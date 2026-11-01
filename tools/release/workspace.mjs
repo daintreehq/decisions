@@ -16,9 +16,15 @@ export const REPOSITORY = 'daintreehq/decisions';
 /** Dependency fields that must be installable from the registry when a package is published. */
 export const RUNTIME_DEP_FIELDS = ['dependencies', 'peerDependencies', 'optionalDependencies'];
 
-/** `MAJOR.MINOR.PATCH` with an optional prerelease; no build metadata (npm ignores it). */
-const VERSION_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+/**
+ * `MAJOR.MINOR.PATCH` with an optional SemVer prerelease (numeric identifiers without leading
+ * zeros); no build metadata, which npm ignores.
+ */
+const PRERELEASE_ID = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
+const VERSION_RE = new RegExp(
+  String.raw`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
+    String.raw`(?:-(${PRERELEASE_ID}(?:\.${PRERELEASE_ID})*))?$`,
+);
 
 export function isValidVersion(version) {
   return typeof version === 'string' && VERSION_RE.test(version);
@@ -77,11 +83,23 @@ export function readVersionConstants(root = ROOT) {
   });
 }
 
+/**
+ * The workspace package a dependency entry points at: the key itself, or the target of a pnpm
+ * workspace alias such as `"helper": "workspace:@daintreehq/decisions-x@*"`.
+ */
+export function dependencyTarget(key, range) {
+  const alias = /^workspace:((?:@[^/@]+\/)?[^/@]+)@/.exec(String(range));
+  return alias ? alias[1] : key;
+}
+
 /** The names in `names` that a manifest depends on at run time. */
 function workspaceDeps(manifest, names) {
   const deps = new Set();
   for (const field of RUNTIME_DEP_FIELDS) {
-    for (const dep of Object.keys(manifest[field] ?? {})) if (names.has(dep)) deps.add(dep);
+    for (const [key, range] of Object.entries(manifest[field] ?? {})) {
+      const target = dependencyTarget(key, range);
+      if (names.has(target)) deps.add(target);
+    }
   }
   return deps;
 }
@@ -123,10 +141,11 @@ export function publishOrder(packages) {
 
 /**
  * Release-shape problems with the publishable packages: one shared valid version (equal to the
- * tag, when a tag is given, and to every version constant), the `@daintreehq` scope, and the
- * repository metadata npm provenance needs. Returns a list of messages; empty means ready.
+ * tag when a tag is given, to every version constant, and to every package in `workspace`, private
+ * ones included), the `@daintreehq` scope, and the repository metadata npm provenance needs.
+ * Returns a list of messages; empty means ready.
  */
-export function releaseProblems(publishable, { tag, constants = [] } = {}) {
+export function releaseProblems(publishable, { tag, constants = [], workspace = [] } = {}) {
   const problems = [];
   if (publishable.length === 0) problems.push('no publishable workspace packages found');
   const versions = new Set(publishable.map((p) => p.version));
@@ -149,6 +168,13 @@ export function releaseProblems(publishable, { tag, constants = [] } = {}) {
   for (const c of constants) {
     if (versions.size === 1 && c.version !== version) {
       problems.push(`${c.file} reports version ${c.version}, expected ${version}`);
+    }
+  }
+  for (const p of workspace) {
+    if (versions.size === 1 && p.version !== version) {
+      problems.push(
+        `${p.name ?? p.dir} (${p.dir}) is at ${p.version}, expected ${version} (run pnpm release:version ${version})`,
+      );
     }
   }
   for (const p of publishable) {
@@ -203,14 +229,17 @@ export function compareVersions(a, b) {
 }
 
 /**
- * Interprets `npm view <name>@<version> version --json`. Returns true when that exact version is
- * on the registry, false when the package or version is missing (E404, or empty output from
- * older npm versions), and throws on anything else so a registry or auth error never turns into
- * a publish attempt or a silent skip.
+ * Interprets `npm view <name>@<version> version --json` and its exit status. Returns true when
+ * that exact version is on the registry, false when the package or version is missing (an E404
+ * error, or empty output with exit 0 from older npm versions), and throws on anything else, so
+ * an npm, registry or auth failure never turns into a publish attempt or a silent skip.
  */
-export function parseNpmView(stdout, version) {
-  const text = stdout.trim();
-  if (text === '') return false;
+export function parseNpmView(stdout, version, status = 0) {
+  const text = (stdout ?? '').trim();
+  if (text === '') {
+    if (status === 0) return false;
+    throw new Error(`npm view exited with ${status ?? 'a signal'} and printed nothing`);
+  }
   let data;
   try {
     data = JSON.parse(text);
@@ -222,8 +251,10 @@ export function parseNpmView(stdout, version) {
     throw new Error(`npm view failed: ${data.error.code ?? ''} ${data.error.summary ?? ''}`.trim());
   }
   const found = Array.isArray(data) ? data : [data];
-  if (found.includes(version)) return true;
-  throw new Error(`npm view returned ${text.slice(0, 200)} for version ${version}`);
+  if (status === 0 && found.includes(version)) return true;
+  throw new Error(
+    `npm view exited with ${status ?? 'a signal'} and printed ${text.slice(0, 200)} for ${version}`,
+  );
 }
 
 /**

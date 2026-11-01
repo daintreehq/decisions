@@ -21,7 +21,9 @@
  * --out <dir>   Write the tarballs here instead of a temp directory (kept afterwards).
  * --bootstrap   Publish a placeholder `0.0.0-bootstrap.0` (dist-tag `bootstrap`, deprecated) for
  *               each package that does not exist on npm yet, using your own `npm login`. npm only
- *               lets you configure a trusted publisher on a package that already exists.
+ *               lets you configure a trusted publisher on a package that already exists. npm also
+ *               makes a first version `latest`, so the placeholder is `latest` until the first
+ *               real release.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -101,24 +103,20 @@ function run(cmd, args, { cwd = ROOT } = {}) {
 
 /** Whether name@version is on the registry. Throws on registry or network errors. */
 function isPublished(name, version, cwd) {
-  const { stdout } = capture('npm', ['view', `${name}@${version}`, 'version', '--json'], {
+  const { status, stdout } = capture('npm', ['view', `${name}@${version}`, 'version', '--json'], {
     cwd,
     quiet: true,
   });
-  return parseNpmView(stdout, version);
+  return parseNpmView(stdout, version, status);
 }
 
-/** The package's existence on npm, any version. */
+/** Whether the package exists on npm at all (`npm view <name> name` prints the name). */
 function packageExists(name, cwd) {
-  const { stdout } = capture('npm', ['view', name, 'name', '--json'], { cwd, quiet: true });
-  const text = stdout.trim();
-  if (text === '') return false;
-  const data = JSON.parse(text);
-  if (data?.error) {
-    if (data.error.code === 'E404') return false;
-    throw new Error(`npm view ${name} failed: ${data.error.code} ${data.error.summary ?? ''}`);
-  }
-  return true;
+  const { status, stdout } = capture('npm', ['view', name, 'name', '--json'], {
+    cwd,
+    quiet: true,
+  });
+  return parseNpmView(stdout, name, status);
 }
 
 function npmVersion() {
@@ -150,7 +148,7 @@ try {
 } catch (err) {
   die(err.message);
 }
-const problems = releaseProblems(order, { tag: opts.tag, constants });
+const problems = releaseProblems(order, { tag: opts.tag, constants, workspace });
 if (problems.length) die(`not releasable:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
 const version = order[0].version;
 const distTag = distTagFor(version);

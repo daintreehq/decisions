@@ -97,6 +97,22 @@ describe('publishOrder', () => {
     );
   });
 
+  it('follows pnpm workspace aliases, for ordering and for the private-package check', () => {
+    const order = publishOrder([
+      pkg('@daintreehq/cli', { deps: { helper: 'workspace:@daintreehq/zlib@*' } }),
+      pkg('@daintreehq/zlib'),
+    ]);
+    assert.deepEqual(names(order), ['@daintreehq/zlib', '@daintreehq/cli']);
+    assert.throws(
+      () =>
+        publishOrder([
+          pkg('@daintreehq/cli', { deps: { helper: 'workspace:@daintreehq/app@^' } }),
+          pkg('@daintreehq/app', { isPrivate: true }),
+        ]),
+      /depends on the private package @daintreehq\/app/,
+    );
+  });
+
   it('refuses a dependency cycle', () => {
     assert.throws(
       () =>
@@ -136,6 +152,12 @@ describe('releaseProblems', () => {
     assert.match(problems.join('\n'), /not at one shared version/);
   });
 
+  it('fails when a private workspace package is not at the release version', () => {
+    const app = pkg('@daintreehq/app', { isPrivate: true, version: '1.2.2', dir: 'app' });
+    const problems = releaseProblems(ok, { tag: 'v1.2.3', workspace: [...ok, app] });
+    assert.match(problems.join('\n'), /@daintreehq\/app \(app\) is at 1.2.2, expected 1.2.3/);
+  });
+
   it('fails when a version constant lags', () => {
     const problems = releaseProblems(ok, { constants: [{ file: 'bin.ts', version: '1.2.2' }] });
     assert.match(problems.join('\n'), /bin.ts reports version 1.2.2, expected 1.2.3/);
@@ -168,10 +190,28 @@ describe('releaseProblems', () => {
 
 describe('versions', () => {
   it('validates release versions', () => {
-    for (const v of ['0.1.0', '1.0.0', '10.20.30', '1.0.0-rc.1', '0.2.0-beta']) {
+    for (const v of [
+      '0.1.0',
+      '1.0.0',
+      '10.20.30',
+      '1.0.0-rc.1',
+      '0.2.0-beta',
+      '1.0.0-0',
+      '1.0.0-0a',
+    ]) {
       assert.ok(isValidVersion(v), v);
     }
-    for (const v of ['v1.0.0', '1.0', '01.0.0', '1.0.0+build', '1.0.0-', '', undefined]) {
+    for (const v of [
+      'v1.0.0',
+      '1.0',
+      '01.0.0',
+      '1.0.0+build',
+      '1.0.0-',
+      '1.0.0-01',
+      '1.0.0-rc.01',
+      '',
+      undefined,
+    ]) {
       assert.ok(!isValidVersion(v), String(v));
     }
   });
@@ -197,15 +237,19 @@ describe('parseNpmView', () => {
 
   it('treats a missing package or version as unpublished', () => {
     const e404 = JSON.stringify({ error: { code: 'E404', summary: 'Not Found' } });
-    assert.equal(parseNpmView(e404, '1.2.3'), false);
-    assert.equal(parseNpmView('', '1.2.3'), false);
+    assert.equal(parseNpmView(e404, '1.2.3', 1), false);
+    assert.equal(parseNpmView('', '1.2.3', 0), false);
   });
 
-  it('throws on any other registry error instead of guessing', () => {
+  it('throws on any other failure instead of guessing', () => {
     const e500 = JSON.stringify({ error: { code: 'E500', summary: 'Internal' } });
-    assert.throws(() => parseNpmView(e500, '1.2.3'), /E500/);
-    assert.throws(() => parseNpmView('<html>', '1.2.3'), /unexpected npm view output/);
-    assert.throws(() => parseNpmView('"1.2.4"', '1.2.3'), /returned "1.2.4"/);
+    assert.throws(() => parseNpmView(e500, '1.2.3', 1), /E500/);
+    assert.throws(() => parseNpmView('<html>', '1.2.3', 0), /unexpected npm view output/);
+    assert.throws(() => parseNpmView('"1.2.4"', '1.2.3', 0), /printed "1.2.4"/);
+    // npm dying before it prints anything (bad config, killed) is not "not published".
+    assert.throws(() => parseNpmView('', '1.2.3', 1), /exited with 1/);
+    assert.throws(() => parseNpmView('', '1.2.3', null), /exited with a signal/);
+    assert.throws(() => parseNpmView('"1.2.3"', '1.2.3', 1), /exited with 1/);
   });
 });
 
@@ -288,9 +332,10 @@ describe('publishInOrder', () => {
 
 describe('this workspace', () => {
   it('is releasable as it stands: lockstep versions, provenance metadata, a valid order', () => {
-    const order = publishOrder(listWorkspace());
+    const workspace = listWorkspace();
+    const order = publishOrder(workspace);
     assert.ok(order.length > 0);
-    assert.deepEqual(releaseProblems(order, { constants: readVersionConstants() }), []);
+    assert.deepEqual(releaseProblems(order, { constants: readVersionConstants(), workspace }), []);
     const index = new Map(order.map((p, i) => [p.name, i]));
     assert.ok(index.get('@daintreehq/decisions-protocol') < index.get('@daintreehq/decisions-cli'));
   });

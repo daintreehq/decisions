@@ -75,7 +75,7 @@ This needs an npm account that can publish to the `daintreehq` npm organisation,
    pnpm release:publish --bootstrap --dry-run   # lists the packages missing from npm
    pnpm release:publish --bootstrap             # publishes and deprecates 0.0.0-bootstrap.0 for each
    ```
-   The placeholder is published under the `bootstrap` dist-tag and deprecated, so nobody installs it by accident, and every real release keeps provenance. Packages that already exist are left alone.
+   The placeholder contains no code and is deprecated, so installing it prints a warning. It is published under the `bootstrap` dist-tag, but npm also points `latest` at a package's first version whatever tag it was published with, so a plain `npm install @daintreehq/decisions-…` gets the placeholder until the first real release replaces `latest`. Do steps 2 and 3 without a long gap. Packages that already exist are left alone. Reserving the names this way, rather than publishing the first real release from a laptop, means every real release carries provenance.
 2. **Add a trusted publisher to each package.** On npmjs.com open the package, then **Settings → Trusted Publisher → GitHub Actions**, and enter:
 
    | Field                | Value                                                       |
