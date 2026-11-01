@@ -8,8 +8,16 @@
     "decisions": "./dist/bin.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daintreehq/decisions.git",
+    "directory": "packages/cli"
+  },
   "engines": {
     "node": ">=22"
   },

@@ -5,6 +5,13 @@
   "compatibility_date": "2026-10-30",
   "compatibility_flags": ["nodejs_compat"],
   "upload_source_maps": true,
+  // Bundle the shared libraries from TypeScript source, as the rest of the workspace does through the
+  // "@daintreehq/source" export condition (Wrangler cannot be given a condition in config). Without
+  // this the Worker would need a prior library build, which the Deploy button never runs.
+  "alias": {
+    "@daintreehq/decisions-protocol": "./packages/protocol/src/index.ts",
+    "@daintreehq/decisions-crypto": "./packages/crypto/src/index.ts",
+  },
   "observability": { "enabled": false },
   "assets": {
     "directory": "./app/dist",

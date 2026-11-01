@@ -4,6 +4,7 @@ import { build as esbuild } from 'esbuild';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
+import { sourceConditions } from '../vitest.shared';
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
   version: string;
@@ -46,6 +47,7 @@ function serviceWorker(): Plugin {
 }
 
 export default defineConfig({
+  ...sourceConditions,
   plugins: [react(), serviceWorker()],
   build: {
     outDir: 'dist',

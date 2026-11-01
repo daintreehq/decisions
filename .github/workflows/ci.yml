@@ -28,8 +28,10 @@ jobs:
         run: pnpm typecheck
       - name: Test (protocol, crypto, worker in workerd, client, cli, model, app)
         run: pnpm test
-      - name: Build the web app and CLI
+      - name: Build the libraries, web app and CLI
         run: pnpm build:all
+      - name: Pack the libraries and CLI, install them outside the workspace, import and type-check
+        run: pnpm pack:check
       - name: Validate the Cloudflare deployment config
         run: pnpm exec wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-out"
       - name: Deploy-script dry run
