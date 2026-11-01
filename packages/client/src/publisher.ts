@@ -13,13 +13,14 @@ import {
   encryptEnvelope,
   newId,
   nowIso,
+  sha256Hex,
   sniffImageMime,
 } from '@daintreehq/decisions-crypto';
 import {
   AskHumanInput,
   BridgeError,
-  defaultKind,
   resolveExpiry,
+  shapeForGates,
   validateOptions,
 } from './content.js';
 import {
@@ -30,6 +31,7 @@ import {
   paneRef,
   type BridgeContext,
 } from './context.js';
+import { sameDigests } from './answers.js';
 import { currentEpochKey } from './identity.js';
 import { RelayError } from './errors.js';
 import { backoffMs } from './relay.js';
@@ -97,6 +99,11 @@ export class Publisher {
       validateOptions(input, callerGate);
     }
     validateOptions(input, gate);
+    // The gate that governs the question: the origin's, or else a registered gate the agent named. Either way
+    // it only adds constraints (choices, no free text, artifact binding); the level was settled above.
+    const governingId = gate ? gateId : callerGate ? callerGateId : null;
+    const governing = gate ?? callerGate;
+    const shape = shapeForGates(input, [gate, callerGate], input.attachments?.length ?? 0);
 
     // Idempotency by correlation id, scoped to the pane so one agent cannot collide with another.
     let questionId = newId(ctx.now());
@@ -105,8 +112,12 @@ export class Publisher {
       : null;
     if (corrKey) {
       const existing = await ctx.store.getMeta(corrKey);
-      if (existing) {
-        const row = await ctx.store.getQuestion(existing);
+      const row = existing ? await ctx.store.getQuestion(existing) : null;
+      if (row && !(await this.sameAttachments(origin, input, row))) {
+        // Different images under the same correlation id are a different question: an answer to the old
+        // images must never be returned for the new ones. Re-point the id at a fresh question.
+        await ctx.store.setMeta(corrKey, questionId);
+      } else if (existing) {
         if (row) {
           return {
             questionId: row.question_id,
@@ -134,7 +145,7 @@ export class Publisher {
 
     const epoch = currentEpochKey(ctx.identity);
     const now = ctx.now();
-    const expiresAt = resolveExpiry(input.expires_at, gate, now);
+    const expiresAt = resolveExpiry(input.expires_at, governing, now);
 
     // Attachments: encrypt now (so an offline desktop can publish later) and spool the ciphertext.
     const descriptors: DecisionContentV1['attachments'] = [];
@@ -148,12 +159,7 @@ export class Publisher {
           'a persistent store needs a durable attachment spool (FileSpool), or queued attachments would be lost on restart',
         );
       }
-      if (!ctx.resolver)
-        throw new BridgeError('attachment_error', 'attachments are not configured on this host');
-      const res = await ctx.resolver.resolve(origin, a.local_resource_id);
-      if (!res)
-        throw new BridgeError('attachment_error', `unknown attachment "${a.local_resource_id}"`);
-      const bytes = res.bytes;
+      const bytes = await this.resolveAttachment(origin, a.local_resource_id);
       if (bytes.length === 0 || bytes.length > LIMITS.attachmentBytes) {
         throw new BridgeError('attachment_error', 'attachment is empty or larger than 20 MiB');
       }
@@ -197,10 +203,10 @@ export class Publisher {
       content_version: 1,
       question: input.question,
       ...(input.context ? { context: input.context } : {}),
-      kind: defaultKind(input),
-      options: input.options ?? [],
+      kind: shape.kind,
+      options: shape.options,
       attachments: descriptors,
-      allow_text: true,
+      allow_text: shape.allowText,
       project_label: (origin.project_label?.trim() || origin.project_id).slice(0, 200),
       machine_label: (origin.machine_label?.trim() || origin.host_id).slice(0, 200),
       origin_summary: `${origin.agent_kind} · ${origin.worktree_id}`.slice(0, 500),
@@ -224,8 +230,8 @@ export class Publisher {
       targetHostId: await hostRef(origin.host_id),
       originRef: await paneRef(origin.host_id, origin.pane_id),
       requirement,
-      workflowGateIdHash: gateId && gate ? await gateHash(gateId) : null,
-      policyVersion: gate?.policyVersion ?? null,
+      workflowGateIdHash: governingId ? await gateHash(governingId) : null,
+      policyVersion: governing?.policyVersion ?? null,
       expiresAt,
       attachmentIds: descriptors.map((d) => d.attachment_id),
       envelope,
@@ -236,7 +242,7 @@ export class Publisher {
     const row: QuestionRow = {
       question_id: questionId,
       alias,
-      origin: { ...origin, workflow_gate_id: gate ? gateId : null },
+      origin: { ...origin, workflow_gate_id: governingId },
       requirement,
       question_revision: 0,
       remote_event_seq: null,
@@ -273,6 +279,29 @@ export class Publisher {
       content: input.question,
     });
     return { questionId, alias, requirement, status: 'queued', duplicate: false };
+  }
+
+  private async resolveAttachment(origin: QuestionOrigin, id: string): Promise<Uint8Array> {
+    if (!this.ctx.resolver)
+      throw new BridgeError('attachment_error', 'attachments are not configured on this host');
+    const res = await this.ctx.resolver.resolve(origin, id);
+    if (!res) throw new BridgeError('attachment_error', `unknown attachment "${id}"`);
+    return res.bytes;
+  }
+
+  /** Whether a repeat call names the same images (by plaintext digest) as the question it would return. */
+  private async sameAttachments(
+    origin: QuestionOrigin,
+    input: AskHumanInput,
+    row: QuestionRow,
+  ): Promise<boolean> {
+    const asked = input.attachments ?? [];
+    if (asked.length !== row.attachment_digests.length) return false;
+    if (asked.length === 0) return true;
+    const digests: string[] = [];
+    for (const a of asked)
+      digests.push(await sha256Hex(await this.resolveAttachment(origin, a.local_resource_id)));
+    return sameDigests(digests, row.attachment_digests);
   }
 
   /** Queue a cancellation; it is signed at send time against the then-current revision. */

@@ -10,9 +10,9 @@ import {
 import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
-import { PolicyRegistry } from './policy.js';
+import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type RegisterResult } from './publisher.js';
-import { parseAnswers, type AnswerEntry } from './answers.js';
+import { parseAnswers, sameDigests, type AnswerEntry } from './answers.js';
 import { loadIdentity, type Identity, type KeyStore } from './identity.js';
 import type { ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex } from './mutex.js';
@@ -55,6 +55,24 @@ export interface DecisionView {
   deliveryStatus: QuestionRow['delivery_status'];
   revision: number;
   expiresAt: string | null;
+  /** The trusted workflow gate that governs the question, if any. */
+  workflowGateId: string | null;
+  /**
+   * Who put the answer in force: `human` (an answer, a correction, or a confirmed proxy answer) or `proxy`.
+   * Null unless the question is answered (`human-answered` or `proxy-answered`): an open, expired or
+   * cancelled question reports no provenance, no choice and no text, whatever its history holds.
+   */
+  provenance: 'human' | 'proxy' | null;
+  /** The option id of the answer in force, or null for a text-only answer or no answer. */
+  choice: string | null;
+  /** The free text of the answer in force ('' when none). */
+  text: string;
+  /**
+   * True only when the question carries attachments and the answer in force lists exactly their plaintext
+   * SHA-256 digests as the images the phone displayed. A question with no attachments, a proxy answer
+   * (which reviews nothing) or an approval sent before every image loaded reports false.
+   */
+  reviewedDigestsMatch: boolean;
   answers: {
     revision: number;
     source: 'human' | 'proxy' | 'system';
@@ -260,6 +278,20 @@ export class DecisionsBridge {
   }
 
   private view(row: QuestionRow): DecisionView {
+    const entries = parseAnswers(row.answers_json);
+    const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
+    // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
+    let current: AnswerEntry | undefined;
+    let confirmed = false;
+    for (const e of entries) {
+      if (e.kind !== 'answer') continue;
+      if (e.action === 'confirm-proxy') confirmed = !!current;
+      else {
+        current = e;
+        confirmed = false;
+      }
+    }
+    const inForce = answered ? current : undefined;
     return {
       questionId: row.question_id,
       alias: row.alias,
@@ -268,7 +300,21 @@ export class DecisionsBridge {
       deliveryStatus: row.delivery_status,
       revision: row.question_revision,
       expiresAt: row.expires_at,
-      answers: parseAnswers(row.answers_json)
+      workflowGateId: row.origin.workflow_gate_id,
+      provenance: inForce
+        ? confirmed
+          ? 'human'
+          : inForce.source === 'proxy'
+            ? 'proxy'
+            : 'human'
+        : null,
+      choice: inForce?.choices[0]?.id ?? null,
+      text: inForce?.text ?? '',
+      reviewedDigestsMatch:
+        !!inForce &&
+        row.attachment_digests.length > 0 &&
+        sameDigests(inForce.reviewed_attachment_digests, row.attachment_digests),
+      answers: entries
         .filter((e: AnswerEntry) => e.kind === 'answer')
         .map((e) => ({
           revision: e.revision,
@@ -477,6 +523,7 @@ export class DecisionsBridge {
 
     const optionIds = new Set((content.options ?? []).map((o) => o.id));
     const gate = ctx.policy.get(row.origin.workflow_gate_id);
+    const textAllowed = content.allow_text !== false && gateAllowsText(gate);
     const valid =
       outcome.action === 'answer' &&
       outcome.risk_flags.length === 0 &&
@@ -484,8 +531,12 @@ export class DecisionsBridge {
       outcome.confidence <= 1 &&
       outcome.selected_option_ids.every(
         (id) =>
-          optionIds.has(id) && (!gate?.allowedOptionIds || gate.allowedOptionIds.includes(id)),
+          optionIds.has(id) &&
+          (!gate?.allowedOptionIds || gate.allowedOptionIds.includes(id)) &&
+          (!gate?.choices || gate.choices.some((c) => c.id === id)),
       ) &&
+      (!gate?.choices || outcome.selected_option_ids.length <= 1) &&
+      (textAllowed || (!outcome.answer_text && outcome.selected_option_ids.length > 0)) &&
       (optionIds.size === 0 || outcome.selected_option_ids.length > 0 || !!outcome.answer_text);
     if (outcome.action === 'answer' && valid) {
       await this.publisher.enqueueProxyAction('proxy-answer', questionId, {

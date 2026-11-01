@@ -6,7 +6,7 @@ import {
   utf8ByteLength,
   type DecisionContentV1,
 } from '@daintreehq/decisions-protocol';
-import type { WorkflowGate } from './policy.js';
+import { gateAllowsText, type WorkflowGate } from './policy.js';
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */
 export const AskHumanInput = z.object({
@@ -77,6 +77,78 @@ export function validateOptions(input: AskHumanInput, gate: WorkflowGate | undef
         );
     }
   }
+}
+
+/** The options and answer rules a question is published with, once its trusted gates are applied. */
+export interface GatedShape {
+  options: NonNullable<AskHumanInput['options']>;
+  kind: DecisionContentV1['kind'];
+  allowText: boolean;
+  bindArtifacts: boolean;
+}
+
+/**
+ * Applies trusted workflow gates (the origin's gate first, then any other registered gate the agent named)
+ * to the agent's input. Gates can only make a question stricter: a gate's `choices` replace the agent's
+ * options (which, if sent, must be exactly those choices with the same labels), free text is accepted only if
+ * every gate allows it, and any gate that binds artifacts requires attachments and makes the question an
+ * approval the phone can only send once every image has loaded.
+ */
+export function shapeForGates(
+  input: AskHumanInput,
+  gates: (WorkflowGate | undefined)[],
+  attachmentCount: number,
+): GatedShape {
+  const active = gates.filter((g): g is WorkflowGate => !!g);
+  let options = input.options ?? [];
+  let fromGate: WorkflowGate | undefined;
+  for (const g of active) {
+    if (!g.choices) continue;
+    const want = new Map(g.choices.map((c) => [c.id, c]));
+    const sent = fromGate ? (fromGate.choices ?? []) : options;
+    for (const o of sent) {
+      const c = want.get(o.id);
+      if (!c)
+        throw new BridgeError(
+          'validation_error',
+          `option "${o.id}" is not permitted by this workflow gate`,
+        );
+      if (c.label !== o.label)
+        throw new BridgeError(
+          'validation_error',
+          `option "${o.id}" must use the workflow gate's label "${c.label}"`,
+        );
+    }
+    if (sent.length > 0 && sent.length !== want.size) {
+      throw new BridgeError(
+        'validation_error',
+        `options must be exactly the workflow gate's choices (${[...want.keys()].join(', ')})`,
+      );
+    }
+    if (!fromGate) {
+      fromGate = g;
+      options = g.choices.map((c) => ({ ...c }));
+    }
+  }
+  const allowText = active.every((g) => gateAllowsText(g));
+  const bindArtifacts = active.some((g) => g.bindArtifacts === true);
+  if (!allowText && options.length === 0) {
+    throw new BridgeError(
+      'validation_error',
+      'this workflow gate accepts only a choice: offer options for the human to pick from',
+    );
+  }
+  if (bindArtifacts && attachmentCount === 0) {
+    throw new BridgeError(
+      'validation_error',
+      'this workflow gate binds the answer to attachments: attach the images to be reviewed',
+    );
+  }
+  let kind = defaultKind({ ...input, options });
+  if (bindArtifacts) kind = 'approval';
+  else if (fromGate && kind === 'text') kind = allowText ? 'mixed' : 'choice';
+  else if (!allowText && (kind === 'mixed' || kind === 'text')) kind = 'choice';
+  return { options, kind, allowText, bindArtifacts };
 }
 
 /**

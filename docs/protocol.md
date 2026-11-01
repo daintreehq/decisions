@@ -179,6 +179,17 @@ the stored object and publishes availability (`attachment.available`). Only then
 Defaults: 8 files, 20 MiB each, 64 MiB per question; deleted 30 days after the question reaches a terminal state;
 orphaned reservations are garbage-collected.
 
+**Answer rules and image binding (end to end, never seen by the relay).** `DecisionContentV1.options` and
+`allow_text` are the answer rules: a phone offers only those options and shows a free-text field only when
+`allow_text` is true, and the desktop refuses (never delivers) an answer that names an unknown option or carries
+text the question did not allow. Questions under a desktop workflow gate with choices carry exactly the gate's
+choices; a gate that binds artifacts publishes `kind: "approval"`, and a phone sends an approval only once every
+attached image has been downloaded, decrypted and checked against its descriptor's `sha256`. The answer's
+`reviewed_attachment_digests` lists the plaintext SHA-256 of each image the phone displayed. The desktop reports
+the answer as bound to the images only when that list equals the question's attachment digests. Attachments are
+fixed when a question is created, so different images are always a different question, and an answer to one
+never applies to another.
+
 ## 10. Devices, keys and revocation
 
 - `GET /devices` → certificates of **all** devices, including revoked ones (so old signatures stay verifiable).
