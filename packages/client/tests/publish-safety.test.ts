@@ -8,12 +8,12 @@ import {
   MAX_BLOCK_BYTES,
   MAX_NOTICE_BYTES,
   MemoryLocalStore,
-  SqliteLocalStore,
   batchNotices,
   formatAnswerNotice,
   MemorySpool,
 } from '../src/index.js';
 import { DecisionsBridge, RelayClient } from '../src/index.js';
+import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { origin, setupBridge, makeIdentity, FakeRelay, FakeSink } from './helpers.js';
 
 const tmp = mkdtempSync(join(tmpdir(), 'decisions-pub-'));

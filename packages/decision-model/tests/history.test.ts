@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { MemoryHistoryStore, SqliteHistoryStore, type HistoryStore } from '../src/history.js';
+import { MemoryHistoryStore, type HistoryStore } from '../src/history.js';
+import { SqliteHistoryStore } from '../src/history-sqlite.js';
 import { day, ex } from './helpers.js';
 
 const dirs: string[] = [];

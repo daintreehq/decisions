@@ -31,6 +31,8 @@ Non-goals for this integration: replacing Canopy, replacing the existing "Answer
 
 Code layout in Daintree (all main-process, lazily imported): `electron/services/decisions/` containing `index.ts` (`getDecisionsService()`, `startDecisionsIfEnabled()`), `DecisionsService.ts` (owns the bridge and relay socket), `daintreeTerminalSink.ts`, `daintreeResumeAdapter.ts`, `daintreeLocalStore.ts` (the `LocalStore` implementation over drizzle/better-sqlite3), `paneAuthenticator.ts`, `workflowGates.ts`, `attachmentResolver.ts`, `keyStore.ts`, `deploy.ts`. The renderer sees only IPC.
 
+Daintree imports the package roots only. A root has no import-time side effects (no timers, sockets or file access) and never loads `node:sqlite`, so the main process pays for nothing it does not use. The reference SQLite stores are separate entry points that Daintree does not need: `SqliteLocalStore` from `@daintreehq/decisions-client/sqlite` (Daintree implements `LocalStore` over better-sqlite3 instead) and `SqliteHistoryStore` from `@daintreehq/decisions-model/sqlite` (implement the root's `HistoryStore` interface over Daintree's own storage, or use `MemoryHistoryStore`).
+
 Distribution of the library code: Daintree depends on published `@daintreehq/decisions-client` (which depends on `-protocol`, `-crypto`). Before the first Daintree PR those packages must be published with built ESM and type declarations; today they are consumed as TypeScript source inside this monorepo. This is tracked as release work in this repository (`release.yml`).
 
 ## 3. Making `ask_human` available to agents (the MCP surface)

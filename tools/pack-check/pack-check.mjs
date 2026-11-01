@@ -9,14 +9,19 @@
  * 3. Creates a scratch project outside the workspace, installs the tarballs with npm, imports every
  *    package under Node, runs the CLI, and type-checks a TypeScript file against the declarations
  *    (NodeNext and Bundler resolution, without the workspace's source condition).
+ * 4. Imports each library entry point alone in a fresh Node process and proves it is free of
+ *    import-time side effects: only the `/sqlite` subpaths load `node:sqlite`, and no entry point
+ *    creates a timer, socket or other async resource, calls into `node:fs`, leaves a handle open
+ *    or creates a file in the working, home or temp directory.
  *
  * Usage: node tools/pack-check/pack-check.mjs [--no-build] [--keep]
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const args = new Set(process.argv.slice(2));
@@ -119,6 +124,8 @@ import * as protocol from '@daintreehq/decisions-protocol';
 import * as crypto from '@daintreehq/decisions-crypto';
 import * as client from '@daintreehq/decisions-client';
 import * as model from '@daintreehq/decisions-model';
+import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
+import { SqliteHistoryStore } from '@daintreehq/decisions-model/sqlite';
 import { createRequire } from 'node:module';
 
 assert.equal(typeof protocol.PROTOCOL_VERSION, 'number');
@@ -128,6 +135,13 @@ assert.match(await crypto.fingerprint(await crypto.exportPublicKey(keys.signing.
 assert.equal(typeof client.DecisionsBridge, 'function');
 assert.equal(typeof new client.MemoryLocalStore(), 'object');
 assert.equal(typeof model.createDecisionModel, 'function');
+// The SQLite stores are only reachable through their own entry points.
+assert.equal('SqliteLocalStore' in client, false);
+assert.equal('SqliteHistoryStore' in model, false);
+const local = new SqliteLocalStore(':memory:');
+assert.equal(await local.getCursor(), 0);
+await local.close();
+assert.equal(new SqliteHistoryStore(':memory:').count(), 0);
 
 const require = createRequire(import.meta.url);
 const vectors = require('@daintreehq/decisions-crypto/fixtures/vectors.json');
@@ -141,7 +155,10 @@ const CHECK_TS = `
 import { PROTOCOL_VERSION, ApiError, type ApiErrorBody } from '@daintreehq/decisions-protocol';
 import { generateDeviceKeys, exportPublicKey, fingerprint, type DeviceKeys } from '@daintreehq/decisions-crypto';
 import { DecisionsBridge, MemoryLocalStore, type BridgeOptions } from '@daintreehq/decisions-client';
-import { createDecisionModel, type DecisionModelPolicy } from '@daintreehq/decisions-model';
+import { createDecisionModel, type DecisionModelPolicy, type HistoryStore } from '@daintreehq/decisions-model';
+import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
+import { SqliteHistoryStore, type SqliteHistoryOptions } from '@daintreehq/decisions-model/sqlite';
+import type { LocalStore } from '@daintreehq/decisions-client';
 
 const version: number = PROTOCOL_VERSION;
 const body: ApiErrorBody | undefined = undefined;
@@ -152,7 +169,103 @@ const bridge: typeof DecisionsBridge = DecisionsBridge;
 const opts: Partial<BridgeOptions> = {};
 const policy: Partial<DecisionModelPolicy> = {};
 const err: Error = new ApiError('validation_error', 'x');
-void [version, body, fp, store, bridge, opts, policy, err, createDecisionModel];
+const local: LocalStore = new SqliteLocalStore(':memory:');
+const historyOpts: SqliteHistoryOptions = { disableFts: true };
+const history: HistoryStore = new SqliteHistoryStore(':memory:', historyOpts);
+void [version, body, fp, store, bridge, opts, policy, err, createDecisionModel, local, history];
+`;
+
+/** The only entry points allowed to load `node:sqlite`; each is also the probe's positive control. */
+const SQLITE_ENTRIES = [
+  '@daintreehq/decisions-client/sqlite',
+  '@daintreehq/decisions-model/sqlite',
+];
+
+/**
+ * Preloaded with `--import`: refuses to resolve `node:sqlite`, so importing it anywhere in the graph
+ * (statically, dynamically or through `require`) fails the probe.
+ */
+const NO_SQLITE_HOOK = `
+import { registerHooks } from 'node:module';
+if (typeof registerHooks !== 'function') {
+  throw new Error('pack-check needs Node 22.15 or later (module.registerHooks)');
+}
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === 'node:sqlite' || specifier === 'sqlite') {
+      throw new Error('import-purity: ' + specifier + ' was imported');
+    }
+    return nextResolve(specifier, context);
+  },
+});
+`;
+
+/**
+ * Imports one entry point in a fresh process and reports what the import alone did:
+ * - `sqlite`: SQLite modules Node loaded (from `process.moduleLoadList`, so a caught import counts);
+ * - `resources`: async resources (timers, immediates, sockets, servers, watchers, fs requests),
+ *   referenced or not, created by code under `node_modules` (the packages and their dependencies);
+ * - `fs`: calls into `node:fs` made by that code (Node's own module loader is not counted);
+ * - `opened`: handles left keeping the process alive;
+ * - `created`: files in the working, home and temp directories (each an empty directory of its own).
+ */
+const PROBE = `
+import { createHook } from 'node:async_hooks';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+
+const watched = [process.cwd(), process.env.HOME, process.env.TMPDIR];
+// Open the stdio pipes first: loading node:http opens one lazily, which is Node's doing, not ours.
+void [process.stdout, process.stderr];
+
+let recording = true;
+const fromPackages = () => {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 200;
+  const stack = new Error().stack;
+  Error.stackTraceLimit = limit;
+  return stack.split('\\n').some((frame) => frame.includes('/node_modules/'));
+};
+const resources = [];
+const hook = createHook({
+  init(_id, type) {
+    if (recording && type !== 'PROMISE' && fromPackages()) resources.push(type);
+  },
+}).enable();
+const fsCalls = [];
+for (const [prefix, api] of [['fs.', fs], ['fs.promises.', fs.promises]]) {
+  for (const [name, fn] of Object.entries(api)) {
+    if (typeof fn !== 'function' || !/^[a-z]/.test(name)) continue;
+    api[name] = Object.assign(function (...args) {
+      if (recording && fromPackages()) fsCalls.push(prefix + name + '(' + String(args[0]) + ')');
+      return fn.apply(this, args);
+    }, fn);
+  }
+}
+syncBuiltinESMExports();
+
+const before = process.getActiveResourcesInfo();
+await import(process.argv[2]);
+// Give anything scheduled at import time (an immediate, a promise chain) the chance to start.
+await new Promise((resolve) => setImmediate(resolve));
+recording = false;
+hook.disable();
+const opened = process.getActiveResourcesInfo();
+for (const r of before) {
+  const i = opened.indexOf(r);
+  if (i >= 0) opened.splice(i, 1);
+}
+const report = {
+  sqlite: process.moduleLoadList.filter((m) => /sqlite/i.test(m)),
+  resources,
+  fs: fsCalls,
+  opened,
+  created: watched.flatMap((d) => fs.readdirSync(d)),
+};
+// Written synchronously so exiting cannot cut it short; exiting keeps a leftover handle (reported
+// above) from hanging the check.
+fs.writeSync(1, JSON.stringify(report) + '\\n');
+process.exit(0);
 `;
 
 function tsconfig(moduleKind, resolution) {
@@ -226,6 +339,81 @@ try {
     ),
   );
   run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: app });
+
+  step('Importing each entry point alone: no node:sqlite at a root, no timers, sockets or files');
+  writeFileSync(join(app, 'no-sqlite-hook.mjs'), NO_SQLITE_HOOK);
+  writeFileSync(join(app, 'probe.mjs'), PROBE);
+  const probe = (specifier, guard) => {
+    const sandbox = mkdtempSync(join(work, 'probe-'));
+    const [cwd, home, temp] = ['cwd', 'home', 'tmp'].map((d) => {
+      mkdirSync(join(sandbox, d));
+      return join(sandbox, d);
+    });
+    const preload = guard ? ['--import', pathToFileURL(join(app, 'no-sqlite-hook.mjs')).href] : [];
+    const r = spawnSync(process.execPath, [...preload, join(app, 'probe.mjs'), specifier], {
+      cwd,
+      env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: temp, TMP: temp, TEMP: temp },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60_000,
+    });
+    let report;
+    try {
+      if (r.status === 0) report = JSON.parse(r.stdout.trim().split('\n').at(-1));
+    } catch {
+      /* reported by the caller as a failed import */
+    }
+    const outcome = r.error ? r.error.message : `exit ${r.status ?? r.signal}`;
+    return { outcome, stderr: r.stderr, report };
+  };
+  const checkClean = (specifier, report) => {
+    if (report.resources.length)
+      fail(`${specifier}: importing it creates ${report.resources.join(', ')}`);
+    if (report.fs.length) fail(`${specifier}: importing it touches files: ${report.fs.join(', ')}`);
+    if (report.opened.length)
+      fail(`${specifier}: importing it leaves handles open: ${report.opened.join(', ')}`);
+    if (report.created.length)
+      fail(`${specifier}: importing it creates files: ${report.created.join(', ')}`);
+  };
+  const entries = packed.flatMap(({ pkg }) =>
+    Object.keys(pkg.exports ?? {})
+      .filter((k) => !k.endsWith('.json'))
+      .map((k) => (k === '.' ? pkg.name : `${pkg.name}/${k.slice(2)}`)),
+  );
+  for (const specifier of entries.filter((e) => !SQLITE_ENTRIES.includes(e))) {
+    // Unguarded, so the load list shows node:sqlite even if an import of it is caught...
+    const open = probe(specifier, false);
+    if (!open.report) {
+      fail(`${specifier}: import failed (${open.outcome}):\n${open.stderr}`);
+      continue;
+    }
+    if (open.report.sqlite.length) fail(`${specifier}: loads ${open.report.sqlite.join(', ')}`);
+    checkClean(specifier, open.report);
+    // ...and guarded, so an uncaught import of it fails with the importing module in the stack.
+    const guarded = probe(specifier, true);
+    if (!guarded.report)
+      fail(
+        `${specifier}: import failed under the no-sqlite guard (${guarded.outcome}):\n${guarded.stderr}`,
+      );
+    console.log(`  ${specifier} ok`);
+  }
+  for (const specifier of SQLITE_ENTRIES) {
+    if (!entries.includes(specifier)) {
+      fail(`${specifier}: not exported`);
+      continue;
+    }
+    // Positive controls: both detectors must see a SQLite entry point load node:sqlite.
+    const open = probe(specifier, false);
+    if (!open.report) fail(`${specifier}: import failed (${open.outcome}):\n${open.stderr}`);
+    else {
+      if (!open.report.sqlite.length) fail(`${specifier}: the probe did not see node:sqlite load`);
+      checkClean(specifier, open.report);
+    }
+    const guarded = probe(specifier, true);
+    if (guarded.report || !guarded.stderr.includes('import-purity: node:sqlite'))
+      fail(`${specifier}: the no-sqlite guard did not refuse it (${guarded.outcome})`);
+    console.log(`  ${specifier} checked (loads node:sqlite, as it may)`);
+  }
 
   step('Importing every package under Node');
   writeFileSync(join(app, 'smoke.mjs'), SMOKE);
