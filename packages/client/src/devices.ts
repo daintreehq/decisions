@@ -178,15 +178,20 @@ export async function rotateEpoch(client: RelayClient, store: KeyStore): Promise
 /** Verify every returned device certificate against the pinned owner key (our own key on the owner desktop). */
 export async function verifiedDevices(client: RelayClient): Promise<DeviceInfo[]> {
   const list = await client.devices();
-  const owner = client.identity.owner.signingKey;
+  const id = client.identity;
   const out: DeviceInfo[] = [];
   for (const d of list.devices) {
-    // Every certificate (including our own) must be signed by the owner key.
+    // Every certificate (including our own) must be signed by the pinned owner key, and the only owner-desktop
+    // is the pinned owner itself (the same rules the bridge's EventVerifier applies).
+    const isOwner = d.cert.device_id === id.owner.deviceId;
     const ok =
-      d.cert.issuer_device_id === client.identity.owner.deviceId &&
-      (await verifyDeviceCert(d.cert, owner)) &&
-      (d.cert.device_id !== client.identity.config.deviceId ||
-        d.cert.signing_pub === client.identity.signingPub);
+      d.cert.issuer_device_id === id.owner.deviceId &&
+      d.cert.installation_id === id.config.installationId &&
+      d.cert.device_id === d.device_id &&
+      isOwner === (d.cert.role === 'owner-desktop') &&
+      (!isOwner || d.cert.signing_pub === id.owner.signingPub) &&
+      (await verifyDeviceCert(d.cert, id.owner.signingKey)) &&
+      (d.cert.device_id !== id.config.deviceId || d.cert.signing_pub === id.signingPub);
     if (ok) {
       await importSigningPublicKey(d.cert.signing_pub);
       out.push(d);

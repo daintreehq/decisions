@@ -18,7 +18,13 @@ export interface InboxCallbacks {
   onRevokedSelf(): void;
 }
 
+/**
+ * A transiently failing event is given up on (consumed with an error) only after this many attempts AND this long
+ * since its first failure. Attempts come as fast as events arrive, so a count alone would let a short outage
+ * (a relay restart, a rate limit) discard a valid answer.
+ */
 const MAX_TRANSIENT_ATTEMPTS = 5;
+const MIN_TRANSIENT_WINDOW_MS = 10 * 60_000;
 
 /** What the relay would hold for this question, derived only from events WE verified. */
 function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
@@ -43,7 +49,7 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
  */
 export class Inbox {
   private readonly serial = new Mutex();
-  private readonly transientAttempts = new Map<number, number>();
+  private readonly transientAttempts = new Map<number, { n: number; since: number }>();
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -86,9 +92,13 @@ export class Inbox {
             if (await this.apply(ev)) drain = true;
           } catch (e) {
             if (e instanceof TransientError) {
-              const n = (this.transientAttempts.get(ev.seq) ?? 0) + 1;
-              this.transientAttempts.set(ev.seq, n);
-              if (n < MAX_TRANSIENT_ATTEMPTS) {
+              const prev = this.transientAttempts.get(ev.seq);
+              const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
+              this.transientAttempts.set(ev.seq, a);
+              if (
+                a.n < MAX_TRANSIENT_ATTEMPTS ||
+                this.ctx.now() - a.since < MIN_TRANSIENT_WINDOW_MS
+              ) {
                 // Leave it unprocessed and stop: later events must not overtake it.
                 await this.ctx.audit.log({
                   event: 'event.deferred',
@@ -133,6 +143,16 @@ export class Inbox {
     return false;
   }
 
+  /**
+   * After a rotation: pick up the new epoch key unless we already hold it (replaying an old rotation costs no
+   * relay round trip). A relay that understates the epoch only delays this until an answer arrives under the
+   * unknown epoch, which refreshes again.
+   */
+  private async refreshKeys(epoch: number | null): Promise<void> {
+    if (epoch !== null && epoch <= this.ctx.identity.currentEpoch) return;
+    await this.ctx.refreshIdentity?.();
+  }
+
   private async apply(ev: LedgerEvent): Promise<boolean> {
     const { ctx } = this;
     switch (ev.event_type) {
@@ -144,23 +164,30 @@ export class Inbox {
           if (d.data.device_id === ctx.identity.config.deviceId) {
             await ctx.audit.log({ event: 'device.revoked-self' });
             this.cb.onRevokedSelf();
+            this.verifier.invalidate();
+            return false; // nothing more is sealed to us
           }
         }
         this.verifier.invalidate();
-        await ctx.refreshIdentity?.();
+        await this.refreshKeys(d.success ? d.data.key_epoch : null);
         return false;
       }
       case 'device.approved':
         this.verifier.invalidate();
         return false;
-      case 'device.key_rotated':
+      case 'device.key_rotated': {
+        // The owner reloads its key store; a Host fetches the grant the owner sealed to it for the new epoch.
         this.verifier.invalidate();
-        await ctx.refreshIdentity?.();
+        const d = EventData.keyRotated.safeParse(ev.data);
+        await this.refreshKeys(d.success ? d.data.key_epoch : null);
         return false;
+      }
       default:
         break;
     }
     if (!ev.question_id) return false;
+    // Only questions this device created have a live local row. Every other device's events (the owner's, a
+    // Host's) were stored above for sync, and stop here: never verified for delivery, never acted on.
     const peek = await ctx.store.getQuestion(ev.question_id);
     if (!peek || peek.history_only) return false; // not ours (or imported history): never act on it
 
@@ -174,6 +201,17 @@ export class Inbox {
       if (!row) return false;
       switch (ev.event_type) {
         case 'decision.created': {
+          // Our question ids are random and the record is signed by its creator: a creation naming any other
+          // device for one of our ids is not ours, whatever the relay says.
+          const d = EventData.created.safeParse(ev.data);
+          if (
+            !d.success ||
+            d.data.record.question_id !== row.question_id ||
+            d.data.record.originating_device_id !== ctx.identity.config.deviceId ||
+            d.data.record.signer_device_id !== ctx.identity.config.deviceId
+          ) {
+            return this.reject(row, 'created-by-another-device');
+          }
           const patch: Partial<QuestionRow> = { remote_event_seq: ev.seq };
           if (row.local_status === 'queued') patch.local_status = 'open';
           await ctx.store.updateQuestion(row.question_id, patch);

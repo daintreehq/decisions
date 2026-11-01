@@ -25,7 +25,7 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 | Role              | Who                                              | May                                                                                                                     |
 | ----------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `owner-desktop`   | The Daintree installation that claimed the relay | create questions, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
-| `desktop-host`    | Additional trusted desktop (reserved for V2)     | create questions, proxy answer/abstain, cancel, delivery acks                                                           |
+| `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                           |
 | `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, settings, push, voice                                                                  |
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
@@ -225,6 +225,11 @@ decoding (terminal line wraps). Both objects are strict: unknown top-level field
   and the owner key fingerprint.
 - After a `device.key_rotated` event a Host fetches `GET /devices/{id}/key-grants` and opens the new grant with the
   pinned owner key. Revoking a Host is the normal `POST /devices/{id}/revoke`.
+- Running as a `desktop-host`, a client verifies every device certificate against the pinned owner key (never its
+  own: a Host cannot introduce devices), and accepts exactly one `owner-desktop`, the pinned owner. It acts only on
+  the questions it created: events for any other device's questions are stored and acknowledged for sync, but never
+  verified for delivery or acted on. It never attempts the owner-only routes (pairing, revoke, rotate, enroll-host,
+  reopen, delete, diagnostics), and like every desktop it never signs `answer`, `override` or `confirm-proxy`.
 - `POST /epoch/rotate` (owner): same body, without revoking anyone.
 
 ## 11. Push, reminders and expiry

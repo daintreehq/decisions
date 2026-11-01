@@ -13,9 +13,11 @@ import { Inbox } from './inbox.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type RegisterResult } from './publisher.js';
 import { parseAnswers, sameDigests, type AnswerEntry } from './answers.js';
-import { loadIdentity, type Identity, type KeyStore } from './identity.js';
+import { RelayError } from './errors.js';
+import { refreshHostGrants } from './host-enrollment.js';
+import { MemoryKeyStore, loadIdentity, type Identity, type KeyStore } from './identity.js';
 import type { ProxyEngine, ProxyOutcome } from './proxy.js';
-import { Mutex } from './mutex.js';
+import { Mutex, TransientError } from './mutex.js';
 import { RelayClient } from './relay.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
@@ -178,12 +180,7 @@ export class DecisionsBridge {
       resolver: o.resolver,
       now: o.now ?? Date.now,
       lock: new Mutex(),
-      refreshIdentity: async () => {
-        if (!o.keyStore) return;
-        const id = await loadIdentity(o.keyStore);
-        this.ctx.identity = id;
-        this.ctx.client.identity = id;
-      },
+      refreshIdentity: () => this.refreshKeys(),
     };
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
@@ -217,6 +214,43 @@ export class DecisionsBridge {
 
   private emitError(e: Error): void {
     this.listeners.error.forEach((l) => l(e));
+  }
+
+  /** A Host without a persistent key store keeps the epochs it fetches here, seeded from its identity. */
+  private hostKeys: KeyStore | null = null;
+
+  /**
+   * Pick up epoch keys rotated since the identity was loaded. The owner desktop holds every epoch key itself,
+   * so it reloads them from the key store (another process may have rotated). A `desktop-host` holds only
+   * what the owner sealed to it: it fetches its grants from the relay and opens them with the pinned owner.
+   */
+  private async refreshKeys(): Promise<void> {
+    const { ctx, o } = this;
+    if (ctx.identity.role === 'desktop-host') {
+      let keyStore = o.keyStore ?? this.hostKeys;
+      if (!keyStore) {
+        keyStore = new MemoryKeyStore();
+        await keyStore.save(ctx.identity.stored);
+        this.hostKeys = keyStore;
+      }
+      ctx.client.identity = ctx.identity;
+      let next: Identity;
+      try {
+        next = await refreshHostGrants(ctx.client, keyStore);
+      } catch (e) {
+        // Unreachable relay: retry the event later, in order. Anything else (a grant the pinned owner did not
+        // seal, a changed identity) is permanent and fails closed.
+        if (e instanceof RelayError && e.retryable)
+          throw new TransientError(`epoch grants unavailable: ${e.message}`);
+        throw e;
+      }
+      ctx.identity = next;
+      return;
+    }
+    if (!o.keyStore) return;
+    const id = await loadIdentity(o.keyStore);
+    ctx.identity = id;
+    ctx.client.identity = id;
   }
 
   /* ---------------- lifecycle ---------------- */

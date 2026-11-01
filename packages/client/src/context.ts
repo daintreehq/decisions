@@ -110,6 +110,9 @@ export interface BridgeContext {
   now: () => number;
   /** Serialises read-modify-write sections that touch a question's answer history. */
   lock: Mutex;
-  /** Reload identity + epoch material from the key store (another process may have rotated). */
+  /**
+   * Pick up epoch keys rotated since the identity was loaded: from the key store on the owner desktop (another
+   * process may have rotated), from this device's sealed grants on the relay on a `desktop-host`.
+   */
   refreshIdentity?: () => Promise<void>;
 }
