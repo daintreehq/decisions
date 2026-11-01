@@ -28,3 +28,11 @@ export function parseAnswers(json: string): AnswerEntry[] {
   }
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
+
+/** True when two digest lists hold the same digests the same number of times, in any order. */
+export function sameDigests(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const x = a.map((d) => d.toLowerCase()).sort();
+  const y = b.map((d) => d.toLowerCase()).sort();
+  return x.every((d, i) => d === y[i]);
+}

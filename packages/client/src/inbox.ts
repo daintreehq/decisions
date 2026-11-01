@@ -10,6 +10,7 @@ import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
 import type { BridgeContext } from './context.js';
 import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';
 import { Mutex, TransientError } from './mutex.js';
+import { gateAllowsText } from './policy.js';
 import type { QuestionRow } from './types.js';
 
 export interface InboxCallbacks {
@@ -108,11 +109,12 @@ export class Inbox {
     });
   }
 
-  private options(row: QuestionRow): DecisionContentV1['options'] {
+  private content(row: QuestionRow): Pick<DecisionContentV1, 'options' | 'allow_text'> {
     try {
-      return (JSON.parse(row.content_json ?? '{}') as DecisionContentV1).options ?? [];
+      const c = JSON.parse(row.content_json ?? '{}') as Partial<DecisionContentV1>;
+      return { options: c.options ?? [], allow_text: c.allow_text !== false };
     } catch {
-      return [];
+      return { options: [], allow_text: true };
     }
   }
 
@@ -304,20 +306,49 @@ export class Inbox {
     }
 
     // answer / override / proxy-answer / confirm-proxy
-    const opts = this.options(row);
+    if (v.action === 'confirm-proxy') {
+      // A confirmation affirms one specific proxy answer: it must be the one in force here.
+      const target = entries
+        .filter((e) => e.kind === 'answer' && e.action !== 'confirm-proxy')
+        .at(-1);
+      if (
+        !target ||
+        target.action !== 'proxy-answer' ||
+        target.entry_id !== v.record.confirms_action_id
+      ) {
+        return this.reject(row, 'confirms-another-answer');
+      }
+    }
+    const { options: opts, allow_text } = this.content(row);
     const chosen = v.content?.selected_option_ids ?? [];
+    const text = v.content?.text ?? '';
     const gate = ctx.policy.get(row.origin.workflow_gate_id);
     const bad = chosen.find(
       (id) =>
         (opts.length > 0 && !opts.some((o) => o.id === id)) ||
-        (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)),
+        (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)) ||
+        (gate?.choices && !gate.choices.some((c) => c.id === id)),
     );
-    if (bad !== undefined) {
+    // The answer rules the question was published with (and the gate's, should it have tightened since).
+    // confirm-proxy carries no content of its own: it affirms an answer that was already checked.
+    const ruled = v.action !== 'confirm-proxy';
+    const textAllowed = allow_text && gateAllowsText(gate);
+    const invalid =
+      bad !== undefined
+        ? 'unknown_option'
+        : ruled && gate?.choices && chosen.length > 1
+          ? 'too_many_choices'
+          : ruled && text.trim() !== '' && !textAllowed
+            ? 'text_not_allowed'
+            : ruled && !textAllowed && chosen.length === 0
+              ? 'choice_required'
+              : null;
+    if (invalid) {
       await ctx.store.updateQuestion(row.question_id, {
         delivery_status: 'needs-attention',
-        error_code: 'unknown_option',
+        error_code: invalid,
       });
-      return this.reject(row, 'unknown-option');
+      return this.reject(row, invalid.replace(/_/g, '-'));
     }
     // Null provenance is never human: answer-like actions always carry an explicit human/proxy provenance.
     if (v.provenance === null) return this.reject(row, 'missing-provenance');

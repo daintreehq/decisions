@@ -2,6 +2,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  PolicyRegistry,
   TOOLS,
   TokenMapAuthenticator,
   createDecisionsMcpHandler,
@@ -17,8 +18,15 @@ afterEach(async () => {
   running = null;
 });
 
-async function boot(opts: { rate?: number; maxBody?: number; path?: string } = {}) {
-  const env = await setupBridge();
+async function boot(
+  opts: {
+    rate?: number;
+    maxBody?: number;
+    path?: string;
+    bridge?: Parameters<typeof setupBridge>[0];
+  } = {},
+) {
+  const env = await setupBridge(opts.bridge);
   const auth = new TokenMapAuthenticator();
   auth.register(TOKEN, origin());
   auth.register('other-pane-token-BBBBBBBBBBBBBBBBBB', origin({ pane_id: 'pane-2' }));
@@ -216,6 +224,68 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     );
     expect(cancelOther.isError).toBe(true);
     expect((await call(mcp, 'cancel_question', { question_id: id })).isError).toBeUndefined();
+  });
+});
+
+describe('HTTP MCP: workflow gates', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+  it('the schemas expose the gate and the decision fields', async () => {
+    const { mcp } = await boot();
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const [ask, get] = r.result.tools;
+    expect(ask.inputSchema.properties.workflow_gate_id.description).toMatch(/choices/);
+    expect(Object.keys(get.outputSchema.properties)).toEqual(
+      expect.arrayContaining(['status', 'provenance', 'choice', 'text', 'reviewed_digests_match']),
+    );
+  });
+  it('get_decision reports a design-review approval bound to the reviewed images', async () => {
+    const policy = new PolicyRegistry();
+    policy.register({
+      gateId: 'design-review/final',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+      choices: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'reject', label: 'Reject' },
+      ],
+      allowText: false,
+      bindArtifacts: true,
+    });
+    const { mcp, bridge, relay, phone, store } = await boot({
+      bridge: { policy, resolver: { resolve: async () => ({ bytes: PNG }) } },
+    });
+    const ask = await call(mcp, 'ask_human', {
+      question: 'Approve the final design?',
+      workflow_gate_id: 'design-review/final',
+      attachments: [{ local_resource_id: 'after', role: 'after' }],
+    });
+    expect(ask.isError).toBeUndefined();
+    const id = ask.structuredContent.question_id;
+    await bridge.pump();
+    const open = await call(mcp, 'get_decision', { question_id: id });
+    expect(open.structuredContent).toMatchObject({
+      status: 'open',
+      workflow_gate_id: 'design-review/final',
+      provenance: null,
+      choice: null,
+      text: '',
+      reviewed_digests_match: false,
+    });
+    await relay.answerEvent({
+      questionId: id,
+      phone,
+      options: ['approve'],
+      extra: { reviewed_attachment_digests: (await store.getQuestion(id))!.attachment_digests },
+    });
+    await bridge.catchUp();
+    const done = await call(mcp, 'get_decision', { question_id: id });
+    expect(done.structuredContent).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      choice: 'approve',
+      reviewed_digests_match: true,
+    });
+    expect(done.content[0].text).toContain('reviewed_digests_match: true');
   });
 });
 

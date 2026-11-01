@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { BridgeError } from './content.js';
-import type { DecisionsBridge } from './bridge.js';
+import type { DecisionView, DecisionsBridge } from './bridge.js';
 import type { QuestionOrigin } from './types.js';
 
 const SERVER_VERSION = '0.1.0';
@@ -36,6 +36,33 @@ export class TokenMapAuthenticator implements PaneAuthenticator {
     for (const e of this.entries) if (timingSafeEqual(e.d, d)) found = e.origin; // no early exit
     return found ? { origin: found } : null;
   }
+}
+
+/** The `get_decision` structured result: the decision fields first, in the MCP surface's snake_case. */
+function decisionResult(v: DecisionView) {
+  return {
+    question_id: v.questionId,
+    alias: v.alias,
+    status: v.status,
+    requirement: v.requirement,
+    workflow_gate_id: v.workflowGateId,
+    provenance: v.provenance,
+    choice: v.choice,
+    text: v.text,
+    reviewed_digests_match: v.reviewedDigestsMatch,
+    delivery_status: v.deliveryStatus,
+    revision: v.revision,
+    expires_at: v.expiresAt,
+    answers: v.answers.map((a) => ({
+      revision: a.revision,
+      source: a.source,
+      choices: a.choices,
+      text: a.text,
+      correction: a.correction,
+      delivered: a.delivered,
+      created_at: a.createdAt,
+    })),
+  };
 }
 
 /** Tool definitions. Descriptions stay under 400 bytes (Daintree's CI budget for tool lists). */
@@ -97,7 +124,11 @@ export const TOOLS = [
           enum: ['human-required', 'proxy-ok', 'proxy-first'],
           description: 'Can only make the question stricter; the workflow decides the final level.',
         },
-        workflow_gate_id: { type: 'string' },
+        workflow_gate_id: {
+          type: 'string',
+          description:
+            'A workflow gate the host registered (e.g. design-review/final). Its choices replace options; it may refuse free text and require attachments.',
+        },
         expires_at: { type: 'string', description: 'ISO time; bounded by workflow policy.' },
         correlation_id: {
           type: 'string',
@@ -110,12 +141,38 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check the status and answer of a question you asked with ask_human, by question_id. Only works for questions asked from this terminal.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text and reviewed_digests_match (true only if the human reviewed exactly the attached images). Only status human-answered with provenance human is a human decision; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       required: ['question_id'],
       properties: { question_id: { type: 'string' } },
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        question_id: { type: 'string' },
+        status: {
+          type: 'string',
+          enum: [
+            'queued',
+            'open',
+            'proxy-answered',
+            'human-answered',
+            'cancelled',
+            'expired',
+            'publish-failed',
+          ],
+        },
+        requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
+        workflow_gate_id: { type: ['string', 'null'] },
+        provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
+        choice: { type: ['string', 'null'] },
+        text: { type: 'string' },
+        reviewed_digests_match: { type: 'boolean' },
+        expires_at: { type: ['string', 'null'] },
+        error: { type: 'string' },
+      },
     },
   },
   {
@@ -265,11 +322,12 @@ export function createDecisionsMcpHandler(
         if (typeof args.question_id !== 'string')
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
-        const last = v.answers.at(-1);
-        const summary = last
-          ? `q-${v.alias} is ${v.status}. Latest answer (${last.source}): ${last.choices.join(', ') || '(no choice)'}${last.text ? ` — ${last.text.slice(0, 500)}` : ''}`
-          : `q-${v.alias} is ${v.status}; no answer yet.`;
-        return text(summary, v);
+        const summary = v.provenance
+          ? `q-${v.alias} is ${v.status}. Answer (${v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+          : v.status === 'expired'
+            ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+            : `q-${v.alias} is ${v.status}; no answer in force.`;
+        return text(summary, decisionResult(v));
       }
       if (name === 'cancel_question') {
         if (typeof args.question_id !== 'string')
