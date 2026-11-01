@@ -12,7 +12,9 @@
   },
   "files": [
     "src",
-    "fixtures"
+    "fixtures",
+    "openapi.json",
+    "schemas.json"
   ],
   "scripts": {
     "build": "tsc --noEmit -p tsconfig.json",
@@ -24,6 +26,7 @@
   },
   "devDependencies": {
     "vitest": "^4.1.0",
-    "typescript": "~5.9.0"
+    "typescript": "~5.9.0",
+    "@types/node": "^22.0.0"
   }
 }

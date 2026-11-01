@@ -1,4 +1,4 @@
-import { ApiError, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { DeleteDataBody, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
 import { z } from 'zod';
 import { WORKER_VERSION } from '../env.js';
 import type { Handler, Room } from '../room/types.js';
@@ -47,12 +47,6 @@ export const diagnostics: Handler = async (room) => {
   });
 };
 
-const DeleteBody = z.object({
-  protocol_version: z.literal(PROTOCOL_VERSION),
-  confirm: z.literal('DELETE'),
-  scope: z.enum(['questions', 'everything']),
-});
-
 async function emptyBucket(room: Room): Promise<void> {
   let cursor: string | undefined;
   do {
@@ -67,7 +61,7 @@ async function emptyBucket(room: Room): Promise<void> {
 }
 
 export const deleteData: Handler = async (room, c) => {
-  const b = c.body(DeleteBody);
+  const b = c.body(DeleteDataBody);
   await emptyBucket(room);
   await room.tx(() => {
     for (const t of [

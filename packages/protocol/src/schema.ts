@@ -510,6 +510,12 @@ export const CorrectionResult = z.strictObject({
 });
 export type CorrectionResult = z.infer<typeof CorrectionResult>;
 
+export const DeleteDataBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  confirm: z.literal('DELETE'),
+  scope: z.enum(['questions', 'everything']),
+});
+
 export const InfoResponse = z.object({
   name: z.literal('daintree-decisions'),
   protocol_min: z.number().int(),

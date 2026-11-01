@@ -9,3 +9,4 @@ export * from './signing.js';
 export * from './policy.js';
 export * from './state.js';
 export * from './api.js';
+export * from './routes.js';

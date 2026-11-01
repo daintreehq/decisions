@@ -1,0 +1,1112 @@
+{
+  "DeviceCert": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "number",
+        "const": 1
+      },
+      "type": {
+        "type": "string",
+        "const": "device.cert"
+      },
+      "installation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "role": {
+        "type": "string",
+        "enum": ["owner-desktop", "desktop-host", "phone", "tablet"]
+      },
+      "label": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 60
+      },
+      "signing_pub": {
+        "type": "string",
+        "minLength": 87,
+        "maxLength": 87,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "exchange_pub": {
+        "type": "string",
+        "minLength": 87,
+        "maxLength": 87,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "issued_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "issuer_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "signature": {
+        "type": "string",
+        "minLength": 86,
+        "maxLength": 86,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      }
+    },
+    "required": [
+      "v",
+      "type",
+      "installation_id",
+      "device_id",
+      "role",
+      "label",
+      "signing_pub",
+      "exchange_pub",
+      "issued_at",
+      "issuer_device_id",
+      "signature"
+    ],
+    "additionalProperties": {}
+  },
+  "EpochGrant": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "number",
+        "const": 1
+      },
+      "type": {
+        "type": "string",
+        "const": "epoch.grant"
+      },
+      "installation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "key_epoch": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "ephemeral_pub": {
+        "type": "string",
+        "minLength": 87,
+        "maxLength": 87,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "salt": {
+        "type": "string",
+        "minLength": 43,
+        "maxLength": 43,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "nonce": {
+        "type": "string",
+        "minLength": 16,
+        "maxLength": 16,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "sealed": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "issuer_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "issued_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "signature": {
+        "type": "string",
+        "minLength": 86,
+        "maxLength": 86,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      }
+    },
+    "required": [
+      "v",
+      "type",
+      "installation_id",
+      "device_id",
+      "key_epoch",
+      "ephemeral_pub",
+      "salt",
+      "nonce",
+      "sealed",
+      "issuer_device_id",
+      "issued_at",
+      "signature"
+    ],
+    "additionalProperties": {}
+  },
+  "CryptoEnvelope": {
+    "type": "object",
+    "properties": {
+      "crypto_version": {
+        "type": "number",
+        "const": 1
+      },
+      "suite": {
+        "type": "string",
+        "const": "P256-ECDH-HKDF-SHA256-A256GCM-ECDSA-P256"
+      },
+      "key_epoch": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "record_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "purpose": {
+        "type": "string",
+        "enum": ["question-content", "answer-content", "history-export"]
+      },
+      "nonce": {
+        "type": "string",
+        "minLength": 16,
+        "maxLength": 16,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "ciphertext": {
+        "type": "string",
+        "minLength": 22,
+        "maxLength": 184320,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      },
+      "aad": {
+        "type": "object",
+        "properties": {
+          "installation_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "question_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "record_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sender_device_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          }
+        },
+        "required": [
+          "installation_id",
+          "question_id",
+          "record_type",
+          "revision",
+          "sender_device_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "crypto_version",
+      "suite",
+      "key_epoch",
+      "record_id",
+      "purpose",
+      "nonce",
+      "ciphertext",
+      "aad"
+    ],
+    "additionalProperties": {}
+  },
+  "QuestionRecord": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "number",
+        "const": 1
+      },
+      "type": {
+        "type": "string",
+        "const": "question"
+      },
+      "installation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "question_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "originating_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "target_host_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "origin_ref": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "requirement": {
+        "type": "string",
+        "enum": ["human-required", "proxy-ok", "proxy-first"]
+      },
+      "workflow_gate_id_hash": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "policy_version": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "expires_at": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "key_epoch": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "envelope_digest": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "attachment_ids": {
+        "maxItems": 8,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+        }
+      },
+      "signer_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "signature": {
+        "type": "string",
+        "minLength": 86,
+        "maxLength": 86,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      }
+    },
+    "required": [
+      "v",
+      "type",
+      "installation_id",
+      "question_id",
+      "originating_device_id",
+      "target_host_id",
+      "origin_ref",
+      "requirement",
+      "workflow_gate_id_hash",
+      "policy_version",
+      "created_at",
+      "expires_at",
+      "key_epoch",
+      "envelope_digest",
+      "attachment_ids",
+      "signer_device_id",
+      "signature"
+    ],
+    "additionalProperties": {}
+  },
+  "ActionRecord": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "number",
+        "const": 1
+      },
+      "type": {
+        "type": "string",
+        "const": "action"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "answer",
+          "override",
+          "proxy-answer",
+          "proxy-abstain",
+          "confirm-proxy",
+          "cancel",
+          "reopen"
+        ]
+      },
+      "installation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "question_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "action_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "expected_revision": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "envelope_digest": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "confirms_action_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "expires_at": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "signer_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "signature": {
+        "type": "string",
+        "minLength": 86,
+        "maxLength": 86,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      }
+    },
+    "required": [
+      "v",
+      "type",
+      "action",
+      "installation_id",
+      "question_id",
+      "action_id",
+      "expected_revision",
+      "created_at",
+      "envelope_digest",
+      "confirms_action_id",
+      "expires_at",
+      "signer_device_id",
+      "signature"
+    ],
+    "additionalProperties": {}
+  },
+  "DecisionContentV1": {
+    "type": "object",
+    "properties": {
+      "content_version": {
+        "default": 1,
+        "type": "number",
+        "const": 1
+      },
+      "question": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8000
+      },
+      "context": {
+        "type": "string"
+      },
+      "kind": {
+        "default": "mixed",
+        "type": "string",
+        "enum": ["choice", "approval", "text", "mixed"]
+      },
+      "options": {
+        "default": [],
+        "maxItems": 12,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 240
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          },
+          "required": ["id", "label"],
+          "additionalProperties": false
+        }
+      },
+      "attachments": {
+        "default": [],
+        "maxItems": 8,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "attachment_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+            },
+            "role": {
+              "default": "other",
+              "type": "string",
+              "enum": ["before", "after", "reference", "other"]
+            },
+            "alt": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "mime": {
+              "type": "string",
+              "enum": ["image/png", "image/jpeg", "image/webp"]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20971520
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "nonce": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 16,
+              "pattern": "^[A-Za-z0-9_-]*$"
+            },
+            "key_epoch": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["attachment_id", "role", "mime", "size", "sha256", "nonce", "key_epoch"],
+          "additionalProperties": false
+        }
+      },
+      "allow_text": {
+        "default": true,
+        "type": "boolean"
+      },
+      "project_label": {
+        "type": "string",
+        "maxLength": 200
+      },
+      "machine_label": {
+        "type": "string",
+        "maxLength": 200
+      },
+      "origin_summary": {
+        "type": "string",
+        "maxLength": 500
+      }
+    },
+    "required": ["content_version", "question", "kind", "options", "attachments", "allow_text"],
+    "additionalProperties": false
+  },
+  "HumanAnswerContentV1": {
+    "type": "object",
+    "properties": {
+      "content_version": {
+        "default": 1,
+        "type": "number",
+        "const": 1
+      },
+      "selected_option_ids": {
+        "default": [],
+        "maxItems": 12,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "text": {
+        "type": "string"
+      },
+      "reviewed_attachment_digests": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "explicit_approval": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "required": ["content_version", "selected_option_ids", "reviewed_attachment_digests"],
+    "additionalProperties": false
+  },
+  "ProxyAnswerContentV1": {
+    "type": "object",
+    "properties": {
+      "content_version": {
+        "default": 1,
+        "type": "number",
+        "const": 1
+      },
+      "selected_option_ids": {
+        "default": [],
+        "maxItems": 12,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "text": {
+        "type": "string"
+      },
+      "reviewed_attachment_digests": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "explicit_approval": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "model_id": {
+        "type": "string",
+        "maxLength": 120
+      },
+      "prompt_template_version": {
+        "type": "string",
+        "maxLength": 60
+      },
+      "confidence": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "retrieval_reference_ids": {
+        "default": [],
+        "maxItems": 50,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 80
+        }
+      },
+      "rationale": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "required": [
+      "content_version",
+      "selected_option_ids",
+      "reviewed_attachment_digests",
+      "model_id",
+      "prompt_template_version",
+      "confidence",
+      "retrieval_reference_ids"
+    ],
+    "additionalProperties": false
+  },
+  "LedgerEvent": {
+    "type": "object",
+    "properties": {
+      "protocol_version": {
+        "type": "number",
+        "const": 1
+      },
+      "seq": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "event_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "event_type": {
+        "type": "string",
+        "enum": [
+          "decision.created",
+          "decision.answer.committed",
+          "decision.answer.overridden",
+          "decision.proxy.committed",
+          "decision.proxy.abstained",
+          "decision.proxy.confirmed",
+          "decision.cancelled",
+          "decision.expired",
+          "decision.reopened",
+          "decision.deleted",
+          "device.approved",
+          "device.revoked",
+          "device.key_rotated",
+          "attachment.available",
+          "delivery.received",
+          "delivery.terminal_delivered",
+          "delivery.needs_attention"
+        ]
+      },
+      "occurred_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "question_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "question_revision": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "origin_device_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "data": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {}
+      }
+    },
+    "required": [
+      "protocol_version",
+      "seq",
+      "event_id",
+      "event_type",
+      "occurred_at",
+      "question_id",
+      "question_revision",
+      "origin_device_id",
+      "data"
+    ],
+    "additionalProperties": false
+  },
+  "ServerFrame": {
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "hello"
+          },
+          "protocol_version": {
+            "type": "number",
+            "const": 1
+          },
+          "device_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["owner-desktop", "desktop-host", "phone", "tablet"]
+          },
+          "key_epoch": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "high_water": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "server_time": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+          }
+        },
+        "required": [
+          "t",
+          "protocol_version",
+          "device_id",
+          "role",
+          "key_epoch",
+          "high_water",
+          "server_time"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "event"
+          },
+          "event": {
+            "type": "object",
+            "properties": {
+              "protocol_version": {
+                "type": "number",
+                "const": 1
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{8,64}$"
+              },
+              "event_type": {
+                "type": "string",
+                "enum": [
+                  "decision.created",
+                  "decision.answer.committed",
+                  "decision.answer.overridden",
+                  "decision.proxy.committed",
+                  "decision.proxy.abstained",
+                  "decision.proxy.confirmed",
+                  "decision.cancelled",
+                  "decision.expired",
+                  "decision.reopened",
+                  "decision.deleted",
+                  "device.approved",
+                  "device.revoked",
+                  "device.key_rotated",
+                  "attachment.available",
+                  "delivery.received",
+                  "delivery.terminal_delivered",
+                  "delivery.needs_attention"
+                ]
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+              },
+              "question_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "question_revision": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "origin_device_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "data": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "protocol_version",
+              "seq",
+              "event_id",
+              "event_type",
+              "occurred_at",
+              "question_id",
+              "question_revision",
+              "origin_device_id",
+              "data"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["t", "event"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "caught_up"
+          },
+          "high_water": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "has_more": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": ["t", "high_water", "has_more"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "pairing"
+          },
+          "pairing_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          }
+        },
+        "required": ["t", "pairing_id"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "res"
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "status": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": ["t", "id", "status", "body"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "revoked"
+          }
+        },
+        "required": ["t"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "error"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["t", "code", "message"],
+        "additionalProperties": false
+      }
+    ]
+  },
+  "ClientFrame": {
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "sync"
+          },
+          "after": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["t", "after"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "ack"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["t", "seq"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "t": {
+            "type": "string",
+            "const": "req"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "method": {
+            "type": "string",
+            "enum": ["GET", "POST", "PUT", "DELETE"]
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "query": {
+            "default": "",
+            "type": "string",
+            "maxLength": 1024
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1048576
+          },
+          "authorization": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "required": ["t", "id", "method", "path", "query", "authorization"],
+        "additionalProperties": false
+      }
+    ]
+  }
+}
