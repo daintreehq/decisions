@@ -3,7 +3,17 @@ import { exports } from 'cloudflare:workers';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
 import { decryptAttachment, sha256Hex, signRequest } from '@daintree/decisions-crypto';
-import { ask, claimRelay, inRoom, pairDevice, raw, stub, uploadImage, act } from './helpers.js';
+import {
+  ask,
+  claimRelay,
+  inRoom,
+  pairDevice,
+  raw,
+  settle,
+  stub,
+  uploadImage,
+  act,
+} from './helpers.js';
 import { newId } from '@daintree/decisions-crypto';
 
 const PNG = new Uint8Array([
@@ -189,6 +199,7 @@ describe('encrypted attachments', () => {
       room.run(`UPDATE scheduled_jobs SET run_at = ? WHERE kind = 'gc_orphan'`, Date.now() - 1),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     expect(await env.ATTACHMENTS.head(await keyOf(orphan.attachmentId))).toBeNull();
     expect(await env.ATTACHMENTS.head(await keyOf(bound.attachmentId))).not.toBeNull(); // bound survives
     // an open question keeps its images; answering schedules deletion
@@ -199,6 +210,7 @@ describe('encrypted attachments', () => {
       ),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     expect(await env.ATTACHMENTS.head(await keyOf(bound.attachmentId))).not.toBeNull();
     await act(w, phone, 'answer', qid, 0);
     await inRoom((room) =>
@@ -208,7 +220,9 @@ describe('encrypted attachments', () => {
       ),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     await runDurableObjectAlarm(stub());
+    await settle();
     expect(await env.ATTACHMENTS.head(await keyOf(bound.attachmentId))).toBeNull();
     const st = await inRoom((room) =>
       room.q1<{ state: string }>(
@@ -225,5 +239,6 @@ describe('encrypted attachments', () => {
       ),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
   });
 });

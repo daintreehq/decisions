@@ -1,3 +1,4 @@
+import { settle } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
@@ -41,6 +42,7 @@ async function runDue(kind?: string) {
     ),
   );
   await runDurableObjectAlarm(stub());
+  await settle();
 }
 
 const pending = (kind?: string) =>
@@ -368,7 +370,7 @@ describe('settings, voice sessions and admin', () => {
       jobs: { failed: 0 },
     });
     expect(d.json.jobs.pending).toBeGreaterThan(0);
-    expect(d.json.jobs.alarm_at).toBeTruthy();
+    expect(d.json.jobs.next_run_at).toBeTruthy(); // the alarm itself may already have fired and re-armed
     expect(JSON.stringify(d.json)).not.toMatch(/ciphertext|signing_pub/);
     expect((await phone.call('GET', '/api/v1/admin/diagnostics')).status).toBe(403);
   });

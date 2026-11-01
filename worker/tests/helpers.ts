@@ -448,3 +448,23 @@ export async function uploadImage(
 }
 
 export { sha256Hex, bytesToBase64Url, type PairingInvitePayload };
+
+/**
+ * Alarms also fire on their own in the test runtime, so after forcing jobs due we wait until nothing due is
+ * left pending (and any push in flight has finished) before asserting. Keeps timing-sensitive tests deterministic.
+ */
+export async function settle(maxMs = 5000): Promise<void> {
+  const end = Date.now() + maxMs;
+  for (;;) {
+    const due = await inRoom(
+      (room) =>
+        room.q1<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM scheduled_jobs WHERE status = 'pending' AND run_at <= ?`,
+          Date.now(),
+        )!.n,
+    );
+    if (due === 0 || Date.now() > end) break;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  await new Promise((r) => setTimeout(r, 120));
+}

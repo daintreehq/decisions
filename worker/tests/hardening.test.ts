@@ -1,3 +1,4 @@
+import { settle } from './helpers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exports } from 'cloudflare:workers';
 import { runDurableObjectAlarm } from 'cloudflare:test';
@@ -92,6 +93,7 @@ describe('expiry cannot be bypassed', () => {
       ),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -218,6 +220,7 @@ describe('attachment races', () => {
       room.run(`UPDATE scheduled_jobs SET run_at = ? WHERE kind = 'gc_orphan'`, Date.now() - 1),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     const res = await ask(w, { questionId, attachmentIds: [up.attachmentId] });
     expect(res.res.status).toBe(400);
   });
@@ -518,6 +521,7 @@ describe('maintenance and settings', () => {
       room.run(`UPDATE scheduled_jobs SET run_at = ? WHERE kind = 'remind'`, Date.now() - 1),
     );
     await runDurableObjectAlarm(stub());
+    await settle();
     expect(spy).not.toHaveBeenCalled();
   });
 });
