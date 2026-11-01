@@ -6,6 +6,8 @@ import {
   base64UrlToBytes,
   bytesToBase64Url,
   type ClaimResponse,
+  type DeviceCert,
+  type EpochGrant,
 } from '@daintreehq/decisions-protocol';
 import {
   decryptRecoveryBundle,
@@ -15,6 +17,7 @@ import {
   generateDeviceKeys,
   generateEpochKeyBytes,
   importEpochKey,
+  importSigningPublicKey,
   issueDeviceCert,
   newId,
   serializeDeviceKeys,
@@ -35,11 +38,35 @@ export interface RelayConfig {
   label: string;
 }
 
-/** Everything secret the owner desktop holds. Daintree stores this with Electron safeStorage. */
+/** The two roles a desktop identity can hold. */
+export type DesktopRole = 'owner-desktop' | 'desktop-host';
+
+/**
+ * What an enrolled `desktop-host` keeps from its enrollment (see host-enrollment.ts). The owner identity is
+ * pinned here: every certificate the Host ever accepts must chain to `ownerCert.signing_pub`.
+ */
+export interface HostEnrollmentRecord {
+  /** This Host's own owner-issued `desktop-host` certificate. */
+  cert: DeviceCert;
+  /** The owner's self-signed `owner-desktop` certificate, pinned at enrollment. */
+  ownerCert: DeviceCert;
+  /** Every sealed epoch grant received so far, verified against the pinned owner key. */
+  grants: EpochGrant[];
+  enrolledAt: string;
+}
+
+/**
+ * Everything secret a desktop holds. Daintree stores this with Electron safeStorage. The owner desktop has no
+ * `role` (or `owner-desktop`); an enrolled Daintree Host has `role: 'desktop-host'` and a `host` record.
+ */
 export interface StoredIdentity {
   v: 1;
   /** `false` while a setup is staged but not yet confirmed by the relay. Absent once claimed. */
   claimed?: boolean;
+  /** Absent means `owner-desktop` (identities written before Host enrollment existed). */
+  role?: DesktopRole;
+  /** Present exactly when `role` is `desktop-host`. */
+  host?: HostEnrollmentRecord;
   config: RelayConfig;
   keys: SerializedDeviceKeys;
   /** All epoch keys ever issued, raw base64url; old epochs stay so history remains readable. */
@@ -123,14 +150,24 @@ export class FileKeyStore implements KeyStore {
   }
 }
 
+/** The owner identity every certificate must chain to. For the owner desktop this is itself. */
+export interface OwnerPin {
+  deviceId: string;
+  signingPub: string;
+  signingKey: CryptoKey;
+}
+
 /** Live, imported form of a StoredIdentity. */
 export interface Identity {
   config: RelayConfig;
+  role: DesktopRole;
   keys: DeviceKeys;
   signingPub: string;
   exchangePub: string;
   epochs: Map<number, EpochKey>;
   currentEpoch: number;
+  /** Pinned owner: this device on the owner desktop, the enrollment's owner on a `desktop-host`. */
+  owner: OwnerPin;
   stored: StoredIdentity;
 }
 
@@ -139,15 +176,55 @@ export async function importIdentity(stored: StoredIdentity): Promise<Identity> 
   const epochs = new Map<number, EpochKey>();
   for (const e of stored.epochs)
     epochs.set(e.epoch, await importEpochKey(base64UrlToBytes(e.raw), e.epoch, true));
+  const role: DesktopRole = stored.role ?? 'owner-desktop';
+  let owner: OwnerPin;
+  if (role === 'desktop-host') {
+    const h = stored.host;
+    if (
+      !h ||
+      h.cert.role !== 'desktop-host' ||
+      h.cert.device_id !== stored.config.deviceId ||
+      h.cert.installation_id !== stored.config.installationId ||
+      h.cert.signing_pub !== stored.keys.signing_public ||
+      h.cert.exchange_pub !== stored.keys.exchange_public ||
+      h.ownerCert.role !== 'owner-desktop' ||
+      h.ownerCert.installation_id !== stored.config.installationId ||
+      h.cert.issuer_device_id !== h.ownerCert.device_id
+    ) {
+      throw new Error('stored desktop-host identity is inconsistent: enroll this Host again');
+    }
+    owner = {
+      deviceId: h.ownerCert.device_id,
+      signingPub: h.ownerCert.signing_pub,
+      signingKey: await importSigningPublicKey(h.ownerCert.signing_pub),
+    };
+  } else if (role === 'owner-desktop') {
+    owner = {
+      deviceId: stored.config.deviceId,
+      signingPub: stored.keys.signing_public,
+      signingKey: keys.signing.publicKey,
+    };
+  } else {
+    throw new Error(`unknown identity role ${String(role)}`);
+  }
   return {
     config: stored.config,
+    role,
     keys,
     signingPub: stored.keys.signing_public,
     exchangePub: stored.keys.exchange_public,
     epochs,
     currentEpoch: stored.currentEpoch,
+    owner,
     stored,
   };
+}
+
+/** Owner-only operations (pair, approve, revoke, rotate, enroll a Host) refuse to run as a `desktop-host`. */
+export function assertOwner(id: Identity, what: string): void {
+  if (id.role !== 'owner-desktop') {
+    throw new Error(`${what} is only possible on the owner desktop, not on an enrolled Host`);
+  }
 }
 
 export async function loadIdentity(store: KeyStore): Promise<Identity> {

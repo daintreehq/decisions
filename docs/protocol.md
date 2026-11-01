@@ -187,6 +187,33 @@ orphaned reservations are garbage-collected.
   to the new epoch key. Blocks the device immediately, closes its sockets, deletes its push subscriptions and tickets,
   emits `device.revoked` and `device.key_rotated`. Content the revoked device already downloaded cannot be recalled.
 - `POST /devices/enroll-host {cert, grant}` (owner): registers an additional desktop (a Daintree Host) as a `desktop-host` device. The host creates its own key pairs and sends the public halves to the owner, who signs the device certificate and seals the current epoch key to the host's exchange key. A `desktop-host` can create questions, answer as a proxy, cancel and acknowledge deliveries, but cannot pair, revoke, reopen or answer as a human.
+
+### 10.1 Host enrollment exchange (device to device)
+
+The relay sees only `POST /devices/enroll-host`. The two messages around it pass between the Host and the owner,
+over Daintree's authenticated link or copied by hand (`decisions host request | enroll | accept`). Each is a single
+line, `<prefix><base64url(canonical JSON)>`; the prefix carries the format version, and whitespace is ignored when
+decoding (terminal line wraps). Both objects are strict: unknown top-level fields are rejected.
+
+- **Request** (Host → owner), prefix `decisions-host-request.v1.`:
+  `{v, type: "host.enroll-request", device_id, label, signing_pub, exchange_pub, created_at, signature}`.
+  The Host generates `device_id` and both P-256 key pairs, keeps the private halves, and signs the request with its
+  own signing key (proof of possession). The owner refuses it if the signature fails, if it is older than 24 hours
+  or dated more than 10 minutes ahead, if either key is already used by a device, or if `device_id` is already
+  registered (including a revoked Host: a revoked identity is never re-enrolled).
+- **Enrollment** (owner → Host), prefix `decisions-host-enrollment.v1.`:
+  `{v, type: "host.enrollment", relay_origin, installation_id, owner_cert, cert, grant, issued_at, signature}`,
+  signed as a whole by the owner. `owner_cert` is the owner's self-signed certificate as the relay holds it, `cert`
+  the Host's `desktop-host` certificate (exactly the requested keys and id) and `grant` the relay's current epoch key
+  sealed to the Host's exchange key. The Host accepts it only if it matches its pending request, `owner_cert` is a
+  valid self-signed `owner-desktop` certificate for `installation_id`, the enrollment signature, `cert` and `grant`
+  all verify against that owner key, and a signed `GET /devices` shows the same owner and this Host as active. It
+  then pins `owner_cert`: every certificate and grant it accepts afterwards must chain to that key.
+- Both sides print a fingerprint for a human to compare when copying by hand: the request code (SHA-256 of the
+  canonical `{t: "host.enroll.code", device_id, signing_pub, exchange_pub}`, first 128 bits as hex in groups of four)
+  and the owner key fingerprint.
+- After a `device.key_rotated` event a Host fetches `GET /devices/{id}/key-grants` and opens the new grant with the
+  pinned owner key. Revoking a Host is the normal `POST /devices/{id}/revoke`.
 - `POST /epoch/rotate` (owner): same body, without revoking anyone.
 
 ## 11. Push, reminders and expiry

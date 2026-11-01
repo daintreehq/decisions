@@ -1,6 +1,7 @@
 import {
   API_PREFIX,
   EventsPage,
+  KeyGrantsResponse,
   PROTOCOL_VERSION,
   type ActionKind,
   type ClaimResponse,
@@ -254,6 +255,19 @@ export class RelayClient {
     return this.request('POST', `${API_PREFIX}/devices/${deviceId}/revoke`, {
       body: { protocol_version: PROTOCOL_VERSION, new_key_epoch: newKeyEpoch, grants },
     });
+  }
+  /** Owner only: register a `desktop-host` with its owner-issued certificate and current-epoch grant. */
+  enrollHost(cert: DeviceCert, grant: EpochGrant) {
+    return this.request<{ device_id: string }>('POST', `${API_PREFIX}/devices/enroll-host`, {
+      body: { protocol_version: PROTOCOL_VERSION, cert, grant },
+    });
+  }
+  /** This device's own sealed epoch grants (the relay refuses any other device id). */
+  async keyGrants(
+    deviceId = this.identity.config.deviceId,
+  ): Promise<{ current_epoch: number; grants: EpochGrant[] }> {
+    const raw = await this.request<unknown>('GET', `${API_PREFIX}/devices/${deviceId}/key-grants`);
+    return KeyGrantsResponse.parse(raw);
   }
   rotateEpoch(newKeyEpoch: number, grants: EpochGrant[]) {
     return this.request('POST', `${API_PREFIX}/epoch/rotate`, {
