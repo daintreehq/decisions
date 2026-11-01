@@ -4,7 +4,6 @@ import { createInterface } from 'node:readline';
 import {
   FileKeyStore,
   RelayClient,
-  SqliteLocalStore,
   defaultHome,
   loadIdentity,
   type Identity,
@@ -12,6 +11,7 @@ import {
   type LocalStore,
   type WebSocketFactory,
 } from '@daintreehq/decisions-client';
+import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
 
 /** Everything a command needs from its environment, so commands are testable without a terminal. */
 export interface Ctx {

@@ -5,11 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
   MemoryLocalStore,
-  SqliteLocalStore,
   type LocalStore,
   type OutboxItem,
   type QuestionRow,
 } from '../src/index.js';
+import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { origin } from './helpers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'decisions-store-'));

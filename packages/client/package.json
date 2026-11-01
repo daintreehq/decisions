@@ -13,6 +13,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./sqlite": {
+      "@daintreehq/source": "./src/store-sqlite.ts",
+      "types": "./dist/store-sqlite.d.ts",
+      "default": "./dist/store-sqlite.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

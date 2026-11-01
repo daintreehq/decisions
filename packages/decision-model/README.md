@@ -23,11 +23,13 @@ It runs on the desktop, where the encryption keys are. The relay never sees any 
 
 ```ts
 import {
-  SqliteHistoryStore,
   createDecisionModel,
   commandPresets, // or AnthropicAdapter / OpenAIAdapter
   formatReport,
 } from '@daintreehq/decisions-model';
+// The SQLite history store is its own entry point, so the root never loads node:sqlite.
+// Use MemoryHistoryStore from the root, or implement HistoryStore over your own storage, instead.
+import { SqliteHistoryStore } from '@daintreehq/decisions-model/sqlite';
 
 const history = new SqliteHistoryStore('/path/to/decision-history.sqlite');
 history.setLearningEnabled(true); // off by default: nothing is recorded until you opt in
@@ -107,7 +109,8 @@ contract.
 
 ## Privacy
 
-- History lives in a local SQLite file (or memory). It is never synced anywhere by this package.
+- History lives in a local SQLite file (`@daintreehq/decisions-model/sqlite`), in memory, or in a `HistoryStore`
+  you implement. It is never synced anywhere by this package.
 - Secrets (API keys, tokens, JWTs, private key blocks, `.env`-style and inline `NAME=value` credentials such as
   `PRIVATE_KEY`, `ACCESS_KEY`, `PASSPHRASE`, URL credentials) are redacted **before storage and again before
   prompting**, including options and earlier labels in `label_history`; `rebuildIndex()` re-redacts stored data.

@@ -6,7 +6,8 @@ export * from './devices.js';
 export * from './socket.js';
 export * from './store.js';
 export * from './store-memory.js';
-export * from './store-sqlite.js';
+// SqliteLocalStore is the separate `@daintreehq/decisions-client/sqlite` entry point, so importing
+// this root never loads `node:sqlite`.
 export * from './answers.js';
 export * from './notice.js';
 export * from './sink.js';
