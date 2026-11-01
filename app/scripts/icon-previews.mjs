@@ -245,7 +245,7 @@ for (const [file_, wallpaper, labelColor, title] of [
   const cy = 260;
   comps.push({
     input: await png(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="250"><rect width="1080" height="250" rx="36" fill="#2b2f33"/><text x="170" y="70" ${FONT} font-size="30" fill="#c4c7c5">Decisions · now</text><text x="170" y="122" ${FONT} font-size="38" font-weight="600" fill="#e3e3e3">api-gateway needs you</text><text x="170" y="172" ${FONT} font-size="32" fill="#c4c7c5">Approve the migration plan before it runs?</text></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="250"><rect width="1080" height="250" rx="36" fill="#2b2f33"/><text x="170" y="70" ${FONT} font-size="30" fill="#c4c7c5">Daintree Decisions · now</text><text x="170" y="122" ${FONT} font-size="38" font-weight="600" fill="#e3e3e3">Daintree Decisions</text><text x="170" y="172" ${FONT} font-size="32" fill="#c4c7c5">A question needs your input</text></svg>`,
     ),
     left: 20,
     top: cy,

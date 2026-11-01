@@ -1,4 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor">
-  <!-- The Decisions mark: a flowchart decision node, resolved. One colour; the check is a hole, not a second colour. -->
-  <path fill-rule="evenodd" d="M213.6 25.6a60 60 0 0 1 84.8 0l188 188a60 60 0 0 1 0 84.8l-188 188a60 60 0 0 1-84.8 0l-188-188a60 60 0 0 1 0-84.8z M174 238l48 47.9L322 186a34 34 0 0 1 48 48L246 358a34 34 0 0 1-48 0l-72-72a34 34 0 0 1 48-48z"/>
+  <!-- The Decisions mark: a flowchart decision node holding the question your agent is asking. One colour; the question mark is a hole. -->
+  <path fill-rule="evenodd" d="M213.6 25.6a60 60 0 0 1 84.8 0l188 188a60 60 0 0 1 0 84.8l-188 188a60 60 0 0 1-84.8 0l-188-188a60 60 0 0 1 0-84.8z M167.7 198.2C167.7 74.6 344.3 74.6 344.3 198.2C344.3 242.3 285.4 244.2 285.4 260.7A29.4 29.4 0 0 1 226.6 260.7C226.6 198.2 278.1 198.2 285.4 198.2C285.4 142.7 226.6 142.7 226.6 198.2A29.4 29.4 0 0 1 167.7 198.2z M285.4 371.1A29.4 29.4 0 1 1 226.6 371.1A29.4 29.4 0 1 1 285.4 371.1z"/>
 </svg>
