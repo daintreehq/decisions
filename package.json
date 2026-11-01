@@ -1,0 +1,49 @@
+{
+  "name": "daintree-decisions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Daintree Decisions: a non-blocking, end-to-end encrypted human-in-the-loop relay for AI coding agents. Self-hosted on Cloudflare.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' build && pnpm --filter @daintree/decisions-app build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "dev": "wrangler dev",
+    "deploy": "pnpm build && wrangler deploy",
+    "decisions": "node packages/cli/dist/bin.js",
+    "decisions:deploy": "node tools/deploy/deploy.mjs",
+    "decisions:doctor": "node tools/doctor/doctor.mjs"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CLAIM_SECRET": {
+        "description": "One-time setup secret that lets *you* (and nobody else) claim this deployment for your Daintree installation. Generate one with `openssl rand -hex 32` and keep it: Daintree asks for it once during setup."
+      },
+      "XAI_API_KEY": {
+        "description": "Optional. xAI API key for Grok dictation on the phone. Leave blank to disable cloud dictation."
+      },
+      "ANTHROPIC_API_KEY": {
+        "description": "Optional. Anthropic API key for Claude Haiku dictation clean-up. Leave blank to disable."
+      },
+      "OPENAI_API_KEY": {
+        "description": "Optional. OpenAI API key for the single-provider dictation mode. Leave blank to disable."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261101.1",
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.156.0"
+  }
+}

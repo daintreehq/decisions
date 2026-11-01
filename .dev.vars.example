@@ -1,0 +1,6 @@
+# Required: one-time setup secret. Generate with: openssl rand -hex 32
+CLAIM_SECRET=
+# Optional dictation providers (leave blank to disable cloud dictation)
+XAI_API_KEY=
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
