@@ -4,6 +4,7 @@ import { sha256Hex } from '@daintreehq/decisions-crypto';
 import type { AuditLog } from './audit.js';
 import type { Identity } from './identity.js';
 import type { PolicyRegistry } from './policy.js';
+import type { DecisionLearner } from './proxy.js';
 import type { RelayClient } from './relay.js';
 import type { Mutex } from './mutex.js';
 import type { LocalStore } from './store.js';
@@ -115,4 +116,6 @@ export interface BridgeContext {
    * process may have rotated), from this device's sealed grants on the relay on a `desktop-host`.
    */
   refreshIdentity?: () => Promise<void>;
+  /** The decision model's history, when the host wired one: receives human decisions (see `DecisionLearner`). */
+  learner?: DecisionLearner;
 }

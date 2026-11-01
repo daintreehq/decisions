@@ -30,7 +30,7 @@ const row = (id: string, alias: number, over: Partial<QuestionRow> = {}): Questi
   last_attempt_at: null,
   agent_resume_strategy: null,
   error_code: null,
-  content_json: '{"q":1}',
+  content_sealed: '{"sealed":1}',
   answers_json: '[]',
   history_only: false,
   delivered_revision: 0,
@@ -297,7 +297,8 @@ describe('SqliteLocalStore migrations', () => {
       ownership_principal: '',
       agent_incarnation: '',
     });
-    expect(q.content_json).toBe('{"q":1}');
+    expect(q.legacy_content_json).toBe('{"q":1}');
+    expect(q.content_sealed).toBeNull();
     expect(await s.getIntent('legacy-i')).toMatchObject({
       state: 'intent',
       ownership_principal: '',

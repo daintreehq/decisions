@@ -8,8 +8,12 @@ import {
   MemoryLocalStore,
   exportDecisions,
   importDecisions,
+  openAnswers,
+  openQuestionContent,
 } from '../src/index.js';
-import { origin, setupBridge } from './helpers.js';
+import { makeIdentity, origin, setupBridge } from './helpers.js';
+
+const anyIdentity = await makeIdentity();
 
 async function populated() {
   const env = await setupBridge();
@@ -78,11 +82,26 @@ describe('import', () => {
     const res = await importDecisions(
       { encrypted: out.data, passphrase: 'a long export passphrase' },
       dst.store,
+      dst.identity,
     );
     expect(res).toMatchObject({ imported: 1, skipped: 0 });
     const row = (await dst.store.getQuestion(src.qid))!;
     expect(row.history_only).toBe(true);
-    expect(row.content_json).toContain('SECRET-TEXT');
+    // Imported content is sealed under the importing identity: nothing readable in the row...
+    expect(JSON.stringify(row)).not.toContain('SECRET-TEXT');
+    expect(JSON.stringify(row)).not.toContain('because');
+    // ...but it opens on demand, and a re-export carries it again.
+    expect((await openQuestionContent(dst, row))!.question).toContain('SECRET-TEXT');
+    expect((await openAnswers(dst, row))[0]).toMatchObject({ text: 'because', delivered: true });
+    const again = await exportDecisions({
+      store: dst.store,
+      identity: dst.identity,
+      plaintext: true,
+    });
+    if (again.encrypted) throw new Error('expected a zip');
+    const line = new TextDecoder().decode(unzipSync(again.data)['decisions.jsonl']);
+    expect(line).toContain('SECRET-TEXT');
+    expect(line).toContain('because');
     expect(await dst.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10)).toHaveLength(0);
     // even a fresh answer-looking event for an imported question is ignored and nothing is typed
     expect((await dst.bridge.delivery.drain()).delivered).toBe(0);
@@ -93,11 +112,16 @@ describe('import', () => {
         await importDecisions(
           { encrypted: out.data, passphrase: 'a long export passphrase' },
           dst.store,
+          dst.identity,
         )
       ).skipped,
     ).toBe(1);
     await expect(
-      importDecisions({ encrypted: out.data, passphrase: 'wrong passphrase here' }, dst.store),
+      importDecisions(
+        { encrypted: out.data, passphrase: 'wrong passphrase here' },
+        dst.store,
+        dst.identity,
+      ),
     ).rejects.toThrow();
   });
 
@@ -123,7 +147,9 @@ describe('import', () => {
       'manifest.json': utf8ToBytes(JSON.stringify(man)),
       'decisions.jsonl': utf8ToBytes('{"question_id":"evil"}\n'),
     });
-    await expect(importDecisions({ zip }, new MemoryLocalStore())).rejects.toThrow(/checksum/);
+    await expect(importDecisions({ zip }, new MemoryLocalStore(), anyIdentity)).rejects.toThrow(
+      /checksum/,
+    );
   });
   it('rejects path traversal and unexpected files', async () => {
     for (const name of [
@@ -134,31 +160,32 @@ describe('import', () => {
       'attachments/x.png',
     ]) {
       const zip = zipSync({ [name]: utf8ToBytes('x'), 'manifest.json': utf8ToBytes('{}') });
-      await expect(importDecisions({ zip }, new MemoryLocalStore())).rejects.toBeInstanceOf(
-        ImportError,
-      );
+      await expect(
+        importDecisions({ zip }, new MemoryLocalStore(), anyIdentity),
+      ).rejects.toBeInstanceOf(ImportError);
     }
   });
   it('rejects zip bombs and oversized entries', async () => {
     const big = new Uint8Array(IMPORT_LIMITS.maxFileBytes + 1);
     const zip = zipSync({ 'decisions.jsonl': big }, { level: 9 });
     expect(zip.length).toBeLessThan(1_000_000); // highly compressible
-    await expect(importDecisions({ zip }, new MemoryLocalStore())).rejects.toBeInstanceOf(
-      ImportError,
-    );
+    await expect(
+      importDecisions({ zip }, new MemoryLocalStore(), anyIdentity),
+    ).rejects.toBeInstanceOf(ImportError);
     const ratio = zipSync({ 'decisions.jsonl': new Uint8Array(20 * 1024 * 1024) }, { level: 9 });
-    await expect(importDecisions({ zip: ratio }, new MemoryLocalStore())).rejects.toThrow(
-      /compression ratio/,
-    );
+    await expect(
+      importDecisions({ zip: ratio }, new MemoryLocalStore(), anyIdentity),
+    ).rejects.toThrow(/compression ratio/);
   });
   it('rejects garbage and archives without a manifest', async () => {
     await expect(
-      importDecisions({ zip: utf8ToBytes('not a zip') }, new MemoryLocalStore()),
+      importDecisions({ zip: utf8ToBytes('not a zip') }, new MemoryLocalStore(), anyIdentity),
     ).rejects.toBeInstanceOf(ImportError);
     await expect(
       importDecisions(
         { zip: zipSync({ 'decisions.jsonl': utf8ToBytes('') }) },
         new MemoryLocalStore(),
+        anyIdentity,
       ),
     ).rejects.toThrow(/manifest/);
   });

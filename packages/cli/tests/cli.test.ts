@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
 import { RelayError } from '@daintreehq/decisions-client';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
@@ -346,6 +347,30 @@ describe('export / import / recovery / delete-data', () => {
     await exportCmd(a.ctx, {}, { out: plain, plaintext: true });
     expect(a.err.join('\n')).toContain('UNENCRYPTED');
     expect(readFileSync(plain).subarray(0, 2).toString('latin1')).toBe('PK');
+    // The local databases hold the question sealed (the export above opened it on demand).
+    for (const home of [a.ctx.home, b.ctx.home]) {
+      for (const f of ['decisions.db', 'decisions.db-wal']) {
+        const p = join(home, f);
+        if (existsSync(p)) expect(readFileSync(p).includes(Buffer.from('SECRET-BODY'))).toBe(false);
+      }
+    }
+  });
+  it('any command seals a store row left in plaintext by an older version', async () => {
+    const { ctx } = await ready();
+    await ask(ctx, {}, { question: 'Fresh question' });
+    // Rewind the row to how a pre-sealing build stored it: plaintext content, nothing sealed.
+    const dbFile = join(ctx.home, 'decisions.db');
+    const raw = new DatabaseSync(dbFile);
+    raw
+      .prepare('UPDATE questions SET content_json = ?, content_sealed = NULL')
+      .run(JSON.stringify({ content_version: 1, question: 'OLDPLAIN legacy question' }));
+    raw.close();
+    expect(readFileSync(dbFile).includes(Buffer.from('OLDPLAIN'))).toBe(true);
+    await status(ctx, {});
+    for (const f of ['decisions.db', 'decisions.db-wal']) {
+      const p = join(ctx.home, f);
+      if (existsSync(p)) expect(readFileSync(p).includes(Buffer.from('OLDPLAIN'))).toBe(false);
+    }
   });
   it('recovery kit export, verify and restore', async () => {
     const env = { DECISIONS_RECOVERY_PASSPHRASE: 'a long recovery passphrase' };

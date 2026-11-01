@@ -11,7 +11,15 @@ import {
   sha256Hex,
   type RecoveryBundleFile,
 } from '@daintreehq/decisions-crypto';
-import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
+import { serializeAnswers, type AnswerEntry, type OpenAnswerEntry } from './answers.js';
+import {
+  openAnswers,
+  openQuestionContent,
+  sealAnswerContent,
+  sealQuestionContent,
+  storedEntry,
+  type SealContext,
+} from './at-rest.js';
 import type { Identity } from './identity.js';
 import type { LocalStore } from './store.js';
 import type { AuditEntry, QuestionRow } from './types.js';
@@ -77,7 +85,22 @@ Importing restores records as history only. Imported answers are never typed int
 Encrypted archives need the passphrase you chose at export time; without it they cannot be recovered.
 `;
 
-function rowToRecord(q: QuestionRow) {
+interface ExportRecord {
+  question_id: string;
+  alias: number;
+  requirement: QuestionRow['requirement'];
+  status: QuestionRow['local_status'];
+  created_at: string;
+  expires_at: string | null;
+  revision: number;
+  project_id: string;
+  content: unknown;
+  answers: OpenAnswerEntry[];
+  attachment_digests: string[];
+}
+
+/** The export is a deliberate copy of the history, so content is opened here (and the archive is encrypted by default). */
+async function rowToRecord(ctx: SealContext, q: QuestionRow): Promise<ExportRecord> {
   return {
     question_id: q.question_id,
     alias: q.alias,
@@ -87,8 +110,8 @@ function rowToRecord(q: QuestionRow) {
     expires_at: q.expires_at,
     revision: q.question_revision,
     project_id: q.origin.project_id,
-    content: q.content_json ? (JSON.parse(q.content_json) as unknown) : null,
-    answers: parseAnswers(q.answers_json),
+    content: await openQuestionContent(ctx, q),
+    answers: await openAnswers(ctx, q),
     attachment_digests: q.attachment_digests,
   };
 }
@@ -99,10 +122,11 @@ export async function exportDecisions(o: ExportOptions): Promise<ExportResult> {
   const created = o.now ?? new Date();
   const questions = (await o.store.listQuestions()).filter((q) => !q.history_only || true);
   const audit: AuditEntry[] = await o.store.listAudit(100_000);
+  const records: string[] = [];
+  for (const q of questions)
+    records.push(JSON.stringify(await rowToRecord({ identity: o.identity }, q)));
   const files: Record<string, Uint8Array> = {
-    'decisions.jsonl': utf8ToBytes(
-      questions.map((q) => JSON.stringify(rowToRecord(q))).join('\n') + '\n',
-    ),
+    'decisions.jsonl': utf8ToBytes(records.join('\n') + '\n'),
     'device-public-keys.json': utf8ToBytes(JSON.stringify(o.devices ?? [], null, 2)),
     'audit-events.jsonl': utf8ToBytes(
       audit.map((a) => JSON.stringify(a)).join('\n') + (audit.length ? '\n' : ''),
@@ -152,10 +176,16 @@ export interface ImportResult {
   manifest: ExportManifest;
 }
 
+/**
+ * Restore an export as history only. Content is sealed under `identity`'s current epoch key as it is written,
+ * so imported records hold no plaintext at rest either.
+ */
 export async function importDecisions(
   input: { zip: Uint8Array } | { encrypted: RecoveryBundleFile; passphrase: string },
   store: LocalStore,
+  identity: Identity,
 ): Promise<ImportResult> {
+  const ctx: SealContext = { identity };
   let zip: Uint8Array;
   if ('zip' in input) zip = input.zip;
   else {
@@ -206,16 +236,28 @@ export async function importDecisions(
   let skipped = 0;
   for (const line of bytesToUtf8(dj).split('\n')) {
     if (!line.trim()) continue;
-    const r = JSON.parse(line) as ReturnType<typeof rowToRecord>;
+    const r = JSON.parse(line) as ExportRecord;
     if (typeof r.question_id !== 'string' || (await store.getQuestion(r.question_id))) {
       skipped++;
       continue;
     }
-    const answers: AnswerEntry[] = (Array.isArray(r.answers) ? r.answers : []).map((a) => ({
-      ...a,
-      deliver: false,
-      delivered: true,
-    }));
+    const answers: AnswerEntry[] = [];
+    for (const a of Array.isArray(r.answers) ? r.answers : []) {
+      const content = {
+        choices: Array.isArray(a.choices) ? a.choices : [],
+        text: typeof a.text === 'string' ? a.text : '',
+        reviewed_attachment_digests: Array.isArray(a.reviewed_attachment_digests)
+          ? a.reviewed_attachment_digests
+          : [],
+        ...(typeof a.confidence === 'number' ? { confidence: a.confidence } : {}),
+        ...(typeof a.model_id === 'string' ? { model_id: a.model_id } : {}),
+      };
+      const sealed =
+        a.kind === 'answer'
+          ? await sealAnswerContent(ctx, r.question_id, String(a.entry_id), a.revision, content)
+          : null;
+      answers.push({ ...storedEntry(a, sealed), deliver: false, delivered: true });
+    }
     const row: QuestionRow = {
       question_id: r.question_id,
       alias: await store.nextAlias(),
@@ -244,7 +286,7 @@ export async function importDecisions(
       last_attempt_at: null,
       agent_resume_strategy: null,
       error_code: null,
-      content_json: r.content ? JSON.stringify(r.content) : null,
+      content_sealed: r.content ? await sealQuestionContent(ctx, r.question_id, r.content) : null,
       answers_json: serializeAnswers(answers),
       history_only: true,
       delivered_revision: r.revision ?? 0,

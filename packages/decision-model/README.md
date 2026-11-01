@@ -103,6 +103,23 @@ const bridge = new DecisionsBridge({
 | `attachments` (optional)                   | `attachments`            |                                                                                 |
 | _(returned)_                               | `ProxyOutcome` unchanged | Malformed input abstains with `invalid-input`                                   |
 
+To learn from the answers the bridge receives, pass the history store as the bridge's `learner`:
+
+```ts
+import { asBridgeLearner } from '@daintreehq/decisions-model';
+
+const bridge = new DecisionsBridge({
+  /* ... */
+  learner: asBridgeLearner(history),
+});
+```
+
+The bridge offers it every human answer and override (never proxy answers, nor a human's confirmation of one), with
+the question decrypted in memory. The history store decides what is kept: nothing while learning is off or for an
+opted-out project, and secrets are redacted before anything is written. The bridge's own local store holds question
+and answer content only as ciphertext, so with learning on this history is the one place that plaintext lives on
+disk.
+
 `BridgeProxyQuestionInput` and `BridgeProxyEngine` are exported so the two sides can share one contract. The
 `abstain` branch of `ProxyOutcome` may carry an optional `suggestion` for display; ignore it if you only need the
 contract.

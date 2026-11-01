@@ -39,3 +39,37 @@ export interface ProxyEngine {
   readonly gateAware?: boolean;
   suggest(input: ProxyQuestionInput, signal: AbortSignal): Promise<ProxyOutcome>;
 }
+
+/**
+ * One human decision, offered to the decision model's history (`asBridgeLearner` in packages/decision-model).
+ * This is the ONLY path by which question or answer plaintext leaves the bridge for storage: the local store
+ * keeps it sealed. The learner applies its own consent (learning is off until the user opts in) and its
+ * secrets filter before anything is written.
+ */
+export interface LearnedDecision {
+  questionId: string;
+  question: string;
+  context?: string;
+  options: { id: string; label: string }[];
+  kind: 'choice' | 'approval' | 'text' | 'mixed';
+  /** The ENFORCED level the question was asked with. */
+  requirement: 'human-required' | 'proxy-ok' | 'proxy-first';
+  projectId: string;
+  /** When the question was asked. */
+  createdAt: string;
+  /** When the human answered (the signed action's timestamp). */
+  chosenAt: string;
+  selectedOptionIds: string[];
+  /** The human's free text ('' when none). */
+  text: string;
+  /** The question's ledger revision after this answer: later corrections win. */
+  revision: number;
+  /** True for an override that replaces an earlier answer. */
+  correction: boolean;
+}
+
+/** Receives human answers and overrides (never proxy answers or confirmations of them). */
+export interface DecisionLearner {
+  /** May return a value or a promise (for example the history store's record result); it is awaited and ignored. */
+  learn(decision: LearnedDecision): unknown;
+}

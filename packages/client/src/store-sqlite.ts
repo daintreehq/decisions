@@ -102,6 +102,13 @@ const MIGRATIONS: Migration[] = [
    ALTER TABLE injection_intents ADD COLUMN ownership_principal TEXT NOT NULL DEFAULT '';
    ALTER TABLE injection_intents ADD COLUMN agent_incarnation TEXT NOT NULL DEFAULT '';`,
   },
+  {
+    // Question content moves to a sealed column. The old `content_json` column stays, read back as
+    // `legacy_content_json`, because sealing needs the identity's epoch key, which the store never holds: the
+    // bridge (or `sealStoredContent`) seals every legacy row, clears the column, and compacts the file.
+    name: 'sealed question content',
+    up: `ALTER TABLE questions ADD COLUMN content_sealed TEXT;`,
+  },
 ];
 
 /** The schema version a fully migrated database reports in `PRAGMA user_version`. */
@@ -133,6 +140,7 @@ const Q_COLS = [
   'agent_resume_strategy',
   'error_code',
   'content_json',
+  'content_sealed',
   'answers_json',
   'history_only',
   'delivered_revision',
@@ -165,7 +173,8 @@ function toRow(q: QuestionRow): Row {
     last_attempt_at: q.last_attempt_at,
     agent_resume_strategy: q.agent_resume_strategy,
     error_code: q.error_code,
-    content_json: q.content_json,
+    content_json: q.legacy_content_json ?? null,
+    content_sealed: q.content_sealed,
     answers_json: q.answers_json,
     history_only: q.history_only ? 1 : 0,
     delivered_revision: q.delivered_revision,
@@ -202,7 +211,8 @@ function fromRow(r: Row): QuestionRow {
     last_attempt_at: (r.last_attempt_at as string | null) ?? null,
     agent_resume_strategy: (r.agent_resume_strategy as string | null) ?? null,
     error_code: (r.error_code as string | null) ?? null,
-    content_json: (r.content_json as string | null) ?? null,
+    content_sealed: (r.content_sealed as string | null) ?? null,
+    ...(r.content_json != null ? { legacy_content_json: r.content_json as string } : {}),
     answers_json: r.answers_json as string,
     history_only: Number(r.history_only) === 1,
     delivered_revision: Number(r.delivered_revision),
@@ -217,7 +227,11 @@ export class SqliteLocalStore implements LocalStore {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
+    // secure_delete zeroes the space a deleted or rewritten row leaves behind, so content that was ever in a
+    // row does not linger in free space; `compact()` also rewrites the file and empties the WAL.
+    this.db.exec(
+      'PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;',
+    );
     this.migrate();
   }
 
@@ -506,6 +520,14 @@ export class SqliteLocalStore implements LocalStore {
   async listAudit(limit: number) {
     const rows = this.st('SELECT json FROM audit ORDER BY id DESC LIMIT ?').all(limit) as Row[];
     return rows.map((r) => JSON.parse(r.json as string) as AuditEntry).reverse();
+  }
+
+  async compact() {
+    this.db.exec('VACUUM');
+    // Until the WAL is checkpointed the old pages are still in the main file. Another connection reading the
+    // database blocks a full checkpoint without raising an error, so report that as a failure (retried later).
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as Row | undefined;
+    if (r && Number(r.busy) !== 0) throw new Error('database busy: WAL checkpoint incomplete');
   }
 
   async close() {

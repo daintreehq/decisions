@@ -32,6 +32,7 @@ import {
   type BridgeContext,
 } from './context.js';
 import { sameDigests } from './answers.js';
+import { openProxyDraft, sealProxyDraft } from './at-rest.js';
 import { currentEpochKey } from './identity.js';
 import { RelayError } from './errors.js';
 import { backoffMs } from './relay.js';
@@ -51,7 +52,9 @@ export interface PreparedAction {
 }
 export interface ActionPayload {
   prepared?: PreparedAction;
-  /** For proxy-answer: the decrypted-form content to sign at send time. */
+  /** For proxy-answer: the content to encrypt and sign at send time, sealed until then (at-rest.ts). */
+  sealed?: string;
+  /** Plaintext form written by stores from before drafts were sealed; `sealStoredContent` replaces it. */
   content?: Record<string, unknown>;
 }
 
@@ -268,7 +271,8 @@ export class Publisher {
       last_attempt_at: null,
       agent_resume_strategy: null,
       error_code: null,
-      content_json: JSON.stringify(content),
+      // The ciphertext the relay will hold, never the plaintext: see at-rest.ts.
+      content_sealed: JSON.stringify(envelope),
       answers_json: '[]',
       history_only: false,
       delivered_revision: 0,
@@ -367,11 +371,15 @@ export class Publisher {
     content?: Record<string, unknown>,
   ): Promise<void> {
     const now = this.ctx.now();
+    const id = newId(now);
+    const payload: ActionPayload = content
+      ? { sealed: await sealProxyDraft(this.ctx, questionId, id, content) }
+      : {};
     await this.ctx.store.putOutbox({
-      id: newId(now),
+      id,
       kind,
       question_id: questionId,
-      payload: { content } satisfies ActionPayload,
+      payload,
       attempts: 0,
       next_attempt_at: now,
       created_at: now,
@@ -494,6 +502,12 @@ export class Publisher {
     const payload = item.payload as ActionPayload;
 
     const prepare = async (revision: number, idem: string): Promise<PreparedAction> => {
+      const plaintext =
+        kind !== 'proxy-answer'
+          ? {}
+          : payload.sealed
+            ? await openProxyDraft(ctx, item.question_id, item.id, payload.sealed)
+            : (payload.content ?? {});
       const epoch = currentEpochKey(ctx.identity);
       const envelope =
         kind === 'proxy-answer'
@@ -506,7 +520,7 @@ export class Publisher {
               revision: revision + 1,
               senderDeviceId: ctx.identity.config.deviceId,
               purpose: 'answer-content',
-              plaintext: payload.content ?? {},
+              plaintext,
             })
           : null;
       const signed = await buildSignedAction({
