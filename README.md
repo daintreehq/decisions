@@ -71,7 +71,8 @@ Back up your keys: `pnpm decisions recovery export`. **If you lose every device 
 ```bash
 pnpm install
 pnpm build        # builds the PWA into app/dist (what the Worker serves)
-pnpm build:all    # also builds the CLI
+pnpm build:all    # also builds the libraries and the CLI (needed for `pnpm decisions`)
+pnpm pack:check   # packs every library and the CLI, installs them in a scratch project, imports and type-checks
 pnpm test         # every package, including the Worker in a real workerd runtime
 pnpm typecheck
 pnpm dev          # wrangler dev on http://localhost:8787

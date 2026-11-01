@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { RelayError } from '@daintreehq/decisions-client';
 import { CliError, makeCtx, type GlobalOptions } from './runtime.js';
@@ -231,5 +233,17 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('bin.js'))
-  void main();
+/**
+ * True when `moduleUrl` is the script Node was started with. npm runs the CLI through a symlink
+ * (`node_modules/.bin/decisions`, or the global bin directory), so both sides are resolved first.
+ */
+export function isEntryPoint(argv1: string | undefined, moduleUrl: string): boolean {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint(process.argv[1], import.meta.url)) void main();

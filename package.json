@@ -20,7 +20,9 @@
     "decisions:deploy": "node tools/deploy/deploy.mjs",
     "decisions:doctor": "node tools/doctor/doctor.mjs",
     "deploy:local": "pnpm build && wrangler deploy",
-    "build:all": "pnpm -r build"
+    "build:all": "pnpm -r build",
+    "build:packages": "pnpm -r --filter \"./packages/*\" build",
+    "pack:check": "node tools/pack-check/pack-check.mjs"
   },
   "cloudflare": {
     "bindings": {
