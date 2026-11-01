@@ -94,6 +94,8 @@ export class DemoSink implements TerminalSink {
             p.on('close', (code) =>
               resolve(code === 0 ? { ok: true } : { ok: false, reason: 'exec_failed' }),
             );
+            // A command that exits before reading its input raises EPIPE on stdin; the exit code decides the outcome.
+            p.stdin.on('error', () => undefined);
             p.stdin.end(text + '\n');
           });
         }

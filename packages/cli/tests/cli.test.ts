@@ -343,3 +343,33 @@ describe('export / import / recovery / delete-data', () => {
     });
   });
 });
+
+describe('exec sink', () => {
+  const target = {
+    hostId: 'cli',
+    paneId: 'p',
+    terminalGeneration: 1,
+    agentSessionId: null,
+    worktreeId: 'w',
+  };
+
+  it('does not crash when the command exits before reading its input (EPIPE)', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'exit 3' }, () => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on('uncaughtException', onUnhandled);
+    try {
+      const res = await sink.inject(target as never, 'x'.repeat(2_000_000), 'inj1');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(res).toEqual({ ok: false, reason: 'exec_failed' });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUnhandled);
+    }
+  });
+
+  it('reports success when the command accepts the notice', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null' }, () => undefined);
+    expect(await sink.inject(target as never, 'hello', 'inj2')).toEqual({ ok: true });
+  });
+});
