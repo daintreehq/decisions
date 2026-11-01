@@ -95,18 +95,26 @@ interface FakeWrangler {
   bucketExists?: boolean;
   deployOutput?: string;
   failOn?: string;
+  /** Make the failing command repeat its stdin in the error, as a careless tool might. */
+  echoInputOnFail?: boolean;
 }
 
 function fakeSpawner(f: FakeWrangler = {}) {
   const calls: (SpawnRequest & { configAtCall?: unknown })[] = [];
   let loggedIn = f.loggedIn ?? false;
   const spawn = async (req: SpawnRequest): Promise<SpawnResult> => {
-    const call: SpawnRequest & { configAtCall?: unknown } = { ...req, args: [...req.args] };
+    // Snapshot argv and env as they were at the time of the call.
+    const call: SpawnRequest & { configAtCall?: unknown } = {
+      ...req,
+      args: [...req.args],
+      env: { ...req.env },
+    };
     calls.push(call);
     const ok = (stdout = ''): SpawnResult => ({ status: 0, stdout, stderr: '' });
     const no = (stderr: string): SpawnResult => ({ status: 1, stdout: '', stderr });
     const sub = req.args.slice(2).join(' ');
-    if (f.failOn && sub.startsWith(f.failOn)) return no(`${f.failOn} exploded`);
+    if (f.failOn && sub.startsWith(f.failOn))
+      return no(`${f.failOn} exploded${f.echoInputOnFail ? `: ${req.input ?? ''}` : ''}`);
     if (sub === '--version') return ok(`${WRANGLER}\n`);
     if (sub === 'whoami') {
       if (req.env.CLOUDFLARE_API_TOKEN) return ok('You are logged in with an API Token');
@@ -495,8 +503,10 @@ describe('decisions deploy', () => {
     await deploy(t.ctx, {}, { apiToken: true, accountId: ACCOUNT }, t.deps);
     expect(t.prompts).toEqual([expect.stringMatching(/API token/)]);
     expect(t.calls.map((c) => c.args[2])).not.toContain('login');
+    // The token is asked for after the Wrangler check, and reaches every later command.
+    expect(t.calls[0]!.env.CLOUDFLARE_API_TOKEN).toBeUndefined();
+    expect(t.calls.slice(1).every((c) => c.env.CLOUDFLARE_API_TOKEN === TOKEN)).toBe(true);
     for (const c of t.calls) {
-      expect(c.env.CLOUDFLARE_API_TOKEN).toBe(TOKEN);
       expect(c.env.CLOUDFLARE_ACCOUNT_ID).toBe(ACCOUNT);
       expect(c.args.join(' ')).not.toContain(TOKEN);
       expect(c.input ?? '').not.toContain(TOKEN);
@@ -558,8 +568,39 @@ describe('decisions deploy', () => {
       new URL(String(u)).pathname === '/health'
         ? new Response('down', { status: 503 })
         : base(u as string, init)) as typeof fetch;
-    await deploy(t.ctx, {}, {}, t.deps);
+    await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toThrow(/health check/);
     expect(count(text(t.out), SECRET)).toBe(1);
+    expect(text(t.out)).toMatch(/with problems/);
+  });
+
+  it('shows the secret when Wrangler errors while setting it, without echoing it in the error', async () => {
+    const t = setupDeploy({ wrangler: { failOn: 'secret put', echoInputOnFail: true } });
+    const e = (await deploy(t.ctx, {}, {}, t.deps).catch((x: unknown) => x)) as Error;
+    expect(e).toBeInstanceOf(CliError);
+    expect(e.message).toMatch(/may or may not have been set/);
+    expect(e.message).toContain('[redacted]');
+    expect(e.message).not.toContain(SECRET);
+    expect(count(text(t.out), SECRET)).toBe(1);
+    expect(text(t.err)).not.toContain(SECRET);
+  });
+
+  it('keeps Wrangler from logging request bodies, and writes no Wrangler log for the secret', async () => {
+    const t = setupDeploy({ env: { PATH: '/usr/bin', WRANGLER_LOG_SANITIZE: 'false' } });
+    await deploy(t.ctx, {}, {}, t.deps);
+    for (const c of t.calls) expect(c.env.WRANGLER_LOG_SANITIZE).toBe('true');
+    expect(t.calls.find((c) => c.args.includes('secret'))!.env.WRANGLER_WRITE_LOGS).toBe('false');
+  });
+
+  it('says so when it could not tell whether the relay was already claimed', async () => {
+    const t = setupDeploy();
+    const base = t.ctx.fetch;
+    t.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+      if (new URL(String(u)).pathname === '/api/v1/info') throw new TypeError('fetch failed');
+      return base(u as string, init);
+    }) as typeof fetch;
+    await deploy(t.ctx, {}, {}, t.deps).catch(() => {});
+    expect(count(text(t.out), SECRET)).toBe(1);
+    expect(text(t.out)).toMatch(/could not be checked whether it was already claimed/);
   });
 
   it('still shows the secret when no workers.dev URL was printed', async () => {
@@ -580,6 +621,17 @@ describe('decisions deploy', () => {
     for (const f of [...walk(root), ...walk(t.home)]) {
       expect(readFileSync(f).includes(SECRET), f).toBe(false);
     }
+  });
+
+  it('--claim exits non-zero, and still shows the secret, when the claim fails', async () => {
+    const t = setupDeploy();
+    const base = t.ctx.fetch;
+    t.ctx.fetch = (async (u: unknown, init?: RequestInit) =>
+      new URL(String(u)).pathname === '/api/v1/setup/claim'
+        ? new Response(JSON.stringify({ code: 'already_claimed', message: 'no' }), { status: 409 })
+        : base(u as string, init)) as typeof fetch;
+    await expect(deploy(t.ctx, {}, { claim: true }, t.deps)).rejects.toThrow(/claiming/);
+    expect(count(text(t.out), SECRET)).toBe(1);
   });
 
   it('--claim refuses up front when this machine already has a claimed identity', async () => {

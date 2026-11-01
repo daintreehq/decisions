@@ -296,26 +296,41 @@ export async function deploy(
   // children, and the nested `npx wrangler@…` would then run the CLI's package instead of Wrangler.
   delete env.npm_config_package;
   delete env.npm_config_call;
+  // Wrangler's debug log (terminal and ~/.wrangler/logs) includes request bodies, such as the
+  // secret upload, when sanitizing is turned off; keep it on whatever the user's shell says.
+  env.WRANGLER_LOG_SANITIZE = 'true';
   if (o.accountId) env.CLOUDFLARE_ACCOUNT_ID = o.accountId;
+
+  /** Values that must never be echoed back, even inside Wrangler's own error output. */
+  const secrets: string[] = [];
+  const redact = (t: string) => secrets.reduce((acc, v) => acc.split(v).join('[redacted]'), t);
 
   const staging = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-deploy-'));
   try {
     await stageRelayBundle(bundle, join(staging, 'relay'), { name, bucket });
     const cwd = join(staging, 'relay');
     const step = (i: number) => say(`\n[${i + 1}] ${plan[i]!.title}`);
-    const wr = (args: string[], x: { capture?: boolean; echo?: boolean; input?: string } = {}) => {
+    const wr = (
+      args: string[],
+      x: {
+        capture?: boolean;
+        echo?: boolean;
+        input?: string;
+        env?: Record<string, string>;
+      } = {},
+    ) => {
       say(`    $ ${shown(wrangler, args)}`);
       return spawn({
         cmd: 'npx',
         args: npxArgs(wrangler, args),
         cwd,
-        env,
+        env: { ...env, ...x.env },
         capture: x.capture ?? true,
         ...(x.echo ? { echo: true } : {}),
         ...(x.input !== undefined ? { input: x.input } : {}),
       });
     };
-    const output = (r: SpawnResult) => `${r.stdout}\n${r.stderr}`.trim();
+    const output = (r: SpawnResult) => redact(`${r.stdout}\n${r.stderr}`.trim());
 
     step(0);
     say(`    Node ${nodeVersion}`);
@@ -333,7 +348,10 @@ export async function deploy(
         await ctx.prompt('Cloudflare API token (input hidden): ', { secret: true })
       ).trim();
       if (!token) throw new CliError('no API token entered');
+      secrets.push(token);
       env.CLOUDFLARE_API_TOKEN = token;
+    } else if (auth === 'token-env') {
+      secrets.push(ctx.env.CLOUDFLARE_API_TOKEN!);
     }
     const who = await wr(wranglerCommands.whoami());
     const loggedIn = who.status === 0 && !/not authenticated|not logged in/i.test(output(who));
@@ -365,67 +383,109 @@ export async function deploy(
     say(url ? `    deployed: ${url}` : '    deployed (no workers.dev URL in the output)');
 
     step(4);
-    let claimed = false;
-    if (url) {
-      try {
-        const r = await ctx.fetch(`${url}/api/v1/info`);
-        claimed = r.ok && ((await r.json()) as { claimed?: unknown }).claimed === true;
-      } catch {
-        /* not reachable yet (a new workers.dev route takes a moment): treat as unclaimed */
-      }
-    }
-    if (claimed) {
+    const state = url ? await claimState(ctx, url, sleep) : 'unknown';
+    if (state === 'claimed') {
       say('    the relay is already claimed: this was an update, the claim secret is unchanged');
-      await check(ctx, g, url!, sleep, `\n[6] ${plan[5]!.title}`);
-      summary(ctx, { url, claimSecret: null, claimedHere: false, alreadyClaimed: true });
+      const healthy = await check(ctx, g, url!, sleep, `\n[6] ${plan[5]!.title}`);
+      summary(ctx, { url, claimSecret: null, claimedHere: false, state, problems: !healthy });
+      if (!healthy) throw new CliError('deployed, but the health check found problems');
       return;
     }
     const claimSecret = (deps.generateSecret ?? (() => randomBytes(32).toString('hex')))();
-    const sec = await wr(wranglerCommands.secret(name), { input: claimSecret + '\n' });
-    if (sec.status !== 0) throw new CliError(`could not set the claim secret:\n${output(sec)}`);
-    say('    set (the value is shown once at the end)');
+    secrets.push(claimSecret);
 
-    // The secret is live on the Worker from here on: whatever happens next, it must be shown.
+    // From the moment the upload starts the secret may be live on the Worker, so whatever happens
+    // next, it is shown (once) before the command ends.
     let claimedHere = false;
-    try {
-      if (url) {
-        await check(ctx, g, url, sleep, `\n[6] ${plan[5]!.title}`);
-        if (o.claim) {
-          say(`\n[${plan.length}] ${plan[plan.length - 1]!.title}`);
-          try {
-            await setup({ ...ctx, env: { ...ctx.env, DECISIONS_CLAIM_SECRET: claimSecret } }, g, {
-              url,
-              label: o.label ?? 'Daintree',
-            });
-            claimedHere = true;
-          } catch (e) {
-            ctx.err(`    could not claim from this computer: ${(e as Error).message}`);
-          }
-        }
-      } else if (o.claim) {
-        ctx.err('    skipping the claim: Wrangler did not print the Worker URL');
+    let failure: CliError | null = null;
+    const afterSecret = async (): Promise<CliError | null> => {
+      const sec = await wr(wranglerCommands.secret(name), {
+        input: claimSecret + '\n',
+        // Belt and braces: no debug log file at all for the one command that carries the secret.
+        env: { WRANGLER_WRITE_LOGS: 'false' },
+      });
+      if (sec.status !== 0) {
+        return new CliError(
+          `Wrangler reported an error while setting the claim secret; it may or may not have been set. Run the deploy again if claiming fails.\n${output(sec)}`,
+        );
       }
+      say('    set (the value is shown once at the end)');
+      if (!url) {
+        return o.claim
+          ? new CliError(
+              'deployed, but Wrangler did not print the Worker URL, so the relay was not claimed',
+            )
+          : null;
+      }
+      const healthy = await check(ctx, g, url, sleep, `\n[6] ${plan[5]!.title}`);
+      if (o.claim) {
+        say(`\n[${plan.length}] ${plan[plan.length - 1]!.title}`);
+        try {
+          await setup({ ...ctx, env: { ...ctx.env, DECISIONS_CLAIM_SECRET: claimSecret } }, g, {
+            url,
+            label: o.label ?? 'Daintree',
+          });
+          claimedHere = true;
+        } catch (e) {
+          return new CliError(
+            `deployed, but claiming from this computer failed: ${redact((e as Error).message)}`,
+          );
+        }
+      }
+      return healthy ? null : new CliError('deployed, but the health check found problems');
+    };
+    let finished = false;
+    try {
+      failure = await afterSecret();
+      finished = true;
     } finally {
       summary(ctx, {
         url,
         claimSecret: claimedHere ? null : claimSecret,
         claimedHere,
-        alreadyClaimed: false,
+        state,
+        problems: !finished || failure !== null,
       });
     }
+    if (failure) throw failure;
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
 }
 
-/** Waits for the new Worker to answer, then runs the doctor. Never throws. */
+/**
+ * Whether the freshly deployed relay is already claimed. A new workers.dev route can take a moment
+ * to answer, so this retries for a while; 'unknown' means it never gave a clear answer.
+ */
+async function claimState(
+  ctx: Ctx,
+  url: string,
+  sleep: (ms: number) => Promise<void>,
+): Promise<'claimed' | 'unclaimed' | 'unknown'> {
+  for (let i = 0; i < 5; i++) {
+    try {
+      const r = await ctx.fetch(`${url}/api/v1/info`);
+      if (r.ok) {
+        const claimed = ((await r.json()) as { claimed?: unknown }).claimed;
+        if (claimed === true) return 'claimed';
+        if (claimed === false) return 'unclaimed';
+      }
+    } catch {
+      /* not reachable yet */
+    }
+    await sleep(2000);
+  }
+  return 'unknown';
+}
+
+/** Waits for the new Worker to answer, then runs the doctor. Resolves to whether it passed. */
 async function check(
   ctx: Ctx,
   g: GlobalOptions,
   url: string,
   sleep: (ms: number) => Promise<void>,
   heading: string,
-): Promise<void> {
+): Promise<boolean> {
   ctx.out(heading);
   for (let i = 0; i < 10; i++) {
     try {
@@ -437,10 +497,12 @@ async function check(
   }
   try {
     await doctor({ ...ctx, json: false }, g, { url });
+    return true;
   } catch (e) {
     ctx.err(
-      `    ${(e as Error).message}; the deployment may need a minute, then run: decisions doctor --url ${url}`,
+      `    ${(e as Error).message}; a new deployment can take a minute, then run: decisions doctor --url ${url}`,
     );
+    return false;
   }
 }
 
@@ -450,12 +512,18 @@ function summary(
     url: string | undefined;
     claimSecret: string | null;
     claimedHere: boolean;
-    alreadyClaimed: boolean;
+    state: 'claimed' | 'unclaimed' | 'unknown';
+    problems: boolean;
   },
 ): void {
   const url = s.url ?? '<your Worker URL, from the Cloudflare dashboard>';
-  const lines = ['', 'Done.', '', `  Worker URL    ${url}`];
-  if (s.alreadyClaimed) {
+  const lines = [
+    '',
+    s.problems ? 'Deployed, with problems (see above).' : 'Done.',
+    '',
+    `  Worker URL    ${url}`,
+  ];
+  if (s.state === 'claimed') {
     lines.push(
       '',
       'The relay was already claimed, so nothing else is needed. Paired phones keep working.',
@@ -475,6 +543,13 @@ function summary(
       'Without Daintree, claim the relay from this computer; it asks for the claim secret:',
       `  npx @daintreehq/decisions-cli setup --url ${url}`,
     );
+    if (s.state === 'unknown') {
+      lines.push(
+        '',
+        'The relay did not answer yet, so it could not be checked whether it was already claimed.',
+        'If it was, it stays claimed by the same owner and this new secret has no effect.',
+      );
+    }
   }
   ctx.out(lines.join('\n'));
 }
