@@ -1,8 +1,10 @@
-import { request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   TOOLS,
   TokenMapAuthenticator,
+  createDecisionsMcpHandler,
   startDecisionsMcpServer,
   type RunningMcp,
 } from '../src/index.js';
@@ -15,7 +17,7 @@ afterEach(async () => {
   running = null;
 });
 
-async function boot(opts: { rate?: number; maxBody?: number } = {}) {
+async function boot(opts: { rate?: number; maxBody?: number; path?: string } = {}) {
   const env = await setupBridge();
   const auth = new TokenMapAuthenticator();
   auth.register(TOKEN, origin());
@@ -25,6 +27,7 @@ async function boot(opts: { rate?: number; maxBody?: number } = {}) {
     authenticator: auth,
     ...(opts.rate ? { rateLimitPerMinute: opts.rate } : {}),
     ...(opts.maxBody ? { maxBodyBytes: opts.maxBody } : {}),
+    ...(opts.path ? { path: opts.path } : {}),
   });
   return { ...env, mcp: running };
 }
@@ -37,8 +40,15 @@ interface Reply {
 
 /** Raw HTTP so we can control Host/Origin exactly like a browser or DNS-rebinding page would. */
 function raw(
-  mcp: RunningMcp,
-  o: { method?: string; headers?: Record<string, string>; body?: string; auth?: string | null },
+  mcp: Pick<RunningMcp, 'port' | 'url'>,
+  o: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    auth?: string | null;
+    /** Request path; defaults to the path the server says it is mounted at. */
+    path?: string;
+  },
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {
@@ -47,7 +57,13 @@ function raw(
     };
     if (o.auth !== null) headers.authorization = `Bearer ${o.auth ?? TOKEN}`;
     const req = httpRequest(
-      { host: '127.0.0.1', port: mcp.port, path: '/mcp', method: o.method ?? 'POST', headers },
+      {
+        host: '127.0.0.1',
+        port: mcp.port,
+        path: o.path ?? new URL(mcp.url).pathname,
+        method: o.method ?? 'POST',
+        headers,
+      },
       (res) => {
         let b = '';
         res.on('data', (c) => (b += c));
@@ -307,5 +323,163 @@ describe('HTTP MCP: security', () => {
     const addr = mcp.server.address() as { address: string };
     expect(addr.address).toBe('127.0.0.1');
     expect(mcp.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+  });
+});
+
+describe('HTTP MCP: mount path', () => {
+  it('defaults to exactly /mcp', async () => {
+    const { mcp } = await boot();
+    expect(new URL(mcp.url).pathname).toBe('/mcp');
+    expect((await raw(mcp, { body: rpc('ping') })).status).toBe(200);
+    expect((await raw(mcp, { path: '/mcp?x=1', body: rpc('ping') })).status).toBe(200);
+    for (const path of ['/', '/mcp/', '/mcp/decisions', '/mcpx', '/MCP'])
+      expect((await raw(mcp, { path, body: rpc('ping') })).status, path).toBe(404);
+  });
+
+  it('rejects malformed mount paths when the handler is created', async () => {
+    const env = await setupBridge();
+    const auth = new TokenMapAuthenticator();
+    for (const path of [
+      '',
+      '/',
+      'mcp',
+      'mcp/decisions',
+      '/mcp/',
+      '//mcp',
+      '/mcp//decisions',
+      '/mcp/./decisions',
+      '/mcp/../decisions',
+      '/..',
+      '/mcp?x=1',
+      '/mcp#x',
+      '/mcp decisions',
+      '/mcp%2Fdecisions',
+      '/mcp\\decisions',
+      'http://127.0.0.1/mcp',
+    ])
+      expect(() => createDecisionsMcpHandler(env.bridge, auth, { path }), path).toThrow(
+        /mount path/,
+      );
+    for (const path of ['/mcp', '/mcp/decisions', '/a-b_c.d~e/0'])
+      expect(() => createDecisionsMcpHandler(env.bridge, auth, { path }), path).not.toThrow();
+    await expect(
+      startDecisionsMcpServer({ bridge: env.bridge, authenticator: auth, path: '/mcp/' }),
+    ).rejects.toThrow(/mount path/);
+  });
+
+  it('serves only the configured path, exactly: /mcp and subpaths are 404', async () => {
+    const { mcp } = await boot({ path: '/mcp/decisions' });
+    expect(mcp.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/decisions$/);
+    const tools = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    expect(tools.result.tools).toHaveLength(3);
+    expect((await raw(mcp, { path: '/mcp/decisions?session=1', body: rpc('ping') })).status).toBe(
+      200,
+    );
+    for (const path of [
+      '/mcp',
+      '/',
+      '/mcp/decisions/',
+      '/mcp/decisions/x',
+      '/mcp/decisionsx',
+      '/mcp/Decisions',
+      '/decisions',
+    ]) {
+      const r = await raw(mcp, { path, body: rpc('ping') });
+      expect(r.status, path).toBe(404);
+      expect(JSON.parse(r.body)).toEqual({ error: 'not_found' });
+    }
+    // percent-encoding is not decoded, but URL parsing resolves dot segments before the match
+    for (const path of ['/mcp%2Fdecisions', '/mcp/decision%73'])
+      expect((await raw(mcp, { path, body: rpc('ping') })).status, path).toBe(404);
+    for (const path of ['/a/../mcp/decisions', '/mcp/x/../decisions', '/mcp/%2e/decisions']) {
+      expect((await raw(mcp, { path, body: rpc('ping') })).status, path).not.toBe(404);
+      expect((await raw(mcp, { path, auth: null, body: rpc('ping') })).status, path).toBe(401);
+    }
+    // 404 is decided before auth, Host or Origin, so a wrong path leaks nothing about them
+    expect((await raw(mcp, { path: '/mcp', auth: null, body: rpc('ping') })).status).toBe(404);
+  });
+
+  it('keeps every Host, Origin, method, bearer, content-type, body-size and rate check on a custom path', async () => {
+    const { mcp, store } = await boot({ path: '/mcp/decisions', maxBody: 2048, rate: 5 });
+    const ping = rpc('ping');
+    expect((await raw(mcp, { headers: { host: 'evil.example' }, body: ping })).status).toBe(403);
+    expect(
+      (await raw(mcp, { headers: { host: `evil.example:${mcp.port}` }, body: ping })).status,
+    ).toBe(403);
+    expect(
+      (await raw(mcp, { headers: { origin: `http://127.0.0.1:${mcp.port}` }, body: ping })).status,
+    ).toBe(403);
+    await raw(mcp, {
+      headers: { host: 'evil.example' },
+      body: rpc('tools/call', { name: 'ask_human', arguments: { question: 'steer the agent' } }),
+    });
+    expect(await store.listQuestions()).toHaveLength(0);
+    for (const method of ['GET', 'DELETE', 'OPTIONS']) {
+      const r = await raw(mcp, { method });
+      expect(r.status).toBe(405);
+      expect(r.headers['access-control-allow-origin']).toBeUndefined();
+    }
+    const none = await raw(mcp, { auth: null, body: ping });
+    expect(none.status).toBe(401);
+    expect(none.headers['www-authenticate']).toContain('Bearer');
+    expect((await raw(mcp, { auth: 'totally-wrong-token', body: ping })).status).toBe(401);
+    // the checks below run after auth, so each one uses up the pane's rate budget
+    expect((await raw(mcp, { headers: { 'content-type': 'text/plain' }, body: ping })).status).toBe(
+      415,
+    );
+    expect(
+      (
+        await raw(mcp, {
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'ping',
+            params: { pad: 'x'.repeat(5000) },
+          }),
+        })
+      ).status,
+    ).toBe(413);
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) codes.push((await raw(mcp, { body: ping })).status);
+    expect(codes.slice(0, 3)).toEqual([200, 200, 200]);
+    expect(codes.slice(3)).toEqual([429, 429]);
+  });
+
+  it('a host can route its own prefix to the handler beside its own /mcp', async () => {
+    const env = await setupBridge();
+    const auth = new TokenMapAuthenticator();
+    auth.register(TOKEN, origin());
+    let port = 0;
+    const handler = createDecisionsMcpHandler(env.bridge, auth, {
+      path: '/mcp/decisions',
+      allowedHosts: () => [`127.0.0.1:${port}`],
+    });
+    // Like Daintree's listener: its own control surface at /mcp, Decisions under /mcp/decisions.
+    const server = createServer((req, res) => {
+      const p = new URL(req.url ?? '/', 'http://x').pathname;
+      if (p === '/mcp/decisions' || p.startsWith('/mcp/decisions/')) return void handler(req, res);
+      res.writeHead(p === '/mcp' ? 200 : 404, { 'content-type': 'text/plain' });
+      res.end(p === '/mcp' ? 'host control surface' : 'host 404');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    port = (server.address() as AddressInfo).port;
+    try {
+      const target = { port, url: `http://127.0.0.1:${port}/mcp/decisions` };
+      const ok = await raw(target, { body: rpc('tools/list') });
+      expect(ok.status).toBe(200);
+      expect(JSON.parse(ok.body).result.tools).toHaveLength(3);
+      expect((await raw(target, { path: '/mcp', body: rpc('ping') })).body).toBe(
+        'host control surface',
+      );
+      const sub = await raw(target, { path: '/mcp/decisions/extra', body: rpc('ping') });
+      expect(sub.status).toBe(404);
+      expect(JSON.parse(sub.body)).toEqual({ error: 'not_found' });
+      expect((await raw(target, { auth: null, body: rpc('ping') })).status).toBe(401);
+      expect(
+        (await raw(target, { headers: { host: 'evil.example' }, body: rpc('ping') })).status,
+      ).toBe(403);
+    } finally {
+      await new Promise<void>((r) => (server.closeAllConnections(), server.close(() => r())));
+    }
   });
 });

@@ -256,7 +256,13 @@ describe('setup: the claim secret does not have to be on the command line', () =
     const mflags = mcpCmd.options.map((o) => o.long);
     expect(mflags).not.toContain('--token'); // a bearer in argv is visible to every local user
     expect(mflags).toEqual(
-      expect.arrayContaining(['--token-env', '--token-file', '--show-token', '--attachments-dir']),
+      expect.arrayContaining([
+        '--token-env',
+        '--token-file',
+        '--show-token',
+        '--attachments-dir',
+        '--path',
+      ]),
     );
   });
 });

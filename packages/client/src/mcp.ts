@@ -134,6 +134,16 @@ export const TOOLS = [
 export interface McpHandlerOptions {
   /** Exact `Host` header values accepted. Defaults to the loopback names on `port`. */
   allowedHosts?: () => string[];
+  /**
+   * The path the MCP endpoint answers on (default `/mcp`). Matched exactly against the request's
+   * WHATWG-parsed pathname, ignoring the query string: no subpaths, no trailing slash,
+   * case-sensitive, percent-encoding not decoded. Parsing resolves dot segments (`/x/../mcp`,
+   * `/%2e/mcp`) first, so those aliases match; every check below still applies to them. Any other
+   * path is 404 before any other check. A host that routes a prefix (such as `/mcp/decisions`) to
+   * this handler passes the same path here. Must be one or more `/segment`s of unreserved URL
+   * characters (`A-Z a-z 0-9 - . _ ~`), with no `.` or `..` segments; anything else throws.
+   */
+  path?: string;
   maxBodyBytes?: number;
   /** Requests per minute per pane. */
   rateLimitPerMinute?: number;
@@ -181,6 +191,27 @@ async function readBody(req: IncomingMessage, max: number): Promise<string | nul
   return Buffer.concat(chunks).toString('utf8');
 }
 
+export const DEFAULT_MCP_PATH = '/mcp';
+
+const SEGMENT = /^[A-Za-z0-9._~-]+$/;
+
+/**
+ * Returns `path` if it is a valid MCP mount path, otherwise throws. Validated up front so a typo
+ * fails at startup instead of serving 404 to every agent; see `McpHandlerOptions.path`.
+ */
+export function validateMcpPath(path: string): string {
+  const segments = path.split('/');
+  const ok =
+    segments.length >= 2 &&
+    segments[0] === '' &&
+    segments.slice(1).every((s) => SEGMENT.test(s) && s !== '.' && s !== '..');
+  if (!ok)
+    throw new TypeError(
+      `invalid MCP mount path ${JSON.stringify(path)}: use one or more /segments of letters, digits, '-', '.', '_' or '~', with no trailing slash (for example /mcp or /mcp/decisions)`,
+    );
+  return path;
+}
+
 function bearer(req: IncomingMessage): string | null {
   const h = req.headers.authorization;
   if (!h || !/^Bearer\s+\S+$/i.test(h)) return null;
@@ -192,6 +223,7 @@ export function createDecisionsMcpHandler(
   authenticator: PaneAuthenticator,
   opts: McpHandlerOptions = {},
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const mountPath = validateMcpPath(opts.path ?? DEFAULT_MCP_PATH);
   const maxBody = opts.maxBodyBytes ?? 256 * 1024;
   const limit = opts.rateLimitPerMinute ?? 60;
   const now = opts.now ?? Date.now;
@@ -298,7 +330,7 @@ export function createDecisionsMcpHandler(
   return async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname !== '/mcp') return send(res, 404, { error: 'not_found' });
+      if (url.pathname !== mountPath) return send(res, 404, { error: 'not_found' });
 
       // 1. DNS-rebinding / browser defences first: exact Host, and no Origin at all.
       const host = (req.headers.host ?? '').toLowerCase();
@@ -373,7 +405,7 @@ export interface RunningMcp {
   close(): Promise<void>;
 }
 
-/** Own listener on 127.0.0.1 only. */
+/** Own listener on 127.0.0.1 only, serving the handler at `o.path` (default `/mcp`). */
 export async function startDecisionsMcpServer(o: StartMcpOptions): Promise<RunningMcp> {
   let port = 0;
   const handler = createDecisionsMcpHandler(o.bridge, o.authenticator, {
@@ -387,7 +419,7 @@ export async function startDecisionsMcpServer(o: StartMcpOptions): Promise<Runni
   });
   port = (server.address() as AddressInfo).port;
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
+    url: `http://127.0.0.1:${port}${o.path ?? DEFAULT_MCP_PATH}`,
     port,
     server,
     close: () =>
