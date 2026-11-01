@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { RelayError } from '@daintreehq/decisions-client';
-import { buildProgram, describeError } from '../src/bin.js';
+import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, type Ctx } from '../src/runtime.js';
 import { DemoSink, ask, cliOrigin, mcpAddLines, parseSink } from '../src/commands/daemon.js';
 import {
@@ -132,6 +133,18 @@ describe('program surface', () => {
       'is the relay reachable',
     );
     expect(describeError(new RelayError('not_authenticated', 'bad', 401))).toContain('clock skew');
+  });
+  it('runs when started through a bin symlink, as npm installs it, and not when imported', () => {
+    const dir = mkdtempSync(join(root, 'bin-'));
+    const real = join(dir, 'bin.js');
+    const link = join(dir, 'decisions');
+    writeFileSync(real, '');
+    symlinkSync(real, link);
+    const url = pathToFileURL(real).href;
+    expect(isEntryPoint(real, url)).toBe(true);
+    expect(isEntryPoint(link, url)).toBe(true);
+    expect(isEntryPoint(join(dir, 'other.js'), url)).toBe(false);
+    expect(isEntryPoint(undefined, url)).toBe(false);
   });
 });
 
