@@ -2,11 +2,11 @@
 
 A flowchart decision node holding the question your agent is asking: a rounded diamond with a question mark cut out of it. The diamond says "decision", the question mark says "waiting on you", which is the one thing the app ever asks of its user. It is one colour by construction (the question mark is a hole in a single `evenodd` path), so the same geometry works as an app icon, an alpha-only notification badge and a `currentColor` glyph.
 
-A check was tried first and dropped: it reads as "approved" or "done", the state after the interaction. A fork cut into the diamond read as a back arrow at small sizes.
+A check was tried first and dropped: it reads as "approved" or "done", the state after the interaction. A fork cut into the diamond read as a back arrow at small sizes, and a hand-drawn question mark was never as good as a real heavy-sans glyph.
 
 ## Source
 
-[`app/public/icons/mark.svg`](../../app/public/icons/mark.svg) is the only source. It is hand-authored path data on a 512 grid and fills with `currentColor`, which makes it the monochrome variant too: inline it, or load it as a mask, and it takes the surrounding text colour. Daintree uses it as-is in its Settings tab and on the pane chip.
+[`app/public/icons/mark.svg`](../../app/public/icons/mark.svg) is the only source. It was generated as a raster, traced to a single `evenodd` path with crisp-vector, normalised to a 512 grid, and then regularised by hand: the diamond is an exact construction (straight diagonal sides, equal 48-unit corners) and the question mark's terminals were squared off. It fills with `currentColor`, which makes it the monochrome variant too: inline it, or load it as a mask, and it takes the surrounding text colour. Daintree uses it as-is in its Settings tab and on the pane chip.
 
 Everything else is generated from it by [`app/scripts/make-icons.mjs`](../../app/scripts/make-icons.mjs) (`pnpm --filter @daintreehq/decisions-app icons`):
 
