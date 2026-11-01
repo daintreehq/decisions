@@ -48,7 +48,7 @@ Remove a Host like any other device: `decisions revoke <deviceId>`, which also r
 
 ## Releasing to npm
 
-Every workspace package without `"private": true` is published to npm under `@daintreehq` (today `decisions-protocol`, `decisions-crypto`, `decisions-client`, `decisions-model` and `decisions-cli`). They share one version and are published dependencies first, with npm provenance, by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v*` tag is pushed. The same run attaches the PWA (`decisions-app-<tag>.tar.gz`), the bundled Worker (`decisions-worker-<tag>.tar.gz`) and `SHA256SUMS` to a GitHub release.
+Every workspace package without `"private": true` is published to npm under `@daintreehq` (today `decisions-protocol`, `decisions-crypto`, `decisions-client`, `decisions-model`, `decisions-relay` (the Worker bundle and phone app `decisions deploy` uploads) and `decisions-cli`). They share one version and are published dependencies first, with npm provenance, by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v*` tag is pushed. The same run attaches the PWA (`decisions-app-<tag>.tar.gz`), the bundled Worker (`decisions-worker-<tag>.tar.gz`) and `SHA256SUMS` to a GitHub release.
 
 Publishing uses npm trusted publishing (OIDC), so there is no npm token in the repository's secrets. [`tools/release/publish.mjs`](../tools/release/publish.mjs) finds the packages from the workspace, so a new public package is picked up without editing a list (it still needs a trusted publisher first; see the end of this section). It packs each one with `pnpm pack`, which turns `workspace:*` into the real version, and uploads the tarball with `npm publish <tarball> --provenance`, because npm 11.5.1 or later is what performs the OIDC exchange. Never run `npm publish` in a package directory: plain npm publishes `workspace:*` unchanged.
 
@@ -115,7 +115,8 @@ To confirm a release works from the registry in a clean project, with provenance
 ```bash
 cd "$(mktemp -d)" && npm init -y >/dev/null && npm pkg set type=module
 npm install @daintreehq/decisions-protocol@0.2.0 @daintreehq/decisions-crypto@0.2.0 \
-  @daintreehq/decisions-client@0.2.0 @daintreehq/decisions-model@0.2.0 @daintreehq/decisions-cli@0.2.0
+  @daintreehq/decisions-client@0.2.0 @daintreehq/decisions-model@0.2.0 @daintreehq/decisions-relay@0.2.0 \
+  @daintreehq/decisions-cli@0.2.0
 npm audit signatures        # registry signatures and provenance attestations
 npx decisions --version
 ```

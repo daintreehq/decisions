@@ -14,10 +14,11 @@ import {
   recoveryVerify,
   status,
 } from './commands/ops.js';
+import { deploy } from './commands/deploy.js';
 import { devices, pair, revoke, rotate, setup } from './commands/setup.js';
 import { hostAccept, hostEnroll, hostRequest } from './commands/host.js';
+import { VERSION } from './version.js';
 
-const VERSION = '0.1.0';
 const collect = (v: string, prev: string[] = []) => [...prev, v];
 
 const SINK_HELP =
@@ -47,6 +48,27 @@ export function buildProgram(): Command {
       const g = opts();
       await fn(makeCtx(g), g);
     };
+
+  program
+    .command('deploy')
+    .description(
+      'Deploy the relay that matches this CLI to your own Cloudflare account (checksummed; the claim secret is shown once, never saved).',
+    )
+    .option('--name <name>', 'Worker name', 'daintree-decisions')
+    .option('--bucket <name>', 'R2 bucket name', 'daintree-decisions')
+    .option('--dry-run', 'verify the bundle and print the plan without changing anything')
+    .option(
+      '--api-token',
+      "ask for a Cloudflare API token (kept in memory) instead of Wrangler's browser login",
+    )
+    .option('--account-id <id>', 'Cloudflare account ID, if your login or token has several')
+    .option(
+      '--claim',
+      'claim the relay from this computer once it is deployed (as `decisions setup`)',
+    )
+    .option('--label <name>', 'name for this computer when claiming', 'Daintree')
+    .option('--outdir <dir>', 'only verify and write the deployable bundle to <dir>')
+    .action((o) => run((c, g) => deploy(c, g, o))());
 
   program
     .command('setup')

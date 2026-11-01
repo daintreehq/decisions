@@ -40,12 +40,12 @@ export function distTagFor(version) {
 
 /**
  * Source constants that report the release version at run time. They are bumped with the
- * packages and checked by the publish script, so `decisions --version`, the MCP server info and
- * the Worker's health check always name the version that was released. Each pattern must match
+ * packages and checked by the publish script, so the MCP server info and
+ * the Worker's health check always name the version that was released (`decisions --version` reads
+ * the CLI's package.json). Each pattern must match
  * exactly once; capture group 2 is the version.
  */
 export const VERSION_CONSTANTS = [
-  { file: 'packages/cli/src/bin.ts', pattern: /(const VERSION = ')([^']*)(')/g },
   { file: 'packages/client/src/mcp.ts', pattern: /(const SERVER_VERSION = ')([^']*)(')/g },
   { file: 'worker/src/env.ts', pattern: /(export const WORKER_VERSION = ')([^']*)(')/g },
 ];

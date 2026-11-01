@@ -30,6 +30,7 @@
     "@daintreehq/decisions-client": "workspace:*",
     "@daintreehq/decisions-crypto": "workspace:*",
     "@daintreehq/decisions-protocol": "workspace:*",
+    "@daintreehq/decisions-relay": "workspace:*",
     "commander": "^14.0.0",
     "qrcode": "^1.5.4"
   },

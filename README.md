@@ -37,7 +37,7 @@ Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and 
 
 You need a Cloudflare account (the free plan is enough for one person), Node 22+, and a phone.
 
-1. **Deploy.** Click the button above. Cloudflare copies this repository into your account, creates the R2 bucket and Durable Object, and asks for one secret, `CLAIM_SECRET`: type any long random string (`openssl rand -hex 32`) and keep it for step 2. Prefer a terminal? `pnpm install && pnpm decisions:deploy` does the same thing and generates the secret for you. More detail in [docs/self-host.md](docs/self-host.md).
+1. **Deploy.** Click the button above. Cloudflare copies this repository into your account, creates the R2 bucket and Durable Object, and asks for one secret, `CLAIM_SECRET`: type any long random string (`openssl rand -hex 32`) and keep it for step 2. Prefer a terminal? `npx @daintreehq/decisions-cli deploy` (no clone needed) deploys the relay that matches the CLI's version, generates the secret, shows it once and never saves it. More detail in [docs/self-host.md](docs/self-host.md).
 2. **Claim it** from the computer your agents run on: `pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file <file containing the secret>` (or set `DECISIONS_CLAIM_SECRET`; avoid putting the secret on the command line, where it shows in the process list). In Daintree this is Settings → Decisions. The claim can only happen once.
 3. **Pair your phone:** `pnpm decisions pair` shows a QR code. Scan it, then confirm the same six digits appear on both screens. On iPhone open the link in Safari, tap Share → Add to Home Screen, and open the installed app (iOS only delivers push to installed web apps).
 4. **Add the MCP to your agent:** `pnpm decisions mcp` prints the line for your agent.
@@ -55,8 +55,9 @@ Back up your keys: `pnpm decisions recovery export`. **If you lose every device 
 | `packages/crypto/`         | WebCrypto implementation (P-256 ECDSA/ECDH, HKDF, AES-256-GCM) shared by browser, Node and Workers                |
 | `packages/client/`         | Desktop client library: relay client, hibernatable socket, durable stores, delivery engine, HTTP MCP server       |
 | `packages/cli/`            | The `decisions` command                                                                                           |
+| `packages/relay/`          | The prebuilt, checksummed Worker bundle and phone app that `decisions deploy` uploads                             |
 | `packages/decision-model/` | The optional local opinion model                                                                                  |
-| `tools/`                   | Guided deploy and health check                                                                                    |
+| `tools/`                   | Health check and the package check                                                                                |
 | `docs/`                    | Protocol, architecture, security, operations, and the Daintree integration spec                                   |
 
 ## Documentation

@@ -277,6 +277,20 @@ describe('setup: the claim secret does not have to be on the command line', () =
     await setup(c.ctx, {}, { url: 'https://relay.example', claimSecret: 'a'.repeat(40) });
     expect(c.err.join('\n')).toContain('visible in the process list');
   });
+  it('asks for it with a hidden prompt at a terminal, and never without one', async () => {
+    const a = mkCtx({ answers: ['p'.repeat(40)] });
+    const prompts: { q: string; secret: boolean | undefined }[] = [];
+    const base = a.ctx.prompt;
+    a.ctx.interactive = true;
+    a.ctx.prompt = (q, o) => (prompts.push({ q, secret: o?.secret }), base(q, o));
+    await setup(a.ctx, {}, { url: 'https://relay.example' });
+    expect(prompts).toEqual([{ q: expect.stringMatching(/Claim secret/), secret: true }]);
+    expect((a.calls[0]!.body as { claim_secret: string }).claim_secret).toBe('p'.repeat(40));
+    const b = mkCtx({ answers: ['p'.repeat(40)] });
+    await expect(setup(b.ctx, {}, { url: 'https://relay.example' })).rejects.toThrow(
+      /missing claim secret/,
+    );
+  });
   it('does not accept the secret only through argv: the flag set offers file, stdin and env', () => {
     const setupCmd = buildProgram().commands.find((c) => c.name() === 'setup')!;
     const flags = setupCmd.options.map((o) => o.long);

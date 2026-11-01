@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { relative, resolve, sep } from 'node:path';
 import { build as esbuild } from 'esbuild';
 import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
@@ -34,7 +35,17 @@ function serviceWorker(): Plugin {
       }
     },
     async closeBundle() {
-      const buildId = Date.now().toString(36);
+      // Derived from the built files, not the clock, so the same source always builds the same
+      // bytes: the relay package pins the app by SHA-256 (packages/relay/scripts/build.mjs).
+      const hash = createHash('sha256');
+      const files = readdirSync(outDir, { recursive: true, withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => resolve(e.parentPath, e.name))
+        .filter((f) => f !== resolve(outDir, 'sw.js'))
+        .sort();
+      for (const f of files)
+        hash.update(relative(outDir, f).split(sep).join('/')).update('\0').update(readFileSync(f));
+      const buildId = hash.digest('hex').slice(0, 12);
       await esbuild({
         entryPoints: [resolve(import.meta.dirname, 'src/sw.ts')],
         outfile: resolve(outDir, 'sw.js'),

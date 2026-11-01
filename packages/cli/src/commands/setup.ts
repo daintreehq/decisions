@@ -45,6 +45,9 @@ export async function setup(
   } else {
     secret = ctx.env.DECISIONS_CLAIM_SECRET;
   }
+  if (!secret && ctx.interactive) {
+    secret = (await ctx.prompt('Claim secret (input hidden): ', { secret: true })).trim();
+  }
   if (!secret) {
     throw new CliError(
       'missing claim secret: use --claim-secret-file, --claim-secret-stdin or set DECISIONS_CLAIM_SECRET',

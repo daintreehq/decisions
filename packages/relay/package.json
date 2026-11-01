@@ -1,0 +1,33 @@
+{
+  "name": "@daintreehq/decisions-relay",
+  "version": "0.1.0",
+  "description": "The prebuilt Decisions relay (Cloudflare Worker bundle, phone app assets and Wrangler config) with a SHA-256 manifest, deployed by `decisions deploy`.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./manifest.json": "./dist/manifest.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daintreehq/decisions.git",
+    "directory": "packages/relay"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@daintreehq/decisions-app": "workspace:*",
+    "typescript": "~5.9.0",
+    "wrangler": "^4.156.0"
+  }
+}
