@@ -4,12 +4,14 @@ import {
   type ActionKind,
   type CryptoEnvelope,
   type DeviceCert,
+  type EpochGrant,
   type LedgerEvent,
   type SignedAction,
   type SignedQuestion,
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  createEpochGrant,
   decryptEnvelope,
   encryptEnvelope,
   exportPublicKey,
@@ -21,9 +23,10 @@ import {
   type DeviceKeys,
   type EpochKey,
 } from '@daintreehq/decisions-crypto';
-import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { base64UrlToBytes, bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
+  MemoryKeyStore,
   MemoryLocalStore,
   PolicyRegistry,
   RelayClient,
@@ -119,6 +122,11 @@ export class FakeRelay {
   /** Number of upcoming question creates the relay COMMITS but whose reply is lost. */
   dropCreateReply = 0;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
+  /** The relay's current key epoch and every device's sealed grants (`GET /devices/{id}/key-grants`). */
+  epoch = 1;
+  grants = new Map<string, EpochGrant[]>();
+  /** Number of upcoming key-grant fetches that fail with a network error. */
+  failGrants = 0;
 
   constructor(private readonly owner: Identity) {}
 
@@ -205,7 +213,7 @@ export class FakeRelay {
     if (method === 'GET' && p === '/api/v1/devices') {
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
-        key_epoch: 1,
+        key_epoch: this.epoch,
         owner_device_id: this.owner.config.deviceId,
         devices: certs.map((cert) => ({
           device_id: cert.device_id,
@@ -219,6 +227,13 @@ export class FakeRelay {
           push_enabled: false,
         })),
       });
+    }
+    if (method === 'GET' && (m = p.match(/^\/api\/v1\/devices\/([^/]+)\/key-grants$/))) {
+      if (this.failGrants > 0) {
+        this.failGrants--;
+        throw new TypeError('fetch failed');
+      }
+      return json(200, { current_epoch: this.epoch, grants: this.grants.get(m[1]!) ?? [] });
     }
     if (method === 'GET' && p === '/api/v1/events') {
       const after = Number(url.searchParams.get('after') ?? 0);
@@ -539,6 +554,83 @@ export class FakeSink implements TerminalSink {
   async resume() {
     return this.resumeTarget;
   }
+}
+
+export interface Host {
+  identity: Identity;
+  keyStore: MemoryKeyStore;
+  cert: DeviceCert;
+}
+
+/**
+ * An enrolled `desktop-host` of `owner`, as `acceptHostEnrollment` would store it: its own keys, an owner-issued
+ * certificate, the owner pinned, and the owner's epoch keys opened from grants sealed to it. With `relay`, the
+ * certificate is listed and the grants are served from `GET /devices/{id}/key-grants`.
+ */
+export async function makeHost(owner: Identity, relay?: FakeRelay): Promise<Host> {
+  const keys = await generateDeviceKeys(true);
+  const deviceId = newId();
+  const exchangePub = await exportPublicKey(keys.exchange.publicKey);
+  const cert = await issueDeviceCert({
+    issuerDeviceId: owner.config.deviceId,
+    issuerSigningKey: owner.keys.signing.privateKey,
+    installationId: owner.config.installationId,
+    deviceId,
+    role: 'desktop-host',
+    label: 'Build box',
+    signingPub: await exportPublicKey(keys.signing.publicKey),
+    exchangePub,
+  });
+  const ownerCert = await issueDeviceCert({
+    issuerDeviceId: owner.config.deviceId,
+    issuerSigningKey: owner.keys.signing.privateKey,
+    installationId: owner.config.installationId,
+    deviceId: owner.config.deviceId,
+    role: 'owner-desktop',
+    label: owner.config.label,
+    signingPub: owner.signingPub,
+    exchangePub: owner.exchangePub,
+  });
+  const grants: EpochGrant[] = [];
+  for (const e of owner.stored.epochs) {
+    grants.push(
+      await sealEpochTo(owner, { deviceId, exchangePub }, e.epoch, base64UrlToBytes(e.raw)),
+    );
+  }
+  const keyStore = new MemoryKeyStore();
+  await keyStore.save({
+    v: 1,
+    role: 'desktop-host',
+    config: { ...owner.config, deviceId, label: 'Build box' },
+    keys: await serializeDeviceKeys(keys),
+    epochs: owner.stored.epochs.map((e) => ({ ...e })),
+    currentEpoch: owner.currentEpoch,
+    host: { cert, ownerCert, grants, enrolledAt: new Date().toISOString() },
+  });
+  const identity = await importIdentity((await keyStore.load())!);
+  if (relay) {
+    relay.devices.push(cert);
+    relay.grants.set(deviceId, grants);
+  }
+  return { identity, keyStore, cert };
+}
+
+/** The owner seals an epoch key to a device, as a rotation does. */
+export function sealEpochTo(
+  owner: Identity,
+  to: { deviceId: string; exchangePub: string },
+  epoch: number,
+  raw: Uint8Array,
+): Promise<EpochGrant> {
+  return createEpochGrant({
+    issuerDeviceId: owner.config.deviceId,
+    issuerSigningKey: owner.keys.signing.privateKey,
+    installationId: owner.config.installationId,
+    recipientDeviceId: to.deviceId,
+    recipientExchangePub: to.exchangePub,
+    epoch,
+    epochKeyRaw: raw,
+  });
 }
 
 export async function setupBridge(over: Partial<BridgeOptions> = {}) {

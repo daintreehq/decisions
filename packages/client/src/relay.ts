@@ -22,6 +22,9 @@ import type { Identity } from './identity.js';
 
 type ActionBodyShape = { protocol_version: 1; idempotency_key: string; action: SignedAction };
 
+/** Actions only a human device signs (human provenance). No desktop ever signs one. */
+const HUMAN_ACTIONS: ReadonlySet<ActionKind> = new Set(['answer', 'override', 'confirm-proxy']);
+
 export interface RelayClientOptions {
   identity: Identity;
   fetch?: typeof fetch;
@@ -74,6 +77,21 @@ export class RelayClient {
 
   get origin(): string {
     return this.identity.config.relayOrigin;
+  }
+
+  /**
+   * Owner-only routes refuse to run as a `desktop-host` before anything is signed or sent, so a Host never
+   * attempts them (the relay would refuse them too). The refusal is permanent: it is never retried.
+   */
+  private async ownerOnly<T>(what: string, send: () => Promise<T>): Promise<T> {
+    if (this.identity.role !== 'owner-desktop') {
+      throw new RelayError(
+        'forbidden',
+        `${what} is only possible on the owner desktop, not on an enrolled Host`,
+        403,
+      );
+    }
+    return send();
   }
 
   private qs(query?: RequestOptions['query']): string {
@@ -187,7 +205,24 @@ export class RelayClient {
       { query: q },
     );
   }
-  postAction(
+  async postAction(
+    kind: ActionKind,
+    questionId: string,
+    idempotencyKey: string,
+    action: SignedAction,
+  ): Promise<CommandReceipt> {
+    // A desktop signs only proxy provenance: answers, overrides and confirmations are a human's, from a phone.
+    if (HUMAN_ACTIONS.has(kind)) {
+      throw new RelayError(
+        'forbidden',
+        `a desktop never signs "${kind}": only a phone or tablet answers as a human`,
+        403,
+      );
+    }
+    const send = () => this.sendAction(kind, questionId, idempotencyKey, action);
+    return kind === 'reopen' ? this.ownerOnly('reopening a question', send) : send();
+  }
+  private sendAction(
     kind: ActionKind,
     questionId: string,
     idempotencyKey: string,
@@ -201,7 +236,9 @@ export class RelayClient {
     return this.request('POST', `${API_PREFIX}/questions/${questionId}/${kind}`, { body });
   }
   deleteQuestion(id: string): Promise<unknown> {
-    return this.request('DELETE', `${API_PREFIX}/questions/${id}`);
+    return this.ownerOnly('deleting a question', () =>
+      this.request('DELETE', `${API_PREFIX}/questions/${id}`),
+    );
   }
 
   /* ---- events / socket ---- */
@@ -229,22 +266,30 @@ export class RelayClient {
     expires_at: string;
     role: 'phone' | 'tablet';
   }) {
-    return this.request<{ ok: true }>('POST', `${API_PREFIX}/pairing/invitations`, {
-      body: { protocol_version: PROTOCOL_VERSION, ...body },
-    });
+    return this.ownerOnly('pairing a device', () =>
+      this.request<{ ok: true }>('POST', `${API_PREFIX}/pairing/invitations`, {
+        body: { protocol_version: PROTOCOL_VERSION, ...body },
+      }),
+    );
   }
   pendingPairings() {
-    return this.request<{ pending: PendingPairing[] }>('GET', `${API_PREFIX}/pairing/pending`);
+    return this.ownerOnly('listing pending pairings', () =>
+      this.request<{ pending: PendingPairing[] }>('GET', `${API_PREFIX}/pairing/pending`),
+    );
   }
   approvePairing(pairingId: string, cert: DeviceCert, grant: EpochGrant) {
-    return this.request('POST', `${API_PREFIX}/pairing/${pairingId}/approve`, {
-      body: { protocol_version: PROTOCOL_VERSION, cert, grant },
-    });
+    return this.ownerOnly('approving a device', () =>
+      this.request('POST', `${API_PREFIX}/pairing/${pairingId}/approve`, {
+        body: { protocol_version: PROTOCOL_VERSION, cert, grant },
+      }),
+    );
   }
   rejectPairing(pairingId: string) {
-    return this.request('POST', `${API_PREFIX}/pairing/${pairingId}/reject`, {
-      body: { protocol_version: PROTOCOL_VERSION },
-    });
+    return this.ownerOnly('rejecting a pairing', () =>
+      this.request('POST', `${API_PREFIX}/pairing/${pairingId}/reject`, {
+        body: { protocol_version: PROTOCOL_VERSION },
+      }),
+    );
   }
 
   /* ---- devices ---- */
@@ -252,15 +297,19 @@ export class RelayClient {
     return this.request('GET', `${API_PREFIX}/devices`);
   }
   revokeDevice(deviceId: string, newKeyEpoch: number, grants: EpochGrant[]) {
-    return this.request('POST', `${API_PREFIX}/devices/${deviceId}/revoke`, {
-      body: { protocol_version: PROTOCOL_VERSION, new_key_epoch: newKeyEpoch, grants },
-    });
+    return this.ownerOnly('revoking a device', () =>
+      this.request('POST', `${API_PREFIX}/devices/${deviceId}/revoke`, {
+        body: { protocol_version: PROTOCOL_VERSION, new_key_epoch: newKeyEpoch, grants },
+      }),
+    );
   }
   /** Owner only: register a `desktop-host` with its owner-issued certificate and current-epoch grant. */
   enrollHost(cert: DeviceCert, grant: EpochGrant) {
-    return this.request<{ device_id: string }>('POST', `${API_PREFIX}/devices/enroll-host`, {
-      body: { protocol_version: PROTOCOL_VERSION, cert, grant },
-    });
+    return this.ownerOnly('enrolling a Host', () =>
+      this.request<{ device_id: string }>('POST', `${API_PREFIX}/devices/enroll-host`, {
+        body: { protocol_version: PROTOCOL_VERSION, cert, grant },
+      }),
+    );
   }
   /** This device's own sealed epoch grants (the relay refuses any other device id). */
   async keyGrants(
@@ -270,9 +319,11 @@ export class RelayClient {
     return KeyGrantsResponse.parse(raw);
   }
   rotateEpoch(newKeyEpoch: number, grants: EpochGrant[]) {
-    return this.request('POST', `${API_PREFIX}/epoch/rotate`, {
-      body: { protocol_version: PROTOCOL_VERSION, new_key_epoch: newKeyEpoch, grants },
-    });
+    return this.ownerOnly('rotating the content key', () =>
+      this.request('POST', `${API_PREFIX}/epoch/rotate`, {
+        body: { protocol_version: PROTOCOL_VERSION, new_key_epoch: newKeyEpoch, grants },
+      }),
+    );
   }
 
   /* ---- attachments ---- */
@@ -341,12 +392,16 @@ export class RelayClient {
     return this.request<{ vapid_public_key: string }>('GET', `${API_PREFIX}/push/config`);
   }
   diagnostics(): Promise<Diagnostics> {
-    return this.request('GET', `${API_PREFIX}/admin/diagnostics`);
+    return this.ownerOnly('reading diagnostics', () =>
+      this.request('GET', `${API_PREFIX}/admin/diagnostics`),
+    );
   }
   deleteData(scope: 'questions' | 'everything') {
-    return this.request('POST', `${API_PREFIX}/admin/delete-data`, {
-      body: { protocol_version: PROTOCOL_VERSION, confirm: 'DELETE', scope },
-    });
+    return this.ownerOnly('deleting relay data', () =>
+      this.request('POST', `${API_PREFIX}/admin/delete-data`, {
+        body: { protocol_version: PROTOCOL_VERSION, confirm: 'DELETE', scope },
+      }),
+    );
   }
 }
 

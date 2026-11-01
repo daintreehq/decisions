@@ -60,8 +60,10 @@ export interface VerifiedAnswer {
 export const revokedKey = (deviceId: string): string => `revoked:${deviceId}`;
 
 /**
- * Device directory pinned to our own owner key: every certificate must be issued by us, so a relay
- * cannot introduce a device. Used to verify record signatures, roles and provenance.
+ * Device directory pinned to the owner identity: this device itself on the owner desktop, the owner pinned at
+ * enrollment on a `desktop-host`. Every certificate must be issued by that owner and verify against its key, so
+ * a relay cannot introduce a device (and neither can a Host). Exactly one `owner-desktop` is accepted: the
+ * pinned one. Used to verify record signatures, roles and provenance.
  */
 export class EventVerifier {
   private dir = new Map<string, DirEntry>();
@@ -83,15 +85,24 @@ export class EventVerifier {
     } catch (e) {
       throw new TransientError(`device directory unavailable: ${(e as Error).message}`);
     }
-    const owner = ctx.identity.keys.signing.publicKey;
+    const { identity } = ctx;
+    const pin = identity.owner;
     const next = new Map<string, DirEntry>();
     for (const d of list.devices) {
       const c = d.cert;
-      if (c.issuer_device_id !== ctx.identity.config.deviceId) continue;
-      if (c.installation_id !== ctx.identity.config.installationId) continue;
+      if (c.issuer_device_id !== pin.deviceId) continue;
+      if (c.installation_id !== identity.config.installationId) continue;
       if (c.device_id !== d.device_id) continue;
-      if (!(await verifyDeviceCert(c, owner))) continue;
-      if (c.device_id === ctx.identity.config.deviceId && c.signing_pub !== ctx.identity.signingPub)
+      if (!(await verifyDeviceCert(c, pin.signingKey))) continue;
+      // The owner entry must be the pinned owner key, and no other device may claim to be an owner.
+      const isOwner = c.device_id === pin.deviceId;
+      if (isOwner !== (c.role === 'owner-desktop')) continue;
+      if (isOwner && c.signing_pub !== pin.signingPub) continue;
+      // Our own entry must carry our own key and role.
+      if (
+        c.device_id === identity.config.deviceId &&
+        (c.signing_pub !== identity.signingPub || c.role !== identity.role)
+      )
         continue;
       next.set(c.device_id, {
         cert: c,
