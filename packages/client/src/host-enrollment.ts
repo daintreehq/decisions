@@ -29,7 +29,6 @@ import {
   bytesToBase64Url,
   canonicalize,
   utf8ToBytes,
-  type DeviceInfo,
 } from '@daintreehq/decisions-protocol';
 import {
   createEpochGrant,
@@ -63,7 +62,16 @@ import {
   type KeyStore,
   type StoredIdentity,
 } from './identity.js';
+import { Mutex } from './mutex.js';
 import { RelayClient } from './relay.js';
+
+/** Serializes read-merge-write commits to one key store within this process. */
+const storeLocks = new WeakMap<KeyStore, Mutex>();
+function lockFor(store: KeyStore): Mutex {
+  let m = storeLocks.get(store);
+  if (!m) storeLocks.set(store, (m = new Mutex()));
+  return m;
+}
 
 export const HOST_REQUEST_PREFIX = 'decisions-host-request.v1.';
 export const HOST_ENROLLMENT_PREFIX = 'decisions-host-enrollment.v1.';
@@ -325,10 +333,6 @@ export async function createHostRequest(o: CreateHostRequestOptions): Promise<{
 
 /* ---------- owner side ---------- */
 
-function sameKeys(a: DeviceCert, r: HostEnrollRequest): boolean {
-  return a.signing_pub === r.signing_pub && a.exchange_pub === r.exchange_pub;
-}
-
 /**
  * Owner side. Verifies the request, issues a `desktop-host` certificate for exactly the requested keys, seals
  * the relay's current epoch key to the Host's exchange key, registers both with the relay, and returns the
@@ -369,27 +373,20 @@ export async function enrollHost(
   ) {
     throw new Error("the relay's owner certificate does not match this device; refusing to enroll");
   }
-  let existing: DeviceInfo | undefined;
   for (const d of list.devices) {
+    if (d.device_id === r.device_id) {
+      // Never re-seal to an id the relay already holds: its revocation flag is not signed, so a lying relay
+      // could present a revoked Host as active. A completed-but-lost enrollment is revoked and redone instead.
+      throw new Error(
+        d.revoked_at
+          ? 'this Host was revoked: run `decisions host request --new` on it for a new identity'
+          : `a device with this id is already registered; if an earlier enrollment of this Host completed, revoke it (decisions revoke ${d.device_id}) and run \`decisions host request --new\` on the Host`,
+      );
+    }
     const keys = [d.cert.signing_pub, d.cert.exchange_pub];
-    const overlaps = keys.includes(r.signing_pub) || keys.includes(r.exchange_pub);
-    if (d.device_id === r.device_id) existing = d;
-    else if (overlaps) throw new Error('the requested keys already belong to another device');
-  }
-  const issuedByUs = async (d: DeviceInfo) =>
-    d.revoked_at === null &&
-    d.cert.role === 'desktop-host' &&
-    d.cert.device_id === r.device_id &&
-    d.cert.installation_id === id.config.installationId &&
-    d.cert.issuer_device_id === id.config.deviceId &&
-    sameKeys(d.cert, r) &&
-    (await verifyDeviceCert(d.cert, id.keys.signing.publicKey));
-  if (existing && !(await issuedByUs(existing))) {
-    throw new Error(
-      existing.revoked_at
-        ? 'this Host was revoked: run `decisions host request --new` on it for a new identity'
-        : 'a different device with this id is already registered',
-    );
+    if (keys.includes(r.signing_pub) || keys.includes(r.exchange_pub)) {
+      throw new Error('the requested keys already belong to another device');
+    }
   }
 
   const epoch = id.epochs.get(list.key_epoch);
@@ -407,30 +404,24 @@ export async function enrollHost(
     epoch: epoch.epoch,
     epochKeyRaw: epoch.raw,
   });
-  let cert: DeviceCert;
-  if (existing) {
-    // Already registered by an earlier run whose reply was lost: hand out what the relay holds.
-    cert = existing.cert;
-  } else {
-    cert = await issueDeviceCert({
-      issuerDeviceId: id.config.deviceId,
-      issuerSigningKey: id.keys.signing.privateKey,
-      installationId: id.config.installationId,
-      deviceId: r.device_id,
-      role: 'desktop-host',
-      label: r.label,
-      signingPub: r.signing_pub,
-      exchangePub: r.exchange_pub,
-    });
-    try {
-      await client.enrollHost(cert, grant);
-    } catch (e) {
-      // A retried request after a lost reply lands here: accept it only if the relay holds OUR registration.
-      if (!(e instanceof RelayError) || e.code !== 'invalid_state') throw e;
-      const again = (await client.devices()).devices.find((d) => d.device_id === r.device_id);
-      if (!again || !(await issuedByUs(again))) throw e;
-      cert = again.cert;
-    }
+  const cert = await issueDeviceCert({
+    issuerDeviceId: id.config.deviceId,
+    issuerSigningKey: id.keys.signing.privateKey,
+    installationId: id.config.installationId,
+    deviceId: r.device_id,
+    role: 'desktop-host',
+    label: r.label,
+    signingPub: r.signing_pub,
+    exchangePub: r.exchange_pub,
+  });
+  try {
+    await client.enrollHost(cert, grant);
+  } catch (e) {
+    // The client retries after a lost reply, and the retry finds the device registered. That is success only
+    // if the relay holds exactly the certificate issued (and so the grant sent) by THIS call.
+    if (!(e instanceof RelayError) || e.code !== 'invalid_state') throw e;
+    const again = (await client.devices()).devices.find((d) => d.device_id === r.device_id);
+    if (!again || again.revoked_at !== null || again.cert.signature !== cert.signature) throw e;
   }
   const enrollment = (await signObject(id.keys.signing.privateKey, {
     v: PROTOCOL_VERSION,
@@ -511,8 +502,9 @@ export interface AcceptHostEnrollmentOptions {
  */
 export async function acceptHostEnrollment(o: AcceptHostEnrollmentOptions): Promise<Identity> {
   const e = decodeHostEnrollment(o.response);
-  const existing = await o.keyStore.load();
-  if (existing) {
+  const alreadyAccepted = async (): Promise<Identity | null> => {
+    const existing = await o.keyStore.load();
+    if (!existing) return null;
     if (
       existing.role === 'desktop-host' &&
       existing.host?.cert.device_id === e.cert.device_id &&
@@ -522,7 +514,9 @@ export async function acceptHostEnrollment(o: AcceptHostEnrollmentOptions): Prom
       return importIdentity(existing); // the same enrollment, accepted before
     }
     throw new Error('this machine already has a Decisions identity; refusing to replace it');
-  }
+  };
+  const before = await alreadyAccepted();
+  if (before) return before;
   const p = await o.pending.load();
   if (!p) {
     throw new Error(
@@ -619,9 +613,15 @@ export async function acceptHostEnrollment(o: AcceptHostEnrollmentOptions): Prom
       stored = await mergeHostGrants(stored, keys.exchange.privateKey, ownerKey, grants);
     }
   }
-  await o.keyStore.save(stored);
-  await o.pending.clear();
-  return importIdentity(stored);
+  const final = stored;
+  return lockFor(o.keyStore).run(async () => {
+    // Re-check right before writing: never replace an identity that appeared while we were verifying.
+    const raced = await alreadyAccepted();
+    if (raced) return raced;
+    await o.keyStore.save(final);
+    await o.pending.clear();
+    return importIdentity(final);
+  });
 }
 
 /**
@@ -635,17 +635,33 @@ export async function refreshHostGrants(
   const id = client.identity;
   if (id.role !== 'desktop-host') throw new Error('only an enrolled Host refreshes its grants');
   const { grants } = await client.keyGrants();
-  const known = new Map(id.stored.host!.grants.map((g) => [g.key_epoch, g.signature]));
-  const fresh = grants.filter((g) => known.get(g.key_epoch) !== g.signature);
-  if (fresh.length === 0) return id;
-  const stored = await mergeHostGrants(
-    id.stored,
-    id.keys.exchange.privateKey,
-    id.owner.signingKey,
-    fresh,
-  );
-  await keyStore.save(stored);
-  const next = await importIdentity(stored);
-  client.identity = next;
-  return next;
+  // Merge into what is stored NOW, not into the snapshot taken before the fetch: overlapping refreshes must
+  // never drop an epoch another one saved, nor move the current epoch backwards.
+  return lockFor(keyStore).run(async () => {
+    const latest = await keyStore.load();
+    if (
+      !latest ||
+      latest.role !== 'desktop-host' ||
+      latest.config.deviceId !== id.config.deviceId ||
+      latest.keys.exchange_public !== id.exchangePub ||
+      latest.host?.ownerCert.signing_pub !== id.owner.signingPub
+    ) {
+      throw new Error('the stored Host identity changed while its grants were being refreshed');
+    }
+    const known = new Map(latest.host.grants.map((g) => [g.key_epoch, g.signature]));
+    const fresh = grants.filter((g) => known.get(g.key_epoch) !== g.signature);
+    let stored = latest;
+    if (fresh.length > 0) {
+      stored = await mergeHostGrants(
+        latest,
+        id.keys.exchange.privateKey,
+        id.owner.signingKey,
+        fresh,
+      );
+      await keyStore.save(stored);
+    }
+    const next = await importIdentity(stored);
+    client.identity = next;
+    return next;
+  });
 }

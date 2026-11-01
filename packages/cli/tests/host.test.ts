@@ -104,9 +104,11 @@ describe('decisions host', () => {
     await expect(hostEnroll(owner.ctx, {}, { requestFile: file })).rejects.toThrow(/cancelled/);
     expect(owner.err.join('\n')).toContain(code);
     expect(owner.calls).toEqual([]);
-    // from stdin
-    const piped = mkCtx({ home: owner.ctx.home, readStdin: async () => request, answers: ['no'] });
-    await expect(hostEnroll(piped.ctx, {}, { request: '-' })).rejects.toThrow(/cancelled/);
+    // from stdin, which leaves nothing to read a confirmation from: shows the code and asks for --yes
+    const piped = mkCtx({ home: owner.ctx.home, readStdin: async () => request, answers: ['y'] });
+    await expect(hostEnroll(piped.ctx, {}, { request: '-' })).rejects.toThrow(/--yes/);
+    expect(piped.err.join('\n')).toContain(code);
+    expect(piped.calls).toEqual([]);
   });
 
   it('accept refuses garbage and a response with no pending request', async () => {

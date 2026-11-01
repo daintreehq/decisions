@@ -41,7 +41,7 @@ Revoke it from Daintree or `decisions revoke <deviceId>`. The relay blocks it im
 Each remote Daintree Host is its own `desktop-host` device with its own keys (Daintree does this for you over its link). By hand, with the CLI:
 
 1. On the Host (with its own `--home`): `decisions host request --label "Build box"` prints a request and a code. The private keys stay on the Host.
-2. On the owner machine: `decisions host enroll <request>` (or pipe it in with `-`) shows the same code; confirm it, and it prints a response.
+2. On the owner machine: `decisions host enroll <request>` (or `--request-file <file>`) shows the same code; confirm it, and it prints a response. A request piped on standard input cannot be confirmed interactively, so it needs `--yes` once you have compared the code.
 3. On the Host: `decisions host accept <response>`. It prints the owner key fingerprint; compare it with the owner's output.
 
 Remove a Host like any other device: `decisions revoke <deviceId>`, which also rotates the content key.

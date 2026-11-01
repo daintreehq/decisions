@@ -398,6 +398,25 @@ describe('owner side: checking the request and enrolling the Host', () => {
     expect(host.stored.host!.cert).toEqual(w.relay.rows[1]!.cert);
   });
 
+  it('never re-seals to an id the relay already holds, even when the relay hides a revocation', async () => {
+    const e = await enrolled();
+    await expect(enrollHost(e.ownerClient, e.req.request)).rejects.toThrow(/already registered/);
+    e.ownerClient.identity = await revokeAndRotate(
+      e.ownerClient,
+      e.ownerStore,
+      e.host.config.deviceId,
+    );
+    const row = e.relay.rows.find((r) => r.cert.device_id === e.host.config.deviceId)!;
+    expect(row.revoked_at).toBeTruthy();
+    // a lying relay presents the revoked Host as active again: no new grant may be produced for it
+    row.revoked_at = null;
+    const before = e.relay.calls.length;
+    await expect(enrollHost(e.ownerClient, e.req.request)).rejects.toThrow(/already registered/);
+    expect(e.relay.calls.slice(before).filter((c) => c.method === 'POST')).toHaveLength(0);
+    row.revoked_at = new Date().toISOString();
+    await expect(enrollHost(e.ownerClient, e.req.request)).rejects.toThrow(/revoked/);
+  });
+
   it('cannot be run from an enrolled Host, and neither can the other owner-only operations', async () => {
     const e = await enrolled();
     const hostClient = new RelayClient({ identity: e.host, fetch: e.relay.fetch, maxRetries: 0 });
@@ -573,6 +592,37 @@ describe('Host side: accepting the enrollment and loading it as the identity', (
     expect(await w.pending.load()).not.toBeNull(); // still there for a correct response
   });
 
+  it('never replaces an identity that appears while the enrollment is being verified', async () => {
+    const w = await world();
+    const req = await createHostRequest({
+      pending: w.pending,
+      keyStore: w.hostStore,
+      label: 'Box',
+    });
+    const out = await enrollHost(w.ownerClient, req.request);
+    const racing: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/api/v1/devices')) await w.hostStore.save(w.owner.stored);
+      return w.relay.fetch(input, init);
+    };
+    await expect(
+      acceptHostEnrollment({
+        response: out.response,
+        pending: w.pending,
+        keyStore: w.hostStore,
+        fetch: racing,
+      }),
+    ).rejects.toThrow(/already has a Decisions identity/);
+    expect((await w.hostStore.load())!.config.deviceId).toBe(w.owner.config.deviceId);
+    expect(await w.pending.load()).not.toBeNull();
+  });
+
+  it('refuses to load a desktop-host identity whose certificate does not match its keys', async () => {
+    const e = await enrolled();
+    const s = (await e.hostStore.load())!;
+    await e.hostStore.save({ ...s, keys: e.owner.stored.keys });
+    await expect(loadIdentity(e.hostStore)).rejects.toThrow(/inconsistent/);
+  });
+
   it('refuses when the relay does not know the Host or names a different owner', async () => {
     const w = await world();
     const req = await createHostRequest({
@@ -616,6 +666,38 @@ describe('after enrollment: rotation and revocation use the normal owner operati
       1, 2,
     ]);
     expect(hostClient.identity.currentEpoch).toBe(2);
+  });
+
+  it('overlapping refreshes never drop an epoch or move the current epoch back', async () => {
+    const e = await enrolled();
+    e.ownerClient.identity = await rotateEpoch(e.ownerClient, e.ownerStore); // epoch 2
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let held = false;
+    const slowFetch: typeof fetch = async (input, init) => {
+      const res = await e.relay.fetch(input, init);
+      if (!held && String(input).endsWith('/key-grants')) {
+        held = true;
+        await gate; // this refresh saw epochs 1 and 2, and now stalls
+      }
+      return res;
+    };
+    const slow = refreshHostGrants(
+      new RelayClient({ identity: e.host, fetch: slowFetch }),
+      e.hostStore,
+    );
+    while (!held) await new Promise((r) => setTimeout(r, 1));
+    e.ownerClient.identity = await rotateEpoch(e.ownerClient, e.ownerStore); // epoch 3
+    const fast = await refreshHostGrants(
+      new RelayClient({ identity: e.host, fetch: e.relay.fetch }),
+      e.hostStore,
+    );
+    expect(fast.currentEpoch).toBe(3);
+    release();
+    expect((await slow).currentEpoch).toBe(3);
+    const stored = await loadIdentity(e.hostStore);
+    expect(stored.currentEpoch).toBe(3);
+    expect([...stored.epochs.keys()].sort()).toEqual([1, 2, 3]);
   });
 
   it('refreshing refuses grants that are not signed by the pinned owner', async () => {

@@ -92,7 +92,7 @@ export function buildProgram(): Command {
   host
     .command('enroll [request]')
     .description(
-      'On the owner machine: check a request, register the Host with the relay and print its response (request from the argument, --request-file, or stdin).',
+      'On the owner machine: check a request, register the Host with the relay and print its response (request from the argument, --request-file, or stdin with --yes).',
     )
     .option('--request-file <file>', 'read the request from a file')
     .option('-y, --yes', 'do not ask to confirm the code')

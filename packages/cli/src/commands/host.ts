@@ -26,6 +26,9 @@ function pendingStore(ctx: Ctx, g: GlobalOptions): FilePendingHostStore {
   return new FilePendingHostStore(ctx.home, pass);
 }
 
+const fromStdin = (arg: string | undefined, file: string | undefined) =>
+  file === undefined && (arg === undefined || arg === '-');
+
 /** The blob comes from the argument, a file, or standard input (`-` or nothing). */
 async function readBlob(
   ctx: Ctx,
@@ -35,8 +38,8 @@ async function readBlob(
   const text =
     file !== undefined
       ? await readFile(file, 'utf8')
-      : arg !== undefined && arg !== '-'
-        ? arg
+      : !fromStdin(arg, file)
+        ? arg!
         : await ctx.readStdin();
   if (!text.trim())
     throw new CliError('nothing to read: pass it as an argument, with a file, or on stdin');
@@ -70,7 +73,7 @@ export async function hostRequest(
       `Code: ${r.code}`,
       '',
       'Its private keys stay on this machine. On the owner machine, run:',
-      '  decisions host enroll <request>      (or pipe it in: decisions host enroll -)',
+      '  decisions host enroll <request>      (or --request-file <file>)',
       'Check it shows the same code, then bring the response back here:',
       '  decisions host accept <response>',
     ].join('\n'),
@@ -100,11 +103,19 @@ export async function hostEnroll(
   })();
   await verifyHostRequest(req, ctx.now()).catch(fail);
   const code = await hostRequestCode(req);
+  if (!o.yes) {
+    ctx.err(`Host "${req.label}" (device ${req.device_id}) asks to be enrolled.`);
+    ctx.err(`Code: ${code}`);
+    if (fromStdin(o.request, o.requestFile)) {
+      // Standard input is used up by the request: there is nothing left to read a confirmation from.
+      throw new CliError(
+        'the request came from standard input, so the code cannot be confirmed here: check it against the Host and run again with --yes, or pass the request as an argument or with --request-file',
+      );
+    }
+  }
   const rt = await openRuntime(ctx, g);
   try {
     if (!o.yes) {
-      ctx.err(`Host "${req.label}" (device ${req.device_id}) asks to be enrolled.`);
-      ctx.err(`Code: ${code}`);
       const a = (await ctx.prompt('Does the Host show exactly this code? [y/N] ')).toLowerCase();
       if (a !== 'y' && a !== 'yes') throw new CliError('cancelled: the Host was not enrolled');
     }
