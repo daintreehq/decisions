@@ -235,7 +235,9 @@ export class DecisionsBridge {
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
-    await sealStoredContent(this.ctx);
+    // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
+    // next start tries again.
+    await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
@@ -617,8 +619,17 @@ export class DecisionsBridge {
       event: 'proxy.abstain',
       question_id: questionId,
       requirement: row.requirement,
-      result: outcome.action === 'abstain' ? outcome.reason.slice(0, 60) : 'invalid-suggestion',
+      // Only the reason's leading code: a model's own explanation can quote the question, so its prose is kept
+      // only with debug content logging on.
+      result: outcome.action === 'abstain' ? abstainCode(outcome.reason) : 'invalid-suggestion',
+      ...(outcome.action === 'abstain' ? { content: outcome.reason } : {}),
     });
     return 'abstained';
   }
+}
+
+/** The machine-readable head of an abstention reason (`model-abstained: <prose>` → `model-abstained`). */
+export function abstainCode(reason: string): string {
+  const head = (reason.split(/[:\s]/, 1)[0] ?? '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 60);
+  return head || 'abstained';
 }

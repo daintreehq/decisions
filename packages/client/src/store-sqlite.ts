@@ -524,7 +524,10 @@ export class SqliteLocalStore implements LocalStore {
 
   async compact() {
     this.db.exec('VACUUM');
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    // Until the WAL is checkpointed the old pages are still in the main file. Another connection reading the
+    // database blocks a full checkpoint without raising an error, so report that as a failure (retried later).
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as Row | undefined;
+    if (r && Number(r.busy) !== 0) throw new Error('database busy: WAL checkpoint incomplete');
   }
 
   async close() {

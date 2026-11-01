@@ -12,6 +12,7 @@ import {
   RelayClient,
   SQLITE_SCHEMA_VERSION,
   SqliteLocalStore,
+  sealStoredContent,
   type DecisionLearner,
   type Identity,
   type LearnedDecision,
@@ -257,36 +258,52 @@ describe('an undelivered answer survives a restart', () => {
     expect(leakedInFile(path)).toEqual([]);
   });
 
-  it('an answer whose sealed copy cannot be opened is never typed blank: it needs attention', async () => {
-    const env = await makeEnv();
-    const store = new MemoryLocalStore();
-    const bridge = bridgeFor(env, store);
-    const qid = await ask(bridge);
-    env.sink.panes.get('pane-1')!.idle = false;
-    await env.relay.answerEvent({
-      questionId: qid,
-      phone: env.phone,
-      options: ['approve'],
-      text: ANSWER,
-    });
-    await bridge.catchUp();
-    const row = (await store.getQuestion(qid))!;
-    const entries = JSON.parse(row.answers_json) as { sealed: string }[];
-    const env0 = JSON.parse(entries[0]!.sealed) as { ciphertext: string };
-    env0.ciphertext = env0.ciphertext.slice(0, -4) + 'AAAA';
-    entries[0]!.sealed = JSON.stringify(env0);
-    await store.updateQuestion(qid, { answers_json: JSON.stringify(entries) });
-    env.sink.panes.get('pane-1')!.idle = true;
-    await bridge.notifyPaneIdle();
-    expect(env.sink.typed).toHaveLength(0);
-    expect((await store.getQuestion(qid))!).toMatchObject({
-      delivery_status: 'needs-attention',
-      error_code: 'answer_unreadable',
-    });
-  });
+  it.each([
+    [
+      'tampered',
+      (sealed: string) => {
+        const e = JSON.parse(sealed) as { ciphertext: string };
+        e.ciphertext = e.ciphertext.slice(0, -4) + 'AAAA';
+        return JSON.stringify(e);
+      },
+    ],
+    ['missing', () => null],
+  ])(
+    'an answer whose sealed copy is %s is never typed blank: it needs attention',
+    async (_k, corrupt) => {
+      const env = await makeEnv();
+      const store = new MemoryLocalStore();
+      const bridge = bridgeFor(env, store);
+      const qid = await ask(bridge);
+      env.sink.panes.get('pane-1')!.idle = false;
+      await env.relay.answerEvent({
+        questionId: qid,
+        phone: env.phone,
+        options: ['approve'],
+        text: ANSWER,
+      });
+      await bridge.catchUp();
+      const row = (await store.getQuestion(qid))!;
+      const entries = JSON.parse(row.answers_json) as { sealed: string | null }[];
+      entries[0]!.sealed = corrupt(entries[0]!.sealed!);
+      await store.updateQuestion(qid, { answers_json: JSON.stringify(entries) });
+      env.sink.panes.get('pane-1')!.idle = true;
+      await bridge.notifyPaneIdle();
+      expect(env.sink.typed).toHaveLength(0);
+      expect((await store.getQuestion(qid))!).toMatchObject({
+        delivery_status: 'needs-attention',
+        error_code: 'answer_unreadable',
+      });
+    },
+  );
 });
 
 describe('learning', () => {
+  it('the learner contract accepts a hook that returns a value (the history store returns its record result)', () => {
+    const hook: DecisionLearner = { learn: () => ({ recorded: true as const, revision: 1 }) };
+    expect(hook.learn).toBeTypeOf('function');
+  });
+
   function learner() {
     const seen: LearnedDecision[] = [];
     const l: DecisionLearner = {
@@ -342,6 +359,26 @@ describe('learning', () => {
     await bridge.stop();
     await store.close();
     expect(leakedInFile(path)).toEqual([]);
+  });
+
+  it("a model's abstention prose never reaches the audit log, only its code", async () => {
+    const env = await makeEnv();
+    const store = new MemoryLocalStore();
+    const bridge = bridgeFor(env, store, {
+      proxy: {
+        async suggest() {
+          return { action: 'abstain', reason: `model-abstained: unsure whether "${QUESTION}"` };
+        },
+      },
+      policy: new PolicyRegistry({ proxyAllowlisted: true }),
+    });
+    await ask(bridge, { requested_requirement: 'proxy-first' });
+    await bridge.pump();
+    const audit = await store.listAudit(100);
+    expect(audit.find((a) => a.event === 'proxy.abstain')).toMatchObject({
+      result: 'model-abstained',
+    });
+    expect(JSON.stringify(audit)).not.toContain('QPLAIN');
   });
 
   it('proxy answers are never learned, and a failing learner never blocks delivery', async () => {
@@ -528,7 +565,6 @@ describe('migrating a store written before content was sealed', () => {
   });
 
   it('seals a migrated store even when no bridge ever starts (sealStoredContent)', async () => {
-    const { sealStoredContent } = await import('../src/index.js');
     const env = await makeEnv();
     const path = dbPath();
     writeVersion2Database(path, 'q-legacy-02');
@@ -543,5 +579,103 @@ describe('migrating a store written before content was sealed', () => {
     });
     await store.close();
     expect(leakedInFile(path)).toEqual([]);
+  });
+
+  it('a crash after sealing but before compacting still compacts on the next open', async () => {
+    const env = await makeEnv();
+    const path = dbPath();
+    writeVersion2Database(path, 'q-legacy-04');
+    // The process "dies" straight after the last sealed row (the outbox draft) is written.
+    class CrashingStore extends SqliteLocalStore {
+      override async putOutbox(item: Parameters<LocalStore['putOutbox']>[0]) {
+        await super.putOutbox(item);
+        throw new Error('process died');
+      }
+    }
+    const store = new CrashingStore(path);
+    await expect(sealStoredContent({ store, identity: env.identity })).rejects.toThrow(/died/);
+    await store.close();
+    const reopened = new SqliteLocalStore(path);
+    // Every row is already sealed, yet the freed pages are still erased.
+    expect(await sealStoredContent({ store: reopened, identity: env.identity })).toEqual({
+      questions: 0,
+      outbox: 0,
+    });
+    expect(await reopened.getMeta('at-rest:compact-pending')).toBe('');
+    expect(leakedInFile(path)).toEqual([]);
+    await reopened.close();
+  });
+
+  it('sealing keeps bookkeeping another writer changed while it was encrypting', async () => {
+    const env = await makeEnv();
+    const path = dbPath();
+    const qid = 'q-legacy-05';
+    writeVersion2Database(path, qid);
+    // Between the snapshot and the write, a concurrent delivery marks the legacy answer delivered and a
+    // new (already sealed) answer is appended.
+    class RacingStore extends SqliteLocalStore {
+      armed = true;
+      override async getQuestion(id: string) {
+        if (this.armed) {
+          this.armed = false;
+          const cur = (await super.getQuestion(id))!;
+          const entries = JSON.parse(cur.answers_json) as Record<string, unknown>[];
+          entries[0]!.delivered = true;
+          entries.push({
+            entry_id: 'act-new-2',
+            kind: 'answer',
+            action: 'override',
+            revision: 2,
+            source: 'human',
+            correction: true,
+            created_at: '2026-10-01T00:02:00.000Z',
+            deliver: true,
+            delivered: false,
+            sealed: 'sealed-by-someone-else',
+          });
+          await super.updateQuestion(id, { answers_json: JSON.stringify(entries) });
+        }
+        return super.getQuestion(id);
+      }
+    }
+    const store = new RacingStore(path);
+    await sealStoredContent({ store, identity: env.identity });
+    const entries = JSON.parse((await store.getQuestion(qid))!.answers_json) as Record<
+      string,
+      unknown
+    >[];
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ entry_id: 'act-legacy-1', delivered: true });
+    expect(entries[0]!.text).toBeUndefined();
+    expect(entries[0]!.sealed).toEqual(expect.any(String));
+    expect(entries[1]).toMatchObject({ entry_id: 'act-new-2', sealed: 'sealed-by-someone-else' });
+    await store.close();
+    expect(leakedInFile(path)).toEqual([]);
+  });
+
+  it('a compaction that fails (database busy) is retried on the next open', async () => {
+    const env = await makeEnv();
+    const path = dbPath();
+    writeVersion2Database(path, 'q-legacy-03');
+    // Another process holds a read transaction open: VACUUM cannot run.
+    const other = new DatabaseSync(path);
+    other.exec('BEGIN');
+    other.prepare('SELECT COUNT(*) FROM questions').get();
+    const store = new SqliteLocalStore(path);
+    expect(await sealStoredContent({ store, identity: env.identity })).toEqual({
+      questions: 1,
+      outbox: 1,
+    });
+    expect(await store.getMeta('at-rest:compact-pending')).toBe('1');
+    other.exec('COMMIT');
+    other.close();
+    // Nothing left to seal, but the pending compaction still runs.
+    expect(await sealStoredContent({ store, identity: env.identity })).toEqual({
+      questions: 0,
+      outbox: 0,
+    });
+    expect(await store.getMeta('at-rest:compact-pending')).toBe('');
+    expect(leakedInFile(path)).toEqual([]);
+    await store.close();
   });
 });

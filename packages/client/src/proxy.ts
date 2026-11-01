@@ -70,5 +70,6 @@ export interface LearnedDecision {
 
 /** Receives human answers and overrides (never proxy answers or confirmations of them). */
 export interface DecisionLearner {
-  learn(decision: LearnedDecision): void | Promise<void>;
+  /** May return a value or a promise (for example the history store's record result); it is awaited and ignored. */
+  learn(decision: LearnedDecision): unknown;
 }

@@ -230,6 +230,9 @@ export async function openAnswerContent(
     };
   }
   if (hasLegacyContent(e)) return legacyContent(e);
+  // Every answer is stored with its content sealed: one without any has lost it, and must never pass as an
+  // empty answer. Only content-free entries (expiry notices) open as empty.
+  if (e.kind === 'answer') throw new SealedContentError('answer content is missing');
   return { ...EMPTY_ANSWER_CONTENT, choices: [], reviewed_attachment_digests: [] };
 }
 
@@ -292,6 +295,13 @@ export function openProxyDraft(
 
 /* ---------------- sealing rows written before content was sealed ---------------- */
 
+function needsSealing(row: QuestionRow): boolean {
+  return row.legacy_content_json != null || parseAnswers(row.answers_json).some(hasLegacyContent);
+}
+
+/** Meta key set while freed pages may still hold plaintext that has since been sealed. */
+const COMPACT_PENDING = 'at-rest:compact-pending';
+
 export interface SealStoredContentResult {
   /** Questions whose content or answers were sealed. */
   questions: number;
@@ -313,46 +323,70 @@ export async function sealStoredContent(
     const { store } = ctx;
     let questions = 0;
     let outbox = 0;
-    for (const row of await store.listQuestions()) {
-      const patch: Partial<QuestionRow> = {};
-      if (row.legacy_content_json != null) {
-        if (!row.content_sealed) {
-          let content: unknown = null;
-          try {
-            content = JSON.parse(row.legacy_content_json);
-          } catch {
-            /* unreadable legacy content: nothing worth keeping */
-          }
-          if (content !== null) {
-            patch.content_sealed = await sealQuestionContent(ctx, row.question_id, content);
-          }
-        }
-        patch.legacy_content_json = null;
-      }
-      const entries = parseAnswers(row.answers_json);
-      if (entries.some(hasLegacyContent)) {
-        const sealed: AnswerEntry[] = [];
-        for (const e of entries) {
-          if (!hasLegacyContent(e)) {
-            sealed.push(e);
-            continue;
-          }
-          const s =
-            e.sealed ??
+    // Mark the file as holding freed plaintext BEFORE the first rewrite, so a crash between rewriting and
+    // compacting still compacts on the next open.
+    let marked = false;
+    const markPending = async () => {
+      if (marked || !store.compact) return;
+      await store.setMeta(COMPACT_PENDING, '1');
+      marked = true;
+    };
+    for (const snapshot of await store.listQuestions()) {
+      if (!needsSealing(snapshot)) continue;
+      // Encrypt from the snapshot (slow, async), then apply the seals to a fresh read of the row immediately
+      // before writing it, so bookkeeping another writer changed meanwhile (an appended answer, a delivered
+      // flag) is kept rather than overwritten by the stale snapshot.
+      const seals = new Map<string, string | null>();
+      for (const e of parseAnswers(snapshot.answers_json)) {
+        if (!hasLegacyContent(e)) continue;
+        seals.set(
+          e.entry_id,
+          e.sealed ??
             (e.kind === 'answer'
               ? await sealAnswerContent(
                   ctx,
-                  row.question_id,
+                  snapshot.question_id,
                   e.entry_id,
                   e.revision,
                   legacyContent(e),
                 )
-              : null);
-          sealed.push(storedEntry(e, s));
+              : null),
+        );
+      }
+      let sealedContent: string | null = null;
+      if (snapshot.legacy_content_json != null && !snapshot.content_sealed) {
+        let content: unknown = null;
+        try {
+          content = JSON.parse(snapshot.legacy_content_json);
+        } catch {
+          /* unreadable legacy content: nothing worth keeping */
         }
-        patch.answers_json = serializeAnswers(sealed);
+        if (content !== null)
+          sealedContent = await sealQuestionContent(ctx, snapshot.question_id, content);
+      }
+      const row = await store.getQuestion(snapshot.question_id);
+      if (!row) continue;
+      const patch: Partial<QuestionRow> = {};
+      // Clear the legacy column only if it still holds what was just sealed.
+      if (
+        row.legacy_content_json != null &&
+        row.legacy_content_json === snapshot.legacy_content_json
+      ) {
+        if (!row.content_sealed && sealedContent) patch.content_sealed = sealedContent;
+        patch.legacy_content_json = null;
+      }
+      const entries = parseAnswers(row.answers_json);
+      if (entries.some((e) => hasLegacyContent(e) && seals.has(e.entry_id))) {
+        patch.answers_json = serializeAnswers(
+          entries.map((e) =>
+            hasLegacyContent(e) && seals.has(e.entry_id)
+              ? storedEntry(e, seals.get(e.entry_id) ?? null)
+              : e,
+          ),
+        );
       }
       if (Object.keys(patch).length > 0) {
+        await markPending();
         await store.updateQuestion(row.question_id, patch);
         questions++;
       }
@@ -364,10 +398,21 @@ export async function sealStoredContent(
       const next: Record<string, unknown> = { ...p };
       delete next.content;
       if (!p.sealed) next.sealed = await sealProxyDraft(ctx, item.question_id, item.id, p.content);
+      await markPending();
       await store.putOutbox({ ...item, payload: next } satisfies OutboxItem);
       outbox++;
     }
-    if (questions + outbox > 0) await store.compact?.();
+    // Erase the freed pages. The marker is written first and cleared only once compaction succeeds, so a
+    // compaction that fails (another process holding the database open, a crash) is retried on the next open
+    // even though nothing is left to seal by then.
+    if (store.compact && (marked || (await store.getMeta(COMPACT_PENDING)))) {
+      try {
+        await store.compact();
+        await store.setMeta(COMPACT_PENDING, '');
+      } catch {
+        /* retried on the next open; the rows themselves are already sealed */
+      }
+    }
     return { questions, outbox };
   });
 }
