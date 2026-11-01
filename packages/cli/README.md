@@ -6,12 +6,15 @@ self-hosted relay, pair your phone, serve the HTTP MCP that gives agents `ask_hu
 ```bash
 npm install -g @daintreehq/decisions-cli
 
-decisions setup --url https://<your-worker>.workers.dev --claim-secret-file <file>
+decisions deploy    # deploy the matching relay to your Cloudflare account (--dry-run shows the plan)
+decisions setup --url https://<your-worker>.workers.dev   # asks for the claim secret
 decisions pair      # scan the QR code with your phone
 decisions mcp       # prints the line that adds the MCP to your agent
 decisions --help
 ```
 
-Deploying the relay itself is covered in the [setup guide](https://github.com/daintreehq/decisions#set-up-about-five-minutes).
+`decisions deploy` uploads the prebuilt relay from `@daintreehq/decisions-relay`, installed at the same version,
+after checking every file against a SHA-256 manifest pinned in the CLI. The claim secret is shown once and never
+saved. More in the [self-hosting guide](https://github.com/daintreehq/decisions/blob/main/docs/self-host.md).
 
 Node 22+. Apache-2.0.

@@ -11,14 +11,26 @@ You deploy the relay to your own Cloudflare account. The free plan is enough for
 
 R2 must be enabled on your account (it needs a payment method on file; the free allowance applies).
 
-## Option 2: Guided script
+## Option 2: Guided deploy from the CLI
 
 ```bash
-pnpm install
-pnpm decisions:deploy            # add --dry-run to see the plan first
+npx @daintreehq/decisions-cli deploy --dry-run   # print the plan; changes nothing
+npx @daintreehq/decisions-cli deploy
 ```
 
-The script logs in with Wrangler's browser flow (no API token needed), creates the bucket, builds, deploys, generates and installs `CLAIM_SECRET`, runs the health check, and saves the secret to `~/.decisions/deploy.json` (mode 0600; delete it after setup).
+No clone is needed. The command:
+
+1. Checks Node 22+ and runs the exact Wrangler version the relay was built with (`npx wrangler@<version>`).
+2. Logs in with Wrangler's browser flow. With `--api-token` it asks for a Cloudflare API token instead (or uses `CLOUDFLARE_API_TOKEN` if it is already set); the token stays in memory and reaches Wrangler only through its environment. `--account-id` picks an account when you have several.
+3. Creates the private R2 bucket (`--bucket`, default `daintree-decisions`; an existing one is reused).
+4. Deploys the Worker (`--name`, default `daintree-decisions`), its Durable Object and the phone app from `@daintreehq/decisions-relay`, the prebuilt relay published with the same version as the CLI. Before anything runs, it checks the relay's manifest against the SHA-256 the CLI was built with and every file against the manifest, and refuses to deploy on any mismatch.
+5. Generates `CLAIM_SECRET` in memory and gives it to `wrangler secret put` on standard input. It is never written to disk, to a command line or to the environment. If the relay is already claimed (you are updating it), this step is skipped.
+6. Runs `decisions doctor` against the new Worker.
+7. Prints the Worker URL and the claim secret once, with the next step. Copy the secret then: it is not saved anywhere. If you lose it before claiming, run the deploy again to set a new one.
+
+Add `--claim` to claim the relay from this computer straight away (as `decisions setup` does, creating this computer's keys); the secret is then used up and not shown. `--outdir <dir>` only verifies the relay and writes the deployable files and Wrangler config to `<dir>`, for inspection or to deploy them yourself.
+
+In a clone of this repository, `pnpm decisions:deploy` builds everything and runs the same command from the workspace.
 
 ## Option 3: Manual
 
@@ -35,7 +47,7 @@ pnpm decisions:doctor --url https://<your-worker>.workers.dev
 ## Claim and pair
 
 ```bash
-pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file ./claim-secret   # or DECISIONS_CLAIM_SECRET, or --claim-secret-stdin
+pnpm decisions setup --url https://<your-worker>.workers.dev   # asks for the claim secret (hidden); or --claim-secret-file, --claim-secret-stdin, DECISIONS_CLAIM_SECRET
 pnpm decisions pair
 ```
 
@@ -55,4 +67,4 @@ Optional. If you put Access in front of the Worker, allow the paths the installe
 
 ## Updating
 
-Pull a new release and run the same deploy again. Nothing updates itself and nothing is deployed on your behalf. The Worker and desktop check each other's protocol range; the app shows a banner when a new version is ready and never discards unsent answers.
+Run the deploy again with the newer CLI (`npx @daintreehq/decisions-cli@latest deploy`), or pull a new release and redeploy. Nothing updates itself and nothing is deployed on your behalf. The Worker and desktop check each other's protocol range; the app shows a banner when a new version is ready and never discards unsent answers.

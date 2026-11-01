@@ -34,8 +34,8 @@ jobs:
         run: pnpm pack:check
       - name: Validate the Cloudflare deployment config
         run: pnpm exec wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-out"
-      - name: Deploy-script dry run
-        run: node tools/deploy/deploy.mjs --dry-run
+      - name: Guided deploy dry run (verifies the pinned relay bundle)
+        run: node packages/cli/dist/bin.js deploy --dry-run
       - name: Dependency audit (production, high and above)
         run: pnpm audit --prod --audit-level high
         continue-on-error: true

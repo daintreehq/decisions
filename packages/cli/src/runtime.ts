@@ -27,6 +27,8 @@ export interface Ctx {
   now(): number;
   /** Read all of standard input (for secrets that must not appear in argv). */
   readStdin(): Promise<string>;
+  /** True when a person is at the terminal, so a hidden prompt can stand in for a missing secret. */
+  interactive?: boolean;
   keyStore?: KeyStore;
 }
 
@@ -53,6 +55,7 @@ export function makeCtx(g: GlobalOptions): Ctx {
     out: (l) => process.stdout.write(l + '\n'),
     err: (l) => process.stderr.write(l + '\n'),
     prompt: promptLine,
+    interactive: process.stdin.isTTY === true,
     env: process.env,
     now: Date.now,
     readStdin: async () => {

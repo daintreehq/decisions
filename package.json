@@ -17,7 +17,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "decisions": "node packages/cli/dist/bin.js",
-    "decisions:deploy": "node tools/deploy/deploy.mjs",
+    "decisions:deploy": "pnpm build:all && node packages/cli/dist/bin.js deploy",
     "decisions:doctor": "node tools/doctor/doctor.mjs",
     "deploy:local": "pnpm build && wrangler deploy",
     "build:all": "pnpm -r build",

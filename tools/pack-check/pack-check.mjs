@@ -6,14 +6,27 @@
  * 2. Packs each one with `pnpm pack` into a temp directory and checks the tarball holds only the
  *    intended files, that `main`/`types`/`exports`/`bin` point at files that are in it, and that no
  *    `workspace:` range survived.
- * 3. Creates a scratch project outside the workspace, installs the tarballs with npm, imports every
+ * 3. Checks every file of the relay bundle against its SHA-256 manifest, inside the tarball.
+ * 4. Creates a scratch project outside the workspace, installs the tarballs with npm, imports every
  *    package under Node, runs the CLI, and type-checks a TypeScript file against the declarations
  *    (NodeNext and Bundler resolution, without the workspace's source condition).
+ * 5. Runs the installed `decisions deploy` in its side-effect-free modes: the dry run verifies the
+ *    installed relay against the digest pinned in the CLI, `--outdir` stages it and Wrangler
+ *    validates the staged config, and a tampered file makes it refuse.
  *
  * Usage: node tools/pack-check/pack-check.mjs [--no-build] [--keep]
  */
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -27,14 +40,29 @@ const keep = args.has('--keep');
 const SOURCE_CONDITION = '@daintreehq/source';
 
 /**
- * Every published package, with the files it may ship beyond package.json, README.md, LICENSE,
- * NOTICE and compiled `dist/**.js` / `dist/**.d.ts`.
+ * Every published package, with the files it must ship beyond package.json, README.md, LICENSE and
+ * NOTICE, and the pattern for the rest of what it may ship (default: compiled `dist/**.js` and
+ * `dist/**.d.ts`).
  */
 const PACKAGES = [
   { dir: 'packages/protocol', extra: ['openapi.json', 'schemas.json'] },
   { dir: 'packages/crypto', extra: ['fixtures/vectors.json'] },
   { dir: 'packages/client', extra: [] },
   { dir: 'packages/decision-model', extra: [] },
+  {
+    dir: 'packages/relay',
+    extra: [
+      'dist/manifest.json',
+      'dist/wrangler.json',
+      'dist/worker/index.js',
+      'dist/worker/index.js.map',
+      'dist/app/index.html',
+      'dist/app/sw.js',
+      'dist/app/manifest.webmanifest',
+    ],
+    // The Worker bundle and the phone app's static assets, all listed in dist/manifest.json.
+    allow: /^dist\/(worker|app)\/./,
+  },
   { dir: 'packages/cli', extra: [] },
 ];
 const REQUIRED = ['package.json', 'README.md', 'LICENSE', 'NOTICE'];
@@ -74,7 +102,7 @@ function checkTarball(spec, tarball, ownVersions) {
   const fileSet = new Set(files);
   const allowed = new Set([...REQUIRED, ...spec.extra]);
   for (const f of files) {
-    const ok = allowed.has(f) || /^dist\/.+\.(js|d\.ts)$/.test(f);
+    const ok = allowed.has(f) || (spec.allow ?? /^dist\/.+\.(js|d\.ts)$/).test(f);
     if (!ok) fail(`${name}: unexpected file in tarball: ${f}`);
   }
   for (const f of [...REQUIRED, ...spec.extra]) {
@@ -109,8 +137,34 @@ function checkTarball(spec, tarball, ownVersions) {
       }
     }
   }
+  if (spec.dir === 'packages/relay') checkRelayManifest(tarball, files);
   console.log(`  ${pkg.name}@${pkg.version}: ${files.length} files`);
   return pkg;
+}
+
+/** Every relay file in the tarball is in the manifest with the right SHA-256, and vice versa. */
+function checkRelayManifest(tarball, files) {
+  const read = (f) =>
+    execFileSync('tar', ['-xzOf', tarball, `package/${f}`], { maxBuffer: 1 << 28 });
+  const manifest = JSON.parse(read('dist/manifest.json').toString('utf8'));
+  const shipped = files.filter((f) => f.startsWith('dist/') && f !== 'dist/manifest.json');
+  const listed = Object.keys(manifest.files).map((f) => `dist/${f}`);
+  for (const f of shipped) {
+    if (!listed.includes(f)) fail(`relay: ${f} is in the tarball but not in the manifest`);
+  }
+  for (const [rel, want] of Object.entries(manifest.files)) {
+    if (!files.includes(`dist/${rel}`)) {
+      fail(`relay: manifest lists ${rel}, which is not in the tarball`);
+      continue;
+    }
+    const bytes = read(`dist/${rel}`);
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    if (sha !== want.sha256 || bytes.length !== want.bytes) {
+      fail(`relay: ${rel} does not match its SHA-256 in the manifest`);
+    }
+  }
+  const pinned = createHash('sha256').update(read('dist/manifest.json')).digest('hex');
+  console.log(`  relay manifest: ${listed.length} files verified, manifest SHA-256 ${pinned}`);
 }
 
 const SMOKE = `
@@ -238,6 +292,31 @@ try {
   });
   if (!/Usage: decisions/.test(help)) fail(`cli: unexpected --help output:\n${help}`);
   else console.log('  decisions --help ok');
+
+  step('Checking the installed relay with `decisions deploy` (no Cloudflare calls)');
+  const decisions = join(app, 'node_modules/.bin/decisions');
+  const dry = run(decisions, ['deploy', '--dry-run'], { cwd: app, capture: true });
+  if (!/files verified against manifest SHA-256/.test(dry) || !/wrangler@\d/.test(dry))
+    fail(`cli: unexpected deploy --dry-run output:\n${dry}`);
+  else console.log('  decisions deploy --dry-run ok');
+  const staged = join(work, 'relay-staged');
+  run(decisions, ['deploy', '--outdir', staged], { cwd: app, capture: true });
+  const wrangler = join(ROOT, 'node_modules/.bin/wrangler');
+  try {
+    run(wrangler, ['deploy', '--dry-run', '--config', 'wrangler.json'], {
+      cwd: staged,
+      capture: true,
+    });
+    console.log('  wrangler accepts the staged relay (deploy --dry-run)');
+  } catch {
+    fail('relay: wrangler deploy --dry-run rejected the staged relay');
+  }
+  // Tamper with one installed file: the CLI must refuse to deploy.
+  appendFileSync(join(app, 'node_modules/@daintreehq/decisions-relay/dist/app/index.html'), ' ');
+  const tampered = spawnSync(decisions, ['deploy', '--dry-run'], { cwd: app, encoding: 'utf8' });
+  if (tampered.status === 0 || !/refusing to deploy/.test(tampered.stderr))
+    fail(`cli: deploy --dry-run accepted a tampered relay:\n${tampered.stdout}${tampered.stderr}`);
+  else console.log('  a tampered relay file is refused');
 
   step('Type-checking against the published declarations');
   writeFileSync(join(app, 'check.ts'), CHECK_TS);
