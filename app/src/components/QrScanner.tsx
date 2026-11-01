@@ -13,9 +13,15 @@ declare global {
 export function QrScanner({
   onResult,
   onCancel,
+  onPaste,
+  onRetry,
 }: {
   onResult: (text: string) => void;
   onCancel: () => void;
+  /** Leave the scanner and go straight to the paste field. */
+  onPaste: () => void;
+  /** Start the camera again (for example after allowing it in settings). */
+  onRetry: () => void;
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,7 +39,11 @@ export function QrScanner({
           audio: false,
         });
         const v = video.current;
-        if (!v || stopped) return;
+        if (!v || stopped) {
+          // Cancelled while the camera was starting: release it at once.
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         v.srcObject = stream;
         await v.play();
         const detector = window.BarcodeDetector
@@ -69,10 +79,15 @@ export function QrScanner({
         };
         void tick();
       } catch (e) {
+        stream?.getTracks().forEach((t) => t.stop());
+        if (stopped) return;
+        const name = e instanceof Error ? e.name : '';
         setError(
-          e instanceof Error
-            ? e.message
-            : 'Could not start the camera. You can paste the link instead.',
+          name === 'NotAllowedError' || name === 'SecurityError'
+            ? 'Decisions is not allowed to use the camera. Allow it in your browser settings, or paste the link instead.'
+            : name === 'NotFoundError' || name === 'OverconstrainedError'
+              ? 'No camera was found on this device. Paste the pairing link instead.'
+              : 'The camera could not start. Paste the pairing link instead.',
         );
       }
     })();
@@ -91,16 +106,27 @@ export function QrScanner({
           {error}
         </p>
       ) : (
-        <video
-          ref={video}
-          playsInline
-          muted
-          aria-label="Camera preview. Point it at the QR code on your computer."
-        />
+        <>
+          <video ref={video} playsInline muted aria-label="Camera preview" />
+          <p className="scanner-caption">Point the camera at the QR code on your computer.</p>
+        </>
       )}
-      <button type="button" className="btn" onClick={onCancel}>
-        Cancel
-      </button>
+      {error ? (
+        <div className="stack">
+          <button type="button" className="btn primary big" onClick={onPaste}>
+            Paste the link instead
+          </button>
+          <button type="button" className="btn" onClick={onRetry}>
+            Try the camera again
+          </button>
+        </div>
+      ) : (
+        <div>
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }

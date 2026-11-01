@@ -38,7 +38,7 @@ export function App() {
         <PrivacyPage />
       ) : null;
     return (
-      <main id="main" tabIndex={-1}>
+      <main id="main" className="bare" tabIndex={-1}>
         {open ?? <LockedPage phase={snap.phase} />}
       </main>
     );

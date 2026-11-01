@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { app } from '../app/controller.js';
 import { useApp, useNow } from '../app/hooks.js';
 import { AnswerEditor } from '../components/AnswerEditor.js';
@@ -11,10 +11,12 @@ import {
   deliveryProgress,
   effectiveStatus,
   lastProxyAction,
-  originLabel,
   proxyNeedsReview,
+  statusLabel,
   submitKind,
 } from '../domain/selectors.js';
+import { ChevronLeft, ClockIcon, Origin, PersonIcon } from '../components/Icons.js';
+import { announce } from '../lib/announce.js';
 import { absoluteLabel, ageLabel, untilLabel } from '../lib/time.js';
 import type { OutboxEntry } from '../data/outbox.js';
 
@@ -30,9 +32,17 @@ function Conflict({
   const winner = currentAnswer(view);
   const [copied, setCopied] = useState(false);
   return (
-    <section className="card warn" role="alert" aria-label="Answered on another device">
+    <section
+      className="card warn"
+      role="alert"
+      aria-label={entry.state === 'expired' ? 'Your answer arrived too late' : 'Answer not applied'}
+    >
       <strong>
-        {entry.state === 'expired' ? 'This question expired' : 'Answered on another device'}
+        {entry.state === 'expired'
+          ? 'Your answer arrived after the question expired'
+          : winner
+            ? 'Answered on another device'
+            : 'The question changed before your answer arrived'}
       </strong>
       <p>
         {entry.state === 'expired'
@@ -80,7 +90,15 @@ export function QuestionDetail({ id }: { id: string }) {
   const [review, setReview] = useState<ReviewState>(NO_REVIEW);
   const [overriding, setOverriding] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const onReview = useCallback((s: ReviewState) => setReview(s), []);
+  // Closing a correction puts focus back on the control that opened it.
+  const wasOverriding = useRef(false);
+  useEffect(() => {
+    if (wasOverriding.current && !overriding)
+      document.querySelector<HTMLElement>('[data-reopen-correction]')?.focus();
+    wasOverriding.current = overriding;
+  }, [overriding]);
   void snap.rev;
 
   const view = app.store?.get(id);
@@ -113,22 +131,56 @@ export function QuestionDetail({ id }: { id: string }) {
   const verified = view.verification.ok;
   const content = view.content;
   const initial = failed[0] ? { selected: failed[0].selected, text: failed[0].text } : undefined;
+  const open = status === 'open';
+  const urgent = open && !!view.expiresAt && Date.parse(view.expiresAt) - now < 24 * 3_600_000;
+  const confirmed = view.actions.find((a) => a.verified && a.action === 'confirm-proxy');
+  const closedOptions =
+    (status === 'expired' || status === 'cancelled') && content ? content.options : [];
 
   return (
-    <article className="detail" aria-labelledby="q-title">
+    <article
+      className="detail"
+      aria-labelledby={content ? 'q-title' : undefined}
+      aria-label={content ? undefined : 'Question that could not be verified'}
+    >
       <header className="detail-head">
-        <Link to="/" className="back" aria-label="Back to inbox">
-          ‹ Inbox
+        <Link to="/" className="back">
+          <ChevronLeft />
+          Inbox
         </Link>
-        <p className="origin">{originLabel(view)}</p>
-        <p className="muted" title={absoluteLabel(view.createdAt)}>
-          Asked {ageLabel(view.createdAt, now)} · {absoluteLabel(view.createdAt)}
-          {view.expiresAt && status === 'open' ? ` · ${untilLabel(view.expiresAt, now)}` : ''}
+        <Origin v={view} as="p" />
+        <p className="meta-line">
+          <span className="nowrap">Asked {ageLabel(view.createdAt, now)}</span> ·{' '}
+          <span className="nowrap">{absoluteLabel(view.createdAt)}</span>
+          {open && view.expiresAt && !urgent && (
+            <>
+              {' '}
+              · <span className="nowrap">{untilLabel(view.expiresAt, now, true)}</span>
+            </>
+          )}
         </p>
-        <p>
-          <span className={`badge ${status}`}>{statusLabel(status)}</span>{' '}
-          {view.requirement === 'human-required' && (
-            <span className="badge strong">Needs a person</span>
+        {status === 'expired' && view.expiresAt && (
+          <p className="meta-line">Expired {absoluteLabel(view.expiresAt)}</p>
+        )}
+        <p className="detail-badges">
+          {/* An answered question's answer card carries the provenance label; no need to say it twice. */}
+          {status !== 'human-answered' && status !== 'proxy-answered' && (
+            <span className={`badge ${status}`}>{statusLabel(status)}</span>
+          )}
+          {open && view.requirement === 'human-required' && (
+            <span className="badge req">
+              <PersonIcon />
+              Needs a person
+            </span>
+          )}
+          {urgent && (
+            <span className="badge warn">
+              <ClockIcon />
+              {untilLabel(view.expiresAt!, now, true)}
+            </span>
+          )}
+          {status === 'proxy-answered' && proxyNeedsReview(view, now) && (
+            <span className="badge warn">To review</span>
           )}
         </p>
       </header>
@@ -156,13 +208,16 @@ export function QuestionDetail({ id }: { id: string }) {
 
       {content && (
         <>
-          <h1 id="q-title" className="sr-only">
-            Question
-          </h1>
-          <SafeText text={content.question} className="question" />
+          {/* The question itself is the page's heading; SafeText keeps it plain text. */}
+          <div id="q-title" role="heading" aria-level={1}>
+            <SafeText text={content.question} className="question" />
+          </div>
+          {open && view.proxyAbstained && (
+            <p className="note">The decision model passed on this one, so it is waiting for you.</p>
+          )}
           {content.context && (
             <details className="context">
-              <summary>Show context</summary>
+              <summary>Context from the agent</summary>
               <SafeText text={content.context} />
             </details>
           )}
@@ -171,18 +226,32 @@ export function QuestionDetail({ id }: { id: string }) {
       )}
 
       {status === 'expired' && (
-        <section className="card warn" role="status">
-          <strong>This question expired</strong>
+        <section className="card closed" role="status">
+          <strong>This question expired before it was answered</strong>
           <p>
-            Your agent was told it expired. It will not continue on its own; ask it again from your
-            computer if you still need an answer.
+            The time limit passed, so it can no longer be answered from here and nothing was
+            approved. If you still want to decide, ask your agent again from your computer.
           </p>
         </section>
       )}
       {status === 'cancelled' && (
-        <section className="card" role="status">
+        <section className="card closed" role="status">
           <strong>Your agent withdrew this question</strong>
+          <p>No answer is needed and nothing was approved here.</p>
         </section>
+      )}
+      {closedOptions.length > 0 && (
+        <>
+          <p className="muted">The options were:</p>
+          <ul className="closed-options">
+            {closedOptions.map((o) => (
+              <li key={o.id}>
+                {o.label}
+                {o.description && <SafeText text={o.description} className="option-desc" />}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
 
       {failed.map((e) => (
@@ -194,10 +263,14 @@ export function QuestionDetail({ id }: { id: string }) {
           view={view}
           a={proxy}
           busy={busy}
+          now={now}
+          error={confirmError}
+          confirmedAt={confirmed?.createdAt ?? null}
           onConfirm={
-            proxyNeedsReview(view, now)
+            proxyNeedsReview(view, now) && !overriding
               ? () => {
                   setBusy(true);
+                  setConfirmError(null);
                   void app
                     .submit({
                       view,
@@ -207,17 +280,61 @@ export function QuestionDetail({ id }: { id: string }) {
                       text: '',
                       reviewedDigests: [],
                     })
+                    .then(() => announce('Your confirmation is being sent.'))
+                    .catch((e: unknown) =>
+                      setConfirmError(
+                        e instanceof Error
+                          ? e.message
+                          : 'Could not send your confirmation. Try again.',
+                      ),
+                    )
                     .finally(() => setBusy(false));
                 }
               : undefined
           }
-          onOverrule={kind === 'override' ? () => setOverriding(true) : undefined}
+          onOverrule={kind === 'override' && !overriding ? () => setOverriding(true) : undefined}
         />
       ) : answer ? (
         <HumanAnswerCard view={view} a={answer} />
       ) : null}
 
-      {progress && <DeliveryProgress progress={progress} />}
+      {verified &&
+        content &&
+        kind === 'override' &&
+        !pending &&
+        (overriding || answer?.provenance !== 'proxy') && (
+          <section aria-label="Change the answer">
+            {overriding ? (
+              <AnswerEditor
+                key={`${view.id}-override`}
+                view={view}
+                mode="override"
+                review={review}
+                current={answer}
+                onDone={() => setOverriding(false)}
+                onCancel={() => setOverriding(false)}
+              />
+            ) : (
+              answer?.provenance !== 'proxy' && (
+                <button
+                  type="button"
+                  className="btn"
+                  data-reopen-correction=""
+                  onClick={() => setOverriding(true)}
+                >
+                  Change this answer…
+                </button>
+              )
+            )}
+          </section>
+        )}
+
+      {progress && (
+        <DeliveryProgress
+          progress={progress}
+          fromPhone={!!pending || answer?.provenance !== 'proxy'}
+        />
+      )}
 
       {verified && content && kind === 'answer' && !pending && (
         <section aria-label="Your answer">
@@ -230,46 +347,6 @@ export function QuestionDetail({ id }: { id: string }) {
           />
         </section>
       )}
-      {verified && content && kind === 'override' && !pending && (
-        <section aria-label="Change the answer">
-          {overriding ? (
-            <AnswerEditor
-              key={`${view.id}-override`}
-              view={view}
-              mode="override"
-              review={review}
-              onDone={() => setOverriding(false)}
-              onCancel={() => setOverriding(false)}
-            />
-          ) : (
-            answer?.provenance !== 'proxy' && (
-              <button type="button" className="btn" onClick={() => setOverriding(true)}>
-                Change this answer…
-              </button>
-            )
-          )}
-        </section>
-      )}
-      {status === 'open' && view.proxyAbstained && (
-        <p className="note">The decision model passed on this one, so it is waiting for you.</p>
-      )}
     </article>
   );
-}
-
-function statusLabel(s: ReturnType<typeof effectiveStatus>): string {
-  switch (s) {
-    case 'open':
-      return 'Needs you';
-    case 'proxy-answered':
-      return 'Proxy answered';
-    case 'human-answered':
-      return 'Answered';
-    case 'cancelled':
-      return 'Withdrawn';
-    case 'expired':
-      return 'Expired';
-    default:
-      return 'Unverified';
-  }
 }

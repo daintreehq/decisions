@@ -1,9 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useApp, useNow, useQuestions } from '../app/hooks.js';
 import { Link } from '../app/router.js';
-import { currentAnswer, effectiveStatus, originLabel } from '../domain/selectors.js';
+import {
+  currentAnswer,
+  effectiveStatus,
+  originLabel,
+  proxyNeedsReview,
+  statusLabel,
+} from '../domain/selectors.js';
 import { previewText } from '../lib/safe-text.js';
-import { absoluteLabel } from '../lib/time.js';
+import { shortDateLabel } from '../lib/time.js';
+import { Origin } from '../components/Icons.js';
 
 export function HistoryPage() {
   const snap = useApp();
@@ -20,7 +27,16 @@ export function HistoryPage() {
     if (!needle) return done;
     return done.filter((v) => {
       const a = currentAnswer(v);
-      const hay = [v.content?.question, v.content?.context, a?.content?.text, originLabel(v)]
+      const chosen = (a?.content?.selected_option_ids ?? []).map(
+        (id) => v.content?.options.find((o) => o.id === id)?.label ?? '',
+      );
+      const hay = [
+        v.content?.question,
+        v.content?.context,
+        a?.content?.text,
+        originLabel(v),
+        ...chosen,
+      ]
         .join(' ')
         .toLowerCase();
       return hay.includes(needle);
@@ -38,11 +54,14 @@ export function HistoryPage() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search your decisions"
+          aria-describedby="history-privacy"
         />
       </label>
-      <p className="note">
-        Search runs on this phone, on your decrypted history. Your relay never sees what you search
-        for.
+      <p className="note" id="history-privacy">
+        Search runs on this phone. Your relay never sees what you search for.
+      </p>
+      <p className="sr-only" role="status">
+        {q.trim() ? `${hits.length} ${hits.length === 1 ? 'match' : 'matches'}` : ''}
       </p>
       {incomplete && (
         <p className="note warn" role="status">
@@ -52,6 +71,15 @@ export function HistoryPage() {
       {hits.length === 0 ? (
         <div className="empty">
           <h2>{q ? 'No matches' : 'No history yet'}</h2>
+          {q ? (
+            <button type="button" className="btn" onClick={() => setQ('')}>
+              Clear search
+            </button>
+          ) : (
+            <p>
+              Questions you have answered, and ones that expired or were withdrawn, appear here.
+            </p>
+          )}
         </div>
       ) : (
         <ul className="list">
@@ -62,8 +90,8 @@ export function HistoryPage() {
               <li key={v.id}>
                 <Link to={`/q/${v.id}`} className="row-card">
                   <span className="row-top">
-                    <span className="origin">{originLabel(v)}</span>
-                    <span className="muted">{absoluteLabel(v.lastEventAt)}</span>
+                    <Origin v={v} />
+                    <span className="when">{shortDateLabel(v.lastEventAt, now)}</span>
                   </span>
                   <span className="row-text">
                     {v.content
@@ -71,13 +99,8 @@ export function HistoryPage() {
                       : 'Could not verify this question'}
                   </span>
                   <span className="row-badges">
-                    <span className={`badge ${s}`}>
-                      {s === 'human-answered'
-                        ? 'Answered by you'
-                        : s === 'proxy-answered'
-                          ? 'Answered by decision model'
-                          : s}
-                    </span>
+                    <span className={`badge ${s}`}>{statusLabel(s)}</span>
+                    {proxyNeedsReview(v, now) && <span className="badge warn">To review</span>}
                     {a && v.actions.filter((x) => x.action === 'override').length > 0 && (
                       <span className="badge">Corrected</span>
                     )}

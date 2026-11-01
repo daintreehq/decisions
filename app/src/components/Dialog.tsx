@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 
 /** Native <dialog> modal: focus trap and Escape handling come from the platform. */
 export function Dialog({
@@ -7,14 +7,18 @@ export function Dialog({
   onClose,
   children,
   actions,
+  wide,
 }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
   actions?: ReactNode;
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  // Several dialogs can be mounted at once, so each needs its own ids for its name and description.
+  const id = useId();
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
@@ -24,13 +28,16 @@ export function Dialog({
   return (
     <dialog
       ref={ref}
-      className="dialog"
-      aria-labelledby="dlg-title"
+      className={wide ? 'dialog wide' : 'dialog'}
+      aria-labelledby={`${id}-title`}
+      aria-describedby={`${id}-body`}
       onClose={onClose}
       onCancel={onClose}
     >
-      <h2 id="dlg-title">{title}</h2>
-      <div className="dialog-body">{children}</div>
+      <h2 id={`${id}-title`}>{title}</h2>
+      <div className="dialog-body" id={`${id}-body`}>
+        {children}
+      </div>
       <div className="dialog-actions">{actions}</div>
     </dialog>
   );
@@ -41,6 +48,7 @@ export function ConfirmDialog({
   title,
   confirmLabel,
   danger,
+  confirmDisabled,
   onConfirm,
   onCancel,
   children,
@@ -49,6 +57,7 @@ export function ConfirmDialog({
   title: string;
   confirmLabel: string;
   danger?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
   children: ReactNode;
@@ -66,6 +75,7 @@ export function ConfirmDialog({
           <button
             type="button"
             className={danger ? 'btn danger' : 'btn primary'}
+            disabled={confirmDisabled}
             onClick={onConfirm}
           >
             {confirmLabel}

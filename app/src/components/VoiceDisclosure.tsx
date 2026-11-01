@@ -10,7 +10,8 @@ export function VoiceDisclosure({
 }: {
   open: boolean;
   provider: string;
-  correction: string;
+  /** Who tidies up the transcript, or null when clean-up is off. */
+  correction: string | null;
   onAccept?: () => void;
   onClose: () => void;
 }) {
@@ -42,10 +43,15 @@ export function VoiceDisclosure({
           deployed) to <strong>{provider}</strong> for transcription. The relay forwards audio
           without storing or logging it, but it can technically see it in transit.
         </li>
-        <li>
-          After you stop, the transcript (plus the question text and option names, to fix spelling)
-          is sent through your relay to <strong>{correction}</strong> for a single clean-up pass.
-        </li>
+        {correction ? (
+          <li>
+            After you stop, the transcript (plus the question text and option names, to fix
+            spelling) is sent through your relay to <strong>{correction}</strong> for a single
+            clean-up pass.
+          </li>
+        ) : (
+          <li>Clean-up is off, so the transcript is not sent anywhere else after you stop.</li>
+        )}
         <li>Those providers process your words under their own terms and retention policies.</li>
         <li>No audio is ever saved on your phone, your relay or Daintree.</li>
         <li>

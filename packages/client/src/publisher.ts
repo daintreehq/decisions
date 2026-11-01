@@ -201,8 +201,8 @@ export class Publisher {
       options: input.options ?? [],
       attachments: descriptors,
       allow_text: true,
-      project_label: origin.project_id.slice(0, 200),
-      machine_label: origin.host_id.slice(0, 200),
+      project_label: (origin.project_label?.trim() || origin.project_id).slice(0, 200),
+      machine_label: (origin.machine_label?.trim() || origin.host_id).slice(0, 200),
       origin_summary: `${origin.agent_kind} · ${origin.worktree_id}`.slice(0, 500),
     };
     const envelope = await encryptEnvelope({
