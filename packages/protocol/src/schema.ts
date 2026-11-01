@@ -285,6 +285,7 @@ export const EventType = z.enum([
   'decision.cancelled',
   'decision.expired',
   'decision.reopened',
+  'decision.deleted',
   'device.approved',
   'device.revoked',
   'device.key_rotated',
@@ -374,8 +375,10 @@ export const RevokeDeviceBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
   new_key_epoch: z.number().int().min(2),
   /** One grant for every remaining active device (excluding the revoked one), sealed to the new epoch key. */
-  grants: z.array(EpochGrant).min(1).max(LIMITS.maxDevices),
+  grants: z.array(EpochGrant).max(LIMITS.maxDevices),
 });
+
+export const RotateEpochBody = RevokeDeviceBody;
 
 export const AttachmentReserveBody = Idem.extend({
   protocol_version: z.literal(PROTOCOL_VERSION),

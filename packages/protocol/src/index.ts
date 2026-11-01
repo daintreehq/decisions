@@ -8,3 +8,4 @@ export * from './auth.js';
 export * from './signing.js';
 export * from './policy.js';
 export * from './state.js';
+export * from './api.js';
