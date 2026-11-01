@@ -6,7 +6,12 @@ import { tokenize } from './text.js';
 import type { DecisionExample } from './types.js';
 
 export type RecordResult =
-  | { recorded: true; revision: number }
+  | {
+      recorded: true;
+      revision: number;
+      /** The same label was already stored: nothing changed (idempotent re-ingestion). */
+      duplicate?: true;
+    }
   | {
       recorded: false;
       reason:
@@ -15,7 +20,8 @@ export type RecordResult =
         | 'project-opted-out'
         | 'invalid'
         | 'no-label'
-        | 'older-than-existing';
+        | 'older-than-existing'
+        | 'stale-revision';
     };
 
 export interface HistoryStore {
@@ -25,6 +31,12 @@ export interface HistoryStore {
   setProjectOptOut(projectTag: string, optedOut: boolean): void;
   isProjectOptedOut(projectTag: string): boolean;
   optedOutProjects(): string[];
+  /**
+   * Record a human decision. Ordering of corrections: when the caller supplies `revision` (the question's ledger
+   * revision after the human action) the higher revision wins, an equal revision is a duplicate (idempotent) or a
+   * conflict (rejected), and wall-clock time is ignored, so clock skew cannot reorder corrections. Callers without
+   * a revision fall back to `chosen_at`, where an equal timestamp can only be a duplicate.
+   */
   record(example: DecisionExample): RecordResult;
   get(questionId: string): DecisionExample | undefined;
   all(): DecisionExample[];
@@ -71,20 +83,35 @@ export const DecisionExampleSchema = z.object({
   superseded_by_revision: z.number().int().optional(),
 });
 
+/** Redacts every free-text field of an example, including options and earlier labels in `label_history`. */
+function redactExample(ex: DecisionExample): DecisionExample {
+  const out: DecisionExample = { ...ex, question: redactSecrets(ex.question) };
+  if (ex.context_summary !== undefined) out.context_summary = redactSecrets(ex.context_summary);
+  if (ex.human_reasoning !== undefined) out.human_reasoning = redactSecrets(ex.human_reasoning);
+  if (ex.options) out.options = ex.options.map((o) => ({ ...o, label: redactSecrets(o.label) }));
+  if (ex.label_history) {
+    out.label_history = ex.label_history.map((l) => {
+      const h = { ...l };
+      if (l.human_reasoning !== undefined) h.human_reasoning = redactSecrets(l.human_reasoning);
+      return h;
+    });
+  }
+  return out;
+}
+
 function sanitize(ex: z.infer<typeof DecisionExampleSchema>): DecisionExample {
   const out: DecisionExample = {
     question_id: ex.question_id,
-    question: redactSecrets(ex.question),
+    question: ex.question,
     created_at: ex.created_at,
     chosen_at: ex.chosen_at,
     policy_level: ex.policy_level,
     source: 'human',
   };
-  if (ex.context_summary !== undefined) out.context_summary = redactSecrets(ex.context_summary);
-  if (ex.options)
-    out.options = ex.options.map((o) => ({ id: o.id, label: redactSecrets(o.label) }));
+  if (ex.context_summary !== undefined) out.context_summary = ex.context_summary;
+  if (ex.options) out.options = ex.options.map((o) => ({ id: o.id, label: o.label }));
   if (ex.selected_option_ids) out.selected_option_ids = [...ex.selected_option_ids];
-  if (ex.human_reasoning !== undefined) out.human_reasoning = redactSecrets(ex.human_reasoning);
+  if (ex.human_reasoning !== undefined) out.human_reasoning = ex.human_reasoning;
   if (ex.project_tags) out.project_tags = [...ex.project_tags];
   if (ex.kind) out.kind = ex.kind;
   if (ex.outcome) out.outcome = ex.outcome;
@@ -92,7 +119,7 @@ function sanitize(ex: z.infer<typeof DecisionExampleSchema>): DecisionExample {
   if (ex.label_history) out.label_history = ex.label_history.map((l) => ({ ...l }));
   if (ex.superseded_by_revision !== undefined)
     out.superseded_by_revision = ex.superseded_by_revision;
-  return out;
+  return redactExample(out);
 }
 
 /** Text that is tokenised for lexical matching. Mirrors what retrieval scores. */
@@ -110,24 +137,34 @@ interface CommonState {
   optOut: Set<string>;
 }
 
+type Rejection = Extract<RecordResult, { recorded: false }>['reason'];
+type Prepared =
+  | { ok: true; example: DecisionExample; duplicate?: false }
+  | { ok: true; duplicate: true; revision: number }
+  | { ok: false; reason: Rejection };
+
+const sameLabel = (a: DecisionExample, b: DecisionExample): boolean =>
+  [...(a.selected_option_ids ?? [])].sort().join('\u0000') ===
+    [...(b.selected_option_ids ?? [])].sort().join('\u0000') &&
+  (a.human_reasoning ?? '') === (b.human_reasoning ?? '');
+
 /**
- * Shared record rules. Returns the prepared example (already redacted and merged with any earlier label)
- * or a rejection. `existing` is the stored example with the same question id, if any.
+ * Shared record rules. Returns the prepared example (already redacted and merged with any earlier label),
+ * a duplicate marker, or a rejection. `existing` is the stored example with the same question id, if any.
  */
 function prepare(
   state: CommonState,
   input: DecisionExample,
   existing: DecisionExample | undefined,
-):
-  | { ok: true; example: DecisionExample }
-  | { ok: false; reason: Extract<RecordResult, { recorded: false }>['reason'] } {
+): Prepared {
   if (!state.learning) return { ok: false, reason: 'learning-disabled' };
   if ((input as { source?: unknown }).source !== 'human') return { ok: false, reason: 'not-human' };
   const parsed = DecisionExampleSchema.safeParse(input);
   if (!parsed.success) return { ok: false, reason: 'invalid' };
   const ex = sanitize(parsed.data);
-  if ((ex.project_tags ?? []).some((t) => state.optOut.has(t)))
+  if ((ex.project_tags ?? []).some((t) => state.optOut.has(t))) {
     return { ok: false, reason: 'project-opted-out' };
+  }
   if (
     (ex.selected_option_ids?.length ?? 0) === 0 &&
     !(ex.human_reasoning && ex.human_reasoning.trim())
@@ -135,19 +172,43 @@ function prepare(
     return { ok: false, reason: 'no-label' };
   }
   if (!existing) return { ok: true, example: { ...ex, revision: ex.revision ?? 0 } };
-  // A later human correction replaces the label; an older late-arriving record never overrides it.
-  if (Date.parse(ex.chosen_at) < Date.parse(existing.chosen_at))
-    return { ok: false, reason: 'older-than-existing' };
-  const revision = (existing.revision ?? 0) + 1;
+
+  const cur = existing.revision ?? 0;
+  let nextRevision: number;
+  if (input.revision !== undefined) {
+    // Authoritative ordering: the ledger revision, never the wall clock.
+    if (ex.revision! < cur) return { ok: false, reason: 'stale-revision' };
+    if (ex.revision === cur) {
+      return sameLabel(ex, existing)
+        ? { ok: true, duplicate: true, revision: cur }
+        : { ok: false, reason: 'stale-revision' };
+    }
+    nextRevision = ex.revision!;
+  } else {
+    const tIn = Date.parse(ex.chosen_at);
+    const tEx = Date.parse(existing.chosen_at);
+    if (tIn < tEx) return { ok: false, reason: 'older-than-existing' };
+    if (tIn === tEx) {
+      return sameLabel(ex, existing)
+        ? { ok: true, duplicate: true, revision: cur }
+        : { ok: false, reason: 'stale-revision' };
+    }
+    nextRevision = cur + 1;
+  }
+
   const prev: NonNullable<DecisionExample['label_history']>[number] = {
     chosen_at: existing.chosen_at,
-    superseded_by_revision: revision,
+    superseded_by_revision: nextRevision,
   };
   if (existing.selected_option_ids) prev.selected_option_ids = existing.selected_option_ids;
   if (existing.human_reasoning !== undefined) prev.human_reasoning = existing.human_reasoning;
   return {
     ok: true,
-    example: { ...ex, revision, label_history: [...(existing.label_history ?? []), prev] },
+    example: {
+      ...ex,
+      revision: nextRevision,
+      label_history: [...(existing.label_history ?? []), prev],
+    },
   };
 }
 
@@ -183,6 +244,7 @@ export class MemoryHistoryStore implements HistoryStore {
   record(example: DecisionExample): RecordResult {
     const r = prepare(this.state, example, this.items.get(example.question_id));
     if (!r.ok) return { recorded: false, reason: r.reason };
+    if (r.duplicate) return { recorded: true, revision: r.revision, duplicate: true };
     this.items.set(r.example.question_id, r.example);
     this.ver++;
     return { recorded: true, revision: r.example.revision ?? 0 };
@@ -211,7 +273,7 @@ export class MemoryHistoryStore implements HistoryStore {
   }
   rebuildIndex(): void {
     // Nothing is persisted separately for the in-JS index; re-run redaction defensively.
-    for (const [id, ex] of this.items) this.items.set(id, sanitizeStored(ex));
+    for (const [id, ex] of this.items) this.items.set(id, redactExample(ex));
     this.ver++;
   }
   version(): number {
@@ -219,16 +281,9 @@ export class MemoryHistoryStore implements HistoryStore {
   }
 }
 
-function sanitizeStored(ex: DecisionExample): DecisionExample {
-  const copy: DecisionExample = { ...ex, question: redactSecrets(ex.question) };
-  if (ex.context_summary !== undefined) copy.context_summary = redactSecrets(ex.context_summary);
-  if (ex.human_reasoning !== undefined) copy.human_reasoning = redactSecrets(ex.human_reasoning);
-  return copy;
-}
-
 export interface SqliteHistoryOptions {
   learningEnabled?: boolean;
-  /** Skip FTS5 even when available (used to test the fallback path). */
+  /** Do not use FTS5 for candidate prefiltering (an existing FTS index is still kept clean). */
   disableFts?: boolean;
   /** Only use FTS5 to prefilter once the store has more than this many examples. Default 500. */
   prefilterThreshold?: number;
@@ -241,7 +296,10 @@ export class SqliteHistoryStore implements HistoryStore {
   private readonly db: DatabaseSync;
   private readonly state: CommonState;
   private readonly prefilterThreshold: number;
+  /** FTS5 is enabled for candidate prefiltering. */
   private fts = false;
+  /** An FTS table exists in this database. It is kept in sync (and purged) whether or not prefiltering is on. */
+  private ftsPresent = false;
 
   constructor(path: string, opts: SqliteHistoryOptions = {}) {
     this.db = new DatabaseSync(path);
@@ -254,7 +312,11 @@ export class SqliteHistoryStore implements HistoryStore {
         (this.db.prepare('SELECT tag FROM opt_outs').all() as { tag: string }[]).map((r) => r.tag),
       ),
     };
+    if (this.ftsPresent && (this.getMeta('fts_dirty') === '1' || this.ftsNeedsBackfill))
+      this.reindexFts();
   }
+
+  private ftsNeedsBackfill = false;
 
   /** True when FTS5 is available and enabled for candidate prefiltering. */
   get ftsEnabled(): boolean {
@@ -280,13 +342,17 @@ export class SqliteHistoryStore implements HistoryStore {
         COMMIT;
       `);
     }
+    this.ftsPresent = this.ftsTableExists();
     // FTS5 is optional: some SQLite builds omit it. Absence only disables prefiltering.
     if (!disableFts) {
       try {
         this.db.exec(
           'CREATE VIRTUAL TABLE IF NOT EXISTS examples_fts USING fts5(question_id UNINDEXED, body)',
         );
+        // A table created now has not seen the existing rows.
+        if (!this.ftsPresent && this.count() > 0) this.ftsNeedsBackfill = true;
         this.fts = true;
+        this.ftsPresent = true;
       } catch {
         this.fts = false;
       }
@@ -315,12 +381,34 @@ export class SqliteHistoryStore implements HistoryStore {
         .get() !== undefined
     );
   }
+
+  /** Runs an FTS statement; if it cannot run (module missing, corruption) the index is flagged for a rebuild. */
+  private ftsDo(fn: () => void): void {
+    if (!this.ftsPresent) return;
+    try {
+      fn();
+    } catch {
+      try {
+        this.setMeta('fts_dirty', '1');
+      } catch {
+        /* nothing more we can do */
+      }
+    }
+  }
   private ftsUpsert(ex: DecisionExample): void {
-    if (!this.fts) return;
-    this.db.prepare('DELETE FROM examples_fts WHERE question_id = ?').run(ex.question_id);
-    this.db
-      .prepare('INSERT INTO examples_fts(question_id, body) VALUES(?, ?)')
-      .run(ex.question_id, tokenize(indexText(ex)).join(' '));
+    this.ftsDo(() => {
+      this.db.prepare('DELETE FROM examples_fts WHERE question_id = ?').run(ex.question_id);
+      this.db
+        .prepare('INSERT INTO examples_fts(question_id, body) VALUES(?, ?)')
+        .run(ex.question_id, tokenize(indexText(ex)).join(' '));
+    });
+  }
+  private reindexFts(): void {
+    this.ftsDo(() => {
+      this.db.exec('DELETE FROM examples_fts');
+      for (const ex of this.all()) this.ftsUpsert(ex);
+      this.db.prepare("DELETE FROM meta WHERE key = 'fts_dirty'").run();
+    });
   }
 
   learningEnabled(): boolean {
@@ -360,6 +448,7 @@ export class SqliteHistoryStore implements HistoryStore {
   record(example: DecisionExample): RecordResult {
     const r = prepare(this.state, example, this.get(example.question_id));
     if (!r.ok) return { recorded: false, reason: r.reason };
+    if (r.duplicate) return { recorded: true, revision: r.revision, duplicate: true };
     this.db.exec('BEGIN');
     try {
       this.db
@@ -410,7 +499,7 @@ export class SqliteHistoryStore implements HistoryStore {
   }
   private forgetInner(id: string): boolean {
     const res = this.db.prepare('DELETE FROM examples WHERE question_id = ?').run(id);
-    if (this.fts) this.db.prepare('DELETE FROM examples_fts WHERE question_id = ?').run(id);
+    this.ftsDo(() => this.db.prepare('DELETE FROM examples_fts WHERE question_id = ?').run(id));
     return Number(res.changes) > 0;
   }
   forget(id: string): boolean {
@@ -429,7 +518,7 @@ export class SqliteHistoryStore implements HistoryStore {
     this.db.exec('BEGIN');
     try {
       this.db.exec('DELETE FROM examples');
-      if (this.fts) this.db.exec('DELETE FROM examples_fts');
+      this.ftsDo(() => this.db.exec('DELETE FROM examples_fts'));
       this.bump();
       this.db.exec('COMMIT');
     } catch (e) {
@@ -440,14 +529,13 @@ export class SqliteHistoryStore implements HistoryStore {
   rebuildIndex(): void {
     this.db.exec('BEGIN');
     try {
-      if (this.fts && this.ftsTableExists()) this.db.exec('DELETE FROM examples_fts');
       for (const ex of this.all()) {
-        const clean = sanitizeStored(ex);
+        const clean = redactExample(ex);
         this.db
           .prepare('UPDATE examples SET data = ? WHERE question_id = ?')
           .run(JSON.stringify(clean), clean.question_id);
-        this.ftsUpsert(clean);
       }
+      this.reindexFts();
       this.bump();
       this.db.exec('COMMIT');
     } catch (e) {

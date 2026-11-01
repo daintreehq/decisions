@@ -30,6 +30,21 @@ const INJECTION_PATTERNS: RegExp[] = [
   /\bprompt injection\b/i,
 ];
 
+const statelessCache = new WeakMap<RegExp, RegExp>();
+
+/**
+ * A copy of `re` without the global/sticky flags. `RegExp#test`/`#exec` on a `g` or `y` regex advance `lastIndex`,
+ * so the same configured block would match one call and miss the next. Hard blocks must be stateless.
+ */
+function stateless(re: RegExp): RegExp {
+  let c = statelessCache.get(re);
+  if (!c) {
+    c = new RegExp(re.source, re.flags.replace(/[gy]/g, ''));
+    statelessCache.set(re, c);
+  }
+  return c;
+}
+
 export function injectionHit(input: ProxyQuestionInput): string | null {
   const texts = [
     input.question,
@@ -37,7 +52,7 @@ export function injectionHit(input: ProxyQuestionInput): string | null {
     ...input.options.flatMap((o) => [o.label, o.description ?? '']),
   ];
   for (const t of texts) {
-    for (const p of INJECTION_PATTERNS) if (p.test(t)) return p.source.slice(0, 40);
+    for (const p of INJECTION_PATTERNS) if (stateless(p).test(t)) return p.source.slice(0, 40);
   }
   return null;
 }
@@ -45,7 +60,9 @@ export function injectionHit(input: ProxyQuestionInput): string | null {
 export function matchesGate(gateId: string | undefined, gates: (string | RegExp)[]): boolean {
   if (!gateId) return false;
   const g = gateId.toLowerCase();
-  return gates.some((p) => (typeof p === 'string' ? g.includes(p.toLowerCase()) : p.test(gateId)));
+  return gates.some((p) =>
+    typeof p === 'string' ? g.includes(p.toLowerCase()) : stateless(p).test(gateId),
+  );
 }
 
 export function keywordHit(input: ProxyQuestionInput, re: RegExp): string | null {
@@ -55,7 +72,7 @@ export function keywordHit(input: ProxyQuestionInput, re: RegExp): string | null
     ...input.options.map((o) => o.label),
   ];
   for (const t of texts) {
-    const m = re.exec(t);
+    const m = stateless(re).exec(t);
     if (m) return m[0].toLowerCase();
   }
   return null;
@@ -94,18 +111,15 @@ export const ModelOutputSchema = z
   })
   .strict();
 
+/**
+ * The ENTIRE reply must be the decision object, optionally wrapped in one code fence. There is deliberately no
+ * substring recovery: prose around an object ("this is only an example: {...}") must never become an answer.
+ */
 export function extractJson(text: string): unknown {
   let t = text.trim();
   const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(t);
   if (fence) t = fence[1]!.trim();
-  try {
-    return JSON.parse(t);
-  } catch {
-    const a = t.indexOf('{');
-    const b = t.lastIndexOf('}');
-    if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
-    throw new Error('no JSON object');
-  }
+  return JSON.parse(t);
 }
 
 export interface ValidatedDecision {

@@ -34,11 +34,25 @@ import type {
   SuggestOutcome,
 } from './types.js';
 
+/** One scored historical prediction: the model's self-reported confidence and whether it matched the human. */
+export interface CalibrationPoint {
+  confidence: number;
+  correct: boolean;
+}
+
+/**
+ * Evidence from a chronological replay (`evaluateHistory(...).calibration`). Authorisation is computed from the
+ * individual points for the exact threshold in use, never from a summary, so a threshold is only trusted when the
+ * band at-or-above it has enough samples and meets the target accuracy by itself.
+ */
 export interface CalibrationData {
-  /** Number of evaluated (answered) historical examples behind the recommendation. */
+  /** Number of evaluated (answered) historical examples; informational. */
   samples: number;
-  /** Smallest confidence at which accuracy met the operator's target, or null if none did. */
+  /** Smallest confidence band that met the target during evaluation, or null; informational. */
   recommendedThreshold: number | null;
+  /** Accuracy the replay was held to. */
+  targetAccuracy: number;
+  points: CalibrationPoint[];
   evaluatedAt?: string;
 }
 
@@ -54,6 +68,8 @@ export interface DecisionModelPolicy {
   autoAnswerThreshold?: number | null;
   calibration?: CalibrationData | null;
   minCalibrationSamples?: number;
+  /** Calibration held to a lower accuracy target than this cannot authorise auto-answers. Default 0.8. */
+  minTargetAccuracy?: number;
   timeoutMs?: number;
   retries?: number;
   retryDelayMs?: number;
@@ -186,16 +202,31 @@ export class DecisionModel implements ProxyEngine {
     this.limiter = new Limiter(this.policy.maxConcurrent ?? 2, this.policy.maxQueue ?? 16);
   }
 
-  /** Confidence needed for an automatic answer, or null while the engine is suggestion-only. */
+  /**
+   * Confidence needed for an automatic answer, or null while the engine is suggestion-only. The operator's threshold
+   * is honoured only if the calibration evidence for exactly that threshold qualifies: at least
+   * `minCalibrationSamples` replayed predictions at or above it, with accuracy meeting the calibration's target
+   * (itself no lower than `minTargetAccuracy`).
+   */
   effectiveThreshold(): number | null {
     const p = this.policy;
     const t = p.autoAnswerThreshold ?? null;
     const c = p.calibration;
-    if (t === null || !c) return null;
-    if (!(t >= 0 && t <= 1)) return null;
-    if (c.samples < (p.minCalibrationSamples ?? 30)) return null;
-    if (c.recommendedThreshold === null || !Number.isFinite(c.recommendedThreshold)) return null;
-    return Math.max(t, c.recommendedThreshold);
+    if (t === null || !c || !(t >= 0 && t <= 1)) return null;
+    if (!Array.isArray(c.points) || typeof c.targetAccuracy !== 'number') return null;
+    if (!(c.targetAccuracy >= (p.minTargetAccuracy ?? 0.8) && c.targetAccuracy <= 1)) return null;
+    const min = p.minCalibrationSamples ?? 30;
+    const band = c.points.filter(
+      (x) =>
+        x &&
+        typeof x.confidence === 'number' &&
+        Number.isFinite(x.confidence) &&
+        typeof x.correct === 'boolean' &&
+        x.confidence >= t,
+    );
+    if (band.length < min) return null;
+    const accuracy = band.filter((x) => x.correct).length / band.length;
+    return accuracy >= c.targetAccuracy ? t : null;
   }
 
   setCalibration(calibration: CalibrationData | null): void {
@@ -305,7 +336,9 @@ export class DecisionModel implements ProxyEngine {
     const op = optionProblem(input);
     if (op) return { type: 'abstain', reason: op };
 
-    // 3. Evidence.
+    // 3. Evidence. Capture the history version now: anything learned or forgotten while the model runs
+    // invalidates the evidence this answer would rest on.
+    const historyVersion = this.history.version();
     const retrieval = retrieve(this.history, input, p.retrieval);
     if (retrieval.examples.length < (p.minExamples ?? 3))
       return { type: 'abstain', reason: 'insufficient-history' };
@@ -313,6 +346,10 @@ export class DecisionModel implements ProxyEngine {
 
     // 4. One inference per question content (cached; concurrent callers share one call).
     const built = buildPrompt(input, retrieval, p.prompt);
+    // Truncation to fit the prompt budget must not slip below the minimum evidence.
+    if (built.includedExampleIds.length < (p.minExamples ?? 3)) {
+      return { type: 'abstain', reason: 'insufficient-history' };
+    }
     const key = sha256(
       canonicalize({
         q: sha256(
@@ -345,6 +382,9 @@ export class DecisionModel implements ProxyEngine {
         return { type: 'abstain', reason: TERMINAL_REASONS.timeout };
       return { type: 'abstain', reason: TERMINAL_REASONS.modelError };
     }
+
+    if (this.history.version() !== historyVersion)
+      return { type: 'abstain', reason: 'stale-history' };
 
     // 5. Strict validation: any violation is an abstention.
     const v = validateModelReply(reply, input, built.includedExampleIds);

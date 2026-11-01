@@ -40,6 +40,10 @@ export interface Bucket {
 
 export interface EvaluationReport {
   total: number;
+  /** Examples dropped before scoring because they were not human-sourced (proxy output is never ground truth). */
+  rejected_non_human: number;
+  /** Examples dropped because their timestamps could not be ordered. */
+  rejected_invalid: number;
   /** Examples that have a choice among offered options and could be scored. */
   scored: number;
   unscored: number;
@@ -81,15 +85,30 @@ function toInput(ex: DecisionExample): ProxyQuestionInput {
   return input;
 }
 
+interface ReplayEvent {
+  at: number;
+  /** 0 = a question is asked and predicted; 1 = the human's answer is committed. Asked sorts before answered. */
+  kind: 0 | 1;
+  order: number;
+  ex: DecisionExample;
+}
+
 /**
- * Chronological replay: for each human decision, predict it from only the decisions made before it, then add
- * it to the history. Never trains on the future, so the numbers are an honest estimate of live behaviour.
+ * Chronological replay of the human's own decisions. Each question is predicted at the moment it was ASKED
+ * (`created_at`) using only labels that had already been COMMITTED (`chosen_at`) by then; its own label and any
+ * later or concurrent one are never visible. Non-human-sourced examples are dropped before anything is scored or
+ * learned, so proxy output can never become calibration ground truth.
  */
 export async function evaluateHistory(opts: EvaluateOptions): Promise<EvaluationReport> {
   const target = opts.targetAccuracy ?? 0.9;
   const minSamples = opts.minSamples ?? 30;
   const edges = [...(opts.bucketEdges ?? [0.5, 0.6, 0.7, 0.8, 0.9])].sort((a, b) => a - b);
   const minTrain = opts.minTrainExamples ?? 1;
+
+  const humanOnly = opts.examples.filter((e) => (e as { source?: unknown }).source === 'human');
+  const rejectedNonHuman = opts.examples.length - humanOnly.length;
+  const usable = humanOnly.filter((e) => Number.isFinite(Date.parse(e.chosen_at)));
+  const rejectedInvalid = humanOnly.length - usable.length;
 
   const store: HistoryStore = new MemoryHistoryStore({ learningEnabled: true });
   const engine = new DecisionModel({
@@ -98,21 +117,57 @@ export async function evaluateHistory(opts: EvaluateOptions): Promise<Evaluation
     policy: { ...(opts.policy ?? {}), autoAnswerThreshold: null },
   });
 
-  const sorted = [...opts.examples].sort(
-    (a, b) => Date.parse(a.chosen_at) - Date.parse(b.chosen_at),
-  );
+  const events: ReplayEvent[] = [];
+  usable.forEach((ex, order) => {
+    const chosen = Date.parse(ex.chosen_at);
+    const created = Date.parse(ex.created_at);
+    // A question cannot be predicted after it was answered; an unreadable creation time falls back to that bound.
+    const asked = Number.isFinite(created) ? Math.min(created, chosen) : chosen;
+    events.push({ at: asked, kind: 0, order, ex }, { at: chosen, kind: 1, order, ex });
+  });
+  events.sort((a, b) => a.at - b.at || a.kind - b.kind || a.order - b.order);
+
   const items: EvaluationItem[] = [];
   const abstainReasons: Record<string, number> = {};
-  let seen = 0;
 
-  for (const ex of sorted) {
+  for (const ev of events) {
     if (opts.signal?.aborted) break;
+    const ex = ev.ex;
+    if (ev.kind === 1) {
+      store.record(ex);
+      continue;
+    }
     const actual = ex.selected_option_ids ?? [];
     const scoreable = actual.length > 0 && (ex.options?.length ?? 0) > 0;
-    if (scoreable) {
-      const kind = ex.kind ?? ((ex.options?.length ?? 0) >= 2 ? 'choice' : 'text');
-      let item: EvaluationItem;
-      if (seen < minTrain) {
+    if (!scoreable) continue;
+    const kind = ex.kind ?? ((ex.options?.length ?? 0) >= 2 ? 'choice' : 'text');
+    let item: EvaluationItem;
+    if (store.count() < minTrain) {
+      item = {
+        question_id: ex.question_id,
+        kind,
+        chosen_at: ex.chosen_at,
+        actual,
+        predicted: null,
+        confidence: null,
+        correct: null,
+        abstain_reason: 'insufficient-history',
+      };
+    } else {
+      const r = await engine.suggestOnly(toInput(ex), opts.signal);
+      if (r.action === 'suggest') {
+        const predicted = r.suggestion.selected_option_ids;
+        item = {
+          question_id: ex.question_id,
+          kind,
+          chosen_at: ex.chosen_at,
+          actual,
+          predicted,
+          confidence: r.suggestion.confidence,
+          correct: sameSet(predicted, actual),
+          abstain_reason: null,
+        };
+      } else {
         item = {
           question_id: ex.question_id,
           kind,
@@ -121,44 +176,15 @@ export async function evaluateHistory(opts: EvaluateOptions): Promise<Evaluation
           predicted: null,
           confidence: null,
           correct: null,
-          abstain_reason: 'insufficient-history',
+          abstain_reason: r.reason,
         };
-      } else {
-        const r = await engine.suggestOnly(toInput(ex), opts.signal);
-        if (r.action === 'suggest') {
-          const predicted = r.suggestion.selected_option_ids;
-          item = {
-            question_id: ex.question_id,
-            kind,
-            chosen_at: ex.chosen_at,
-            actual,
-            predicted,
-            confidence: r.suggestion.confidence,
-            correct: sameSet(predicted, actual),
-            abstain_reason: null,
-          };
-        } else {
-          item = {
-            question_id: ex.question_id,
-            kind,
-            chosen_at: ex.chosen_at,
-            actual,
-            predicted: null,
-            confidence: null,
-            correct: null,
-            abstain_reason: r.reason,
-          };
-        }
       }
-      if (item.abstain_reason) {
-        const k = item.abstain_reason.split(':')[0]!;
-        abstainReasons[k] = (abstainReasons[k] ?? 0) + 1;
-      }
-      items.push(item);
     }
-    // Learn from the decision only after predicting it.
-    store.record(ex);
-    seen++;
+    if (item.abstain_reason) {
+      const k = item.abstain_reason.split(':')[0]!;
+      abstainReasons[k] = (abstainReasons[k] ?? 0) + 1;
+    }
+    items.push(item);
   }
 
   const answeredItems = items.filter((i) => i.correct !== null);
@@ -195,9 +221,11 @@ export async function evaluateHistory(opts: EvaluateOptions): Promise<Evaluation
   }
 
   return {
-    total: sorted.length,
+    total: usable.length,
+    rejected_non_human: rejectedNonHuman,
+    rejected_invalid: rejectedInvalid,
     scored: items.length,
-    unscored: sorted.length - items.length,
+    unscored: usable.length - items.length,
     answered: answeredItems.length,
     abstained: items.length - answeredItems.length,
     coverage: ratio(answeredItems.length, items.length),
@@ -213,6 +241,8 @@ export async function evaluateHistory(opts: EvaluateOptions): Promise<Evaluation
     calibration: {
       samples: answeredItems.length,
       recommendedThreshold: recommended,
+      targetAccuracy: target,
+      points: answeredItems.map((i) => ({ confidence: i.confidence!, correct: i.correct! })),
       evaluatedAt: new Date().toISOString(),
     },
     items,
@@ -225,7 +255,7 @@ const pct = (x: number | null): string => (x === null ? 'n/a' : `${(x * 100).toF
 export function formatReport(r: EvaluationReport): string {
   const lines = [
     'Decision model evaluation (chronological replay)',
-    `  examples: ${r.total} (${r.scored} scoreable, ${r.unscored} not scoreable)`,
+    `  examples: ${r.total} (${r.scored} scoreable, ${r.unscored} not scoreable)${r.rejected_non_human ? `; ignored ${r.rejected_non_human} non-human` : ''}`,
     `  answered: ${r.answered}   abstained: ${r.abstained}   coverage: ${pct(r.coverage)}`,
     `  accuracy on answered: ${pct(r.accuracy)}   disagreement with you: ${pct(r.disagreement_rate)}`,
     '  by kind:',

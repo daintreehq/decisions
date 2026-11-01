@@ -21,11 +21,22 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g,
 ];
 
-// KEY=value lines with a secret-looking name (.env style, shell exports, YAML-ish `key: value`).
-const ENV_LINE =
-  /^([ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|AUTH)[A-Za-z0-9_.-]*[ \t]*[=:][ \t]*)(?!\[REDACTED\])\S.*$/gim;
-const INLINE_PASSWORD =
-  /\b(password|passwd|pwd|secret|api[_-]?key|token)(\s*[:=]\s*)(?!\[REDACTED\])("[^"\n]+"|'[^'\n]+'|[^\s,;]+)/gi;
+// Credential-looking variable names. The name may be the keyword alone (PRIVATE_KEY, PASSPHRASE) or have a prefix
+// and/or suffix (DB_PASSWORD, STRIPE_SECRET_KEY). Quantifiers are bounded so long lines cannot cause backtracking blow-ups.
+const NAME_KEYWORD =
+  '(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|AUTH[_-]?(?:TOKEN|KEY|SECRET)|AUTHORIZATION)';
+const NAME = `[A-Za-z0-9_.-]{0,64}${NAME_KEYWORD}[A-Za-z0-9_.-]{0,64}`;
+
+// KEY=value lines (.env files, shell exports, `key: value` config): redact everything after the separator.
+const ENV_LINE = new RegExp(
+  `^([ \\t]*(?:export[ \\t]+)?${NAME}[ \\t]*[=:][ \\t]*)(?!\\[REDACTED\\])\\S.*$`,
+  'gim',
+);
+// The same assignments embedded in prose or code: `run with DB_PASSWORD=hunter2 set`.
+const INLINE_ASSIGNMENT = new RegExp(
+  `(${NAME})([ \\t]*[:=][ \\t]*)(?!\\[REDACTED\\])("[^"\\n]+"|'[^'\\n]+'|[^\\s,;]+)`,
+  'gi',
+);
 const URL_CREDENTIALS = /(\b[a-z][a-z0-9+.-]*:\/\/)([^\s/:@]+):([^\s/@]+)@/gi;
 
 /** Remove anything that looks like a credential before it is stored, indexed or put in a prompt. */
@@ -35,7 +46,7 @@ export function redactSecrets(text: string): string {
   for (const p of TOKEN_PATTERNS) out = out.replace(p, REDACTED);
   out = out.replace(URL_CREDENTIALS, `$1${REDACTED}@`);
   out = out.replace(ENV_LINE, `$1${REDACTED}`);
-  out = out.replace(INLINE_PASSWORD, `$1$2${REDACTED}`);
+  out = out.replace(INLINE_ASSIGNMENT, `$1$2${REDACTED}`);
   return out;
 }
 

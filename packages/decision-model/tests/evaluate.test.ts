@@ -11,7 +11,8 @@ function timeline() {
     ex(`e${i}`, {
       question: `Sidebar density for panel #${i}: compact or comfortable?`,
       chosen_at: day(i + 1),
-      created_at: day(i),
+      // Asked half a day after the previous question was answered, so every earlier label is already committed.
+      created_at: new Date(Date.parse(day(i)) + 43_200_000).toISOString(),
     }),
   );
 }

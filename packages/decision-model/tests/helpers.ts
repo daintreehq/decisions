@@ -1,4 +1,5 @@
 import { FakeAdapter } from '../src/adapters/fake.js';
+import type { CalibrationData } from '../src/engine.js';
 import type { ModelPrompt } from '../src/prompt.js';
 import { MemoryHistoryStore, type HistoryStore } from '../src/history.js';
 import type { DecisionExample, ProxyQuestionInput } from '../src/types.js';
@@ -96,9 +97,27 @@ export const abstainJson = (reason = 'not sure'): string =>
 export const okAdapter = (o: Parameters<typeof answerJson>[1] = {}): FakeAdapter =>
   new FakeAdapter({ responder: (p) => answerJson(p, o) });
 
+/** Calibration evidence: the exact confidence/correctness pairs a replay produced. */
+export function calibration(
+  points: [number, boolean][],
+  targetAccuracy = 0.9,
+  recommendedThreshold: number | null = 0,
+): CalibrationData {
+  return {
+    samples: points.length,
+    recommendedThreshold,
+    targetAccuracy,
+    points: points.map(([confidence, correct]) => ({ confidence, correct })),
+  };
+}
+
+export const GOOD_CALIBRATION = calibration(
+  Array.from({ length: 40 }, () => [0.9, true] as [number, boolean]),
+);
+
 export const AUTHORISED = {
   autoAnswerThreshold: 0.8,
-  calibration: { samples: 50, recommendedThreshold: 0.7 },
+  calibration: GOOD_CALIBRATION,
   retryDelayMs: 1,
 } as const;
 

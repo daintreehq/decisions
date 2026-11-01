@@ -42,6 +42,7 @@ export interface RetrievalResult {
 }
 
 const DEFAULT_WEIGHTS = { bm25: 0.65, recency: 0.1, tags: 0.15, options: 0.1 };
+const MAX_EXAMPLES = 12;
 const K1 = 1.2;
 const B = 0.75;
 
@@ -81,7 +82,7 @@ export function retrieve(
   input: ProxyQuestionInput,
   opts: RetrievalOptions = {},
 ): RetrievalResult {
-  const limit = Math.min(12, Math.max(1, Math.floor(opts.limit ?? 8)));
+  const limit = Math.min(MAX_EXAMPLES, Math.max(1, Math.floor(opts.limit ?? 8)));
   const w = { ...DEFAULT_WEIGHTS, ...(opts.weights ?? {}) };
   const now = (opts.now ?? new Date()).getTime();
   const halfLifeMs = (opts.recencyHalfLifeDays ?? 180) * 86_400_000;
@@ -157,25 +158,31 @@ export function retrieve(
   const chosen = scored.slice(0, limit);
   const top1Key = chosen[0] ? answerKey(chosen[0].example) : null;
 
-  // Contradictory evidence must not be crowded out by agreeing examples: pull in up to two dissenters.
+  // Contradictory evidence must never be crowded out by agreeing examples, including when the cap is full:
+  // find up to two qualifying dissenters across ALL scored candidates, then make room for them by dropping the
+  // lowest-ranked agreeing examples (never the top hit).
   if (top1Key) {
+    const dissenters = scored
+      .filter((s) => {
+        const k = answerKey(s.example);
+        return !!k && k !== top1Key && s.optionSimilarity >= 0.5 && s.relevance >= 0.25;
+      })
+      .slice(0, 2);
+    const dissenterIds = new Set(dissenters.map((d) => d.example.question_id));
     const have = new Set(chosen.map((c) => c.example.question_id));
-    let added = 0;
-    for (const s of scored.slice(limit)) {
-      if (added >= 2 || chosen.length >= 12) break;
-      const k = answerKey(s.example);
-      if (
-        !have.has(s.example.question_id) &&
-        k &&
-        k !== top1Key &&
-        s.optionSimilarity >= 0.5 &&
-        s.relevance >= 0.25
-      ) {
-        chosen.push(s);
-        have.add(s.example.question_id);
-        added++;
+    const missing = dissenters.filter((d) => !have.has(d.example.question_id));
+    while (chosen.length + missing.length > MAX_EXAMPLES) {
+      let drop = -1;
+      for (let i = chosen.length - 1; i > 0; i--) {
+        if (!dissenterIds.has(chosen[i]!.example.question_id)) {
+          drop = i;
+          break;
+        }
       }
+      if (drop < 1) break;
+      chosen.splice(drop, 1);
     }
+    chosen.push(...missing);
   }
 
   const contradictions: Contradiction[] = [];

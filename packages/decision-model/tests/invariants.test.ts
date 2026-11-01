@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { FakeAdapter } from '../src/adapters/fake.js';
 import { TransientAdapterError } from '../src/adapters/types.js';
 import { createDecisionModel } from '../src/engine.js';
-import { AUTHORISED, answerJson, input, mulberry32, seededStore } from './helpers.js';
+import { AUTHORISED, answerJson, calibration, input, mulberry32, seededStore } from './helpers.js';
 
 /** Adversarial replies: valid, near-valid, garbage and injection attempts. */
 function randomReply(rand: () => number, p: Parameters<typeof answerJson>[0]): string {
@@ -54,7 +54,11 @@ describe('invariant: a human-required question is never answered by the model', 
       policy: {
         ...AUTHORISED,
         autoAnswerThreshold: 0.01,
-        calibration: { samples: 1000, recommendedThreshold: 0.01 },
+        calibration: calibration(
+          Array.from({ length: 100 }, () => [0.99, true] as [number, boolean]),
+          0.9,
+          0.01,
+        ),
         retries: 0,
       },
     });

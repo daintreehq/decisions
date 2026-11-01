@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { basename } from 'node:path';
 import type { ModelPrompt } from '../prompt.js';
 import {
   AdapterError,
@@ -96,7 +97,6 @@ export class CommandAdapter implements DecisionModelAdapter {
       let settled = false;
       const out: Buffer[] = [];
       let outBytes = 0;
-      let errText = '';
 
       const killTree = (): void => {
         try {
@@ -144,9 +144,8 @@ export class CommandAdapter implements DecisionModelAdapter {
         }
         out.push(d);
       });
-      child.stderr.on('data', (d: Buffer) => {
-        if (errText.length < 400) errText += d.toString('utf8');
-      });
+      // stderr is drained but never kept or reported: CLIs echo credentials and prompt text into it.
+      child.stderr.on('data', () => undefined);
       child.on('error', (e: NodeJS.ErrnoException) => {
         finish(() =>
           reject(
@@ -160,11 +159,7 @@ export class CommandAdapter implements DecisionModelAdapter {
         finish(() => {
           if (code === 0) resolve(Buffer.concat(out).toString('utf8'));
           else
-            reject(
-              new AdapterError(
-                `${o.command} exited with code ${code}${errText ? `: ${errText.slice(0, 200).trim()}` : ''}`,
-              ),
-            );
+            reject(new AdapterError(`${basename(o.command)} exited with code ${code ?? 'null'}`));
         });
       });
       // The child may exit before reading stdin; that is reported through the exit code instead.

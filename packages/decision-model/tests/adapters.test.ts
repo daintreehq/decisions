@@ -134,10 +134,8 @@ describe('CommandAdapter', () => {
     );
   });
 
-  it('reports non-zero exits without echoing much stderr, and missing binaries', async () => {
-    await expect(node('fail.mjs').suggest(prompt)).rejects.toThrow(
-      /exited with code 3: boom happened/,
-    );
+  it('reports non-zero exits without any stderr, and missing binaries', async () => {
+    await expect(node('fail.mjs').suggest(prompt)).rejects.toThrow(/exited with code 3$/);
     const missing = new CommandAdapter({ command: join(dir, 'no-such-binary') });
     await expect(missing.suggest(prompt)).rejects.toBeInstanceOf(AdapterError);
   });

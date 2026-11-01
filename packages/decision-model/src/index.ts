@@ -11,3 +11,4 @@ export * from './adapters/types.js';
 export * from './adapters/fake.js';
 export * from './adapters/command.js';
 export * from './adapters/api.js';
+export * from './bridge.js';

@@ -6,7 +6,9 @@ import { PROMPT_TEMPLATE_VERSION } from '../src/prompt.js';
 import { MemoryHistoryStore } from '../src/history.js';
 import {
   AUTHORISED,
+  GOOD_CALIBRATION,
   abstainJson,
+  calibration,
   answerJson,
   day,
   ex,
@@ -34,15 +36,19 @@ describe('threshold gating', () => {
   });
 
   it('a threshold without enough calibration never authorises answers', async () => {
-    for (const calibration of [
+    for (const cal of [
       null,
-      { samples: 5, recommendedThreshold: 0.5 },
-      { samples: 100, recommendedThreshold: null },
+      calibration([[0.9, true]], 0.9),
+      calibration(
+        Array.from({ length: 100 }, () => [0.9, false] as [number, boolean]),
+        0.9,
+        null,
+      ),
     ]) {
       const m = createDecisionModel({
         history: seededStore(),
         adapter: okAdapter(),
-        policy: { autoAnswerThreshold: 0.5, calibration },
+        policy: { autoAnswerThreshold: 0.5, calibration: cal },
       });
       expect(m.effectiveThreshold()).toBeNull();
       expect((await m.suggest(input())).action).toBe('abstain');
@@ -50,10 +56,7 @@ describe('threshold gating', () => {
     const noOperatorThreshold = createDecisionModel({
       history: seededStore(),
       adapter: okAdapter(),
-      policy: {
-        autoAnswerThreshold: null,
-        calibration: { samples: 100, recommendedThreshold: 0.5 },
-      },
+      policy: { autoAnswerThreshold: null, calibration: GOOD_CALIBRATION },
     });
     expect(noOperatorThreshold.effectiveThreshold()).toBeNull();
   });
@@ -70,18 +73,6 @@ describe('threshold gating', () => {
     expect(r.prompt_template_version).toBe(PROMPT_TEMPLATE_VERSION);
     expect(r.retrieval_reference_ids.length).toBeGreaterThan(0);
     expect(r.rationale).toContain('compact');
-  });
-
-  it('uses the stricter of the operator threshold and the calibrated recommendation', () => {
-    const m = createDecisionModel({
-      history: seededStore(),
-      adapter: okAdapter(),
-      policy: {
-        autoAnswerThreshold: 0.6,
-        calibration: { samples: 40, recommendedThreshold: 0.85 },
-      },
-    });
-    expect(m.effectiveThreshold()).toBe(0.85);
   });
 
   it('abstains below the threshold, keeping the suggestion for display', async () => {
