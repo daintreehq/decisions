@@ -29,6 +29,8 @@ export async function originScope(o: QuestionOrigin): Promise<string> {
         o.host_id,
         o.pane_id,
         o.terminal_generation,
+        o.ownership_principal,
+        o.agent_incarnation,
         o.agent_session_id,
         o.worktree_id,
       ]),

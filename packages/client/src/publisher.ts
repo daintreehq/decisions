@@ -78,6 +78,13 @@ export class Publisher {
       );
     }
     const input = parsed.data;
+    // The run identity comes from the host, never the agent. Without it a relaunched pane that reuses the
+    // pane id could not be told apart from the run that asked, so refuse rather than guess.
+    for (const k of ['ownership_principal', 'agent_incarnation'] as const) {
+      const v: unknown = origin[k];
+      if (typeof v !== 'string' || v.length === 0)
+        throw new BridgeError('validation_error', `origin.${k} is required (set by the host)`);
+    }
     const { ctx } = this;
     // The origin's gate is trusted (registered by the host) and is the floor. A gate the agent names can only
     // make the question STRICTER; it can never replace the origin's gate or relax its level.

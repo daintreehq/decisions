@@ -235,6 +235,32 @@ describe('HTTP MCP: a relaunched terminal is a different asker', () => {
       await second.close();
     }
   });
+
+  it('a relaunch that keeps pane id, generation and session but changes the principal is still a stranger', async () => {
+    const { mcp, bridge } = await boot();
+    const ask = await call(mcp, 'ask_human', { question: 'old run question' });
+    const id = ask.structuredContent.question_id;
+    const auth = new TokenMapAuthenticator();
+    auth.register('new-principal-token-DDDDDDDDDDDDDD', origin({ ownership_principal: 'p-2' }));
+    auth.register('new-incarnation-token-EEEEEEEEEEEE', origin({ agent_incarnation: 'inc-2' }));
+    const second = await startDecisionsMcpServer({ bridge, authenticator: auth });
+    try {
+      for (const token of [
+        'new-principal-token-DDDDDDDDDDDDDD',
+        'new-incarnation-token-EEEEEEEEEEEE',
+      ]) {
+        const r = await call(second, 'get_decision', { question_id: id }, token);
+        expect(r.isError).toBe(true);
+        expect(r.content[0].text).toContain('not_found');
+        const c = await call(second, 'cancel_question', { question_id: id }, token);
+        expect(c.isError).toBe(true);
+      }
+      // the original credential still owns it
+      expect((await call(mcp, 'get_decision', { question_id: id })).isError).toBeUndefined();
+    } finally {
+      await second.close();
+    }
+  });
 });
 
 describe('HTTP MCP: security', () => {

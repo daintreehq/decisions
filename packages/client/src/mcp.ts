@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { BridgeError } from './content.js';
-import type { DecisionsBridge } from './bridge.js';
+import { paneIdentityOf, type DecisionsBridge } from './bridge.js';
 import type { QuestionOrigin } from './types.js';
 
 const SERVER_VERSION = '0.1.0';
@@ -206,13 +206,7 @@ export function createDecisionsMcpHandler(
   };
 
   async function callTool(origin: QuestionOrigin, name: string, args: Record<string, unknown>) {
-    const pane = {
-      host_id: origin.host_id,
-      pane_id: origin.pane_id,
-      terminal_generation: origin.terminal_generation,
-      agent_session_id: origin.agent_session_id,
-      worktree_id: origin.worktree_id,
-    };
+    const pane = paneIdentityOf(origin);
     const text = (t: string, structured: unknown, isError = false) => ({
       content: [{ type: 'text', text: t }],
       structuredContent: structured,

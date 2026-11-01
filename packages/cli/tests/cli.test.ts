@@ -189,47 +189,43 @@ describe('sinks and MCP instructions', () => {
     expect(hidden).toContain('/h/mcp-token');
     expect(hidden).toContain('--show-token');
   });
-  it('file sink appends and can find an injection marker; stdout sink prints', async () => {
+  it('file sink appends with proof and can find an injection marker; stdout sink prints', async () => {
     const path = join(root, 'sink.txt');
     const sink = new DemoSink({ kind: 'file', path }, () => {});
-    const t = {
-      hostId: 'cli',
-      paneId: 'cli',
-      terminalGeneration: 1,
-      agentSessionId: null,
-      worktreeId: 'cli',
-    };
-    expect((await sink.inject(t, 'hello\ninjection_id: inj-1', 'inj-1')).ok).toBe(true);
+    const t = (await sink.locate(cliOrigin())).target!;
+    const r = await sink.inject(t, 'hello\ninjection_id: inj-1', 'inj-1');
+    expect(r).toMatchObject({ outcome: 'delivered' });
+    expect(r.outcome === 'delivered' && r.proof).toMatch(/^file:\d+$/);
     expect(await sink.hasMarker(t, 'inj-1')).toBe(true);
     expect(await sink.hasMarker(t, 'inj-2')).toBe(false);
     const lines: string[] = [];
-    await new DemoSink({ kind: 'stdout' }, (l) => lines.push(l)).inject(t, 'abc', 'x');
+    const s = await new DemoSink({ kind: 'stdout' }, (l) => lines.push(l)).inject(t, 'abc', 'x');
+    expect(s).toEqual({ outcome: 'delivered', proof: 'stdout' });
     expect(lines.join('')).toContain('abc');
     expect((await sink.locate({ ...cliOrigin(), host_id: 'other' })).state).toBe('gone');
     expect((await sink.locate(cliOrigin())).state).toBe('alive');
   });
-  it('exec sink pipes the notice to the command and reports failure', async () => {
-    const path = join(root, 'exec.txt');
-    const t = {
-      hostId: 'cli',
-      paneId: 'cli',
-      terminalGeneration: 1,
-      agentSessionId: null,
-      worktreeId: 'cli',
-    };
-    expect(
-      (
-        await new DemoSink({ kind: 'exec', cmd: `cat > ${path}` }, () => {}).inject(
-          t,
-          'piped text',
-          'i',
-        )
-      ).ok,
-    ).toBe(true);
-    expect(readFileSync(path, 'utf8')).toContain('piped text');
-    expect(
-      (await new DemoSink({ kind: 'exec', cmd: 'exit 3' }, () => {}).inject(t, 'x', 'i')).ok,
-    ).toBe(false);
+  it('file sink that cannot open its file reports unavailable (nothing written), not delivered', async () => {
+    const sink = new DemoSink({ kind: 'file', path: join(root, 'no-such-dir', 'x.txt') }, () => {});
+    const t = (await sink.locate(cliOrigin())).target!;
+    expect(await sink.inject(t, 'hello', 'i')).toMatchObject({
+      outcome: 'unavailable',
+      reason: 'rejected',
+    });
+  });
+  it('a stdout writer that throws mid-write is ambiguous', async () => {
+    const sink = new DemoSink({ kind: 'stdout' }, () => {
+      throw new Error('EPIPE');
+    });
+    const t = (await sink.locate(cliOrigin())).target!;
+    expect(await sink.inject(t, 'hello', 'i')).toMatchObject({ outcome: 'ambiguous' });
+  });
+  it('the CLI origin carries a fixed, non-empty run identity that its sink echoes', async () => {
+    const o = cliOrigin('mcp');
+    expect(o.ownership_principal).toBe('cli:mcp');
+    expect(o.agent_incarnation).toBe('cli');
+    const t = (await new DemoSink({ kind: 'stdout' }, () => {}).locate(o)).target!;
+    expect(t).toMatchObject({ ownershipPrincipal: 'cli:mcp', agentIncarnation: 'cli' });
   });
 });
 
@@ -345,13 +341,40 @@ describe('export / import / recovery / delete-data', () => {
 });
 
 describe('exec sink', () => {
-  const target = {
-    hostId: 'cli',
-    paneId: 'p',
-    terminalGeneration: 1,
-    agentSessionId: null,
-    worktreeId: 'w',
-  };
+  const target = (async () =>
+    (await new DemoSink({ kind: 'stdout' }, () => {}).locate(cliOrigin())).target!)();
+
+  it('pipes the notice to the command; exit 0 after reading it all is delivered', async () => {
+    const path = join(root, 'exec.txt');
+    const sink = new DemoSink({ kind: 'exec', cmd: `cat > ${path}` }, () => {});
+    const r = await sink.inject(await target, 'piped text', 'i');
+    expect(r).toEqual({ outcome: 'delivered', proof: 'exec:exit-0' });
+    expect(readFileSync(path, 'utf8')).toContain('piped text');
+  });
+
+  it('exit 75 (EX_TEMPFAIL) means held: nothing was done, try again later', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null; exit 75' }, () => undefined);
+    expect(await sink.inject(await target, 'hello', 'i')).toEqual({
+      outcome: 'held',
+      reason: 'exec_tempfail',
+    });
+  });
+
+  it('any other non-zero exit is ambiguous: the command may have acted on the text', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null; exit 3' }, () => undefined);
+    expect(await sink.inject(await target, 'hello', 'i')).toEqual({
+      outcome: 'ambiguous',
+      reason: 'exec_exit_3',
+    });
+  });
+
+  it('exit 0 without reading all of the input is ambiguous, not delivered', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'exit 0' }, () => undefined);
+    expect(await sink.inject(await target, 'x'.repeat(2_000_000), 'i')).toEqual({
+      outcome: 'ambiguous',
+      reason: 'exec_input_unread',
+    });
+  });
 
   it('does not crash when the command exits before reading its input (EPIPE)', async () => {
     const sink = new DemoSink({ kind: 'exec', cmd: 'exit 3' }, () => undefined);
@@ -359,17 +382,12 @@ describe('exec sink', () => {
     const onUnhandled = (e: unknown) => unhandled.push(e);
     process.on('uncaughtException', onUnhandled);
     try {
-      const res = await sink.inject(target as never, 'x'.repeat(2_000_000), 'inj1');
+      const res = await sink.inject(await target, 'x'.repeat(2_000_000), 'inj1');
       await new Promise((r) => setTimeout(r, 50));
-      expect(res).toEqual({ ok: false, reason: 'exec_failed' });
+      expect(res).toMatchObject({ outcome: 'ambiguous' });
       expect(unhandled).toEqual([]);
     } finally {
       process.off('uncaughtException', onUnhandled);
     }
-  });
-
-  it('reports success when the command accepts the notice', async () => {
-    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null' }, () => undefined);
-    expect(await sink.inject(target as never, 'hello', 'inj2')).toEqual({ ok: true });
   });
 });

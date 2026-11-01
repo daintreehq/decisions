@@ -6,6 +6,14 @@ export interface QuestionOrigin {
   pane_id: string;
   /** Increments each time the terminal process is relaunched; guards against pane-id reuse. */
   terminal_generation: number;
+  /**
+   * The host's owner of this run of the pane (Daintree: the pane's ownership principal). It changes on every
+   * relaunch, even when the pane id stays the same, so an answer for the old run never reaches the new one.
+   * Required and non-empty; the standalone CLI uses a fixed value because its pane is never relaunched.
+   */
+  ownership_principal: string;
+  /** Which start of the agent inside the pane asked (Daintree: `agentIncarnation`). Required and non-empty. */
+  agent_incarnation: string;
   agent_kind: string;
   agent_session_id: string | null;
   project_id: string;
@@ -100,6 +108,9 @@ export interface InjectionIntent {
   host_id: string;
   pane_id: string;
   terminal_generation: number;
+  /** The run the text was typed into (`''` on intents written before these fields existed). */
+  ownership_principal: string;
+  agent_incarnation: string;
   state: IntentState;
   created_at: number;
   updated_at: number;

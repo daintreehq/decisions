@@ -43,6 +43,8 @@ class Sink implements TerminalSink {
         hostId: o.host_id,
         paneId: o.pane_id,
         terminalGeneration: o.terminal_generation,
+        ownershipPrincipal: o.ownership_principal,
+        agentIncarnation: o.agent_incarnation,
         agentSessionId: o.agent_session_id,
         worktreeId: o.worktree_id,
       },
@@ -52,7 +54,7 @@ class Sink implements TerminalSink {
     return true;
   }
   async inject(_t: TerminalTarget, _text: string, _id: string) {
-    return { ok: true as const, proof: 'shot' };
+    return { outcome: 'delivered' as const, proof: 'shot' };
   }
   async hasMarker() {
     return false;
@@ -246,6 +248,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       host_id: 'host_01JC8Z4MQ7',
       pane_id: pane,
       terminal_generation: 1,
+      ownership_principal: `principal-${pane}`,
+      agent_incarnation: '1',
       agent_kind: agent,
       agent_session_id: `s-${pane}`,
       project_id: project,

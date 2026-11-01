@@ -11,8 +11,20 @@ import type {
 
 type Row = Record<string, unknown>;
 
-const MIGRATIONS: string[] = [
-  `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+/**
+ * One schema step. `up` runs inside the same transaction that bumps `PRAGMA user_version`, so a step either
+ * applies completely or not at all. Use SQL for schema changes and a function when rows have to be rewritten
+ * in code (for example re-encoding a column). Steps are append-only: never edit one that has shipped.
+ */
+interface Migration {
+  name: string;
+  up: string | ((db: DatabaseSync) => void);
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    name: 'initial schema',
+    up: `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
    CREATE TABLE questions (
      question_id TEXT PRIMARY KEY,
      alias INTEGER NOT NULL UNIQUE,
@@ -78,7 +90,22 @@ const MIGRATIONS: string[] = [
      at TEXT NOT NULL,
      json TEXT NOT NULL
    );`,
+  },
+  {
+    // Rows from before the run identity existed get '' for both fields. The bridge refuses to register an
+    // origin with an empty principal or incarnation and never matches '' against a pane, so a migrated
+    // question can only be delivered through a sink that cannot tell runs apart (the standalone CLI) and is
+    // never visible to an agent pane: an unknown run is treated as a different run.
+    name: 'pane run identity: ownership principal and agent incarnation',
+    up: `ALTER TABLE questions ADD COLUMN ownership_principal TEXT NOT NULL DEFAULT '';
+   ALTER TABLE questions ADD COLUMN agent_incarnation TEXT NOT NULL DEFAULT '';
+   ALTER TABLE injection_intents ADD COLUMN ownership_principal TEXT NOT NULL DEFAULT '';
+   ALTER TABLE injection_intents ADD COLUMN agent_incarnation TEXT NOT NULL DEFAULT '';`,
+  },
 ];
+
+/** The schema version a fully migrated database reports in `PRAGMA user_version`. */
+export const SQLITE_SCHEMA_VERSION = MIGRATIONS.length;
 
 const Q_COLS = [
   'question_id',
@@ -86,6 +113,8 @@ const Q_COLS = [
   'origin_host_id',
   'pane_id',
   'terminal_generation',
+  'ownership_principal',
+  'agent_incarnation',
   'agent_kind',
   'agent_session_id',
   'project_id',
@@ -117,6 +146,8 @@ function toRow(q: QuestionRow): Row {
     origin_host_id: q.origin.host_id,
     pane_id: q.origin.pane_id,
     terminal_generation: q.origin.terminal_generation,
+    ownership_principal: q.origin.ownership_principal,
+    agent_incarnation: q.origin.agent_incarnation,
     agent_kind: q.origin.agent_kind,
     agent_session_id: q.origin.agent_session_id,
     project_id: q.origin.project_id,
@@ -147,6 +178,8 @@ function fromRow(r: Row): QuestionRow {
     host_id: r.origin_host_id as string,
     pane_id: r.pane_id as string,
     terminal_generation: Number(r.terminal_generation),
+    ownership_principal: r.ownership_principal as string,
+    agent_incarnation: r.agent_incarnation as string,
     agent_kind: r.agent_kind as string,
     agent_session_id: (r.agent_session_id as string | null) ?? null,
     project_id: r.project_id as string,
@@ -191,9 +224,11 @@ export class SqliteLocalStore implements LocalStore {
   private migrate(): void {
     const v = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
     for (let i = v; i < MIGRATIONS.length; i++) {
+      const step = MIGRATIONS[i]!;
       this.db.exec('BEGIN IMMEDIATE');
       try {
-        this.db.exec(MIGRATIONS[i]!);
+        if (typeof step.up === 'string') this.db.exec(step.up);
+        else step.up(this.db);
         this.db.exec(`PRAGMA user_version = ${i + 1}`);
         this.db.exec('COMMIT');
       } catch (e) {
@@ -390,10 +425,10 @@ export class SqliteLocalStore implements LocalStore {
     if (seq > (await this.getCursor())) await this.setMeta('cursor', String(seq));
   }
 
-  async putIntent(i: InjectionIntent) {
+  private putIntentSql(i: InjectionIntent): void {
     this.st(
-      `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,host_id,pane_id,terminal_generation,state,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?)`,
+      `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,host_id,pane_id,terminal_generation,ownership_principal,agent_incarnation,state,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       i.injection_id,
       i.question_id,
@@ -401,10 +436,15 @@ export class SqliteLocalStore implements LocalStore {
       i.host_id,
       i.pane_id,
       i.terminal_generation,
+      i.ownership_principal,
+      i.agent_incarnation,
       i.state,
       i.created_at,
       i.updated_at,
     );
+  }
+  async putIntent(i: InjectionIntent) {
+    this.putIntentSql(i);
   }
   private intentFrom(r: Row): InjectionIntent {
     return {
@@ -414,6 +454,8 @@ export class SqliteLocalStore implements LocalStore {
       host_id: r.host_id as string,
       pane_id: r.pane_id as string,
       terminal_generation: Number(r.terminal_generation),
+      ownership_principal: r.ownership_principal as string,
+      agent_incarnation: r.agent_incarnation as string,
       state: r.state as InjectionIntent['state'],
       created_at: Number(r.created_at),
       updated_at: Number(r.updated_at),
@@ -454,23 +496,7 @@ export class SqliteLocalStore implements LocalStore {
       const row = this.st('SELECT * FROM injection_intents WHERE injection_id = ?').get(
         intentId,
       ) as Row | undefined;
-      if (row) {
-        const next = { ...this.intentFrom(row), ...intentPatch };
-        this.st(
-          `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,host_id,pane_id,terminal_generation,state,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?)`,
-        ).run(
-          next.injection_id,
-          next.question_id,
-          next.answer_revision,
-          next.host_id,
-          next.pane_id,
-          next.terminal_generation,
-          next.state,
-          next.created_at,
-          next.updated_at,
-        );
-      }
+      if (row) this.putIntentSql({ ...this.intentFrom(row), ...intentPatch });
       this.updateQuestionSync(questionId, questionPatch);
     });
   }

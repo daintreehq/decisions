@@ -17,6 +17,9 @@ import { devices, pair, revoke, rotate, setup } from './commands/setup.js';
 const VERSION = '0.1.0';
 const collect = (v: string, prev: string[] = []) => [...prev, v];
 
+const SINK_HELP =
+  'stdout | file:<path> | exec:<command> (the command reads the answer on stdin; exit 0 = delivered, 75 = retry later, anything else = may have been delivered, never retried)';
+
 export function buildProgram(): Command {
   const program = new Command('decisions')
     .description('Daintree Decisions: ask the human from your AI agents, answer from your phone.')
@@ -84,7 +87,7 @@ export function buildProgram(): Command {
     .description(
       'Receive answers and print / pipe them (demo sink; Daintree types them into the agent pane).',
     )
-    .option('--sink <sink>', 'stdout | file:<path> | exec:<command>', 'stdout')
+    .option('--sink <sink>', SINK_HELP, 'stdout')
     .option('--no-socket', 'poll once over HTTP instead of keeping a live socket')
     .action((o) => run((c, g) => daemon(c, g, { sink: o.sink, socket: o.socket }))());
 
@@ -110,7 +113,7 @@ export function buildProgram(): Command {
       '--show-token',
       'print the literal bearer token once (otherwise only the token file is named)',
     )
-    .option('--sink <sink>', 'stdout | file:<path> | exec:<command>', 'stdout')
+    .option('--sink <sink>', SINK_HELP, 'stdout')
     .action((o) =>
       run((c, g) =>
         daemon(c, g, {
@@ -137,7 +140,7 @@ export function buildProgram(): Command {
     )
     .option('--attach <file>', 'attach an image (repeatable)', collect)
     .option('--wait', 'stay connected until the answer is delivered')
-    .option('--sink <sink>', 'stdout | file:<path> | exec:<command>', 'stdout')
+    .option('--sink <sink>', SINK_HELP, 'stdout')
     .action((q, o) => run((c, g) => ask(c, g, { question: q, ...o }))());
 
   program
