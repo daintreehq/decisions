@@ -1,14 +1,27 @@
 name: Release
 
+# Pushing a v* tag (for example v0.2.0, made after `pnpm release:version 0.2.0` lands on main)
+# publishes every public workspace package to npm and attaches the app and Worker bundles to a
+# GitHub release. docs/operations.md describes the whole procedure.
+#
+# npm trusts this file by name: each package's trusted publisher on npmjs.com names
+# `release.yml` and the `npm` environment. Renaming the file or the environment breaks
+# publishing until every trusted publisher is updated.
+
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  verify:
+    name: Typecheck and test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -17,20 +30,62 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck && pnpm test
+      - name: Check the tag matches every package version
+        run: pnpm release:publish --check --tag "$GITHUB_REF_NAME"
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  npm:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      # No dependency cache in the publishing job, so nothing a pull request wrote can reach it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install npm 11 (trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@11 && npm --version
+      - run: pnpm install --frozen-lockfile
+      - name: Build, pack and publish in dependency order (already-published versions are skipped)
+        run: node tools/release/publish.mjs --tag "$GITHUB_REF_NAME"
+
+  github-release:
+    name: GitHub release (app and Worker bundles)
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
       - run: pnpm build:all
       - name: Bundle the Worker and package artifacts
         run: |
           set -euo pipefail
           mkdir -p dist-release
           pnpm exec wrangler deploy --dry-run --outdir dist-release/worker
-          tar -czf dist-release/decisions-app-${GITHUB_REF_NAME}.tar.gz -C app/dist .
-          (cd dist-release && sha256sum decisions-app-*.tar.gz worker/* > SHA256SUMS)
+          tar -czf "dist-release/decisions-app-${GITHUB_REF_NAME}.tar.gz" -C app/dist .
+          tar -czf "dist-release/decisions-worker-${GITHUB_REF_NAME}.tar.gz" -C dist-release worker
+          (cd dist-release && sha256sum decisions-app-*.tar.gz decisions-worker-*.tar.gz worker/* > SHA256SUMS)
+          cat dist-release/SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist-release/decisions-app-*.tar.gz
+            dist-release/decisions-worker-*.tar.gz
             dist-release/SHA256SUMS
           generate_release_notes: true

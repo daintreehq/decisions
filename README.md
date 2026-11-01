@@ -76,7 +76,10 @@ pnpm pack:check   # packs every library and the CLI, installs them in a scratch 
 pnpm test         # every package, including the Worker in a real workerd runtime
 pnpm typecheck
 pnpm dev          # wrangler dev on http://localhost:8787
+pnpm release:publish --dry-run   # what a release would publish to npm, without uploading
 ```
+
+Releases are published to npm from a `v*` tag; see [docs/operations.md](docs/operations.md#releasing-to-npm).
 
 ## License
 

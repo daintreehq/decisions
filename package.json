@@ -12,7 +12,8 @@
   "scripts": {
     "build": "pnpm --filter @daintreehq/decisions-app build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && pnpm test:tools",
+    "test:tools": "node --test tools/release/release.test.mjs",
     "format": "prettier --write .",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -22,7 +23,9 @@
     "deploy:local": "pnpm build && wrangler deploy",
     "build:all": "pnpm -r build",
     "build:packages": "pnpm -r --filter \"./packages/*\" build",
-    "pack:check": "node tools/pack-check/pack-check.mjs"
+    "pack:check": "node tools/pack-check/pack-check.mjs",
+    "release:version": "node tools/release/version.mjs",
+    "release:publish": "node tools/release/publish.mjs"
   },
   "cloudflare": {
     "bindings": {
