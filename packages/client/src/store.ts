@@ -10,6 +10,9 @@ import type {
 /**
  * Durable desktop-side state. Daintree supplies its own implementation over better-sqlite3; every method
  * is async so either synchronous or asynchronous drivers fit. Implementations MUST make each method atomic.
+ *
+ * Nothing the bridge hands a store holds question, context or answer text in clear: content is sealed above
+ * the store (`at-rest.ts`), so an implementation stores the rows as given and needs no key of its own.
  */
 export interface LocalStore {
   /** True for stores that survive a restart; they require a durable attachment spool. */
@@ -61,6 +64,13 @@ export interface LocalStore {
 
   appendAudit(e: AuditEntry): Promise<void>;
   listAudit(limit: number): Promise<AuditEntry[]>;
+
+  /**
+   * Physically erase content that was deleted or overwritten (for SQLite: `VACUUM` and a truncating WAL
+   * checkpoint), so freed pages cannot retain it. Called after rows written before content was sealed have
+   * been sealed. Stores without such residue may omit it.
+   */
+  compact?(): Promise<void>;
 
   close(): Promise<void>;
 }

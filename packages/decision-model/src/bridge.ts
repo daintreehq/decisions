@@ -1,4 +1,5 @@
-import type { ProxyEngine, ProxyOutcome, ProxyQuestionInput } from './types.js';
+import type { HistoryStore, RecordResult } from './history.js';
+import type { DecisionExample, ProxyEngine, ProxyOutcome, ProxyQuestionInput } from './types.js';
 
 /**
  * The request shape `DecisionsBridge` (packages/client) hands to its `proxy` hook. Field names are the bridge's
@@ -94,6 +95,65 @@ export function asBridgeEngine(
       if (o.requireGateId && !mapped.workflow_gate_id)
         return { action: 'abstain', reason: 'missing-workflow-gate' };
       return model.suggest(mapped, signal);
+    },
+  };
+}
+
+/**
+ * A human decision as `DecisionsBridge` (packages/client) offers it to its `learner` hook. Re-declared here so the
+ * packages never depend on each other; it mirrors the client's `LearnedDecision`.
+ */
+export interface BridgeLearnedDecision {
+  questionId: string;
+  question: string;
+  context?: string;
+  options: { id: string; label: string }[];
+  kind: 'choice' | 'approval' | 'text' | 'mixed';
+  requirement: 'human-required' | 'proxy-ok' | 'proxy-first';
+  projectId: string;
+  createdAt: string;
+  chosenAt: string;
+  selectedOptionIds: string[];
+  text: string;
+  revision: number;
+  correction: boolean;
+}
+
+/** The bridge's `learner` hook. */
+export interface BridgeLearner {
+  learn(decision: BridgeLearnedDecision): RecordResult;
+}
+
+/** Maps a bridge decision to a history example (the history store redacts secrets when it records it). */
+export function toDecisionExample(d: BridgeLearnedDecision): DecisionExample {
+  const ex: DecisionExample = {
+    question_id: d.questionId,
+    question: d.question,
+    created_at: d.createdAt,
+    chosen_at: d.chosenAt,
+    policy_level: d.requirement,
+    source: 'human',
+    kind: d.kind,
+    revision: d.revision,
+  };
+  if (d.context) ex.context_summary = d.context;
+  if (d.options.length > 0) ex.options = d.options.map((o) => ({ id: o.id, label: o.label }));
+  if (d.selectedOptionIds.length > 0) ex.selected_option_ids = [...d.selectedOptionIds];
+  if (d.text) ex.human_reasoning = d.text;
+  if (d.projectId) ex.project_tags = [d.projectId];
+  return ex;
+}
+
+/**
+ * Wire a history store to `DecisionsBridge`'s `learner` option, so the human's answers become examples. The store
+ * stays in charge of consent and privacy: nothing is recorded while learning is off (the default) or for an
+ * opted-out project, and every free-text field passes the secrets filter before it is stored. This is the only
+ * place the bridge lets question or answer plaintext be kept on disk.
+ */
+export function asBridgeLearner(history: HistoryStore): BridgeLearner {
+  return {
+    learn(d) {
+      return history.record(toDecisionExample(d));
     },
   };
 }

@@ -6,7 +6,8 @@ import {
   type LedgerEvent,
   type QuestionStatus,
 } from '@daintreehq/decisions-protocol';
-import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
+import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
+import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import type { BridgeContext } from './context.js';
 import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';
 import { Mutex, TransientError } from './mutex.js';
@@ -109,12 +110,16 @@ export class Inbox {
     });
   }
 
-  private content(row: QuestionRow): Pick<DecisionContentV1, 'options' | 'allow_text'> {
+  /**
+   * The question's content, opened in memory. Null when it cannot be opened: the caller rejects the event
+   * rather than guess the answer rules. A missing epoch key throws `TransientError` (retried in order).
+   */
+  private async content(row: QuestionRow): Promise<Partial<DecisionContentV1> | null> {
     try {
-      const c = JSON.parse(row.content_json ?? '{}') as Partial<DecisionContentV1>;
-      return { options: c.options ?? [], allow_text: c.allow_text !== false };
-    } catch {
-      return { options: [], allow_text: true };
+      return (await openQuestionContent(this.ctx, row)) ?? {};
+    } catch (e) {
+      if (e instanceof TransientError) throw e;
+      return null;
     }
   }
 
@@ -206,13 +211,11 @@ export class Inbox {
       action: 'expire',
       revision: row.question_revision,
       source: 'system',
-      choices: [],
-      text: '',
-      reviewed_attachment_digests: [],
       correction: false,
       created_at: new Date(this.ctx.now()).toISOString(),
       deliver: true,
       delivered: false,
+      sealed: null,
     });
     await this.ctx.store.updateQuestion(row.question_id, {
       local_status: 'expired',
@@ -319,7 +322,10 @@ export class Inbox {
         return this.reject(row, 'confirms-another-answer');
       }
     }
-    const { options: opts, allow_text } = this.content(row);
+    const question = await this.content(row);
+    if (!question) return this.reject(row, 'question-content-unreadable');
+    const opts = question.options ?? [];
+    const allow_text = question.allow_text !== false;
     const chosen = v.content?.selected_option_ids ?? [];
     const text = v.content?.text ?? '';
     const gate = ctx.policy.get(row.origin.workflow_gate_id);
@@ -353,21 +359,31 @@ export class Inbox {
     // Null provenance is never human: answer-like actions always carry an explicit human/proxy provenance.
     if (v.provenance === null) return this.reject(row, 'missing-provenance');
     const labelOf = (id: string) => opts.find((o) => o.id === id)?.label;
+    const content: AnswerContent = {
+      choices: chosen.map((id) => ({ id, ...(labelOf(id) ? { label: labelOf(id)! } : {}) })),
+      text: v.content?.text ?? '',
+      reviewed_attachment_digests: v.content?.reviewed_attachment_digests ?? [],
+      ...(v.content?.confidence !== undefined ? { confidence: v.content.confidence } : {}),
+      ...(v.content?.model_id ? { model_id: v.content.model_id } : {}),
+    };
+    // Only the sealed form is stored; the clear content lives in memory until it is typed.
     const entry: AnswerEntry = {
       entry_id: v.record.action_id,
       kind: 'answer',
       action: v.action as AnswerEntry['action'],
       revision: t.revision,
       source: v.provenance,
-      choices: chosen.map((id) => ({ id, ...(labelOf(id) ? { label: labelOf(id)! } : {}) })),
-      text: v.content?.text ?? '',
-      reviewed_attachment_digests: v.content?.reviewed_attachment_digests ?? [],
       correction: v.action === 'override',
-      ...(v.content?.confidence !== undefined ? { confidence: v.content.confidence } : {}),
-      ...(v.content?.model_id ? { model_id: v.content.model_id } : {}),
       created_at: v.record.created_at,
       deliver: t.deliverable,
       delivered: false,
+      sealed: await sealAnswerContent(
+        ctx,
+        row.question_id,
+        v.record.action_id,
+        t.revision,
+        content,
+      ),
     };
     entries.push(entry);
     await ctx.store.updateQuestion(row.question_id, {
@@ -383,6 +399,47 @@ export class Inbox {
       provenance: entry.source,
       result: 'verified',
     });
+    if (v.provenance === 'human' && (v.action === 'answer' || v.action === 'override')) {
+      await this.learn(row, question, content, entry);
+    }
     return entry.deliver;
+  }
+
+  /**
+   * Hand a human decision to the decision model's history, the only place plaintext may be kept, and only
+   * when the host wired a learner (which records nothing unless the user opted into learning). Proxy answers
+   * and confirmations of them are never ground truth. A failing learner never blocks delivery.
+   */
+  private async learn(
+    row: QuestionRow,
+    question: Partial<DecisionContentV1>,
+    content: AnswerContent,
+    entry: AnswerEntry,
+  ): Promise<void> {
+    const learner = this.ctx.learner;
+    if (!learner || typeof question.question !== 'string') return;
+    try {
+      await learner.learn({
+        questionId: row.question_id,
+        question: question.question,
+        ...(question.context ? { context: question.context } : {}),
+        options: (question.options ?? []).map((o) => ({ id: o.id, label: o.label })),
+        kind: question.kind ?? 'mixed',
+        requirement: row.requirement,
+        projectId: row.origin.project_id,
+        createdAt: row.origin_created_at,
+        chosenAt: entry.created_at,
+        selectedOptionIds: content.choices.map((c) => c.id),
+        text: content.text,
+        revision: entry.revision,
+        correction: entry.correction,
+      });
+    } catch (e) {
+      await this.ctx.audit.log({
+        event: 'learning.failed',
+        question_id: row.question_id,
+        result: ((e as Error)?.name ?? 'error').slice(0, 40),
+      });
+    }
   }
 }

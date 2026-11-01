@@ -24,7 +24,7 @@ Ids, timestamps, requirement level (needed to enforce policy), question status, 
 ## What is not protected
 
 1. **Anyone who controls your Cloudflare account** can change the Worker and the web app it serves. A malicious page could read what your phone decrypts. End-to-end encryption in a web app protects against passive access to stored data, not against a compromised deployment. Mitigations: strict CSP, no third-party scripts, a reproducible build from this repository, and (optionally) Cloudflare Access. This is inherent to web apps.
-2. **Your computer and your phone** hold plaintext while you use them. Disk encryption and a screen lock are your responsibility.
+2. **Your computer and your phone** hold plaintext while you use them. Disk encryption and a screen lock are your responsibility. On disk, the desktop's local database keeps question and answer content only as ciphertext under the content key in your key store. Plaintext is written only where you chose it: the decision model's history if you turn on learning (secrets redacted first), an export you make with `--plaintext`, and the audit log if you turn on debug content logging.
 3. **Dictation is not end-to-end encrypted.** If you enable it, audio and text pass through your Worker and then the speech and correction provider (see [voice-privacy.md](voice-privacy.md)). It is off until you turn it on, and it can be disabled entirely.
 4. **A revoked or stolen phone** keeps whatever it already downloaded. Revocation blocks future access and rotates the content key for new data; it cannot recall old data.
 5. **Agents** continue to send their prompts and code to their own model providers, which is unrelated to Decisions.

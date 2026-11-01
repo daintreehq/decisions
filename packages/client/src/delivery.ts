@@ -1,5 +1,7 @@
 import { batchNotices, formatAnswerNotice } from './notice.js';
-import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
+import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
+import { openAnswerContent } from './at-rest.js';
+import { TransientError } from './mutex.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
 import { newId } from '@daintreehq/decisions-crypto';
@@ -94,6 +96,8 @@ export function normalizeInjectResult(raw: unknown): InjectResult & { code?: str
 interface Item {
   q: QuestionRow;
   entry: AnswerEntry;
+  /** The answer's content, opened in memory for this attempt only. */
+  content: AnswerContent;
   intentId: string;
 }
 
@@ -260,8 +264,31 @@ export class DeliveryEngine {
       if (target && !sameTarget(target, r.target)) {
         break; // a different destination (pane, generation, session or worktree): handle on the next pass
       }
+      // Open every pending answer before anything is typed. One that cannot be opened is never typed as an
+      // empty answer: the question needs a human instead.
+      // A missing epoch key (rotated by another process, not yet reloaded) just waits for a later pass.
+      const opened: Item[] = [];
+      let unreadable: 'transient' | 'broken' | null = null;
+      for (const entry of this.pending(q)) {
+        try {
+          const content = await openAnswerContent(ctx, q.question_id, entry);
+          opened.push({ q, entry, content, intentId: newId(ctx.now()) });
+        } catch (e) {
+          unreadable = e instanceof TransientError ? 'transient' : 'broken';
+          break;
+        }
+      }
+      if (unreadable === 'transient') {
+        res.deferred++;
+        break;
+      }
+      if (unreadable) {
+        await this.attention(q, 'answer_unreadable', 'needs-attention');
+        res.needsAttention++;
+        continue;
+      }
       target = r.target;
-      for (const entry of this.pending(q)) items.push({ q, entry, intentId: newId(ctx.now()) });
+      items.push(...opened);
     }
     if (!target || items.length === 0) return res;
     if (!(await o.sink.isIdle(target))) {
@@ -293,7 +320,7 @@ export class DeliveryEngine {
   }
 
   private block(i: Item): string {
-    const e = i.entry;
+    const e = { ...i.entry, ...i.content };
     return formatAnswerNotice({
       kind: e.kind,
       questionId: i.q.question_id,

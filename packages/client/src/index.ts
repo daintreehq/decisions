@@ -9,6 +9,7 @@ export * from './store.js';
 export * from './store-memory.js';
 export * from './store-sqlite.js';
 export * from './answers.js';
+export * from './at-rest.js';
 export * from './notice.js';
 export * from './sink.js';
 export * from './resume.js';

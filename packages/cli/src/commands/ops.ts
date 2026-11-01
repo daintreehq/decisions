@@ -315,7 +315,8 @@ export async function importCmd(ctx: Ctx, g: GlobalOptions, file: string): Promi
     const raw = await readFile(file);
     const head = raw.subarray(0, 2).toString('latin1');
     let r;
-    if (head === 'PK') r = await importDecisions({ zip: new Uint8Array(raw) }, rt.store);
+    if (head === 'PK')
+      r = await importDecisions({ zip: new Uint8Array(raw) }, rt.store, rt.identity);
     else {
       const passphrase = await secretFromEnvOrPrompt(
         ctx,
@@ -325,6 +326,7 @@ export async function importCmd(ctx: Ctx, g: GlobalOptions, file: string): Promi
       r = await importDecisions(
         { encrypted: JSON.parse(raw.toString('utf8')) as RecoveryBundleFile, passphrase },
         rt.store,
+        rt.identity,
       );
     }
     print(

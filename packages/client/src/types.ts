@@ -63,9 +63,19 @@ export interface QuestionRow {
   last_attempt_at: string | null;
   agent_resume_strategy: string | null;
   error_code: string | null;
-  /** Plaintext question content, kept locally for history and the decision model. */
-  content_json: string | null;
-  /** Decrypted answer history (human and proxy), newest last. */
+  /**
+   * The question content, sealed: the JSON of the `CryptoEnvelope` the question was published with (the same
+   * ciphertext the relay holds), or a local seal under the identity's epoch key for imported and migrated
+   * rows. Opened on demand with `openQuestionContent`; question text never sits in a row in clear.
+   */
+  content_sealed: string | null;
+  /**
+   * Plaintext content of a row written before content was sealed. Only a store migrated from an older schema
+   * ever returns it; the bridge seals it and clears it to null when it starts (`sealStoredContent`). New code
+   * never writes it.
+   */
+  legacy_content_json?: string | null;
+  /** Answer history (human and proxy), newest last: `AnswerEntry[]` whose content is sealed per entry. */
   answers_json: string;
   /** Imported records are never delivered. */
   history_only: boolean;

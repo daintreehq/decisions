@@ -7,6 +7,7 @@ import {
   SqliteLocalStore,
   defaultHome,
   loadIdentity,
+  sealStoredContent,
   type Identity,
   type KeyStore,
   type LocalStore,
@@ -116,6 +117,13 @@ export async function openRuntime(ctx: Ctx, g: GlobalOptions = {}): Promise<Runt
   }
   await mkdir(ctx.home, { recursive: true, mode: 0o700 });
   const store = new SqliteLocalStore(join(ctx.home, 'decisions.db'));
+  try {
+    // A store written before content was sealed is sealed (and compacted) on first open, whatever the command.
+    await sealStoredContent({ store, identity });
+  } catch (e) {
+    await store.close();
+    throw new CliError(`could not seal the local store: ${(e as Error).message}`);
+  }
   const client = new RelayClient({ identity, fetch: ctx.fetch });
   return { ctx, keyStore, identity, client, store, auditPath: join(ctx.home, 'audit.jsonl') };
 }

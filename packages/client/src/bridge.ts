@@ -12,9 +12,10 @@ import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type RegisterResult } from './publisher.js';
-import { parseAnswers, sameDigests, type AnswerEntry } from './answers.js';
+import { sameDigests, type OpenAnswerEntry } from './answers.js';
+import { openAnswers, openQuestionContent, sealStoredContent } from './at-rest.js';
 import { loadIdentity, type Identity, type KeyStore } from './identity.js';
-import type { ProxyEngine, ProxyOutcome } from './proxy.js';
+import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex } from './mutex.js';
 import { RelayClient } from './relay.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
@@ -33,6 +34,12 @@ export interface BridgeOptions {
   spool?: AttachmentSpool;
   proxy?: ProxyEngine;
   proxyTimeoutMs?: number;
+  /**
+   * The decision model's history (`asBridgeLearner(history)` from the decision-model package). Human answers
+   * are offered to it, and it records them only if the user opted into learning, with its secrets filter
+   * applied. Without it, no question or answer plaintext is stored anywhere.
+   */
+  learner?: DecisionLearner;
   adapters?: AgentResumeAdapter[];
   auditPath?: string;
   debugContent?: boolean;
@@ -178,6 +185,7 @@ export class DecisionsBridge {
       resolver: o.resolver,
       now: o.now ?? Date.now,
       lock: new Mutex(),
+      ...(o.learner ? { learner: o.learner } : {}),
       refreshIdentity: async () => {
         if (!o.keyStore) return;
         const id = await loadIdentity(o.keyStore);
@@ -226,6 +234,8 @@ export class DecisionsBridge {
     if (this.state === 'running') return;
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
+    // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
+    await sealStoredContent(this.ctx);
     await this.delivery.recover();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
@@ -287,7 +297,9 @@ export class DecisionsBridge {
     const rows = await this.ctx.store.listQuestions({
       status: ['queued', 'open', 'proxy-answered'],
     });
-    return rows.filter((r) => !pane || sameAsker(r.origin, pane)).map((r) => this.view(r));
+    return Promise.all(
+      rows.filter((r) => !pane || sameAsker(r.origin, pane)).map((r) => this.view(r)),
+    );
   }
 
   /** Only the owning pane may see or cancel a question; others get the same error as an unknown id. */
@@ -299,11 +311,12 @@ export class DecisionsBridge {
     return row;
   }
 
-  private view(row: QuestionRow): DecisionView {
-    const entries = parseAnswers(row.answers_json);
+  /** Opens the answers in memory to build the view; nothing decrypted is written back. */
+  private async view(row: QuestionRow): Promise<DecisionView> {
+    const entries = await openAnswers(this.ctx, row);
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
-    let current: AnswerEntry | undefined;
+    let current: OpenAnswerEntry | undefined;
     let confirmed = false;
     for (const e of entries) {
       if (e.kind !== 'answer') continue;
@@ -339,7 +352,7 @@ export class DecisionsBridge {
         row.attachment_digests.length > 0 &&
         sameDigests(inForce.reviewed_attachment_digests, row.attachment_digests),
       answers: entries
-        .filter((e: AnswerEntry) => e.kind === 'answer')
+        .filter((e) => e.kind === 'answer')
         .map((e) => ({
           revision: e.revision,
           source: e.source,
@@ -506,7 +519,21 @@ export class DecisionsBridge {
     if (await ctx.store.getMeta(markerKey)) return 'skipped';
     await ctx.store.setMeta(markerKey, 'started');
 
-    const content = JSON.parse(row.content_json ?? '{}') as DecisionContentV1;
+    let content: DecisionContentV1;
+    try {
+      content = (await openQuestionContent(ctx, row)) ?? ({} as DecisionContentV1);
+    } catch {
+      // Unreadable content: the model cannot see the question, so the human decides.
+      await this.publisher.enqueueProxyAction('proxy-abstain', questionId);
+      await ctx.store.setMeta(markerKey, 'abstained');
+      await ctx.audit.log({
+        event: 'proxy.abstain',
+        question_id: questionId,
+        requirement: row.requirement,
+        result: 'content-unreadable',
+      });
+      return 'abstained';
+    }
     // The gate is the origin's trusted one (registered by the host), never something the agent named.
     const gateId =
       row.origin.workflow_gate_id && ctx.policy.get(row.origin.workflow_gate_id)
