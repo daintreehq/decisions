@@ -14,7 +14,12 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
  * injecting the list of hashed app-shell files to precache. Nothing from /api is ever listed.
  */
 function serviceWorker(): Plugin {
-  const precache = new Set<string>(['/', '/manifest.webmanifest', '/icons/icon-192.png']);
+  const precache = new Set<string>([
+    '/',
+    '/manifest.webmanifest',
+    '/icons/icon-192.png',
+    '/icons/badge-96.png',
+  ]);
   let outDir = 'dist';
   return {
     name: 'decisions-service-worker',

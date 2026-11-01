@@ -40,7 +40,8 @@ export function shapePush(raw: unknown): ShapedNotification {
       body: BODY[type]!,
       tag: qid ?? 'decisions',
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // Android draws only the badge's alpha channel, tinted: it must be a silhouette, never the coloured tile.
+      badge: '/icons/badge-96.png',
       data: { url: notificationUrl(qid) },
       renotify: type !== 'test',
       requireInteraction: false,
