@@ -9,10 +9,10 @@
  * 3. Creates a scratch project outside the workspace, installs the tarballs with npm, imports every
  *    package under Node, runs the CLI, and type-checks a TypeScript file against the declarations
  *    (NodeNext and Bundler resolution, without the workspace's source condition).
- * 4. Imports each library root alone in a fresh Node process and proves it is free of import-time
- *    side effects: `node:sqlite` is never loaded (the SQLite stores live behind `/sqlite` subpaths),
- *    and no timer, socket or other handle is left open and no file is created in the working,
- *    home or temp directory.
+ * 4. Imports each library entry point alone in a fresh Node process and proves it is free of
+ *    import-time side effects: only the `/sqlite` subpaths load `node:sqlite`, and no entry point
+ *    creates a timer, socket or other async resource, calls into `node:fs`, leaves a handle open
+ *    or creates a file in the working, home or temp directory.
  *
  * Usage: node tools/pack-check/pack-check.mjs [--no-build] [--keep]
  */
@@ -201,29 +201,71 @@ registerHooks({
 `;
 
 /**
- * Imports one entry point in a fresh process and reports what the import alone did: SQLite modules
- * Node loaded, handles (timers, sockets, watchers) left keeping the process alive, and files created
- * in the working, home and temp directories (each an empty directory of its own).
+ * Imports one entry point in a fresh process and reports what the import alone did:
+ * - `sqlite`: SQLite modules Node loaded (from `process.moduleLoadList`, so a caught import counts);
+ * - `resources`: async resources (timers, immediates, sockets, servers, watchers, fs requests),
+ *   referenced or not, created by code under `node_modules` (the packages and their dependencies);
+ * - `fs`: calls into `node:fs` made by that code (Node's own module loader is not counted);
+ * - `opened`: handles left keeping the process alive;
+ * - `created`: files in the working, home and temp directories (each an empty directory of its own).
  */
 const PROBE = `
-import { readdirSync } from 'node:fs';
+import { createHook } from 'node:async_hooks';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+
 const watched = [process.cwd(), process.env.HOME, process.env.TMPDIR];
-// Open the stdio pipes first: loading node:http opens them lazily, which is Node's doing, not ours.
+// Open the stdio pipes first: loading node:http opens one lazily, which is Node's doing, not ours.
 void [process.stdout, process.stderr];
+
+let recording = true;
+const fromPackages = () => {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 200;
+  const stack = new Error().stack;
+  Error.stackTraceLimit = limit;
+  return stack.split('\\n').some((frame) => frame.includes('/node_modules/'));
+};
+const resources = [];
+const hook = createHook({
+  init(_id, type) {
+    if (recording && type !== 'PROMISE' && fromPackages()) resources.push(type);
+  },
+}).enable();
+const fsCalls = [];
+for (const [prefix, api] of [['fs.', fs], ['fs.promises.', fs.promises]]) {
+  for (const [name, fn] of Object.entries(api)) {
+    if (typeof fn !== 'function' || !/^[a-z]/.test(name)) continue;
+    api[name] = Object.assign(function (...args) {
+      if (recording && fromPackages()) fsCalls.push(prefix + name + '(' + String(args[0]) + ')');
+      return fn.apply(this, args);
+    }, fn);
+  }
+}
+syncBuiltinESMExports();
+
 const before = process.getActiveResourcesInfo();
 await import(process.argv[2]);
 // Give anything scheduled at import time (an immediate, a promise chain) the chance to start.
 await new Promise((resolve) => setImmediate(resolve));
+recording = false;
+hook.disable();
 const opened = process.getActiveResourcesInfo();
 for (const r of before) {
   const i = opened.indexOf(r);
   if (i >= 0) opened.splice(i, 1);
 }
-console.log(JSON.stringify({
+const report = {
   sqlite: process.moduleLoadList.filter((m) => /sqlite/i.test(m)),
+  resources,
+  fs: fsCalls,
   opened,
-  created: watched.flatMap((d) => readdirSync(d)),
-}));
+  created: watched.flatMap((d) => fs.readdirSync(d)),
+};
+// Written synchronously so exiting cannot cut it short; exiting keeps a leftover handle (reported
+// above) from hanging the check.
+fs.writeSync(1, JSON.stringify(report) + '\\n');
+process.exit(0);
 `;
 
 function tsconfig(moduleKind, resolution) {
@@ -298,7 +340,7 @@ try {
   );
   run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: app });
 
-  step('Importing each entry point alone: no node:sqlite at a root, no handles, no files');
+  step('Importing each entry point alone: no node:sqlite at a root, no timers, sockets or files');
   writeFileSync(join(app, 'no-sqlite-hook.mjs'), NO_SQLITE_HOOK);
   writeFileSync(join(app, 'probe.mjs'), PROBE);
   const probe = (specifier, guard) => {
@@ -313,6 +355,7 @@ try {
       env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: temp, TMP: temp, TEMP: temp },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60_000,
     });
     let report;
     try {
@@ -320,9 +363,13 @@ try {
     } catch {
       /* reported by the caller as a failed import */
     }
-    return { status: r.status, stderr: r.stderr, report };
+    const outcome = r.error ? r.error.message : `exit ${r.status ?? r.signal}`;
+    return { outcome, stderr: r.stderr, report };
   };
   const checkClean = (specifier, report) => {
+    if (report.resources.length)
+      fail(`${specifier}: importing it creates ${report.resources.join(', ')}`);
+    if (report.fs.length) fail(`${specifier}: importing it touches files: ${report.fs.join(', ')}`);
     if (report.opened.length)
       fail(`${specifier}: importing it leaves handles open: ${report.opened.join(', ')}`);
     if (report.created.length)
@@ -334,13 +381,20 @@ try {
       .map((k) => (k === '.' ? pkg.name : `${pkg.name}/${k.slice(2)}`)),
   );
   for (const specifier of entries.filter((e) => !SQLITE_ENTRIES.includes(e))) {
-    const { status, stderr, report } = probe(specifier, true);
-    if (!report) {
-      fail(`${specifier}: import failed under the no-sqlite guard (exit ${status}):\n${stderr}`);
+    // Unguarded, so the load list shows node:sqlite even if an import of it is caught...
+    const open = probe(specifier, false);
+    if (!open.report) {
+      fail(`${specifier}: import failed (${open.outcome}):\n${open.stderr}`);
       continue;
     }
-    if (report.sqlite.length) fail(`${specifier}: loads ${report.sqlite.join(', ')}`);
-    checkClean(specifier, report);
+    if (open.report.sqlite.length) fail(`${specifier}: loads ${open.report.sqlite.join(', ')}`);
+    checkClean(specifier, open.report);
+    // ...and guarded, so an uncaught import of it fails with the importing module in the stack.
+    const guarded = probe(specifier, true);
+    if (!guarded.report)
+      fail(
+        `${specifier}: import failed under the no-sqlite guard (${guarded.outcome}):\n${guarded.stderr}`,
+      );
     console.log(`  ${specifier} ok`);
   }
   for (const specifier of SQLITE_ENTRIES) {
@@ -350,14 +404,14 @@ try {
     }
     // Positive controls: both detectors must see a SQLite entry point load node:sqlite.
     const open = probe(specifier, false);
-    if (!open.report) fail(`${specifier}: import failed (exit ${open.status}):\n${open.stderr}`);
+    if (!open.report) fail(`${specifier}: import failed (${open.outcome}):\n${open.stderr}`);
     else {
       if (!open.report.sqlite.length) fail(`${specifier}: the probe did not see node:sqlite load`);
       checkClean(specifier, open.report);
     }
     const guarded = probe(specifier, true);
-    if (guarded.status === 0 || !guarded.stderr.includes('import-purity: node:sqlite'))
-      fail(`${specifier}: the no-sqlite guard did not refuse it (exit ${guarded.status})`);
+    if (guarded.report || !guarded.stderr.includes('import-purity: node:sqlite'))
+      fail(`${specifier}: the no-sqlite guard did not refuse it (${guarded.outcome})`);
     console.log(`  ${specifier} checked (loads node:sqlite, as it may)`);
   }
 
