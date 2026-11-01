@@ -9,6 +9,7 @@ import {
   PolicyRegistry,
   TokenMapAuthenticator,
   startDecisionsMcpServer,
+  validateMcpPath,
   type AttachmentResolver,
   type InjectResult,
   type LocateResult,
@@ -187,6 +188,8 @@ export interface DaemonOptions {
   socket?: boolean;
   mcp?: {
     port?: number;
+    /** Path the MCP answers on, exactly (default `/mcp`). */
+    path?: string;
     /** Name of an env var holding the bearer token. */
     tokenEnv?: string;
     tokenFile?: string;
@@ -202,6 +205,14 @@ export interface DaemonOptions {
 }
 
 export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Promise<void> {
+  // A bad mount path fails before the runtime opens or a token file is created.
+  if (o.mcp?.path !== undefined) {
+    try {
+      validateMcpPath(o.mcp.path);
+    } catch (e) {
+      throw new CliError(`--path: ${(e as Error).message}`);
+    }
+  }
   const rt = await openRuntime(ctx, g);
   const sink = new DemoSink(parseSink(o.sink), ctx.out);
   // Agents reach files only through a folder the human designated (per pane), never by naming a path.
@@ -238,6 +249,7 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         bridge,
         authenticator: auth,
         ...(o.mcp.port !== undefined ? { port: o.mcp.port } : {}),
+        ...(o.mcp.path !== undefined ? { path: o.mcp.path } : {}),
       });
       ctx.out(`Decisions MCP listening on ${mcp.url} (loopback only)\n`);
       for (const l of mcpAddLines(mcp.url, token, {

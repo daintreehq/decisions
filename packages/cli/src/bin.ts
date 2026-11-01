@@ -95,6 +95,10 @@ export function buildProgram(): Command {
     )
     .option('--port <n>', 'port (default: a free one)', (v) => Number(v))
     .option(
+      '--path <path>',
+      'serve the MCP at exactly this path, e.g. /mcp/decisions (default: /mcp; subpaths are 404)',
+    )
+    .option(
       '--token-env <VAR>',
       'read the bearer token agents must present from this environment variable',
     )
@@ -117,6 +121,7 @@ export function buildProgram(): Command {
           sink: o.sink,
           mcp: {
             ...(o.port ? { port: o.port } : {}),
+            ...(o.path !== undefined ? { path: o.path } : {}),
             ...(o.tokenEnv ? { tokenEnv: o.tokenEnv } : {}),
             ...(o.tokenFile ? { tokenFile: o.tokenFile } : {}),
             ...(o.attachmentsDir ? { attachmentsDir: o.attachmentsDir } : {}),

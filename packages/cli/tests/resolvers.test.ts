@@ -126,6 +126,7 @@ describe('the MCP daemon: attachments and secrets over the wire', () => {
       attachmentsDir?: string;
       showToken?: boolean;
       tokenEnv?: string;
+      path?: string;
       env?: Record<string, string>;
     },
     fn: (h: {
@@ -160,10 +161,17 @@ describe('the MCP daemon: attachments and secrets over the wire', () => {
           ...(opts.attachmentsDir ? { attachmentsDir: opts.attachmentsDir } : {}),
           ...(opts.showToken ? { showToken: true } : {}),
           ...(opts.tokenEnv ? { tokenEnv: opts.tokenEnv } : {}),
+          ...(opts.path ? { path: opts.path } : {}),
         },
       },
     );
-    const h = await up;
+    // a daemon that fails to start rejects here instead of leaving `up` pending forever
+    const h = await Promise.race([
+      up,
+      done.then(() => {
+        throw new Error('daemon exited before it was ready');
+      }),
+    ]);
     const call = async (name: string, args: unknown) => {
       const r = await fetch(h.mcp.url, {
         method: 'POST',
@@ -230,6 +238,28 @@ describe('the MCP daemon: attachments and secrets over the wire', () => {
         expect(token).toBe(t);
         expect(out.join('\n')).not.toContain(t);
       },
+    );
+  });
+  it('serves /mcp by default and a custom mount path when asked, printing that URL', async () => {
+    await withDaemon({}, async ({ url }) => {
+      expect(new URL(url).pathname).toBe('/mcp');
+    });
+    await withDaemon({ path: '/mcp/decisions' }, async ({ url, token, out, call }) => {
+      expect(new URL(url).pathname).toBe('/mcp/decisions');
+      expect(out.join('\n')).toContain(`Decisions MCP listening on ${url} `);
+      expect(out.join('\n')).toContain(`claude mcp add --transport http decisions ${url} `);
+      expect((await call('ask_human', { question: 'on a custom path' })).isError).toBeUndefined();
+      const old = await fetch(new URL('/mcp', url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      });
+      expect(old.status).toBe(404);
+    });
+  });
+  it('refuses a malformed mount path before serving anything', async () => {
+    await expect(withDaemon({ path: 'mcp/' }, async () => {})).rejects.toThrow(
+      /^--path: invalid MCP mount path/,
     );
   });
 });

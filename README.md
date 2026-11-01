@@ -18,7 +18,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 ```
 
 - **Non-blocking.** `ask_human` returns immediately. The agent ends its turn instead of holding a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks "stuck".
-- **The Decisions MCP** is a plain HTTP MCP server that you can add to any agent. Inside Daintree it is wired in for you; anywhere else run `decisions mcp` and it prints the exact `claude mcp add --transport http …` line.
+- **The Decisions MCP** is a plain HTTP MCP server that you can add to any agent. Inside Daintree it is wired in for you; anywhere else run `decisions mcp` and it prints the exact `claude mcp add --transport http …` line. It serves `/mcp` by default; `--path /mcp/decisions` (or `path` in `createDecisionsMcpHandler`) mounts it somewhere else, matched exactly.
 - **The relay** is a Cloudflare Worker, one SQLite Durable Object, and a private R2 bucket. The desktop and phone stay connected through Cloudflare's WebSocket Hibernation API, so an idle connection costs almost nothing.
 - **The app** is an installable PWA served by the same Worker, with push notifications, an offline outbox, and optional dictation.
 - **The decision model** (optional) can answer the way you would, from your own decision history, only where a workflow allows it, always labelled as a proxy, never for anything that needs you.
