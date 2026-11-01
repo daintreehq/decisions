@@ -20,7 +20,12 @@
       },
       "role": {
         "type": "string",
-        "enum": ["owner-desktop", "desktop-host", "phone", "tablet"]
+        "enum": [
+          "owner-desktop",
+          "desktop-host",
+          "phone",
+          "tablet"
+        ]
       },
       "label": {
         "type": "string",
@@ -172,7 +177,11 @@
       },
       "purpose": {
         "type": "string",
-        "enum": ["question-content", "answer-content", "history-export"]
+        "enum": [
+          "question-content",
+          "answer-content",
+          "history-export"
+        ]
       },
       "nonce": {
         "type": "string",
@@ -267,7 +276,11 @@
       },
       "requirement": {
         "type": "string",
-        "enum": ["human-required", "proxy-ok", "proxy-first"]
+        "enum": [
+          "human-required",
+          "proxy-ok",
+          "proxy-first"
+        ]
       },
       "workflow_gate_id_hash": {
         "anyOf": [
@@ -484,7 +497,12 @@
       "kind": {
         "default": "mixed",
         "type": "string",
-        "enum": ["choice", "approval", "text", "mixed"]
+        "enum": [
+          "choice",
+          "approval",
+          "text",
+          "mixed"
+        ]
       },
       "options": {
         "default": [],
@@ -508,7 +526,10 @@
               "maxLength": 1000
             }
           },
-          "required": ["id", "label"],
+          "required": [
+            "id",
+            "label"
+          ],
           "additionalProperties": false
         }
       },
@@ -526,7 +547,12 @@
             "role": {
               "default": "other",
               "type": "string",
-              "enum": ["before", "after", "reference", "other"]
+              "enum": [
+                "before",
+                "after",
+                "reference",
+                "other"
+              ]
             },
             "alt": {
               "type": "string",
@@ -534,7 +560,11 @@
             },
             "mime": {
               "type": "string",
-              "enum": ["image/png", "image/jpeg", "image/webp"]
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
             },
             "size": {
               "type": "integer",
@@ -557,7 +587,15 @@
               "maximum": 9007199254740991
             }
           },
-          "required": ["attachment_id", "role", "mime", "size", "sha256", "nonce", "key_epoch"],
+          "required": [
+            "attachment_id",
+            "role",
+            "mime",
+            "size",
+            "sha256",
+            "nonce",
+            "key_epoch"
+          ],
           "additionalProperties": false
         }
       },
@@ -578,7 +616,14 @@
         "maxLength": 500
       }
     },
-    "required": ["content_version", "question", "kind", "options", "attachments", "allow_text"],
+    "required": [
+      "content_version",
+      "question",
+      "kind",
+      "options",
+      "attachments",
+      "allow_text"
+    ],
     "additionalProperties": false
   },
   "HumanAnswerContentV1": {
@@ -617,7 +662,11 @@
         "maxLength": 2000
       }
     },
-    "required": ["content_version", "selected_option_ids", "reviewed_attachment_digests"],
+    "required": [
+      "content_version",
+      "selected_option_ids",
+      "reviewed_attachment_digests"
+    ],
     "additionalProperties": false
   },
   "ProxyAnswerContentV1": {
@@ -810,7 +859,12 @@
           },
           "role": {
             "type": "string",
-            "enum": ["owner-desktop", "desktop-host", "phone", "tablet"]
+            "enum": [
+              "owner-desktop",
+              "desktop-host",
+              "phone",
+              "tablet"
+            ]
           },
           "key_epoch": {
             "type": "integer",
@@ -945,7 +999,10 @@
             "additionalProperties": false
           }
         },
-        "required": ["t", "event"],
+        "required": [
+          "t",
+          "event"
+        ],
         "additionalProperties": false
       },
       {
@@ -965,7 +1022,11 @@
             "type": "boolean"
           }
         },
-        "required": ["t", "high_water", "has_more"],
+        "required": [
+          "t",
+          "high_water",
+          "has_more"
+        ],
         "additionalProperties": false
       },
       {
@@ -980,7 +1041,10 @@
             "pattern": "^[A-Za-z0-9_-]{8,64}$"
           }
         },
-        "required": ["t", "pairing_id"],
+        "required": [
+          "t",
+          "pairing_id"
+        ],
         "additionalProperties": false
       },
       {
@@ -1003,7 +1067,12 @@
             "type": "string"
           }
         },
-        "required": ["t", "id", "status", "body"],
+        "required": [
+          "t",
+          "id",
+          "status",
+          "body"
+        ],
         "additionalProperties": false
       },
       {
@@ -1014,7 +1083,9 @@
             "const": "revoked"
           }
         },
-        "required": ["t"],
+        "required": [
+          "t"
+        ],
         "additionalProperties": false
       },
       {
@@ -1031,7 +1102,11 @@
             "type": "string"
           }
         },
-        "required": ["t", "code", "message"],
+        "required": [
+          "t",
+          "code",
+          "message"
+        ],
         "additionalProperties": false
       }
     ]
@@ -1051,7 +1126,10 @@
             "maximum": 9007199254740991
           }
         },
-        "required": ["t", "after"],
+        "required": [
+          "t",
+          "after"
+        ],
         "additionalProperties": false
       },
       {
@@ -1067,7 +1145,10 @@
             "maximum": 9007199254740991
           }
         },
-        "required": ["t", "seq"],
+        "required": [
+          "t",
+          "seq"
+        ],
         "additionalProperties": false
       },
       {
@@ -1084,7 +1165,12 @@
           },
           "method": {
             "type": "string",
-            "enum": ["GET", "POST", "PUT", "DELETE"]
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
           },
           "path": {
             "type": "string",
@@ -1104,7 +1190,14 @@
             "maxLength": 1024
           }
         },
-        "required": ["t", "id", "method", "path", "query", "authorization"],
+        "required": [
+          "t",
+          "id",
+          "method",
+          "path",
+          "query",
+          "authorization"
+        ],
         "additionalProperties": false
       }
     ]

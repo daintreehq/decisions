@@ -102,7 +102,9 @@ if (!DRY) {
     JSON.stringify({ url, claim_secret: claim, created_at: new Date().toISOString() }, null, 2),
     { mode: 0o600 },
   );
-  say(`  saved to ${file} (readable only by you; delete it after setup)`);
+  const secretFile = join(dir, 'claim-secret');
+  writeFileSync(secretFile, claim + '\n', { mode: 0o600 });
+  say(`  saved to ${file} and ${secretFile} (readable only by you; delete them after setup)`);
 }
 
 step(7, 'Checking the deployment');
@@ -114,7 +116,7 @@ if (!DRY && url.startsWith('https://')) {
 say(`
 Done. Next:
   1. Tell Daintree (Settings > Decisions) or run:
-       pnpm decisions setup --url ${url} --claim-secret <value from ${join('~', '.decisions', 'deploy.json')}>
+       pnpm decisions setup --url ${url} --claim-secret-file ${join('~', '.decisions', 'claim-secret')}
   2. Pair your phone:  pnpm decisions pair
   3. On iPhone: open the link in Safari, Share > Add to Home Screen, then open the installed app to enable notifications.
 `);

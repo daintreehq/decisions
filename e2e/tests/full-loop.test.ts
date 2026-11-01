@@ -47,6 +47,7 @@ class RecordingSink implements TerminalSink {
         paneId: o.pane_id,
         terminalGeneration: o.terminal_generation,
         agentSessionId: o.agent_session_id,
+        worktreeId: o.worktree_id,
       },
     };
   }

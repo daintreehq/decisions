@@ -35,7 +35,7 @@ pnpm decisions:doctor --url https://<your-worker>.workers.dev
 ## Claim and pair
 
 ```bash
-pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret <secret>
+pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file ./claim-secret   # or DECISIONS_CLAIM_SECRET, or --claim-secret-stdin
 pnpm decisions pair
 ```
 

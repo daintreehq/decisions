@@ -21,6 +21,8 @@ export interface BridgeProxyQuestionInput {
 
 /** The bridge's `ProxyEngine` hook: identical to the client's declaration, with a required `AbortSignal`. */
 export interface BridgeProxyEngine {
+  /** Tells the client bridge this engine receives the trusted workflow gate, so gated questions may be offered to it. */
+  readonly gateAware?: boolean;
   suggest(input: BridgeProxyQuestionInput, signal: AbortSignal): Promise<ProxyOutcome>;
 }
 
@@ -84,6 +86,8 @@ export function asBridgeEngine(
   o: BridgeAdapterOptions = {},
 ): BridgeProxyEngine {
   return {
+    // The bridge now supplies the trusted workflow gate; this adapter maps it into the model's gate guards.
+    gateAware: true,
     async suggest(input, signal) {
       if (!wellFormed(input)) return { action: 'abstain', reason: 'invalid-input' };
       const mapped = toModelInput(input, o);

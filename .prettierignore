@@ -1,0 +1,8 @@
+# Generated or fixture files whose exact bytes matter
+pnpm-lock.yaml
+packages/protocol/openapi.json
+packages/protocol/schemas.json
+packages/crypto/fixtures/*.json
+**/dist/
+**/node_modules/
+.wrangler/

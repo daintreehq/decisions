@@ -38,7 +38,7 @@ Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and 
 You need a Cloudflare account (the free plan is enough for one person), Node 22+, and a phone.
 
 1. **Deploy.** Click the button above. Cloudflare copies this repository into your account, creates the R2 bucket and Durable Object, and asks for one secret, `CLAIM_SECRET`: type any long random string (`openssl rand -hex 32`) and keep it for step 2. Prefer a terminal? `pnpm install && pnpm decisions:deploy` does the same thing and generates the secret for you. More detail in [docs/self-host.md](docs/self-host.md).
-2. **Claim it** from the computer your agents run on: `pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret <secret>`. In Daintree this is Settings → Decisions. The claim can only happen once.
+2. **Claim it** from the computer your agents run on: `pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file <file containing the secret>` (or set `DECISIONS_CLAIM_SECRET`; avoid putting the secret on the command line, where it shows in the process list). In Daintree this is Settings → Decisions. The claim can only happen once.
 3. **Pair your phone:** `pnpm decisions pair` shows a QR code. Scan it, then confirm the same six digits appear on both screens. On iPhone open the link in Safari, tap Share → Add to Home Screen, and open the installed app (iOS only delivers push to installed web apps).
 4. **Add the MCP to your agent:** `pnpm decisions mcp` prints the line for your agent.
 5. **Test it:** `pnpm decisions ask "Does this work?" --option yes=Yes --option no=No` and answer on your phone.
