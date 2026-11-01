@@ -1,0 +1,224 @@
+# Daintree integration specification
+
+Status: implementation-ready design for the `daintreehq/daintree` repository. Audience: the engineer or agent who will build the Daintree side of Decisions. Everything here was checked against a shallow clone of the public Daintree repository (Electron 42, Node 22, better-sqlite3 + drizzle, `@modelcontextprotocol/sdk`, `ws`). File paths and symbol names are quoted from that clone; re-verify each one when you start because Daintree moves quickly. Where this document says "relay" it means the user's own Cloudflare deployment from this repository, and "protocol" means [docs/protocol.md](./protocol.md), which is normative for everything that crosses the network.
+
+The Daintree-side work is a thin layer. The heavy lifting (signing, encryption, relay client, durable queues, delivery state machine, MCP handler, decision model) already exists in this repository as `@daintree/decisions-client`, `@daintree/decisions-protocol`, `@daintree/decisions-crypto` and `@daintree/decisions-model`. Daintree supplies the host seams: pane authentication, the terminal wake path, the resume path, storage, settings UI and the pane indicator.
+
+## 1. Product requirements that shape the integration
+
+An agent calls `ask_human` and gets an answer back immediately that says the question was queued. The agent ends its turn. Minutes or days later the human answers on a phone, and Daintree types a delimited, labelled answer block into the correct agent terminal once that terminal is safe to type into, resuming the agent session first when needed. Four requirements are non-negotiable and drive every decision below.
+
+1. **The Decisions MCP is a normal HTTP MCP server that any agent can add.** Inside Daintree it is mounted on the existing loopback listener and injected into panes automatically. Outside Daintree the same handler runs standalone (`decisions mcp`) and prints the exact `claude mcp add --transport http ...` line. Nothing about the protocol is Daintree-specific.
+2. **Daintree holds an outbound hibernatable WebSocket to the relay.** Answers arrive as pushed events; Daintree acknowledges receipt and later acknowledges real terminal delivery. No inbound ports, no polling loop, no keep-alive chatter that wakes the Durable Object. Section 6 specifies the connection lifecycle.
+3. **Nothing leaves the machine unless the user turned Decisions on.** A vanilla Daintree pays nothing: no listener, timer, subscription, socket or import. This matches the `deviceAnswer` and remote-host patterns in the repo (`getDeviceAnswerService()` lazy singleton, "Off, there is no listener, no timer and no subscription").
+4. **The agent can never forge a human answer or route around a protected gate.** Requirement levels come from trusted Daintree workflow configuration, pane identity comes from the bearer token and not from tool arguments, and a proxy (decision model) answer can never satisfy `human-required`.
+
+Non-goals for this integration: replacing Canopy, replacing the existing "Answer from another device" page (it remains the zero-infrastructure local path), or adding any Daintree-operated server.
+
+## 2. Where it fits in the existing codebase
+
+| Concern                    | Existing Daintree seam to extend                                                                                                                                                                                                                                                                                                                                 | New code                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| MCP endpoint and pane auth | `electron/services/mcp-server/httpLifecycle.ts` `handleRequest` (Host/Origin checks, then plugin route branch, then `isAuthorized`); `electron/services/McpPaneConfigService.ts`; `mcpPaneConfigService.isValidPaneToken`, `getPaneIdForToken`, ownership principal resolvers wired by `wirePaneTokenResolvers` in `electron/ipc/handlers/terminal/lifecycle.ts` | a dedicated route `/mcp/decisions`, new reserved server key, launch-config entry         |
+| Typing the answer          | `TerminalNotifyService.enqueueWake(pane, projectId, LaneWake)` in `electron/services/mcp-server/terminalNotify.ts`; `shared/utils/terminalWakeGate.ts`; `approvalWake.ts` is the template                                                                                                                                                                        | new wake kind `decision`, `createDecisionWake`, a formatter in `noticeFormat.ts`         |
+| Resume                     | `shared/config/agents/*.ts` `resume` blocks, `buildResumeCommand` in `shared/types/agentSettings`, `electron/services/pty/agentSessionHistory.ts`, `src/services/agentResume.ts`, `agentSessionHistory.resume` action                                                                                                                                            | a main-process `AgentResumeAdapter` over these                                           |
+| Storage                    | drizzle SQL migrations in `electron/services/persistence/migrations` (precedent: `0017_assistant_sender_credentials.sql` used through raw `sqlite.prepare`), electron-store migrations in `electron/services/migrations/NNN-*.ts`                                                                                                                                | `0020_decisions.sql`, migration `043-decisions-settings.ts`, `settingOwnership.ts` entry |
+| Secrets                    | `safeStorage` as used by `electron/services/plugin/secretCipher.ts` (core has no keychain; `SecureStorage` is plaintext by design)                                                                                                                                                                                                                               | key material sealed with `safeStorage`; see section 9                                    |
+| Settings UI                | `src/components/Settings/settingsTabRegistry.tsx` (the `mcp` entry is the model), `McpServerSettingsTab.tsx`, `DeviceAnswerGroup.tsx`                                                                                                                                                                                                                            | a "Decisions" tab under Integrations                                                     |
+| Pane indicator             | `TerminalNotifyChip.tsx` + `usePaneNotifyState`, IPC event `terminal:notify-state`                                                                                                                                                                                                                                                                               | `DecisionWaitChip` + `terminal:decision-state`                                           |
+| Remote hosts               | `docs/architecture/remote-hosts.md`, `CHANNEL_LOCALITY`, link CALL methods in each module's `linkMethods.ts`, `ClientEndpoint.request`                                                                                                                                                                                                                           | Host-resident service, enrollment CALL method                                            |
+| Audit                      | `electron/services/mcp-server/auditLog.ts`, `persistence/auditRingStore.ts`                                                                                                                                                                                                                                                                                      | a `decisions` audit ring (ids and outcomes only)                                         |
+
+Code layout in Daintree (all main-process, lazily imported): `electron/services/decisions/` containing `index.ts` (`getDecisionsService()`, `startDecisionsIfEnabled()`), `DecisionsService.ts` (owns the bridge and relay socket), `daintreeTerminalSink.ts`, `daintreeResumeAdapter.ts`, `daintreeLocalStore.ts` (the `LocalStore` implementation over drizzle/better-sqlite3), `paneAuthenticator.ts`, `workflowGates.ts`, `attachmentResolver.ts`, `keyStore.ts`, `deploy.ts`. The renderer sees only IPC.
+
+Distribution of the library code: Daintree depends on published `@daintree/decisions-client` (which depends on `-protocol`, `-crypto`). Before the first Daintree PR those packages must be published with built ESM and type declarations; today they are consumed as TypeScript source inside this monorepo. This is tracked as release work in this repository (`release.yml`).
+
+## 3. Making `ask_human` available to agents (the MCP surface)
+
+### 3.1 Recommended: a dedicated tier-independent route
+
+Daintree's control surface (`/mcp`) is gated by a per-project tier whose default is `off`, and the external tier is size-budgeted in CI (`tierAuth.test.ts`, `mcpWireBudget.test.ts`). Putting `ask_human` there would couple a human-in-the-loop feature to granting agents the whole Daintree control surface. Plugin endpoints (`/mcp/plugin/<id>`, `contributes.agentMcp`) are tier-independent but default to Off per project, cannot type text into a terminal, and share the plugin grant registry, which is the wrong trust model.
+
+So Decisions gets its own route, following the precedent of the plugin route:
+
+- In `HttpLifecycle.handleRequest`, after the existing Host/Origin/duplicate-header checks and the plugin-route branch, add a branch for the path prefix `/mcp/decisions`. It runs before `isAuthorized` and has its own authentication: only a valid per-pane bearer is accepted (`mcpPaneConfigService.isValidPaneToken`). The API-key tier and help tokens are rejected, because "an api-key client has no pane of its own" (the same reasoning that keeps `terminal.notifyWhenIdle` out of the external tier).
+- Mount it through one `setDecisionsRouteHandler` seam in `McpServerService.ts`, mirroring `setPluginRouteHandler` (about line 570), so that when Decisions is disabled the seam is empty and costs nothing.
+- The handler is `createDecisionsMcpHandler(bridge, authenticator)` from `@daintree/decisions-client`. The `PaneAuthenticator` Daintree supplies resolves a bearer to `{ paneOrigin }` using the existing resolvers: pane id from `getPaneIdForToken`, ownership principal from `paneOwnershipPrincipalResolver`, launch workspace binding from `getPaneWorkspaceBindingForToken`. The pane identity is derived server-side from the bearer, never from tool arguments.
+- Session binding and revocation follow the plugin route: a session is bound to the credential digest that opened it (`bindSessionCredential`), pane sessions are not idle-reaped, and `revokePaneBearer(principal)` closes the Decisions session and, through a new `decisions.revokeOwner(principal)` call, cancels or re-attaches that pane's pending work.
+- Reserve a new server key. `RESERVED_PLUGIN_SERVER_KEYS` (`electron/services/pluginAgentMcp/serverKeys.ts`) currently reserves `daintree`, `daintree-docs`, `daintree-runbooks`. Add `daintree-decisions` so a plugin cannot squat it. Claude Code then exposes the tool as `mcp__daintree-decisions__ask_human`.
+
+### 3.2 Launch-time injection
+
+Add a second entry in `McpPaneConfigService.preparePaneConfig` (called from `electron/ipc/handlers/terminal/lifecycle.ts`, about lines 1037 and 878) that adds the `daintree-decisions` server for panes whose project has Decisions enabled. This uses the sanctioned additive `launchMcp` path only (config file under `userData/mcp-pane-configs`, args, env), consistent with the hard rule never to modify user-owned agent config. The entry is rendered by the existing dialect renderers in `electron/services/launchMcp/renderLaunchMcp.ts`: Claude `--mcp-config`, Codex `-c mcp_servers.<key>.url=… bearer_token_env_var`, Gemini `GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, opencode `OPENCODE_CONFIG_CONTENT`, Copilot, Amp, Qwen, Mistral Vibe. Eight CLIs get it automatically. For the others (Cursor, Grok, Kimi, Antigravity, Crush, Kiro, Goose, Aider, Open Interpreter) the settings page shows the manual `claude mcp add`-style line for the standalone `decisions mcp` server instead; do not claim support that does not exist.
+
+Tool timeout: the generated config uses `MCP_CONFIRMABLE_CALL_MAX_MS` seconds for plain dispatch. `ask_human` returns in well under a second, so it needs nothing special. The point of non-blocking design is that no CLI's tool timeout matters.
+
+### 3.3 Tools and budgets
+
+Three tools, each with a description under 400 bytes (Daintree CI caps this, `.claude/rules/actions-and-mcp.md`): `ask_human`, `get_decision`, `cancel_question`. They are not part of the control surface action manifest, so they do not consume the external-tier budget, and because the route is separate they are not re-sent every turn to clients that did not mount it. Input schemas are exactly the ones in `@daintree/decisions-client` (`AskHumanInput`: question ≤ 8000 chars, context ≤ 32 KiB, options ≤ 12, attachments, `requested_requirement`, `workflow_gate_id`, `expires_at`, `correlation_id`).
+
+The result text returned to the agent is: `Asked as q-<alias>. End your turn now (or continue with unrelated work); the answer will arrive as a message in this terminal.` The alias `q-N` is a cosmetic, per-installation counter. Wire ids are full unguessable identifiers.
+
+### 3.4 Alternatives considered
+
+A core action with a main-process short-circuit in `sessionServer.ts` (the `terminal.notifyWhenIdle` pattern) is viable and would reuse the CallTool gate chain, but it ties Decisions to the project tier and to the action manifest contract (renaming an action id is a breaking change). A built-in plugin is viable for the tool surface but plugins cannot submit text. If the maintainers prefer the first option, `PaneAuthenticator` and the bridge are unchanged; only the transport adapter differs.
+
+## 4. Identity, origin and routing
+
+### 4.1 What a question is bound to
+
+The bridge records, in the local store before anything touches the network, a `DecisionOrigin`:
+
+- `host_id`: the Daintree Host that owns the pane. Daintree's `LOCAL_HOST_ID = "local"` is only unique per machine, so Decisions mints its own globally unique `decisions_host_id` at enrollment and stores the mapping to the Daintree `HostId` (`toHostScopedKey`).
+- `pane_id` (also the terminal id) and `terminal_generation`: the monotonic `launchGeneration` minted by `PtyClient.spawn` for every spawn path, read with `ptyClient.getLiveGeneration(id)` and checked with `isLiveGeneration(id, gen)`. A pane id reused for a new process has a new generation, which blocks injection.
+- `agent_incarnation` (`shared/types/panel.ts` `agentIncarnation`) and `agent_session_id` (`agentSessionId`): Claude mints the session id at launch (`--session-id`), others scrape it at graceful shutdown (`sessionIdCapture.ts`).
+- `ownership_principal`: changes on every relaunch, which is an existing hook for "this is a new run". Anything keyed by it dies with the run (the same property `TerminalNotifyService.revokeOwner` relies on).
+- `project_id`, `worktree_id` and the worktree root (local only, never sent to the relay; it lives inside the encrypted content as a display label at most).
+- `origin_ref` on the wire is a salted hash of `(host_id, pane_id)`, used only for per-pane quotas.
+
+### 4.2 Remote hosts
+
+The agent, its MCP listener, its bearer, its notices and its PTY all live on the Host (`docs/architecture/remote-hosts.md`). The Shell may be closed. Therefore the Decisions service runs on the Host, not in the Shell window, and each Host is its own relay device:
+
+- The local machine, where the user first runs setup, is the `owner-desktop`. It claims the relay, holds the epoch keys and approves phones.
+- Every other Daintree Host is enrolled as a `desktop-host` device. Enrollment is initiated from the Shell attached to that Host over the already authenticated link: a new link CALL method `decisions.enrollHost` (in `electron/remote/decisions/linkMethods.ts`, zod-validated, listed in `CHANNEL_LOCALITY` as `host`) asks the Host for a fresh device key pair, sends the public keys to the owner, which signs a device certificate and an epoch grant sealed to the host's exchange key and registers them with `POST /api/v1/devices/enroll-host` (owner-signed; relay-side route specified in protocol.md section 10). The private keys never leave the Host. Revoking a Host from Daintree calls the normal device revoke.
+- A Host answers only for itself: it ignores events whose `target_host_id` is not its own. It receives the same ciphertext as every device, which is acceptable because all devices belong to one owner; this is documented in the privacy page.
+- Windows is Shell-only (WSL hosts), so a WSL Host enrolls the same way.
+- A Host that is offline simply catches up with `sync` when it reconnects. Pending answers wait in the relay (section 6).
+
+If the owner prefers a single relay identity, the alternative is to forward questions from Host to the owner over `ClientEndpoint.request`; it was rejected because it fails when the owner machine is asleep while the Host keeps running agents.
+
+### 4.3 Routing rules (invariants)
+
+An answer is injected only if host, pane, generation, agent session and worktree all match the origin, otherwise the delivery becomes `needs-attention` and is shown in the UI. Never inject into a guessed same-named pane or project. Multiple open questions per pane are allowed (limit 10); each answer carries its own question id and revision; answers for one pane are ordered by question creation time.
+
+## 5. Policy: requirement levels and workflow gates
+
+`PolicyRegistry` (client library) is populated by Daintree. A gate is `{ id, minRequirement, choices?: {id,label}[], allowText, defaultExpiryMs | null, bindArtifacts: boolean, onApprove?: ... }`. Rules enforced in the bridge, not in the agent-visible tool:
+
+- `enforceRequirement({ workflowMin, requested, proxyAllowlisted })`: the agent's `requested_requirement` can only make a question stricter. With no trusted gate the level is `human-required`. Proxy-capable levels require either a trusted gate that allows them or the user's explicit allowlist in Settings.
+- A gate with `choices` validates exact option ids and labels; free text is accepted only if `allowText`.
+- **Design review gate.** The final before/after screenshots of a design review are submitted as `attachments` with `workflow_gate_id: "design-review/final"`, a `human-required` gate with `approve`/`reject` choices and `bindArtifacts: true`. The phone UI records `reviewed_attachment_digests` (SHA-256 of the plaintext images it displayed). `get_decision` returns `status`, `provenance`, `choice`, `text` and `reviewed_digests_match` (true only if the digests equal the digests of the images attached to the question). The skill continues to the PR step only when `status = human-answered`, `provenance = human`, `choice = approve` and `reviewed_digests_match = true`. If the images change after approval, a new gate must be asked; an old approval does not carry over. There is no design-review workflow in the Daintree repo today (only `scripts/design-review-shots.mjs`), so this ships as a skill/runbook in the user's global configuration plus documentation; Daintree itself only needs the gate registered.
+- Expiry never authorizes anything. The notice delivered on expiry says so in plain words and tells the agent the workflow is not authorized to continue.
+
+## 6. The relay connection: hibernatable WebSocket
+
+Decisions requires a long-lived outbound socket to the relay's Durable Object, using Cloudflare's WebSocket Hibernation API on the server side so that an idle connection is nearly free and survives Worker deploys. The client library implements the protocol (`RelaySocket`); this section specifies how Daintree drives it.
+
+### 6.1 Lifecycle
+
+1. `getDecisionsService()` is created lazily the first time Decisions is enabled or `startDecisionsIfEnabled()` finds `store.get("decisions")?.enabled`. Disabled means no import, no socket, no timer.
+2. Connect: `POST /api/v1/socket-ticket` (signed, single use, 30 seconds) then `GET /api/v1/socket?ticket=…` as a WebSocket. Use the `ws` package already present in main. Never log the URL (the ticket is in the query).
+3. The first frame is `hello {device_id, role, key_epoch, high_water}`. Immediately send `sync {after: last_contiguous_seq}`. The relay replays missed ledger events as `event` frames (≤ 2000 per sync; if `caught_up.high_water` is lower than `hello.high_water`, send `sync` again) and then `caught_up`.
+4. For every `event` frame: validate the schema, verify signatures through the device certificate chain pinned to the owner key, persist to the local inbound log, advance `last_contiguous_seq` only over contiguous sequence numbers, then send `ack {seq}`. Terminal delivery is a separate, later step (6.3).
+5. Keep-alive: send the text frame `ping` every 4 minutes. The runtime answers `pong` without waking the Durable Object, so this costs nothing. Do not send application-level heartbeats.
+6. Close codes: `4409` means another connection from this device replaced this one (do not fight it: back off and surface a warning, this indicates two Daintree processes sharing identity); `4401` means this device was revoked (stop, wipe delivery credentials, show "revoked" in Settings, never reconnect-loop); anything else reconnects with exponential backoff, 1 s to 5 min, full jitter, resyncing from the stored cursor.
+7. Reconnect immediately on `powerMonitor` `resume`, on network change, and when Settings re-enables the feature. Always `sync` after a reconnect even if the socket says it is current.
+8. Commands may travel over the same socket as tunnelled `req` frames (signed exactly like HTTP). Use this for small commands (`deliveries/terminal`, `proxy-answer`, `proxy-abstain`, `cancel`) to avoid extra TLS handshakes; use plain HTTP for attachment upload and as the fallback whenever the socket is down. The bridge's outbound queue already retries on both transports.
+
+### 6.2 What arrives and what it means
+
+`decision.answer.committed`, `decision.answer.overridden` and `decision.proxy.committed` carry an answer; the bridge decrypts it and schedules delivery (6.3). `decision.expired`, `decision.cancelled` and `decision.reopened` produce short safe notices. `decision.proxy.confirmed` is logged only. `device.revoked`/`device.key_rotated` update the epoch keys (fetch `GET /devices/{me}/key-grants`). `delivery.*` events are echoes for other devices and are used to update UI state.
+
+### 6.3 Delivery into the terminal
+
+Add a fifth wake kind to `LaneWake` (`kind: "notice"|"retired"|"lost"|"watch"|"approval"|"decision"`) and the matching branch in `deliver()` line assembly. The factory `createDecisionWake` (modeled on `electron/services/mcp-server/approvalWake.ts`) provides:
+
+- `id`: stable `dec-<hash of question_id + revision>` so duplicates join one queued wake (must match `LANE_WAKE_ID_PATTERN /^[A-Za-z0-9-]{1,64}$/`).
+- `recheck()`: returns `ready`, `held` or `unavailable`. It re-validates that the pane still exists, that `isLiveGeneration(paneId, generation)` holds, that the ownership principal is unchanged (a relaunch yields `unavailable: "relaunched"`), and that the agent session matches. The wake gate (`evaluateWakeGate`) still decides whether the terminal is at an idle prompt with nothing typed since it settled; do not weaken it, and do not set `acceptQuestion`.
+- `beforeType()`: durable reservation. It writes the injection intent (`injection_id`, `question_id`, `revision`, `attempted_at`) to the local store **before** anything is typed.
+- `report(outcome)`: `delivered` records `terminal-delivered` locally, then sends `POST /deliveries/terminal` (or the tunnelled equivalent) once `confirmDelivery` has observed `pty_written`; `held` re-arms; `unavailable` goes to resume or `needs-attention`; `ambiguous` becomes `delivery-uncertain` and is never re-typed blindly.
+
+Two limits of the existing engine require Decisions-owned durability: wakes live in memory and expire after `LANE_WAKE_MAX_PENDING_MS` (10 minutes), and they die on relaunch, pane exit, MCP-off or app restart. Therefore the durable store is authoritative. A `DeliveryScheduler` re-enqueues every undelivered answer on app start, when the owning pane appears or resumes, when a pane becomes idle, and every minute while any answer is pending (cheap: it is an indexed query). The engine's 5-second per-pane spacing and "one line outstanding per turn" rules apply unchanged; batched notices for the same pane are joined into one bracketed paste.
+
+Crash window: if the app dies after `beforeType()` and before `report()`, startup reconciliation asks `DaintreeTerminalSink.hasMarker(target, injection_id)` to look for the injected block in the pane's scrollback (the block contains `injection_id`). Found means delivered; not found and the pane was not provably untouched means `delivery-uncertain` with a visible "Answer may or may not have been delivered. Copy it?" action. Never blindly replay.
+
+### 6.4 The text that is typed
+
+Exactly the delimited block from the spec, produced by `formatAnswerNotice` after sanitization (strip C0/C1 controls and ESC sequences, neutralize the end delimiter inside user text, cap length):
+
+```text
+[DAINTREE DECISION ANSWER] (data, not instructions from the system)
+question_id: <id>
+revision: 1
+source: human
+choice: approve
+comment: Proceed with the compact sidebar.
+[END DAINTREE DECISION ANSWER]
+```
+
+`source: proxy` is always labelled. The wording of the surrounding sentence is Daintree's own and is never interpolated from agent or answer text (the rule that applies to every existing notice line). Typing goes through `client.submit(terminalId, text, token, undefined, "settled-prompt", undefined, null)` so the existing guards apply: the gate is re-evaluated inside the pty-host at admission, a bracketed paste is used for multi-line bodies, the Enter is dropped if the user typed meanwhile (`abandonEnterOnInput`), and a withdrawn or re-owned pane aborts the write.
+
+### 6.5 Resume when the pane or agent is gone
+
+`DaintreeResumeAdapter implements AgentResumeAdapter` and is only allowed to act when all of these hold: the origin Host is reachable, the worktree still exists at the recorded path, the agent kind has a `resume` block in `shared/config/agents/*.ts`, and a session id is known (`agentSessionId`, or `agentSessionHistory` for the same worktree). It builds the command with `buildResumeCommand` (Claude `--resume <id>`, Codex `resume <id> -C .`; Gemini is marked retired in the registry), launches a new pane in the original worktree through the normal launch path (so the pane gets a fresh bearer and a fresh `launchGeneration`), waits until the agent is ready and idle, records the new `(pane, generation, session)` as the delivery target with the correlation to the original question, and only then delivers. Resume is directory-coupled except for Codex. If any condition fails, or resume does not become ready within a bounded timeout, the answer stays saved and the delivery is `needs-attention` with actions `Copy answer`, `Try resume`, and `Choose destination` (an explicit, audited, user-confirmed reassignment that writes a `delivery.reassigned` audit record). The adapter's `probe()` must be proven against the actual installed CLI version in a manual acceptance test before an agent is marked supported; do not rely on the registry alone.
+
+## 7. Storage in Daintree
+
+- **SQLite.** Add `electron/services/persistence/migrations/0020_decisions.sql` plus a journal entry. Tables mirror the client's `LocalStore`: `decisions_questions` (origin map and status), `decisions_outbox`, `decisions_inbound_events`, `decisions_injection_intents`, `decisions_cursor`, `decisions_audit`. Follow the precedent of `0017_assistant_sender_credentials.sql` (raw `CREATE TABLE IF NOT EXISTS`, used through `sqlite.prepare`) or declare them in `schema.ts` and run `npm run db:generate` and `npm run db:check`. Writes are synchronous in better-sqlite3 and can stall main, so batch them and never write per audio/event frame; respect `diskPressureState.getWritesSuppressed()`.
+- **Settings.** electron-store key `decisions: { enabled, relayOrigin, installationId, deviceId, hostId, voice…, retention…, modelPolicy… }` with migration `043-decisions-settings.ts` (self-contained, idempotent), registered in `electron/services/migrations/index.ts`, and a `settingOwnership.ts` entry declaring which keys belong to the Host and which to the device (typecheck fails otherwise).
+- **Question text is not stored in plaintext on disk beyond what the decision-model history needs.** The local store keeps origin metadata and ciphertext references; decrypted answers are held in memory while a delivery is pending. If the user opts into decision-model learning, examples go to the model's own history store with the secrets filter applied.
+
+## 8. Settings and pane UI
+
+- **Settings tab** "Decisions" (group Integrations), entry in `settingsTabRegistry.tsx` following the `mcp` entry; follow `.claude/rules/settings-pages.md` (Page → `SettingsSection` → `SettingsGroup` → rows, instant apply, switches for booleans, sentence case, dependents under the parent via `SettingsDependents`, whole-feature config collapsed behind its enable switch). Sections: _Connection_ (enable switch, relay URL, status, "Set up" wizard, doctor results), _Devices_ (QR for pairing with the 6-digit code confirmation dialog, device list with last seen and push health, revoke, enrolled Hosts), _Questions_ (default expiry, reminders, attachment retention, quiet hours mirror), _Policy_ (gates, proxy allowlist, per-project opt-in), _Voice_ (explains the separate disclosure; provider choice lives on the phone), _Decision model_ (learning off by default, adapter, consent to send history, evaluation report), _Data_ (export, delete relay data, recovery kit export and verify).
+- **Consent text.** Enabling Decisions shows exactly what leaves the machine and where: encrypted question content, context and screenshots, sent to the user's own Cloudflare account; routing metadata (ids, timestamps, requirement level, sizes) that the relay can read; push endpoints. It states that voice dictation, if the user enables it on the phone, is not end-to-end encrypted. This satisfies the "Hosted Features" policy in `docs/feature-curation.md` (off until enabled, consent that says what is sent and where, optional).
+- **Pane indicator.** `DecisionWaitChip` next to `TerminalNotifyChip`, driven by a new push event `terminal:decision-state` (register in `electron/ipc/handlers/events.ts`, `shared/types/ipc/maps.ts`, `preload.cts`; add `CHANNEL_LOCALITY` entries as `host`; run `npm run codegen:ipc && npm run codegen:ipc-renderer`). Wording follows the observation-not-interpretation rule: "Question q-42 is waiting for an answer" and "Answer received, delivering when this terminal is idle", never "agent is blocked". It uses the least restricted surface in `user-signals.md` (frame indicator, then Canopy "needs you" tier through `CANOPY_NEEDS_YOU_PRIORITY` only for needs-attention, never toasts for routine events).
+- **Needs-attention view** (small list reachable from the chip and Settings): origin summary, answer preview with Copy, Try resume, Choose destination.
+
+## 9. Keys, secrets and recovery
+
+Core Daintree stores secrets in plaintext electron-store by design, which is not acceptable for the owner signing key and epoch keys. Use `safeStorage` (the mechanism in `electron/services/plugin/secretCipher.ts`, async API, check `getSelectedStorageBackend` and refuse the `basic_text` backend on Linux without confirmation) to seal a single key bundle file under `userData/decisions/keys.bin`. The `KeyStore` interface from the client library is implemented over that file. On first setup generate the recovery kit (`encryptRecoveryBundle`, passphrase of at least 12 characters, PBKDF2-SHA256 with 600,000 iterations) and require a successful `verifyRecoveryKit` before the wizard completes, with the prominent warning that without the kit or the desktop keys all relay data is unrecoverable. Never write the Cloudflare API token, claim secret, or recovery passphrase to disk, logs, the audit ring, or telemetry. Redact them in `redactSecrets.ts`. Host keys for enrolled `desktop-host` devices are sealed the same way on the Host.
+
+## 10. Guided deploy
+
+The relay is deployable three ways and the settings wizard offers them in this order.
+
+1. **Deploy to Cloudflare button** from the repository README. The user pastes `CLAIM_SECRET` when Cloudflare asks, then enters the resulting `https://<name>.<account>.workers.dev` URL and the claim secret in Daintree. Daintree calls `GET /api/v1/info` (protocol range, `claimed`, `claim_configured`), then `POST /api/v1/setup/claim` with the self-signed owner certificate.
+2. **Guided CLI** `decisions deploy` (this repository, `tools/deploy`): checks Node and `wrangler`, runs the browser login, creates the R2 bucket, generates and installs `CLAIM_SECRET`, builds a pinned release, deploys, runs `doctor`, claims and prints the pairing QR. Daintree launches it in a terminal pane (the user watches it run; nothing is hidden). Prefer Wrangler browser OAuth over API tokens; if a token is collected it is held in memory for the duration of the command only.
+3. **Direct REST deploy** (follow-up, not required for V1): upload a prebuilt, checksummed Worker bundle and static assets with the Cloudflare API so that no Node toolchain is needed. Releases would publish `decisions-worker-<version>.zip` with a SHA-256 manifest.
+
+Every path finishes with the same checks: `/health`, `/api/v1/info`, claim, an encrypted test attachment round trip, a socket connect with a ticket, a push configuration read, and a test question that is answered from the phone and delivered to a non-agent test sink (a clearly labelled diagnostic pane), so setup is complete only when the whole loop works. Daintree never auto-updates the Worker; it compares the relay's `worker_version` and protocol range with its own and shows a prompt.
+
+## 11. Security requirements specific to the integration
+
+- The route accepts only pane bearers; reject Host/Origin mismatches exactly like the existing branch; limit body size (the library already caps it) and calls per pane per minute; never echo tokens in errors, logs, UI or the audit ring.
+- `workflow_gate_id` and attachment paths from the agent are untrusted. Attachment `local_resource_id` is a path relative to the pane's launch worktree (the bearer's `PaneWorkspaceBinding`), resolved with `realpath`, required to stay inside the worktree root (no symlink escapes), restricted to PNG/JPEG/WebP, ≤ 20 MiB, sniffed by magic bytes, ≤ 8 files and 64 MiB per question. SVG is refused.
+- Answer text typed into a terminal is data. It is sanitized, delimited, labelled with its source, never executed by Daintree, and the surrounding line is Daintree-authored.
+- Audit log: question id, requirement level, gate id, who answered (human or proxy), delivery outcome, timestamps. No question, context, answer or screenshot content on any path that leaves the machine, and none in the audit ring unless the user explicitly enables local content debugging.
+- Revocation: revoking a phone rotates the epoch (the relay requires grants for every remaining device); the desktop generates the new key and grants. Document that content the phone already downloaded cannot be recalled.
+- The decision model runs on the desktop. It never answers `human-required`, design-review gates, or anything matching the hard-block list, and proxy answers are always labelled in the notice, the audit log and the phone UI.
+
+## 12. Testing and acceptance
+
+Follow Daintree's conventions: `npm test -- <path>` for changed files only (never the full suite locally), `npm run typecheck:changed`, `npm run check` for anything touching types, IPC, keybindings or plugin manifests, `check:channel-locality`, no tautological assertions, report real exit codes. Markdown in the Daintree repo is never hard-wrapped.
+
+Unit and integration (CI-safe, no real relay): pane authenticator rejects missing, API-key, help and foreign tokens; DNS-rebinding and bad-Origin requests to `/mcp/decisions`; `ask_human` cannot downgrade a gate and defaults to `human-required`; origin is persisted before network I/O; wake factory dedupes, rechecks generation and principal, reserves before typing; the wake gate refuses to type into a busy, typing or approval-blocked pane; ordering and 5-second spacing; restart re-arms undelivered answers; crash between intent and report reconciles via marker or `delivery-uncertain` without re-typing; resume adapter fake covers success, no session id, deleted worktree, timeout; `desktop-host` enrollment; revoked-self (4401) stops delivery; consent and disabled-state tests prove no listener, timer, socket or import when off (use the existing import-budget ratchet and `// eager-import-allow` rules).
+
+End-to-end (manual or dedicated environment, using this repository's `decisions` CLI as the phone stand-in plus a real phone before release): ask → phone answer → correct terminal across app restart, lost socket and a busy pane (T01, T04, T12–T20); several questions in one pane (T21); proxy flows (T22–T25); attachments and the design-review approval bound to digests (T05–T07, T31–T33); Windows WSL Host and SSH Host enrollment; Claude Code and Codex real-resume acceptance.
+
+Mapping to the release gates in the full spec: no meaningful overhead when disabled; wrong-pane injection impossible in tested cases; a protected gate cannot be satisfied by a proxy or by the agent; answers survive a 48-hour desktop outage.
+
+## 13. Delivery plan for the Daintree repository
+
+Each PR targets `develop`, is behind the `decisions.enabled` setting, and ships with tests. Suggested order:
+
+1. **Foundations.** Publish the client libraries; `electron/services/decisions/` skeleton with lazy singleton; migration `0020`, settings migration `043`, ownership entry; `KeyStore` over `safeStorage`; `LocalStore` over better-sqlite3. No UI, no network.
+2. **Route and policy.** `/mcp/decisions` route, `PaneAuthenticator`, reserved server key, launch-config entry for the 8 supported CLIs, `PolicyRegistry` and workflow gate registration, attachment resolver. Feature-curation row (the rubric in `docs/feature-curation.md` may require an APPROVE decision before merge: open that discussion first).
+3. **Relay connection.** Socket service with the lifecycle in section 6, pairing wizard, devices list, revoke and rotate, doctor.
+4. **Delivery.** `decision` wake kind, `createDecisionWake`, formatter, `DaintreeTerminalSink`, scheduler and crash reconciliation, pane chip and IPC events, needs-attention view.
+5. **Resume.** `DaintreeResumeAdapter` for Claude and Codex, proven against the installed CLIs; other agents stay `needs-attention` until proven.
+6. **Remote hosts.** `decisions.enrollHost` link method, `desktop-host` flow, Host-scoped settings, WSL.
+7. **Attachments and design review.** Encrypted uploads, digest binding, the design-review gate and its documented skill.
+8. **Deploy wizard, export, recovery kit, decision model settings.** Then the hardening checklist: external review of pairing and terminal injection, failure injection, usability trial, docs.
+
+Rollback for every PR is the enable switch: with `decisions.enabled = false` the seam is empty and nothing is loaded.
+
+## 14. Open items for the Daintree maintainers
+
+- Whether `/mcp/decisions` as its own route is acceptable versus a core action (section 3.4).
+- Whether single-owner identity plus Host enrollment (section 4.2) is the right topology versus forwarding.
+- The feature-curation decision for Decisions and the Hosted Features consent wording.
+- Publishing channel for the client libraries (npm scope `@daintree`).
+- Which additional agent CLIs should get `launchMcp` support so `ask_human` is available without manual setup.
+- Whether Web Push through the user's own relay satisfies the pending push-relay decision (#14023) for the mobile story: it does not require Daintree to operate anything, which is the point of this design.

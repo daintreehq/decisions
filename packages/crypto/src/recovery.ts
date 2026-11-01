@@ -4,7 +4,7 @@ import {
   bytesToUtf8,
   utf8ToBytes,
 } from '@daintree/decisions-protocol';
-import { buf, randomBytes, subtle } from './util.js';
+import { buf, randomBytes, subtle, type Usage } from './util.js';
 
 export interface RecoveryBundleFile {
   v: 1;
@@ -17,12 +17,7 @@ export interface RecoveryBundleFile {
 
 export const RECOVERY_KDF_ITERATIONS = 600_000;
 
-async function deriveKey(
-  passphrase: string,
-  salt: Uint8Array,
-  iterations: number,
-  usage: KeyUsage[],
-) {
+async function deriveKey(passphrase: string, salt: Uint8Array, iterations: number, usage: Usage[]) {
   const base = await subtle.importKey(
     'raw',
     buf(utf8ToBytes(passphrase.normalize('NFKC'))),

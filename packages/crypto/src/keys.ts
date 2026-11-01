@@ -1,5 +1,5 @@
 import { base64UrlToBytes, bytesToBase64Url } from '@daintree/decisions-protocol';
-import { buf, subtle } from './util.js';
+import { buf, sha256Hex, subtle } from './util.js';
 
 export interface DeviceKeys {
   signing: CryptoKeyPair;
@@ -24,7 +24,7 @@ export async function generateDeviceKeys(extractable: boolean): Promise<DeviceKe
 
 /** Raw uncompressed SEC1 point (65 bytes) as base64url (87 chars). */
 export async function exportPublicKey(key: CryptoKey): Promise<string> {
-  return bytesToBase64Url(new Uint8Array(await subtle.exportKey('raw', key)));
+  return bytesToBase64Url(new Uint8Array((await subtle.exportKey('raw', key)) as ArrayBuffer));
 }
 
 export async function importSigningPublicKey(b64: string): Promise<CryptoKey> {
@@ -52,11 +52,11 @@ export interface SerializedDeviceKeys {
 export async function serializeDeviceKeys(keys: DeviceKeys): Promise<SerializedDeviceKeys> {
   return {
     signing_private_pkcs8: bytesToBase64Url(
-      new Uint8Array(await subtle.exportKey('pkcs8', keys.signing.privateKey)),
+      new Uint8Array((await subtle.exportKey('pkcs8', keys.signing.privateKey)) as ArrayBuffer),
     ),
     signing_public: await exportPublicKey(keys.signing.publicKey),
     exchange_private_pkcs8: bytesToBase64Url(
-      new Uint8Array(await subtle.exportKey('pkcs8', keys.exchange.privateKey)),
+      new Uint8Array((await subtle.exportKey('pkcs8', keys.exchange.privateKey)) as ArrayBuffer),
     ),
     exchange_public: await exportPublicKey(keys.exchange.publicKey),
   };
@@ -94,7 +94,6 @@ export async function deserializeDeviceKeys(
 
 /** SHA-256 fingerprint of a public key, grouped for human comparison. */
 export async function fingerprint(publicKeyB64: string): Promise<string> {
-  const { sha256Hex } = await import('./util.js');
   const hex = await sha256Hex(base64UrlToBytes(publicKeyB64));
   return (hex.slice(0, 32).match(/.{4}/g) ?? []).join(' ');
 }

@@ -10,9 +10,9 @@ import {
 import { importEpochKey, type EpochKey } from './envelope.js';
 import { exportPublicKey, importExchangePublicKey } from './keys.js';
 import { signObject, verifyObject } from './sign.js';
-import { buf, nowIso, randomBytes, subtle } from './util.js';
+import { buf, ecdhParams, nowIso, randomBytes, subtle, type Usage } from './util.js';
 
-async function grantKey(shared: ArrayBuffer, salt: Uint8Array, info: string, usage: KeyUsage[]) {
+async function grantKey(shared: ArrayBuffer, salt: Uint8Array, info: string, usage: Usage[]) {
   const ikm = await subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
   return subtle.deriveKey(
     { name: 'HKDF', hash: 'SHA-256', salt: buf(salt), info: buf(utf8ToBytes(info)) },
@@ -40,7 +40,7 @@ export async function createEpochGrant(i: CreateGrantInput): Promise<EpochGrant>
     'deriveBits',
   ])) as CryptoKeyPair;
   const recipient = await importExchangePublicKey(i.recipientExchangePub);
-  const shared = await subtle.deriveBits({ name: 'ECDH', public: recipient }, eph.privateKey, 256);
+  const shared = await subtle.deriveBits(ecdhParams(recipient), eph.privateKey, 256);
   const salt = randomBytes(32);
   const nonce = randomBytes(12);
   const ephemeralPub = await exportPublicKey(eph.publicKey);
@@ -93,11 +93,7 @@ export async function openEpochGrant(args: {
   if (!(await verifyObject(args.ownerSigningPublicKey, g)))
     throw new Error('grant signature invalid');
   const eph = await importExchangePublicKey(g.ephemeral_pub);
-  const shared = await subtle.deriveBits(
-    { name: 'ECDH', public: eph },
-    args.exchangePrivateKey,
-    256,
-  );
+  const shared = await subtle.deriveBits(ecdhParams(eph), args.exchangePrivateKey, 256);
   const key = await grantKey(
     shared,
     base64UrlToBytes(g.salt),

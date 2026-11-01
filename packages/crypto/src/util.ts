@@ -1,13 +1,20 @@
 import { bytesToHex, utf8ToBytes } from '@daintree/decisions-protocol';
 
-export const subtle: SubtleCrypto = globalThis.crypto.subtle;
+export const subtle: SubtleCrypto = crypto.subtle;
+
+export type Usage = 'encrypt' | 'decrypt' | 'sign' | 'verify' | 'deriveKey' | 'deriveBits';
+
+/** ECDH derive params. The runtime key is `public`; Workers typings spell it `$public`, so we cast. */
+export function ecdhParams(peer: CryptoKey): never {
+  return { name: 'ECDH', public: peer } as never;
+}
 
 /** TS 5.9 distinguishes Uint8Array<ArrayBufferLike> from BufferSource; WebCrypto accepts both at runtime. */
 export const buf = (u: Uint8Array): BufferSource => u as unknown as BufferSource;
 
 export function randomBytes(n: number): Uint8Array {
   const out = new Uint8Array(n);
-  globalThis.crypto.getRandomValues(out);
+  crypto.getRandomValues(out);
   return out;
 }
 

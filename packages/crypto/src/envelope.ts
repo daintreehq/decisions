@@ -11,7 +11,7 @@ import {
   type CryptoEnvelope,
   type EnvelopePurpose,
 } from '@daintree/decisions-protocol';
-import { buf, randomBytes, sha256Hex, subtle } from './util.js';
+import { buf, randomBytes, sha256Hex, subtle, type Usage } from './util.js';
 
 /** An installation content key for one epoch. `key` is an HKDF CryptoKey; `raw` only exists where grants are minted. */
 export interface EpochKey {
@@ -39,7 +39,7 @@ const HKDF_SALT = utf8ToBytes('decisions/v1');
 export async function deriveAesKey(
   epochKey: CryptoKey,
   info: string,
-  usage: KeyUsage[],
+  usage: Usage[],
 ): Promise<CryptoKey> {
   return subtle.deriveKey(
     { name: 'HKDF', hash: 'SHA-256', salt: buf(HKDF_SALT), info: buf(utf8ToBytes(info)) },

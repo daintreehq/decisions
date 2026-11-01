@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "daintree-decisions",
   "main": "./worker/src/index.ts",
-  "compatibility_date": "2026-10-31",
+  "compatibility_date": "2026-10-30",
   "compatibility_flags": ["nodejs_compat"],
   "upload_source_maps": true,
   "observability": { "enabled": false },
@@ -10,18 +10,18 @@
     "directory": "./app/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": true
+    "run_worker_first": true,
   },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "daintree-decisions" }],
   "durable_objects": {
-    "bindings": [{ "name": "DECISION_ROOM", "class_name": "DecisionRoom" }]
+    "bindings": [{ "name": "DECISION_ROOM", "class_name": "DecisionRoom" }],
   },
   "exports": {
-    "DecisionRoom": { "type": "durable-object", "storage": "sqlite" }
+    "DecisionRoom": { "type": "durable-object", "storage": "sqlite" },
   },
   "vars": {
     "CORRECTION_MODEL": "claude-haiku-5-5",
     "OPENAI_CORRECTION_MODEL": "gpt-5-mini",
-    "PUSH_SUBJECT": "mailto:decisions@localhost.invalid"
-  }
+    "PUSH_SUBJECT": "",
+  },
 }

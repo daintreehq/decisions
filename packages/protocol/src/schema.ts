@@ -369,6 +369,13 @@ export const PairingApproveBody = z.object({
   grant: EpochGrant,
 });
 
+/** Owner-signed enrollment of an additional desktop (a Daintree Host) as a `desktop-host` device. */
+export const EnrollHostBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  cert: DeviceCert,
+  grant: EpochGrant,
+});
+
 export const PairingRejectBody = z.object({ protocol_version: z.literal(PROTOCOL_VERSION) });
 
 export const RevokeDeviceBody = z.object({
@@ -384,6 +391,11 @@ export const AttachmentReserveBody = Idem.extend({
   protocol_version: z.literal(PROTOCOL_VERSION),
   /** The question the attachment will belong to; the question is created after upload completes. */
   question_id: Id,
+  /**
+   * Chosen by the client, because the ciphertext's AAD binds the attachment id and the ciphertext digest
+   * is needed to reserve. The relay rejects an id that is already in use.
+   */
+  attachment_id: Id,
   ciphertext_bytes: z
     .number()
     .int()

@@ -251,8 +251,15 @@ export const ServerFrame = z.discriminatedUnion('t', [
   }),
   /** Ledger event, pushed in seq order as they commit (and during `sync`). */
   z.object({ t: z.literal('event'), event: LedgerEvent }),
-  /** Reply to `sync` once all events with seq > `after` have been sent. */
-  z.object({ t: z.literal('caught_up'), high_water: z.number().int() }),
+  /**
+   * Reply to `sync`. `high_water` is the last seq sent. When `has_more` is true the replay was cut short by the
+   * per-request budget: send `sync` again with `after = high_water`. Only `has_more: false` means "fully caught up".
+   */
+  z.object({
+    t: z.literal('caught_up'),
+    high_water: z.number().int(),
+    has_more: z.boolean().default(false),
+  }),
   /** Hint to owner desktops that a pairing candidate is waiting for approval. */
   z.object({ t: z.literal('pairing'), pairing_id: Id }),
   /** Response to a tunnelled `req` frame. `body` is the JSON string a plain HTTP call would return. */

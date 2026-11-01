@@ -59,7 +59,7 @@ export function base64UrlToBytes(input: string): Uint8Array {
 }
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder('utf-8', { fatal: true });
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
 
 export const utf8ToBytes = (s: string): Uint8Array => encoder.encode(s);
 export const bytesToUtf8 = (b: Uint8Array): string => decoder.decode(b);

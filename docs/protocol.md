@@ -138,6 +138,12 @@ ciphertext; `decision.expired` is relay-asserted and unsigned (it never authoris
 `GET /events?after=<seq>&limit=<n>` returns `EventsPage` (`has_more`, `next_after`, `high_water_seq`). A client MUST
 NOT advance its cursor past a partial page and MUST persist events before acknowledging them.
 
+**Sequence numbers can have holes.** Deleting a question (`DELETE /questions/{id}`) removes its events and appends a
+`decision.deleted` tombstone, so the surviving `seq` values are not contiguous. Therefore a "contiguous" cursor means
+"everything the relay holds up to here": a client advances to `next_after` after a complete page, and after a pushed
+`event` frame it advances only if the frame is the next one the relay holds for it (otherwise it re-requests from its
+cursor via `sync` or `GET /events` rather than trusting a gap). Receiving the same `event_id` again is harmless.
+
 Desktop catch-up: persist `last_contiguous_seq` only after the event is durably recorded (not after terminal
 injection); connect; `sync`; process; `ack`; later `POST /deliveries/terminal` once the text was really typed.
 
@@ -150,7 +156,9 @@ idle connection costs nothing and survives deploys with a reconnect + `sync`.
    device, valid 30 s.
 2. `GET /api/v1/socket?ticket=…` (WebSocket upgrade). The relay attaches `{device_id, role}` to the socket.
    A second socket from the same device closes the older one with code `4409`.
-3. Server frames (`ServerFrame`): `hello`, `event`, `caught_up`, `pairing`, `res`, `revoked`, `error`.
+3. Server frames (`ServerFrame`): `hello`, `event`, `caught_up {high_water, has_more}`, `pairing`, `res`, `revoked`, `error`.
+   A `sync` replay is bounded (2000 events or 8 MiB, 30 syncs per minute per device). `caught_up.has_more = true` means the
+   replay was cut short: send `sync` again from the cursor. Only `has_more = false` means fully caught up.
    Client frames (`ClientFrame`): `sync {after}`, `ack {seq}`, `req {…}` (a signed REST request tunnelled over the
    socket, answered by a `res` frame with the same `id`).
 4. Keep-alive: send the text frame `ping`; the runtime answers `pong` without waking the object.
@@ -161,8 +169,9 @@ Attachment content and voice streams use plain HTTP / dedicated sockets, not thi
 
 ## 9. Attachments
 
-`POST /attachments/reservations {idempotency_key, question_id, ciphertext_bytes, sha256_ciphertext, mime_category}`
-(desktop) → `{attachment_id, upload_path, expires_at}`. Then `PUT /attachments/{id}/content` with the ciphertext as
+`POST /attachments/reservations {idempotency_key, question_id, attachment_id, ciphertext_bytes, sha256_ciphertext,
+mime_category}` (desktop) → `{attachment_id, upload_path, expires_at}`. The **client chooses `attachment_id`** (the
+ciphertext's AAD binds it, and the ciphertext digest is needed to reserve); the relay rejects reuse. Then `PUT /attachments/{id}/content` with the ciphertext as
 the body; the request is signed with `body_sha256 = sha256_ciphertext` and the Worker streams it to private R2 with
 an integrity check (no plaintext, no file name — object keys are random). `POST /attachments/{id}/complete` verifies
 the stored object and publishes availability (`attachment.available`). Only then may a question reference it.
@@ -177,6 +186,7 @@ orphaned reservations are garbage-collected.
 - `POST /devices/{id}/revoke {new_key_epoch, grants[]}` (owner): grants for every remaining non-owner device sealed
   to the new epoch key. Blocks the device immediately, closes its sockets, deletes its push subscriptions and tickets,
   emits `device.revoked` and `device.key_rotated`. Content the revoked device already downloaded cannot be recalled.
+- `POST /devices/enroll-host {cert, grant}` (owner): registers an additional desktop (a Daintree Host) as a `desktop-host` device. The host creates its own key pairs and sends the public halves to the owner, who signs the device certificate and seals the current epoch key to the host's exchange key. A `desktop-host` can create questions, answer as a proxy, cancel and acknowledge deliveries, but cannot pair, revoke, reopen or answer as a human.
 - `POST /epoch/rotate` (owner): same body, without revoking anyone.
 
 ## 11. Push, reminders and expiry
