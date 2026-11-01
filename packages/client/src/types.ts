@@ -13,6 +13,12 @@ export interface QuestionOrigin {
   /** Local only. */
   worktree_root: string;
   workflow_gate_id: string | null;
+  /**
+   * Human names shown on the phone (encrypted with the question). Optional: without them the phone shows
+   * the raw ids, which are often opaque ("host_01JC…").
+   */
+  project_label?: string;
+  machine_label?: string;
 }
 
 export type LocalStatus =

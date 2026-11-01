@@ -279,12 +279,14 @@ export function VoiceInput({
     } else if (!session) void begin();
   };
 
+  // Without dictation there is nothing to say: the text box above is the way in. Only explain when the
+  // owner turned dictation on and it cannot work here.
   if (!available || disabled) {
-    return (
-      <p className="note" data-testid="type-instead">
-        {v.consent ? 'Dictation is not set up on your relay. ' : ''}Type your answer below.
+    return v.consent && !disabled ? (
+      <p className="note hint" data-testid="type-instead">
+        Dictation is not set up on your relay, so type instead.
       </p>
-    );
+    ) : null;
   }
 
   const busy = phase !== 'idle';
@@ -397,7 +399,7 @@ export function VoiceInput({
             ? 'Anthropic (Claude)'
             : v.correction === 'openai'
               ? 'OpenAI'
-              : 'no one (clean-up is off)'
+              : null
         }
         onClose={() => setDisclose(false)}
         onAccept={

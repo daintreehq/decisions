@@ -6,11 +6,12 @@ import type { Phase } from '../app/controller.js';
 export function LockedPage({ phase }: { phase: Extract<Phase, 'unpaired' | 'revoked'> }) {
   if (phase === 'revoked') {
     return (
-      <div className="page center-page">
+      <div className="page center-page welcome">
         <h1>This phone was removed</h1>
-        <p>
-          Your computer revoked this device, so it can no longer read or answer questions. You can
-          erase it and pair again.
+        <p>Your computer removed this phone, so it will not receive or answer any new questions.</p>
+        <p className="muted">
+          Clearing it deletes the Decisions data saved here (nothing else on the phone). Then you
+          can pair it again.
         </p>
         <button
           type="button"
@@ -19,13 +20,13 @@ export function LockedPage({ phase }: { phase: Extract<Phase, 'unpaired' | 'revo
             void app.wipe().then(() => navigate('/pair', true));
           }}
         >
-          Erase and pair again
+          Clear and pair again
         </button>
       </div>
     );
   }
   return (
-    <div className="page center-page">
+    <div className="page center-page welcome">
       <img src="/icons/icon-192.png" width="96" height="96" alt="" className="logo" />
       <h1>Daintree Decisions</h1>
       <p>
@@ -35,10 +36,14 @@ export function LockedPage({ phase }: { phase: Extract<Phase, 'unpaired' | 'revo
       <Link to="/pair" className="btn primary big">
         Pair this phone
       </Link>
-      <p className="muted">
-        <Link to="/install">Install on your Home Screen</Link> ·{' '}
-        <Link to="/privacy">Who sees what</Link>
-      </p>
+      <nav className="links" aria-label="More">
+        <Link to="/install" className="text-link">
+          Install on your Home Screen
+        </Link>
+        <Link to="/privacy" className="text-link">
+          Who sees what
+        </Link>
+      </nav>
     </div>
   );
 }

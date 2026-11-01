@@ -1,32 +1,57 @@
 import { useEffect, useState } from 'react';
+import { useApp } from '../app/hooks.js';
 import { Link } from '../app/router.js';
+import { ChevronLeft } from '../components/Icons.js';
 import { isIos, isStandalone } from '../features/push.js';
+import {
+  installPrompt,
+  justInstalled,
+  onInstallChange,
+  runInstallPrompt,
+} from '../features/install.js';
 
-interface BeforeInstallPromptEvent extends Event {
-  prompt(): Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+/** Where "back" goes depends on whether this phone is paired yet. */
+export function BackLink({ top = false }: { top?: boolean }) {
+  const { phase } = useApp();
+  const paired = phase === 'ready';
+  return top ? (
+    <Link to={paired ? '/settings' : '/'} className="page-back">
+      <ChevronLeft />
+      {paired ? 'Settings' : 'Back'}
+    </Link>
+  ) : (
+    <p>
+      <Link to={paired ? '/settings' : '/'} className="btn">
+        {paired ? 'Back to settings' : 'Back'}
+      </Link>
+    </p>
+  );
 }
 
 export function InstallPage() {
-  const [prompt, setPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [, rerender] = useState(0);
   const [result, setResult] = useState<string | null>(null);
-  useEffect(() => {
-    const h = (e: Event) => {
-      e.preventDefault();
-      setPrompt(e as BeforeInstallPromptEvent);
-    };
-    window.addEventListener('beforeinstallprompt', h);
-    return () => window.removeEventListener('beforeinstallprompt', h);
-  }, []);
+  useEffect(() => onInstallChange(() => rerender((n) => n + 1)), []);
 
   const ios = isIos();
-  const installed = isStandalone();
+  const installed = isStandalone() || justInstalled();
+  const prompt = installPrompt();
+  const paired = useApp().phase === 'ready';
+  // Settings exists only once the phone is paired, so the last step depends on where you are.
+  const finish = paired
+    ? 'then turn on notifications in Settings.'
+    : 'pair it with your computer, then turn on notifications in Settings.';
 
   return (
-    <div className="page">
+    <div className="page prose">
+      <BackLink top />
       <h1>Install Decisions</h1>
       {installed ? (
-        <p className="card">Decisions is installed on your Home Screen. You are all set.</p>
+        <p className="card">
+          {isStandalone()
+            ? `You are using the installed app. Now ${finish.replace(/^then /, '')}`
+            : `Decisions is installed on your Home Screen. Open it from there, ${finish}`}
+        </p>
       ) : (
         <p>
           Install Decisions so it opens like an app and can send you notifications.{' '}
@@ -45,15 +70,15 @@ export function InstallPage() {
             Open this page in <strong>Safari</strong> (not inside another app).
           </li>
           <li>
-            Tap the <strong>Share</strong> button: a square with an arrow pointing up, at the bottom
-            of the screen (top right on iPad).
+            Tap the <strong>Share</strong> button: a square with an arrow pointing up. If you do not
+            see it, tap <strong>···</strong> first, then <strong>Share</strong>.
           </li>
           <li>
-            Scroll down and tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.
+            Tap <strong>Add to Home Screen</strong> (you may need to scroll down or tap{' '}
+            <strong>More</strong>), then <strong>Add</strong>.
           </li>
           <li>
-            Open <strong>Decisions</strong> from your Home Screen, then turn on notifications in
-            Settings.
+            Open <strong>Decisions</strong> from your Home Screen, {finish}
           </li>
         </ol>
       )}
@@ -65,11 +90,10 @@ export function InstallPage() {
               type="button"
               className="btn primary big"
               onClick={() => {
-                void prompt.prompt();
-                void prompt.userChoice.then((c) =>
+                void runInstallPrompt().then((o) =>
                   setResult(
-                    c.outcome === 'accepted'
-                      ? 'Installed.'
+                    o === 'accepted'
+                      ? `Installed. Open Decisions from your Home Screen, ${finish}`
                       : 'No problem. You can install it later from the browser menu.',
                   ),
                 );
@@ -85,16 +109,12 @@ export function InstallPage() {
               <li>
                 Tap <strong>Install app</strong> or <strong>Add to Home screen</strong>.
               </li>
+              <li>Open Decisions from your Home Screen, {finish}</li>
             </ol>
           )}
           {result && <p role="status">{result}</p>}
         </>
       )}
-      <p>
-        <Link to="/" className="btn">
-          Back
-        </Link>
-      </p>
     </div>
   );
 }

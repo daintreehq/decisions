@@ -19,14 +19,16 @@ export function absoluteLabel(iso: string): string {
   });
 }
 
-export function untilLabel(toIso: string, now = Date.now()): string {
+export function untilLabel(toIso: string, now = Date.now(), long = false): string {
   const ms = Date.parse(toIso) - now;
   if (ms <= 0) return 'expired';
   const m = Math.floor(ms / 60_000);
-  if (m < 60) return `${Math.max(m, 1)} min left`;
+  const unit = (n: number, short: string, word: string) =>
+    long ? `${n} ${word}${n === 1 ? '' : 's'} left` : `${n} ${short} left`;
+  if (m < 60) return unit(Math.max(m, 1), 'min', 'minute');
   const h = Math.floor(m / 60);
-  if (h < 48) return `${h} h left`;
-  return `${Math.floor(h / 24)} d left`;
+  if (h < 48) return unit(h, 'h', 'hour');
+  return unit(Math.floor(h / 24), 'd', 'day');
 }
 
 export function timeZones(): string[] {
@@ -38,4 +40,15 @@ export function timeZones(): string[] {
     /* fall through */
   }
   return [Intl.DateTimeFormat().resolvedOptions().timeZone];
+}
+
+/** Compact date for list rows: time today, day and month this year, full date otherwise. */
+export function shortDateLabel(iso: string, now = Date.now()): string {
+  const d = new Date(iso);
+  const n = new Date(now);
+  if (d.toDateString() === n.toDateString())
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (d.getFullYear() === n.getFullYear())
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }

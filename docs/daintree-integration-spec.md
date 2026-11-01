@@ -74,6 +74,7 @@ The bridge records, in the local store before anything touches the network, a `D
 - `agent_incarnation` (`shared/types/panel.ts` `agentIncarnation`) and `agent_session_id` (`agentSessionId`): Claude mints the session id at launch (`--session-id`), others scrape it at graceful shutdown (`sessionIdCapture.ts`).
 - `ownership_principal`: changes on every relaunch, which is an existing hook for "this is a new run". Anything keyed by it dies with the run (the same property `TerminalNotifyService.revokeOwner` relies on).
 - `project_id`, `worktree_id` and the worktree root (local only, never sent to the relay; it lives inside the encrypted content as a display label at most).
+- `project_label` and `machine_label` (optional, recommended): the project's display name and the machine's name as the user knows it (for example "Greg's MacBook Pro"). They travel only inside the encrypted content and are what the phone shows on every question; without them it falls back to the raw `project_id` and `host_id`.
 - `origin_ref` on the wire is a salted hash of `(host_id, pane_id)`, used only for per-pane quotas.
 
 ### 4.2 Remote hosts

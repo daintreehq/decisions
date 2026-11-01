@@ -11,6 +11,7 @@ import { Link, navigate } from '../app/router.js';
 import { QrScanner } from '../components/QrScanner.js';
 import { PairingError, type PairingPhase } from '../data/pairing.js';
 import { isIos } from '../features/push.js';
+import { BackLink } from './Install.js';
 
 function defaultLabel(): string {
   const ua = navigator.userAgent;
@@ -26,6 +27,9 @@ export function PairPage() {
   const [label, setLabel] = useState(defaultLabel);
   const [phase, setPhase] = useState<PairingPhase | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanKey, setScanKey] = useState(0);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const pasteInput = useRef<HTMLInputElement>(null);
   const [paste, setPaste] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -33,6 +37,9 @@ export function PairPage() {
   const invite = pending?.invite;
 
   useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => {
+    if (pasteOpen && !scanning) pasteInput.current?.focus();
+  }, [pasteOpen, scanning]);
 
   if (snap.phase === 'ready') {
     return (
@@ -62,23 +69,31 @@ export function PairPage() {
     if (!invite) return;
     abort.current = new AbortController();
     setProblem(null);
+    const signal = abort.current.signal;
     try {
-      await app.pair(invite, label.trim() || defaultLabel(), setPhase, abort.current.signal);
+      await app.pair(invite, label.trim() || defaultLabel(), setPhase, signal);
       clearPendingInvite();
       navigate('/', true);
     } catch (e) {
       clearPendingInvite();
-      setProblem(e instanceof PairingError ? e.message : 'Pairing failed.');
+      // Cancelling is not a failure: go back to the start without an error.
+      if (!signal.aborted) setProblem(e instanceof PairingError ? e.message : 'Pairing failed.');
       setPhase(null);
       force((n) => n + 1);
     }
   };
 
   const code = phase?.phase === 'awaiting-approval' ? phase.shortCode : null;
+  const busy = !!phase && phase.phase !== 'error';
 
   return (
     <div className="page center-page">
-      <h1>Pair this phone</h1>
+      {!busy && (
+        <p className="left">
+          <BackLink top />
+        </p>
+      )}
+      <h1>{code ? 'Check the code' : 'Pair this phone'}</h1>
       {problem && (
         <p className="note error" role="alert">
           {problem}
@@ -91,21 +106,28 @@ export function PairPage() {
       )}
 
       {code ? (
-        <section aria-live="polite" className="code-card">
-          <p>Confirm this code on your computer:</p>
-          <p className="big-code" aria-label={`Code ${code.replace(' ', ' ')}`}>
+        <section className="code-card" aria-labelledby="code-h">
+          <p id="code-h">Confirm this code on your computer:</p>
+          <p className="big-code" aria-hidden="true">
             {code}
           </p>
           <p className="muted">
             In Daintree, check the same six digits and choose <strong>Approve</strong>. If they
             differ, choose Decline and start again.
           </p>
-          <button type="button" className="btn" onClick={() => abort.current?.abort()}>
-            Cancel
-          </button>
+          <p className="waiting">
+            <span className="spinner" aria-hidden="true" />
+            Waiting for your computer…
+          </p>
+          <div>
+            <button type="button" className="btn" onClick={() => abort.current?.abort()}>
+              Cancel pairing
+            </button>
+          </div>
         </section>
       ) : phase && phase.phase !== 'error' ? (
-        <p role="status" className="note">
+        <p className="waiting">
+          <span className="spinner" aria-hidden="true" />
           {phase.phase === 'registering'
             ? 'Contacting your relay…'
             : phase.phase === 'finalizing'
@@ -118,16 +140,42 @@ export function PairPage() {
             This will let this phone read and answer your Daintree questions. Only continue if you
             started pairing on your own computer just now.
           </p>
-          <label className="field">
-            Name this device
-            <input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
-          </label>
-          <button type="button" className="btn primary big" onClick={() => void start()}>
-            Pair this phone
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void start();
+            }}
+          >
+            <label className="field">
+              Name this device
+              <input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
+            </label>
+            <button type="submit" className="btn primary big">
+              Pair this phone
+            </button>
+          </form>
+          <button
+            type="button"
+            className="link-btn"
+            onClick={() => {
+              clearPendingInvite();
+              navigate('/', true);
+            }}
+          >
+            Not now
           </button>
         </>
       ) : scanning ? (
-        <QrScanner onResult={accept} onCancel={() => setScanning(false)} />
+        <QrScanner
+          key={scanKey}
+          onResult={accept}
+          onCancel={() => setScanning(false)}
+          onPaste={() => {
+            setPasteOpen(true);
+            setScanning(false);
+          }}
+          onRetry={() => setScanKey((k) => k + 1)}
+        />
       ) : (
         <>
           <p>
@@ -137,38 +185,63 @@ export function PairPage() {
           <button type="button" className="btn primary big" onClick={() => setScanning(true)}>
             Scan QR code
           </button>
-          <details className="paste">
+          <details
+            className="paste"
+            open={pasteOpen}
+            onToggle={(e) => setPasteOpen((e.currentTarget as HTMLDetailsElement).open)}
+          >
             <summary>Paste the link instead</summary>
-            <label className="field">
-              Pairing link
-              <input
-                value={paste}
-                onChange={(e) => setPaste(e.target.value)}
-                placeholder="https://…/pair#…"
-                autoCapitalize="off"
-                autoCorrect="off"
-              />
-            </label>
-            <button
-              type="button"
-              className="btn"
-              disabled={!paste.trim()}
-              onClick={() => accept(paste)}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (paste.trim()) accept(paste);
+              }}
             >
-              Continue
-            </button>
+              <label className="field">
+                Pairing link
+                <input
+                  ref={pasteInput}
+                  value={paste}
+                  onChange={(e) => setPaste(e.target.value)}
+                  placeholder="https://…/pair#…"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  inputMode="url"
+                />
+              </label>
+              <button type="submit" className="btn" disabled={!paste.trim()}>
+                Continue
+              </button>
+            </form>
           </details>
           {isIos() && (
             <p className="note">
               Tip: on iPhone, pair in Safari first, then add Decisions to your Home Screen.{' '}
-              <Link to="/install">How</Link>
+              <Link to="/install" className="text-link">
+                Installation help
+              </Link>
             </p>
           )}
         </>
       )}
-      <p className="muted">
-        <Link to="/privacy">Who sees what</Link>
+      {/* One live region for the whole page: screen readers announce changes to it, not regions that appear. */}
+      <p className="sr-only" role="status">
+        {code
+          ? `Your code is ${code.replace(/\s/g, '').split('').join(' ')}. Check that your computer shows the same code, then approve it there.`
+          : phase?.phase === 'registering'
+            ? 'Contacting your relay.'
+            : phase?.phase === 'finalizing'
+              ? 'Securing this phone.'
+              : ''}
       </p>
+      {/* Leaving this page cancels a pairing in progress, so the link is offered only before one starts. */}
+      {!busy && (
+        <nav className="links" aria-label="More">
+          <Link to="/privacy" className="text-link">
+            Who sees what
+          </Link>
+        </nav>
+      )}
     </div>
   );
 }

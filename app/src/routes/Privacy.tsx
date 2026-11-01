@@ -1,16 +1,17 @@
-import { Link } from '../app/router.js';
+import { BackLink } from './Install.js';
 
 /** Plain statement of every recipient, and the only place "end-to-end encrypted" is claimed. */
 export function PrivacyPage() {
   return (
-    <div className="page">
+    <div className="page prose">
+      <BackLink top />
       <h1>Who sees what</h1>
       <p>
         Everything below is true for a normal deployment. Nothing here is sent to Daintree or anyone
         but you and the services you choose.
       </p>
       <div className="table-wrap">
-        <table>
+        <table className="stack-table">
           <thead>
             <tr>
               <th scope="col">Who</th>
@@ -28,9 +29,9 @@ export function PrivacyPage() {
             <tr>
               <th scope="row">Your relay (your Cloudflare account)</th>
               <td>
-                <strong>Encrypted</strong> questions, answers and images, plus routing information:
-                when things happened, how big they are, which requirement level and expiry each
-                question has, and your device names. It cannot read the content.
+                <strong>End-to-end encrypted</strong> questions, answers and images, plus routing
+                information: when things happened, how big they are, which requirement level and
+                expiry each question has, and your device names. It cannot read the content.
               </td>
             </tr>
             <tr>
@@ -70,11 +71,7 @@ export function PrivacyPage() {
           history cannot be recovered.
         </li>
       </ul>
-      <p>
-        <Link to="/settings" className="btn">
-          Back to settings
-        </Link>
-      </p>
+      <BackLink />
     </div>
   );
 }

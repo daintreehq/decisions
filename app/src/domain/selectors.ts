@@ -33,6 +33,35 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
 
 export const needsYou = (v: QuestionView, now = Date.now()): boolean =>
   effectiveStatus(v, now) === 'open';
+
+/** Open questions, plus answered ones whose delivery needs the owner to look at their computer. */
+export const needsAction = (v: QuestionView, now = Date.now()): boolean =>
+  needsYou(v, now) || deliveryNeedsAttention(v);
+
+/** One display vocabulary for every status, shared by the inbox, the detail page and History. */
+export function statusLabel(s: EffectiveStatus): string {
+  switch (s) {
+    case 'open':
+      return 'Needs you';
+    case 'proxy-answered':
+      return 'Answered by decision model';
+    case 'human-answered':
+      return 'Answered by you';
+    case 'cancelled':
+      return 'Withdrawn';
+    case 'expired':
+      return 'Expired';
+    default:
+      return 'Could not verify';
+  }
+}
+
+/** Project and machine kept apart, so the row can lead with the project and still always show the machine. */
+export function originParts(v: QuestionView): { project: string; machine: string } {
+  const c = v.content;
+  if (!c) return { project: 'Unverified question', machine: '' };
+  return { project: c.project_label || 'Daintree', machine: c.machine_label || '' };
+}
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
   if (effectiveStatus(v, now) !== 'proxy-answered') return false;
   return !v.actions.some(
@@ -65,6 +94,19 @@ export const DELIVERY_LABELS: Record<DeliveryStep, string> = {
   terminal: 'Typed into the agent’s terminal',
   attention: 'Needs attention on your computer',
 };
+
+/** How a step reads once it is behind us (no ellipsis on something that has finished). */
+export const DELIVERY_DONE_LABELS: Partial<Record<DeliveryStep, string>> = {
+  sending: 'Sent',
+};
+
+/** True when the answer in force could not be confirmed as delivered and the owner should look at it. */
+export function deliveryNeedsAttention(v: QuestionView): boolean {
+  const a = currentAnswer(v);
+  if (!a) return false;
+  const d = v.deliveries[a.revision];
+  return d?.status === 'needs-attention' || d?.status === 'delivery-uncertain';
+}
 
 /** Progress of the answer in force. `pending` is the local outbox state for this question, if any. */
 export function deliveryProgress(
@@ -102,8 +144,9 @@ export function sortNeedsYou(
   newestFirst: boolean,
   now: number,
 ): QuestionView[] {
+  // Only a question that can still be answered is urgent; an answered one with an old deadline is not.
   const urgent = (v: QuestionView) =>
-    v.expiresAt !== null && Date.parse(v.expiresAt) - now < 24 * 3_600_000;
+    needsYou(v, now) && v.expiresAt !== null && Date.parse(v.expiresAt) - now < 24 * 3_600_000;
   return [...list].sort((a, b) => {
     if (newestFirst) return Date.parse(b.createdAt) - Date.parse(a.createdAt);
     const ua = urgent(a);
