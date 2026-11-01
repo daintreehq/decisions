@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import {
   createEpochGrant,
   generatePairingSecret,
@@ -8,7 +8,7 @@ import {
   newId,
   pairingShortCode,
   signPairingPop,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { Actor, claimRelay, inRoom, pairDevice, raw, type World } from './helpers.js';
 
 async function invite(w: World, role: 'phone' | 'tablet' = 'phone', ttlMs = 4 * 60_000) {

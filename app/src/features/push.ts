@@ -3,9 +3,9 @@ import {
   bytesToBase64Url,
   PushConfig,
   PushTestResponse,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import type { Relay } from '../data/relay.js';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 
 export type PushSupport = { ok: true } | { ok: false; reason: 'ios-not-installed' | 'unsupported' };
 

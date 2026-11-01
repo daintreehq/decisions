@@ -1,4 +1,4 @@
-import type { Requirement } from '@daintree/decisions-protocol';
+import type { Requirement } from '@daintreehq/decisions-protocol';
 import type {
   AuditEntry,
   InboundEvent,

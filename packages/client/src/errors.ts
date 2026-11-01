@@ -1,4 +1,4 @@
-import type { ErrorCode } from '@daintree/decisions-protocol';
+import type { ErrorCode } from '@daintreehq/decisions-protocol';
 
 export class RelayError extends Error {
   readonly code: ErrorCode | 'network_error' | 'unknown_error';

@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-app",
+  "name": "@daintreehq/decisions-app",
   "version": "0.1.0",
   "private": true,
   "description": "Daintree Decisions phone app: installable PWA served by the user's own relay.",
@@ -13,8 +13,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@daintree/decisions-crypto": "workspace:*",
-    "@daintree/decisions-protocol": "workspace:*",
+    "@daintreehq/decisions-crypto": "workspace:*",
+    "@daintreehq/decisions-protocol": "workspace:*",
     "idb": "^8.0.3",
     "jsqr": "^1.4.0",
     "react": "^19.3.0",

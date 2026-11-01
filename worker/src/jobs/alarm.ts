@@ -1,5 +1,5 @@
-import { DEFAULTS, bytesToBase64Url } from '@daintree/decisions-protocol';
-import { sha256 } from '@daintree/decisions-crypto';
+import { DEFAULTS, bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { sha256 } from '@daintreehq/decisions-crypto';
 import { nextAllowed } from '../push/quiet-hours.js';
 import type { Room } from '../room/types.js';
 import { expireQuestionNow, type QuestionRow } from '../routes/questions.js';

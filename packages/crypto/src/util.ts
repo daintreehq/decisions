@@ -1,4 +1,4 @@
-import { bytesToHex, utf8ToBytes } from '@daintree/decisions-protocol';
+import { bytesToHex, utf8ToBytes } from '@daintreehq/decisions-protocol';
 
 export const subtle: SubtleCrypto = crypto.subtle;
 

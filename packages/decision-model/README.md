@@ -1,4 +1,4 @@
-# @daintree/decisions-model
+# @daintreehq/decisions-model
 
 The optional **decision model** for Daintree Decisions: it predicts how _you_ would answer a question an agent
 asked, using only your own past decisions, and it either drafts a suggestion for you or (when you have explicitly
@@ -27,7 +27,7 @@ import {
   createDecisionModel,
   commandPresets, // or AnthropicAdapter / OpenAIAdapter
   formatReport,
-} from '@daintree/decisions-model';
+} from '@daintreehq/decisions-model';
 
 const history = new SqliteHistoryStore('/path/to/decision-history.sqlite');
 history.setLearningEnabled(true); // off by default: nothing is recorded until you opt in
@@ -76,7 +76,7 @@ in `packages/client` declares a separate structural hook with different names (`
 checks and the self-example exclusion. Use the explicit adapter instead:
 
 ```ts
-import { asBridgeEngine, createDecisionModel } from '@daintree/decisions-model';
+import { asBridgeEngine, createDecisionModel } from '@daintreehq/decisions-model';
 
 const model = createDecisionModel({ history, adapter, policy });
 const bridge = new DecisionsBridge({

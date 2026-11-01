@@ -5,8 +5,8 @@ import {
   normalizeQuery,
   requestSigningString,
   type ParsedAuthHeader,
-} from '@daintree/decisions-protocol';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import { signString, verifyString } from './sign.js';
 import { randomBytes, sha256Hex } from './util.js';
 

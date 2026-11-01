@@ -1,4 +1,4 @@
-import { ApiError, LIMITS, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { ApiError, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import { json } from '../util.js';
 import { sweepExpired } from './questions.js';

@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { RelayError } from '@daintree/decisions-client';
+import { RelayError } from '@daintreehq/decisions-client';
 import { CliError, makeCtx, type GlobalOptions } from './runtime.js';
 import { ask, daemon } from './commands/daemon.js';
 import {

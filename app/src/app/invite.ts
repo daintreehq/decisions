@@ -1,5 +1,5 @@
-import type { PairingInvitePayload } from '@daintree/decisions-protocol';
-import { decodeInvite } from '@daintree/decisions-crypto';
+import type { PairingInvitePayload } from '@daintreehq/decisions-protocol';
+import { decodeInvite } from '@daintreehq/decisions-crypto';
 
 let pending: { invite?: PairingInvitePayload; error?: string } | null = null;
 

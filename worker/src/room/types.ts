@@ -4,7 +4,7 @@ import type {
   Role,
   ServerFrame,
   SettingsBody,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import type { z } from 'zod';
 import type { Env } from '../env.js';
 import type { ApiRequest, ApiResponse } from '../util.js';

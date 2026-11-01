@@ -3,7 +3,7 @@ import {
   pairingPopString,
   type DeviceCert,
   type Role,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { importSigningPublicKey } from './keys.js';
 import { signObject, signString, verifyObject, verifyString } from './sign.js';
 import { nowIso } from './util.js';

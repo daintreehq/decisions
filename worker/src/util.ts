@@ -1,4 +1,4 @@
-import { ApiError, type ErrorCode } from '@daintree/decisions-protocol';
+import { ApiError, type ErrorCode } from '@daintreehq/decisions-protocol';
 import type { z } from 'zod';
 
 export const nowMs = (): number => Date.now();

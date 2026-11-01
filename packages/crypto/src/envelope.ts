@@ -10,7 +10,7 @@ import {
   utf8ToBytes,
   type CryptoEnvelope,
   type EnvelopePurpose,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { buf, randomBytes, sha256Hex, subtle, type Usage } from './util.js';
 
 /** An installation content key for one epoch. `key` is an HKDF CryptoKey; `raw` only exists where grants are minted. */

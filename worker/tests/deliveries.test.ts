@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
-import { newId } from '@daintree/decisions-crypto';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import { newId } from '@daintreehq/decisions-crypto';
 import { act, ask, claimRelay, events, pairDevice } from './helpers.js';
 
 describe('delivery acknowledgements', () => {

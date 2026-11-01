@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { claimRelay, pairDevice, raw, Actor, type World } from './helpers.js';
-import { formatAuthHeader, normalizeQuery, parseAuthHeader } from '@daintree/decisions-protocol';
-import { signRequest } from '@daintree/decisions-crypto';
+import { formatAuthHeader, normalizeQuery, parseAuthHeader } from '@daintreehq/decisions-protocol';
+import { signRequest } from '@daintreehq/decisions-crypto';
 
 describe('request authentication', () => {
   let w: World;

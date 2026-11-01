@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AttachmentDescriptor } from '@daintree/decisions-protocol';
+import type { AttachmentDescriptor } from '@daintreehq/decisions-protocol';
 import { app, type ImageResult } from '../app/controller.js';
 import type { QuestionView } from '../domain/model.js';
 import { Dialog } from './Dialog.js';

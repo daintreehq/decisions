@@ -3,7 +3,7 @@ import {
   bytesToBase64Url,
   signingString,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { buf, subtle } from './util.js';
 
 const ALG = { name: 'ECDSA', hash: 'SHA-256' } as const;

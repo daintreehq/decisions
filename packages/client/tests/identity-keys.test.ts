@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION, type PendingPairing } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION, type PendingPairing } from '@daintreehq/decisions-protocol';
 import {
   exportPublicKey,
   generateDeviceKeys,
@@ -8,7 +8,7 @@ import {
   issueDeviceCert,
   newId,
   openEpochGrant,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import {
   MemoryKeyStore,
   addEpoch,

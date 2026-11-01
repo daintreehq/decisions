@@ -4,7 +4,7 @@ import {
   WS_CLOSE,
   type ClientFrame,
   type LedgerEvent,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { RelayError } from './errors.js';
 import { backoffMs, type RelayClient } from './relay.js';
 

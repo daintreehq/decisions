@@ -5,7 +5,7 @@ import {
   decryptEnvelope,
   encryptEnvelope,
   newId,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { act, ask, claimRelay, events, pairDevice } from './helpers.js';
 import { buildRotation } from './devices.helpers.js';
 
@@ -131,7 +131,7 @@ describe('revocation and epoch rotation', () => {
 describe('desktop-host enrollment', () => {
   async function enroll(w: Awaited<ReturnType<typeof claimRelay>>) {
     const { Actor } = await import('./helpers.js');
-    const { issueDeviceCert, createEpochGrant } = await import('@daintree/decisions-crypto');
+    const { issueDeviceCert, createEpochGrant } = await import('@daintreehq/decisions-crypto');
     const host = await Actor.create('desktop-host', 'Remote Host');
     host.installationId = w.installationId;
     const cert = await issueDeviceCert({

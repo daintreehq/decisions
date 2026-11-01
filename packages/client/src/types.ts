@@ -1,4 +1,4 @@
-import type { Requirement } from '@daintree/decisions-protocol';
+import type { Requirement } from '@daintreehq/decisions-protocol';
 
 /** Where a question came from. Everything the desktop needs to route an answer back; never sent to the relay. */
 export interface QuestionOrigin {

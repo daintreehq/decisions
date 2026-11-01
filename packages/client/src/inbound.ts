@@ -11,13 +11,13 @@ import {
   type DeviceCert,
   type LedgerEvent,
   type Role,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptEnvelope,
   importSigningPublicKey,
   verifyDeviceCert,
   verifyRecordAndEnvelope,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { BridgeContext } from './context.js';
 import { TransientError } from './mutex.js';
 

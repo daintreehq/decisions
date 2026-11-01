@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { PolicyRegistry, parseAnswers } from '../src/index.js';
 import { makePhone, origin, setupBridge, tick } from './helpers.js';
 

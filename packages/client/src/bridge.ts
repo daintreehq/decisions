@@ -1,4 +1,4 @@
-import { LIMITS, type DecisionContentV1, type LedgerEvent } from '@daintree/decisions-protocol';
+import { LIMITS, type DecisionContentV1, type LedgerEvent } from '@daintreehq/decisions-protocol';
 import { AuditLog } from './audit.js';
 import { BridgeError } from './content.js';
 import {

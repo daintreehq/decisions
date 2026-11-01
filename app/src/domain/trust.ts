@@ -1,9 +1,9 @@
-import type { DeviceCert, Role } from '@daintree/decisions-protocol';
+import type { DeviceCert, Role } from '@daintreehq/decisions-protocol';
 import {
   importSigningPublicKey,
   verifyDeviceCert,
   verifySelfSignedCert,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 
 export interface TrustedDevice {
   cert: DeviceCert;

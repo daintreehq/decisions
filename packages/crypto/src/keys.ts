@@ -1,4 +1,4 @@
-import { base64UrlToBytes, bytesToBase64Url } from '@daintree/decisions-protocol';
+import { base64UrlToBytes, bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import { buf, sha256Hex, subtle } from './util.js';
 
 export interface DeviceKeys {

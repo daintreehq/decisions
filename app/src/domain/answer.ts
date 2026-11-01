@@ -3,13 +3,13 @@ import {
   HumanAnswerContentV1,
   PROTOCOL_VERSION,
   type ActionKind,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   encryptEnvelope,
   newId,
   type EpochKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { QuestionView } from './model.js';
 import { effectiveStatus, lastProxyAction, proxyNeedsReview, submitKind } from './selectors.js';
 

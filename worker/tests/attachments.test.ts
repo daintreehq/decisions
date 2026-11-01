@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { exports } from 'cloudflare:workers';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
-import { decryptAttachment, sha256Hex, signRequest } from '@daintree/decisions-crypto';
+import { decryptAttachment, sha256Hex, signRequest } from '@daintreehq/decisions-crypto';
 import {
   ask,
   claimRelay,
@@ -14,7 +14,7 @@ import {
   uploadImage,
   act,
 } from './helpers.js';
-import { newId } from '@daintree/decisions-crypto';
+import { newId } from '@daintreehq/decisions-crypto';
 
 const PNG = new Uint8Array([
   0x89,

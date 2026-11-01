@@ -18,12 +18,12 @@ import {
   type QuestionOrigin,
   type TerminalSink,
   type TerminalTarget,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
 /**
  * Captures every screen and state of the running phone app, for documentation and design review.
- *   SCREENSHOTS_DIR=/some/dir pnpm --filter @daintree/decisions-e2e test screenshots
+ *   SCREENSHOTS_DIR=/some/dir pnpm --filter @daintreehq/decisions-e2e test screenshots
  * (DESIGN_CAPTURE_DIR works too.) Skipped unless one of them is set. Needs `pnpm build` first.
  *
  * Everything goes through the real seams: a real relay (wrangler dev), the real desktop client publishing

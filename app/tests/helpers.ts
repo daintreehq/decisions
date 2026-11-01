@@ -1,4 +1,4 @@
-import type { DeviceCert, LedgerEvent, Requirement } from '@daintree/decisions-protocol';
+import type { DeviceCert, LedgerEvent, Requirement } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   buildSignedQuestion,
@@ -12,7 +12,7 @@ import {
   nowIso,
   type DeviceKeys,
   type EpochKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
 
 export interface Actor {

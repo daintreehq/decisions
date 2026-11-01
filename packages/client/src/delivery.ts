@@ -2,7 +2,7 @@ import { batchNotices, formatAnswerNotice } from './notice.js';
 import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
-import { newId } from '@daintree/decisions-crypto';
+import { newId } from '@daintreehq/decisions-crypto';
 import { pickResumeAdapter, unsupportedResumeAdapter } from './resume.js';
 import {
   sameTarget,

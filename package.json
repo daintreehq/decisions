@@ -10,7 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm --filter @daintree/decisions-app build",
+    "build": "pnpm --filter @daintreehq/decisions-app build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "format": "prettier --write .",

@@ -7,7 +7,7 @@ import {
   canonicalize,
   envelopeAadString,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptEnvelope,
   encryptEnvelope,

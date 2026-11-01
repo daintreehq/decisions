@@ -6,8 +6,8 @@ import {
   RotateEpochBody,
   type DeviceCert,
   type EpochGrant,
-} from '@daintree/decisions-protocol';
-import { verifyDeviceCert, verifyObject } from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-protocol';
+import { verifyDeviceCert, verifyObject } from '@daintreehq/decisions-crypto';
 import type { Auth, DeviceRow, Handler, Room } from '../room/types.js';
 import { iso, isoOrNull, json, nowMs } from '../util.js';
 

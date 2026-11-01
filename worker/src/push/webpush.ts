@@ -3,7 +3,7 @@ import {
   bytesToBase64Url,
   concatBytes,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 
 /** Web Push (RFC 8030) with aes128gcm payload encryption (RFC 8291) and VAPID (RFC 8292), on WebCrypto only. */
 

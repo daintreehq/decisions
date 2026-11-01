@@ -8,7 +8,7 @@ import {
   type InfoResponse,
   type LedgerEvent,
   type SettingsBody,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptAttachment,
   importSigningPublicKey,
@@ -16,7 +16,7 @@ import {
   sniffImageMime,
   newId,
   type EpochKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { Db, type ConfigRecord, type DeviceKeyRecord } from '../data/db.js';
 import { ImageCache, type ImageContext, type ImageResult } from '../data/images.js';
 import { Drafts, Outbox } from '../data/outbox.js';
@@ -28,7 +28,7 @@ import { QuestionStore, type QuestionView } from '../domain/model.js';
 import { TrustStore } from '../domain/trust.js';
 import { applyTheme, DEFAULT_PREFS, type LocalPrefs } from './prefs.js';
 import { checkInvite } from '../data/pairing.js';
-import type { PairingInvitePayload } from '@daintree/decisions-protocol';
+import type { PairingInvitePayload } from '@daintreehq/decisions-protocol';
 
 export type ServerSettings = z.infer<typeof SettingsResponse>['settings'];
 

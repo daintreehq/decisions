@@ -5,7 +5,7 @@ import {
   type DecisionContentV1,
   type LedgerEvent,
   type QuestionStatus,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
 import type { BridgeContext } from './context.js';
 import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';

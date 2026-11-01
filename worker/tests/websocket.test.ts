@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { evictDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
-import { newId, signRequest } from '@daintree/decisions-crypto';
+import { newId, signRequest } from '@daintreehq/decisions-crypto';
 import { act, ask, claimRelay, pairDevice, raw, stub, type Actor, type World } from './helpers.js';
 import { buildRotation } from './devices.helpers.js';
 

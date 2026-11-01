@@ -9,13 +9,13 @@ import {
   pairingShortCode,
   verifyDeviceCert,
   importSigningPublicKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type {
   DeviceInfo,
   EpochGrant,
   PairingInvitePayload,
   PendingPairing,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { addEpoch, currentEpochKey, type Identity, type KeyStore } from './identity.js';
 import type { RelayClient } from './relay.js';
 

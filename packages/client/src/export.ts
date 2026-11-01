@@ -4,13 +4,13 @@ import {
   bytesToBase64Url,
   bytesToUtf8,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptRecoveryBundle,
   encryptRecoveryBundle,
   sha256Hex,
   type RecoveryBundleFile,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
 import type { Identity } from './identity.js';
 import type { LocalStore } from './store.js';

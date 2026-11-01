@@ -1,4 +1,4 @@
-import type { ActionKind } from '@daintree/decisions-protocol';
+import type { ActionKind } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView } from './model.js';
 
 export type EffectiveStatus =

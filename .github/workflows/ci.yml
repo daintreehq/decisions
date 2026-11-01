@@ -52,5 +52,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Install Chromium
-        run: pnpm --filter @daintree/decisions-e2e exec playwright-core install --with-deps chromium
-      - run: pnpm --filter @daintree/decisions-e2e test
+        run: pnpm --filter @daintreehq/decisions-e2e exec playwright-core install --with-deps chromium
+      - run: pnpm --filter @daintreehq/decisions-e2e test

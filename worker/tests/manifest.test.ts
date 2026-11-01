@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ROUTE_MANIFEST } from '@daintree/decisions-protocol';
+import { ROUTE_MANIFEST } from '@daintreehq/decisions-protocol';
 import { ROUTES } from '../src/routes/index.js';
 
 const ID = '([A-Za-z0-9_-]{8,64})';

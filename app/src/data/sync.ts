@@ -4,7 +4,7 @@ import {
   SocketTicketResponse,
   type ClientFrame,
   type LedgerEvent,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import type { Db } from './db.js';
 import { RelayError } from './relay.js';
 

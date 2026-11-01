@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, sep } from 'node:path';
-import { LIMITS } from '@daintree/decisions-protocol';
-import type { AttachmentResolver, QuestionOrigin } from '@daintree/decisions-client';
+import { LIMITS } from '@daintreehq/decisions-protocol';
+import type { AttachmentResolver, QuestionOrigin } from '@daintreehq/decisions-client';
 
 const MAX = LIMITS.attachmentBytes;
 

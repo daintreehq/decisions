@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION, parseAuthHeader, type LedgerEvent } from '@daintree/decisions-protocol';
-import { verifyRequestSignature, importSigningPublicKey } from '@daintree/decisions-crypto';
+import { PROTOCOL_VERSION, parseAuthHeader, type LedgerEvent } from '@daintreehq/decisions-protocol';
+import { verifyRequestSignature, importSigningPublicKey } from '@daintreehq/decisions-crypto';
 import {
   RelayClient,
   RelayError,
@@ -106,7 +106,7 @@ describe('RelayClient retry policy', () => {
     });
     const h = parseAuthHeader(seen!.auth)!;
     const url = new URL(seen!.url);
-    const { sha256Hex } = await import('@daintree/decisions-crypto');
+    const { sha256Hex } = await import('@daintreehq/decisions-crypto');
     const ok = await verifyRequestSignature({
       header: h,
       method: 'POST',
@@ -144,7 +144,7 @@ describe('RelayClient retry policy', () => {
       (_i, init) => ((hdr = new Headers(init?.headers)), json(200, { ok: true })),
     );
     const bytes = new Uint8Array([1, 2, 3]);
-    const { sha256Hex } = await import('@daintree/decisions-crypto');
+    const { sha256Hex } = await import('@daintreehq/decisions-crypto');
     const sha = await sha256Hex(bytes);
     await c.uploadAttachment('/api/v1/attachments/x/content', bytes, sha);
     expect(hdr!.get('x-content-sha256')).toBe(sha);

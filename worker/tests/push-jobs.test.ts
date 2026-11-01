@@ -2,8 +2,8 @@ import { settle } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
-import { newId } from '@daintree/decisions-crypto';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { newId } from '@daintreehq/decisions-crypto';
 import {
   act,
   ask,

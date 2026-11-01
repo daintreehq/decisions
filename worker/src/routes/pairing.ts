@@ -8,8 +8,8 @@ import {
   timingSafeEqual,
   type DeviceCert,
   type EpochGrant,
-} from '@daintree/decisions-protocol';
-import { base64UrlToBytes } from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
+import { base64UrlToBytes } from '@daintreehq/decisions-protocol';
 import {
   pairingShortCode,
   sha256Hex,
@@ -17,7 +17,7 @@ import {
   verifyObject,
   verifyPairingPop,
   importSigningPublicKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { Handler, Room } from '../room/types.js';
 import { iso, json, nowMs } from '../util.js';
 

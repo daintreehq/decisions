@@ -1,4 +1,4 @@
-import { CorrectionResult, type VoiceCorrectBody } from '@daintree/decisions-protocol';
+import { CorrectionResult, type VoiceCorrectBody } from '@daintreehq/decisions-protocol';
 import { z } from 'zod';
 import type { Env } from './env.js';
 

@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-e2e",
+  "name": "@daintreehq/decisions-e2e",
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
@@ -9,9 +9,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@daintree/decisions-client": "workspace:*",
-    "@daintree/decisions-crypto": "workspace:*",
-    "@daintree/decisions-protocol": "workspace:*",
+    "@daintreehq/decisions-client": "workspace:*",
+    "@daintreehq/decisions-crypto": "workspace:*",
+    "@daintreehq/decisions-protocol": "workspace:*",
     "playwright-core": "^1.64.1"
   },
   "devDependencies": {

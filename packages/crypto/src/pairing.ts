@@ -4,7 +4,7 @@ import {
   canonicalize,
   utf8ToBytes,
   type PairingInvitePayload,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { randomBytes, sha256, sha256Hex } from './util.js';
 
 export function generatePairingSecret(): string {

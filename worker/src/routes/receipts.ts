@@ -1,4 +1,4 @@
-import { ApiError } from '@daintree/decisions-protocol';
+import { ApiError } from '@daintreehq/decisions-protocol';
 import type { Room } from '../room/types.js';
 import { nowMs, type ApiResponse } from '../util.js';
 

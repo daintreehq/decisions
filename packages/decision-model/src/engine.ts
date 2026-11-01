@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalize } from '@daintree/decisions-protocol';
+import { canonicalize } from '@daintreehq/decisions-protocol';
 import {
   AdapterTimeoutError,
   TransientAdapterError,

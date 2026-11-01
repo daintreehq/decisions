@@ -11,7 +11,7 @@ import {
   verifiedDevices,
   normalizeOrigin,
   importIdentity,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 import {
   CliError,
   keyStoreFor,

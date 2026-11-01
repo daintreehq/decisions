@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-protocol",
+  "name": "@daintreehq/decisions-protocol",
   "version": "0.1.0",
   "description": "Versioned wire protocol, schemas, canonical signing rules and errors for Daintree Decisions.",
   "license": "Apache-2.0",

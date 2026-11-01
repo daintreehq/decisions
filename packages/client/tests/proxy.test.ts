@@ -162,7 +162,7 @@ describe('proxy hook receives everything the model guards need', () => {
     await env.bridge.pump();
     await env.bridge.pump();
     expect(seen).toHaveLength(1);
-    const { sha256Hex } = await import('@daintree/decisions-crypto');
+    const { sha256Hex } = await import('@daintreehq/decisions-crypto');
     expect(seen[0]).toMatchObject({
       kind: 'approval',
       workflowGateId: 'naming',

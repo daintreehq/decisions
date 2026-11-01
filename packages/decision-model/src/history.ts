@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import { LIMITS } from '@daintree/decisions-protocol';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import { redactSecrets } from './redact.js';
 import { tokenize } from './text.js';
 import type { DecisionExample } from './types.js';

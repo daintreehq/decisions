@@ -3,7 +3,7 @@ import {
   bytesToBase64Url,
   bytesToUtf8,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 
 export interface SealedBlob {
   iv: Uint8Array;

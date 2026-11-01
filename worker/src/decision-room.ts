@@ -12,13 +12,13 @@ import {
   type LedgerEvent,
   type Role,
   type ServerFrame,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   importSigningPublicKey,
   newId,
   sha256Hex,
   verifyRequestSignature,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { migrate } from './db/schema.js';
 import { WORKER_VERSION, type Env } from './env.js';
 import type { Auth, DeviceRow, Handler, JobInput, Room, RouteCtx, Settings } from './room/types.js';

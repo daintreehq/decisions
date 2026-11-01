@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ActionBody } from '@daintree/decisions-protocol';
-import { newId } from '@daintree/decisions-crypto';
+import { ActionBody } from '@daintreehq/decisions-protocol';
+import { newId } from '@daintreehq/decisions-crypto';
 import {
   assertReviewable,
   buildAnswerRequest,

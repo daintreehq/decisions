@@ -7,7 +7,7 @@ import {
 import type { ActionView, QuestionView } from '../domain/model.js';
 import { ageLabel, absoluteLabel } from '../lib/time.js';
 import { SafeText } from './SafeText.js';
-import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintree/decisions-protocol';
+import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
 
 const PHONE_ORDER: DeliveryStep[] = ['queued', 'sending', 'confirmed', 'desktop', 'terminal'];
 /** An answer made on the computer (the decision model's) never passed through this phone. */

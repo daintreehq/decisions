@@ -3,7 +3,7 @@ import {
   AttachmentCompleteBody,
   AttachmentReserveBody,
   LIMITS,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import { iso, json, nowMs, randomHex } from '../util.js';
 

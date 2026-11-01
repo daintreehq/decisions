@@ -14,8 +14,8 @@ import {
   type QuestionDetail,
   type SignedAction,
   type SignedQuestion,
-} from '@daintree/decisions-protocol';
-import { signRequest } from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-protocol';
+import { signRequest } from '@daintreehq/decisions-crypto';
 import { RelayError } from './errors.js';
 import type { Identity } from './identity.js';
 

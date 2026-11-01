@@ -1,6 +1,6 @@
 import { createECDH, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
 // http_ece is an independent RFC 8188/8291 implementation used here only as an oracle.
 // @ts-expect-error untyped
 import ece from 'http_ece';

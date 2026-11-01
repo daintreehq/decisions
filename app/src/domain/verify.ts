@@ -11,12 +11,12 @@ import {
   type ActionRecord,
   type Provenance,
   type Role,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptEnvelope,
   verifyRecordAndEnvelope,
   type EpochKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { TrustStore } from './trust.js';
 
 export type Verified<T> = { ok: true; value: T } | { ok: false; reason: string };

@@ -1,10 +1,10 @@
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import {
   createEpochGrant,
   generateEpochKeyBytes,
   importEpochKey,
   type EpochKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { Actor, World } from './helpers.js';
 
 /** Signed revoke/rotate body for the next epoch, with one grant per remaining non-owner device. */

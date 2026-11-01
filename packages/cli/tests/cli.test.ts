@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { RelayError } from '@daintree/decisions-client';
+import { RelayError } from '@daintreehq/decisions-client';
 import { buildProgram, describeError } from '../src/bin.js';
 import { CliError, type Ctx } from '../src/runtime.js';
 import { DemoSink, ask, cliOrigin, mcpAddLines, parseSink } from '../src/commands/daemon.js';

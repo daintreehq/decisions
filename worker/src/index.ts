@@ -1,4 +1,4 @@
-import { ApiError, DESKTOP_ROLES, LIMITS, VoiceCorrectBody } from '@daintree/decisions-protocol';
+import { ApiError, DESKTOP_ROLES, LIMITS, VoiceCorrectBody } from '@daintreehq/decisions-protocol';
 import type { DecisionRoom } from './decision-room.js';
 import { WORKER_VERSION, type Env } from './env.js';
 import { securityHeaders } from './security/headers.js';

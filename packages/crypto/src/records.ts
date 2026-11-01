@@ -5,7 +5,7 @@ import {
   type CryptoEnvelope,
   type QuestionRecord,
   type Requirement,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { envelopeDigest } from './envelope.js';
 import { signObject, verifyObject } from './sign.js';
 import { newId, nowIso } from './util.js';

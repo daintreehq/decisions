@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fingerprint } from '@daintree/decisions-crypto';
+import { fingerprint } from '@daintreehq/decisions-crypto';
 import { app } from '../app/controller.js';
 import { useApp } from '../app/hooks.js';
 import { ageLabel } from '../lib/time.js';

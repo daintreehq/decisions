@@ -1,4 +1,4 @@
-// Renders the SVG mark to the PNG sizes the manifest and iOS need. Run `pnpm --filter @daintree/decisions-app icons`.
+// Renders the SVG mark to the PNG sizes the manifest and iOS need. Run `pnpm --filter @daintreehq/decisions-app icons`.
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

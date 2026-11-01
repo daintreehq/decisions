@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
-import { buildSignedAction, newId } from '@daintree/decisions-crypto';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import { act, ask, claimRelay, events, inRoom, pairDevice, type World } from './helpers.js';
 
 const ids = (evs: any[]) => evs.map((e) => e.event_type);

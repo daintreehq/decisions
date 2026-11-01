@@ -1,6 +1,6 @@
 import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { sha256Hex } from '@daintree/decisions-crypto';
+import { sha256Hex } from '@daintreehq/decisions-crypto';
 import type { AuditLog } from './audit.js';
 import type { Identity } from './identity.js';
 import type { PolicyRegistry } from './policy.js';

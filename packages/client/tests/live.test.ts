@@ -6,7 +6,7 @@ import {
   type DeviceCert,
   type EpochGrant,
   type QuestionDetail,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   decryptEnvelope,
@@ -17,7 +17,7 @@ import {
   openEpochGrant,
   signRequest,
   signString,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import {
   DecisionsBridge,
   FileKeyStore,

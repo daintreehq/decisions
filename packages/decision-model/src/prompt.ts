@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { LIMITS } from '@daintree/decisions-protocol';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import { redactSecrets } from './redact.js';
 import type { RetrievalResult } from './retrieval.js';
 import type { ProxyQuestionInput } from './types.js';

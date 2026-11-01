@@ -6,7 +6,7 @@ import {
   grantKeyInfo,
   utf8ToBytes,
   type EpochGrant,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { importEpochKey, type EpochKey } from './envelope.js';
 import { exportPublicKey, importExchangePublicKey } from './keys.js';
 import { signObject, verifyObject } from './sign.js';

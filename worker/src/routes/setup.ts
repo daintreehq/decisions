@@ -6,8 +6,8 @@ import {
   SetupClaimBody,
   utf8ToBytes,
   timingSafeEqual,
-} from '@daintree/decisions-protocol';
-import { sha256, verifySelfSignedCert } from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-protocol';
+import { sha256, verifySelfSignedCert } from '@daintreehq/decisions-crypto';
 import { WORKER_VERSION } from '../env.js';
 import { generateVapidKeys } from '../push/webpush.js';
 import type { Handler } from '../room/types.js';

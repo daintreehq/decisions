@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { unzipSync, zipSync } from 'fflate';
-import { utf8ToBytes } from '@daintree/decisions-protocol';
-import { sha256Hex } from '@daintree/decisions-crypto';
+import { utf8ToBytes } from '@daintreehq/decisions-protocol';
+import { sha256Hex } from '@daintreehq/decisions-crypto';
 import {
   IMPORT_LIMITS,
   ImportError,

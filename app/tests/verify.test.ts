@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import {
   issueDeviceCert,
   newId,
   randomBytes,
   generateDeviceKeys,
   exportPublicKey,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
 import { verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
 import { actionEvent, makeWorld, questionEvent, type World } from './helpers.js';

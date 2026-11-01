@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { LIMITS } from '@daintree/decisions-protocol';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import {
   PaneDirectoryResolver,
   humanFileResolver,

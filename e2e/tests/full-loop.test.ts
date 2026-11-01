@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import type { QuestionDetail } from '@daintree/decisions-protocol';
+import type { QuestionDetail } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
   FileKeyStore,
@@ -17,7 +17,7 @@ import {
   type QuestionOrigin,
   type TerminalSink,
   type TerminalTarget,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 import {
   CLAIM_SECRET,
   findChromium,

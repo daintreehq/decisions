@@ -2,7 +2,7 @@
 
 Status: implementation-ready design for the `daintreehq/daintree` repository. Audience: the engineer or agent who will build the Daintree side of Decisions. Everything here was checked against a shallow clone of the public Daintree repository (Electron 42, Node 22, better-sqlite3 + drizzle, `@modelcontextprotocol/sdk`, `ws`). File paths and symbol names are quoted from that clone; re-verify each one when you start because Daintree moves quickly. Where this document says "relay" it means the user's own Cloudflare deployment from this repository, and "protocol" means [docs/protocol.md](./protocol.md), which is normative for everything that crosses the network.
 
-The Daintree-side work is a thin layer. The heavy lifting (signing, encryption, relay client, durable queues, delivery state machine, MCP handler, decision model) already exists in this repository as `@daintree/decisions-client`, `@daintree/decisions-protocol`, `@daintree/decisions-crypto` and `@daintree/decisions-model`. Daintree supplies the host seams: pane authentication, the terminal wake path, the resume path, storage, settings UI and the pane indicator.
+The Daintree-side work is a thin layer. The heavy lifting (signing, encryption, relay client, durable queues, delivery state machine, MCP handler, decision model) already exists in this repository as `@daintreehq/decisions-client`, `@daintreehq/decisions-protocol`, `@daintreehq/decisions-crypto` and `@daintreehq/decisions-model`. Daintree supplies the host seams: pane authentication, the terminal wake path, the resume path, storage, settings UI and the pane indicator.
 
 ## 1. Product requirements that shape the integration
 
@@ -31,7 +31,7 @@ Non-goals for this integration: replacing Canopy, replacing the existing "Answer
 
 Code layout in Daintree (all main-process, lazily imported): `electron/services/decisions/` containing `index.ts` (`getDecisionsService()`, `startDecisionsIfEnabled()`), `DecisionsService.ts` (owns the bridge and relay socket), `daintreeTerminalSink.ts`, `daintreeResumeAdapter.ts`, `daintreeLocalStore.ts` (the `LocalStore` implementation over drizzle/better-sqlite3), `paneAuthenticator.ts`, `workflowGates.ts`, `attachmentResolver.ts`, `keyStore.ts`, `deploy.ts`. The renderer sees only IPC.
 
-Distribution of the library code: Daintree depends on published `@daintree/decisions-client` (which depends on `-protocol`, `-crypto`). Before the first Daintree PR those packages must be published with built ESM and type declarations; today they are consumed as TypeScript source inside this monorepo. This is tracked as release work in this repository (`release.yml`).
+Distribution of the library code: Daintree depends on published `@daintreehq/decisions-client` (which depends on `-protocol`, `-crypto`). Before the first Daintree PR those packages must be published with built ESM and type declarations; today they are consumed as TypeScript source inside this monorepo. This is tracked as release work in this repository (`release.yml`).
 
 ## 3. Making `ask_human` available to agents (the MCP surface)
 
@@ -43,7 +43,7 @@ So Decisions gets its own route, following the precedent of the plugin route:
 
 - In `HttpLifecycle.handleRequest`, after the existing Host/Origin/duplicate-header checks and the plugin-route branch, add a branch for the path prefix `/mcp/decisions`. It runs before `isAuthorized` and has its own authentication: only a valid per-pane bearer is accepted (`mcpPaneConfigService.isValidPaneToken`). The API-key tier and help tokens are rejected, because "an api-key client has no pane of its own" (the same reasoning that keeps `terminal.notifyWhenIdle` out of the external tier).
 - Mount it through one `setDecisionsRouteHandler` seam in `McpServerService.ts`, mirroring `setPluginRouteHandler` (about line 570), so that when Decisions is disabled the seam is empty and costs nothing.
-- The handler is `createDecisionsMcpHandler(bridge, authenticator)` from `@daintree/decisions-client`. The `PaneAuthenticator` Daintree supplies resolves a bearer to `{ paneOrigin }` using the existing resolvers: pane id from `getPaneIdForToken`, ownership principal from `paneOwnershipPrincipalResolver`, launch workspace binding from `getPaneWorkspaceBindingForToken`. The pane identity is derived server-side from the bearer, never from tool arguments.
+- The handler is `createDecisionsMcpHandler(bridge, authenticator)` from `@daintreehq/decisions-client`. The `PaneAuthenticator` Daintree supplies resolves a bearer to `{ paneOrigin }` using the existing resolvers: pane id from `getPaneIdForToken`, ownership principal from `paneOwnershipPrincipalResolver`, launch workspace binding from `getPaneWorkspaceBindingForToken`. The pane identity is derived server-side from the bearer, never from tool arguments.
 - Session binding and revocation follow the plugin route: a session is bound to the credential digest that opened it (`bindSessionCredential`), pane sessions are not idle-reaped, and `revokePaneBearer(principal)` closes the Decisions session and, through a new `decisions.revokeOwner(principal)` call, cancels or re-attaches that pane's pending work.
 - Reserve a new server key. `RESERVED_PLUGIN_SERVER_KEYS` (`electron/services/pluginAgentMcp/serverKeys.ts`) currently reserves `daintree`, `daintree-docs`, `daintree-runbooks`. Add `daintree-decisions` so a plugin cannot squat it. Claude Code then exposes the tool as `mcp__daintree-decisions__ask_human`.
 
@@ -55,7 +55,7 @@ Tool timeout: the generated config uses `MCP_CONFIRMABLE_CALL_MAX_MS` seconds fo
 
 ### 3.3 Tools and budgets
 
-Three tools, each with a description under 400 bytes (Daintree CI caps this, `.claude/rules/actions-and-mcp.md`): `ask_human`, `get_decision`, `cancel_question`. They are not part of the control surface action manifest, so they do not consume the external-tier budget, and because the route is separate they are not re-sent every turn to clients that did not mount it. Input schemas are exactly the ones in `@daintree/decisions-client` (`AskHumanInput`: question ≤ 8000 chars, context ≤ 32 KiB, options ≤ 12, attachments, `requested_requirement`, `workflow_gate_id`, `expires_at`, `correlation_id`).
+Three tools, each with a description under 400 bytes (Daintree CI caps this, `.claude/rules/actions-and-mcp.md`): `ask_human`, `get_decision`, `cancel_question`. They are not part of the control surface action manifest, so they do not consume the external-tier budget, and because the route is separate they are not re-sent every turn to clients that did not mount it. Input schemas are exactly the ones in `@daintreehq/decisions-client` (`AskHumanInput`: question ≤ 8000 chars, context ≤ 32 KiB, options ≤ 12, attachments, `requested_requirement`, `workflow_gate_id`, `expires_at`, `correlation_id`).
 
 The result text returned to the agent is: `Asked as q-<alias>. End your turn now (or continue with unrelated work); the answer will arrive as a message in this terminal.` The alias `q-N` is a cosmetic, per-installation counter. Wire ids are full unguessable identifiers.
 

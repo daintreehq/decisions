@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { appendFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
   FileSpool,
@@ -16,7 +16,7 @@ import {
   type RunningMcp,
   type TerminalSink,
   type TerminalTarget,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 import {
   CliError,
   openRuntime,

@@ -1,5 +1,5 @@
-import { API_PREFIX, normalizeQuery, type ApiErrorBody } from '@daintree/decisions-protocol';
-import { signRequest } from '@daintree/decisions-crypto';
+import { API_PREFIX, normalizeQuery, type ApiErrorBody } from '@daintreehq/decisions-protocol';
+import { signRequest } from '@daintreehq/decisions-crypto';
 
 export class RelayError extends Error {
   constructor(

@@ -4,7 +4,7 @@ import {
   base64UrlToBytes,
   bytesToBase64Url,
   utf8ToBytes,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { deriveAesKey, type EpochKey } from './envelope.js';
 import { buf, randomBytes, sha256Hex, subtle } from './util.js';
 

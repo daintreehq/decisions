@@ -1,4 +1,4 @@
-import { DeleteDataBody, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { DeleteDataBody, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { z } from 'zod';
 import { WORKER_VERSION } from '../env.js';
 import type { Handler, Room } from '../room/types.js';

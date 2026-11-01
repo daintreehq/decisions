@@ -7,7 +7,7 @@ import {
   SignedAction,
   bytesToBase64Url,
   parseAuthHeader,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   buildSignedQuestion,

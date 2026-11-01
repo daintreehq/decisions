@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { generateDeviceKeys, verifyRequestSignature } from '@daintree/decisions-crypto';
-import { parseAuthHeader, API_PREFIX } from '@daintree/decisions-protocol';
+import { generateDeviceKeys, verifyRequestSignature } from '@daintreehq/decisions-crypto';
+import { parseAuthHeader, API_PREFIX } from '@daintreehq/decisions-protocol';
 import { Relay, RelayError } from '../src/data/relay.js';
-import { sha256Hex } from '@daintree/decisions-crypto';
+import { sha256Hex } from '@daintreehq/decisions-crypto';
 
 async function relay(fetchImpl?: typeof fetch) {
   const keys = await generateDeviceKeys(true);

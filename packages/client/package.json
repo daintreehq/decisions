@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-client",
+  "name": "@daintreehq/decisions-client",
   "version": "0.1.0",
   "description": "Desktop-side reference implementation for Daintree Decisions: relay client, hibernatable socket, durable local store, delivery bridge and HTTP MCP server.",
   "license": "Apache-2.0",
@@ -19,8 +19,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@daintree/decisions-crypto": "workspace:*",
-    "@daintree/decisions-protocol": "workspace:*",
+    "@daintreehq/decisions-crypto": "workspace:*",
+    "@daintreehq/decisions-protocol": "workspace:*",
     "fflate": "^0.8.2",
     "zod": "^4.4.3"
   },

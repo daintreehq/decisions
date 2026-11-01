@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-crypto",
+  "name": "@daintreehq/decisions-crypto",
   "version": "0.1.0",
   "description": "WebCrypto implementation of the Daintree Decisions crypto suite (P-256 ECDSA/ECDH, HKDF, AES-256-GCM). Runs in browsers, Node and Cloudflare Workers.",
   "license": "Apache-2.0",
@@ -21,7 +21,7 @@
     "vectors": "node --experimental-strip-types tests/generate-vectors.ts"
   },
   "dependencies": {
-    "@daintree/decisions-protocol": "workspace:*"
+    "@daintreehq/decisions-protocol": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.0",

@@ -1,5 +1,5 @@
-import type { Role } from '@daintree/decisions-protocol';
-import { DESKTOP_ROLES, HUMAN_ROLES } from '@daintree/decisions-protocol';
+import type { Role } from '@daintreehq/decisions-protocol';
+import { DESKTOP_ROLES, HUMAN_ROLES } from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import * as admin from './admin.js';
 import * as attachments from './attachments.js';

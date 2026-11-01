@@ -3,7 +3,7 @@ import {
   PairingStatusResponse,
   PROTOCOL_VERSION,
   type PairingInvitePayload,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   exportPublicKey,
   generateDeviceKeys,
@@ -14,7 +14,7 @@ import {
   signPairingPop,
   verifyDeviceCert,
   verifySelfSignedCert,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { Db, PairingBundle } from './db.js';
 import { generateCacheKey } from './seal.js';
 import { publicJson, RelayError } from './relay.js';

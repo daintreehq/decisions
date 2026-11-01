@@ -5,7 +5,7 @@ import {
   type DecisionContentV1,
   type SignedAction,
   type SignedQuestion,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   buildSignedQuestion,
@@ -14,7 +14,7 @@ import {
   newId,
   nowIso,
   sniffImageMime,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import {
   AskHumanInput,
   BridgeError,

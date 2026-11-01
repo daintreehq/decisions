@@ -1,4 +1,4 @@
-import { VoiceSessionResponse, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { VoiceSessionResponse, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import type { WebSocketLike } from '../../data/sync.js';
 
 export type VoiceState =

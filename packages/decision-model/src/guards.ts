@@ -1,4 +1,4 @@
-import { LIMITS, utf8ByteLength } from '@daintree/decisions-protocol';
+import { LIMITS, utf8ByteLength } from '@daintreehq/decisions-protocol';
 import { z } from 'zod';
 import { redactSecrets, stripControlChars } from './redact.js';
 import { normalizeLabel } from './text.js';

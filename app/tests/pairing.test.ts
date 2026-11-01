@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PairingInvitePayload } from '@daintree/decisions-protocol';
+import type { PairingInvitePayload } from '@daintreehq/decisions-protocol';
 import {
   createEpochGrant,
   decryptEnvelope,
@@ -13,8 +13,8 @@ import {
   pairingShortCode,
   sha256Hex,
   verifyPairingPop,
-} from '@daintree/decisions-crypto';
-import { base64UrlToBytes } from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-crypto';
+import { base64UrlToBytes } from '@daintreehq/decisions-protocol';
 import { Db } from '../src/data/db.js';
 import { checkInvite, PairingError, runPairing, type PairingPhase } from '../src/data/pairing.js';
 import { makeWorld, type World } from './helpers.js';

@@ -1,5 +1,5 @@
-import { ApiError, LIMITS, VoiceSessionBody } from '@daintree/decisions-protocol';
-import { newId } from '@daintree/decisions-crypto';
+import { ApiError, LIMITS, VoiceSessionBody } from '@daintreehq/decisions-protocol';
+import { newId } from '@daintreehq/decisions-crypto';
 import type { Handler } from '../room/types.js';
 import { iso, json, nowMs } from '../util.js';
 

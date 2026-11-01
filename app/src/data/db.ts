@@ -1,5 +1,5 @@
 import { deleteDB, openDB, type IDBPDatabase, type IDBPTransaction } from 'idb';
-import type { DeviceCert, LedgerEvent } from '@daintree/decisions-protocol';
+import type { DeviceCert, LedgerEvent } from '@daintreehq/decisions-protocol';
 import type { SealedBlob } from './seal.js';
 
 export const DB_NAME = 'daintree-decisions';

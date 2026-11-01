@@ -1,5 +1,5 @@
-import { ApiError, PushSubscribeBody, SettingsBody } from '@daintree/decisions-protocol';
-import { newId } from '@daintree/decisions-crypto';
+import { ApiError, PushSubscribeBody, SettingsBody } from '@daintreehq/decisions-protocol';
+import { newId } from '@daintreehq/decisions-crypto';
 import { sendNotification } from '../jobs/notify.js';
 import { isAllowedPushEndpoint } from '../push/webpush.js';
 import type { Handler } from '../room/types.js';

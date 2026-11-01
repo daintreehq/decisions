@@ -1,4 +1,4 @@
-import { CorrectionResult, PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { CorrectionResult, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 
 /**
  * Whole-passage AI clean-up of a dictated answer. The contract mirrors Daintree desktop dictation:

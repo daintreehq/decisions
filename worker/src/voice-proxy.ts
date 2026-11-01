@@ -1,4 +1,4 @@
-import { LIMITS } from '@daintree/decisions-protocol';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import type { DecisionRoom } from './decision-room.js';
 import type { Env } from './env.js';
 

@@ -2,8 +2,8 @@ import { settle } from './helpers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exports } from 'cloudflare:workers';
 import { runDurableObjectAlarm } from 'cloudflare:test';
-import { PROTOCOL_VERSION, bytesToBase64Url } from '@daintree/decisions-protocol';
-import { newId, signRequest } from '@daintree/decisions-crypto';
+import { PROTOCOL_VERSION, bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { newId, signRequest } from '@daintreehq/decisions-crypto';
 import { buildRotation } from './devices.helpers.js';
 import {
   act,
@@ -235,7 +235,7 @@ describe('revocation closes every path to key material', () => {
       issueDeviceCert,
       createEpochGrant,
       signPairingPop,
-    } = await import('@daintree/decisions-crypto');
+    } = await import('@daintreehq/decisions-crypto');
     const { Actor } = await import('./helpers.js');
     const phone = await Actor.create('phone');
     const secret = generatePairingSecret();
@@ -312,7 +312,7 @@ describe('revocation closes every path to key material', () => {
       issueDeviceCert,
       createEpochGrant,
       signPairingPop,
-    } = await import('@daintree/decisions-crypto');
+    } = await import('@daintreehq/decisions-crypto');
     const { Actor } = await import('./helpers.js');
     const phone = await Actor.create('phone');
     const secret = generatePairingSecret();

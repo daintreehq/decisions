@@ -8,8 +8,8 @@ import {
   type QuestionStatus,
   type Requirement,
   type Role,
-} from '@daintree/decisions-protocol';
-import type { EpochKey } from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-protocol';
+import type { EpochKey } from '@daintreehq/decisions-crypto';
 import { verifyActionEvent, verifyQuestionEvent, type AnswerContent } from './verify.js';
 import { lastProxyAction } from './selectors.js';
 import type { TrustStore } from './trust.js';

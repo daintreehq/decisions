@@ -13,8 +13,8 @@ import {
   type QuestionRecord,
   type QuestionStatus,
   type Requirement,
-} from '@daintree/decisions-protocol';
-import { sha256Hex, verifyObject } from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-protocol';
+import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
 import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { nextAllowed } from '../push/quiet-hours.js';

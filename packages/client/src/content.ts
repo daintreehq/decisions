@@ -5,7 +5,7 @@ import {
   Requirement,
   utf8ByteLength,
   type DecisionContentV1,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import type { WorkflowGate } from './policy.js';
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */

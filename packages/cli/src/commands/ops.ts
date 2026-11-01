@@ -1,5 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { PROTOCOL_VERSION, type InfoResponse } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION, type InfoResponse } from '@daintreehq/decisions-protocol';
 import {
   RelayClient,
   RelayError,
@@ -10,14 +10,14 @@ import {
   verifiedDevices,
   verifyRecoveryKit,
   loadIdentity,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 import {
   encryptAttachment,
   importEpochKey,
   newId,
   generateEpochKeyBytes,
   type RecoveryBundleFile,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import {
   CliError,
   keyStoreFor,

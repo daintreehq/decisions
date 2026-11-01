@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintree/decisions-protocol';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { Actor, CLAIM_SECRET, claimRelay, inRoom, raw } from './helpers.js';
-import { issueDeviceCert, newId } from '@daintree/decisions-crypto';
+import { issueDeviceCert, newId } from '@daintreehq/decisions-crypto';
 
 describe('health, info and claim', () => {
   it('serves /health and unclaimed /info publicly', async () => {

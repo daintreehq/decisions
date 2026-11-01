@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { LedgerEvent } from '@daintree/decisions-protocol';
+import type { LedgerEvent } from '@daintreehq/decisions-protocol';
 import { Db } from '../src/data/db.js';
 import { RelayError } from '../src/data/relay.js';
 import {

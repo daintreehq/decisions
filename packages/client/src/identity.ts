@@ -6,7 +6,7 @@ import {
   base64UrlToBytes,
   bytesToBase64Url,
   type ClaimResponse,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   decryptRecoveryBundle,
   deserializeDeviceKeys,
@@ -24,7 +24,7 @@ import {
   type EpochKey,
   type RecoveryBundleFile,
   type SerializedDeviceKeys,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import { RelayError } from './errors.js';
 import { RelayClient } from './relay.js';
 

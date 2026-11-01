@@ -7,7 +7,7 @@ import {
   type LedgerEvent,
   type SignedAction,
   type SignedQuestion,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   decryptEnvelope,
@@ -20,8 +20,8 @@ import {
   serializeDeviceKeys,
   type DeviceKeys,
   type EpochKey,
-} from '@daintree/decisions-crypto';
-import { bytesToBase64Url } from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-crypto';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
   MemoryLocalStore,

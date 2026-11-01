@@ -11,7 +11,7 @@ import {
   type KeyStore,
   type LocalStore,
   type WebSocketFactory,
-} from '@daintree/decisions-client';
+} from '@daintreehq/decisions-client';
 
 /** Everything a command needs from its environment, so commands are testable without a terminal. */
 export interface Ctx {

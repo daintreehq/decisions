@@ -26,10 +26,10 @@ importers:
 
   app:
     dependencies:
-      '@daintree/decisions-crypto':
+      '@daintreehq/decisions-crypto':
         specifier: workspace:*
         version: link:../packages/crypto
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../packages/protocol
       idb:
@@ -84,13 +84,13 @@ importers:
 
   e2e:
     dependencies:
-      '@daintree/decisions-client':
+      '@daintreehq/decisions-client':
         specifier: workspace:*
         version: link:../packages/client
-      '@daintree/decisions-crypto':
+      '@daintreehq/decisions-crypto':
         specifier: workspace:*
         version: link:../packages/crypto
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../packages/protocol
       playwright-core:
@@ -109,13 +109,13 @@ importers:
 
   packages/cli:
     dependencies:
-      '@daintree/decisions-client':
+      '@daintreehq/decisions-client':
         specifier: workspace:*
         version: link:../client
-      '@daintree/decisions-crypto':
+      '@daintreehq/decisions-crypto':
         specifier: workspace:*
         version: link:../crypto
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../protocol
       commander:
@@ -143,10 +143,10 @@ importers:
 
   packages/client:
     dependencies:
-      '@daintree/decisions-crypto':
+      '@daintreehq/decisions-crypto':
         specifier: workspace:*
         version: link:../crypto
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../protocol
       fflate:
@@ -168,7 +168,7 @@ importers:
 
   packages/crypto:
     dependencies:
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
@@ -184,7 +184,7 @@ importers:
 
   packages/decision-model:
     dependencies:
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../protocol
       zod:
@@ -219,10 +219,10 @@ importers:
 
   worker:
     dependencies:
-      '@daintree/decisions-crypto':
+      '@daintreehq/decisions-crypto':
         specifier: workspace:*
         version: link:../packages/crypto
-      '@daintree/decisions-protocol':
+      '@daintreehq/decisions-protocol':
         specifier: workspace:*
         version: link:../packages/protocol
       zod:

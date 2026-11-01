@@ -1,4 +1,4 @@
-import { enforceRequirement, type Requirement } from '@daintree/decisions-protocol';
+import { enforceRequirement, type Requirement } from '@daintreehq/decisions-protocol';
 
 export interface WorkflowGate {
   gateId: string;

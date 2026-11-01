@@ -10,7 +10,7 @@ import {
   type PairingInvitePayload,
   type Requirement,
   type Role,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   buildSignedQuestion,
@@ -32,7 +32,7 @@ import {
   type DeviceKeys,
   type EpochKey,
   sha256Hex,
-} from '@daintree/decisions-crypto';
+} from '@daintreehq/decisions-crypto';
 import type { DecisionRoom } from '../src/decision-room.js';
 
 export const ORIGIN = 'https://relay.test';

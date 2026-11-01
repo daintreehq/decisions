@@ -3,7 +3,7 @@ import {
   DeliveryFailedBody,
   DeliveryReceivedBody,
   DeliveryTerminalBody,
-} from '@daintree/decisions-protocol';
+} from '@daintreehq/decisions-protocol';
 import { applyAck } from '../room/ack.js';
 import type { Handler } from '../room/types.js';
 import { json, nowMs } from '../util.js';

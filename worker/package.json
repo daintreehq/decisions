@@ -1,5 +1,5 @@
 {
-  "name": "@daintree/decisions-worker",
+  "name": "@daintreehq/decisions-worker",
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
@@ -10,8 +10,8 @@
     "test": "vitest run && vitest run -c vitest.node.config.ts"
   },
   "dependencies": {
-    "@daintree/decisions-protocol": "workspace:*",
-    "@daintree/decisions-crypto": "workspace:*",
+    "@daintreehq/decisions-protocol": "workspace:*",
+    "@daintreehq/decisions-crypto": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

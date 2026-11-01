@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { verifySelfSignedCert } from '@daintree/decisions-crypto';
+import { verifySelfSignedCert } from '@daintreehq/decisions-crypto';
 import {
   FileKeyStore,
   MemoryKeyStore,
@@ -264,7 +264,7 @@ describe('recovery kit', () => {
       fetch: claimFetch({}),
     });
     await expect(exportRecoveryKit(s, 'short')).rejects.toThrow(/12/);
-    const { encryptRecoveryBundle } = await import('@daintree/decisions-crypto');
+    const { encryptRecoveryBundle } = await import('@daintreehq/decisions-crypto');
     const notKit = await encryptRecoveryBundle(
       { kind: 'something-else' },
       'long enough passphrase',
