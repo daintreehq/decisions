@@ -3,6 +3,7 @@ export * from './errors.js';
 export * from './identity.js';
 export * from './relay.js';
 export * from './devices.js';
+export * from './host-enrollment.js';
 export * from './socket.js';
 export * from './store.js';
 export * from './store-memory.js';

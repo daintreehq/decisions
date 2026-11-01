@@ -15,6 +15,7 @@ import {
   status,
 } from './commands/ops.js';
 import { devices, pair, revoke, rotate, setup } from './commands/setup.js';
+import { hostAccept, hostEnroll, hostRequest } from './commands/host.js';
 
 const VERSION = '0.1.0';
 const collect = (v: string, prev: string[] = []) => [...prev, v];
@@ -83,6 +84,32 @@ export function buildProgram(): Command {
     .command('rotate')
     .description('Rotate the content key without revoking anyone.')
     .action(run((c, g) => rotate(c, g)));
+
+  const host = program
+    .command('host')
+    .description('Enroll another machine (a Daintree Host) as its own desktop-host device.');
+  host
+    .command('request')
+    .description('On the Host: create its keys and print an enrollment request for the owner.')
+    .option('--label <name>', 'name for this Host (default: the hostname)')
+    .option('--new', 'discard any pending request and start over with new keys')
+    .action((o) => run((c, g) => hostRequest(c, g, o))());
+  host
+    .command('enroll [request]')
+    .description(
+      'On the owner machine: check a request, register the Host with the relay and print its response (request from the argument, --request-file, or stdin with --yes).',
+    )
+    .option('--request-file <file>', 'read the request from a file')
+    .option('-y, --yes', 'do not ask to confirm the code')
+    .action((request, o) => run((c, g) => hostEnroll(c, g, { ...o, request }))());
+  host
+    .command('accept [response]')
+    .description(
+      "On the Host: check the owner's response and store it as this machine's identity (response from the argument, --response-file, or stdin).",
+    )
+    .option('--response-file <file>', 'read the response from a file')
+    .option('--offline', 'do not confirm the enrollment with the relay')
+    .action((response, o) => run((c, g) => hostAccept(c, g, { ...o, response }))());
 
   program
     .command('listen')

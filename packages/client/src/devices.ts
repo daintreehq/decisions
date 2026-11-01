@@ -16,7 +16,13 @@ import type {
   PairingInvitePayload,
   PendingPairing,
 } from '@daintreehq/decisions-protocol';
-import { addEpoch, currentEpochKey, type Identity, type KeyStore } from './identity.js';
+import {
+  addEpoch,
+  assertOwner,
+  currentEpochKey,
+  type Identity,
+  type KeyStore,
+} from './identity.js';
 import type { RelayClient } from './relay.js';
 
 /** Create a one-time pairing invitation and return the link/QR payload. */
@@ -26,6 +32,7 @@ export async function createPairingInvite(
   now = Date.now(),
 ): Promise<{ url: string; payload: PairingInvitePayload; pairingId: string; expiresAt: number }> {
   const id = client.identity;
+  assertOwner(id, 'pairing a device');
   const secret = generatePairingSecret();
   const pairingId = newId();
   const expiresAt = now + 5 * 60 * 1000 - 5_000;
@@ -60,6 +67,7 @@ export async function approveCandidate(
   candidate: PendingPairing,
 ): Promise<void> {
   const id = client.identity;
+  assertOwner(id, 'approving a device');
   // The code the human compared must be derived from the exact keys we are about to certify.
   if ((await localShortCode(candidate)) !== candidate.short_code) {
     throw new Error(
@@ -139,6 +147,7 @@ export async function revokeAndRotate(
   deviceId: string,
 ): Promise<Identity> {
   const id = client.identity;
+  assertOwner(id, 'revoking a device');
   if (deviceId === id.config.deviceId) throw new Error('cannot revoke the owner device');
   const list = await client.devices();
   const remaining = list.devices.filter(
@@ -155,6 +164,7 @@ export async function revokeAndRotate(
 
 export async function rotateEpoch(client: RelayClient, store: KeyStore): Promise<Identity> {
   const id = client.identity;
+  assertOwner(id, 'rotating the content key');
   const list = await client.devices();
   const active = list.devices.filter((d) => d.device_id !== id.config.deviceId && !d.revoked_at);
   // The relay requires exactly its current epoch + 1; a staged-but-rejected epoch is simply overwritten.
@@ -165,15 +175,15 @@ export async function rotateEpoch(client: RelayClient, store: KeyStore): Promise
   return addEpoch(store, staged, newEpoch, raw, { makeCurrent: true });
 }
 
-/** Verify every returned device certificate against our own (owner) signing key. */
+/** Verify every returned device certificate against the pinned owner key (our own key on the owner desktop). */
 export async function verifiedDevices(client: RelayClient): Promise<DeviceInfo[]> {
   const list = await client.devices();
-  const owner = client.identity.keys.signing.publicKey;
+  const owner = client.identity.owner.signingKey;
   const out: DeviceInfo[] = [];
   for (const d of list.devices) {
-    // Every certificate (including our own) must be signed by our owner key.
+    // Every certificate (including our own) must be signed by the owner key.
     const ok =
-      d.cert.issuer_device_id === client.identity.config.deviceId &&
+      d.cert.issuer_device_id === client.identity.owner.deviceId &&
       (await verifyDeviceCert(d.cert, owner)) &&
       (d.cert.device_id !== client.identity.config.deviceId ||
         d.cert.signing_pub === client.identity.signingPub);
