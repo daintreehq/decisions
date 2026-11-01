@@ -70,7 +70,8 @@ export interface DecisionView {
   /**
    * True only when the question carries attachments and the answer in force lists exactly their plaintext
    * SHA-256 digests as the images the phone displayed. A question with no attachments, a proxy answer
-   * (which reviews nothing) or an approval sent before every image loaded reports false.
+   * (which reviews nothing, even once a human confirms it) or an approval sent before every image loaded
+   * reports false.
    */
   reviewedDigestsMatch: boolean;
   answers: {
@@ -310,8 +311,10 @@ export class DecisionsBridge {
         : null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
+      // Only a human answer that carried its own content attests to the images the phone displayed.
       reviewedDigestsMatch:
         !!inForce &&
+        inForce.source === 'human' &&
         row.attachment_digests.length > 0 &&
         sameDigests(inForce.reviewed_attachment_digests, row.attachment_digests),
       answers: entries

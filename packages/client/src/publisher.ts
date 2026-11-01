@@ -113,9 +113,10 @@ export class Publisher {
     if (corrKey) {
       const existing = await ctx.store.getMeta(corrKey);
       const row = existing ? await ctx.store.getQuestion(existing) : null;
-      if (row && !(await this.sameAttachments(origin, input, row))) {
-        // Different images under the same correlation id are a different question: an answer to the old
-        // images must never be returned for the new ones. Re-point the id at a fresh question.
+      if (row && !(await this.sameBinding(origin, input, row, governingId, requirement))) {
+        // Different images, a different gate or a different level under the same correlation id are a
+        // different question: an answer to the old one must never be returned for the new one. Re-point the
+        // id at a fresh question.
         await ctx.store.setMeta(corrKey, questionId);
       } else if (existing) {
         if (row) {
@@ -145,7 +146,13 @@ export class Publisher {
 
     const epoch = currentEpochKey(ctx.identity);
     const now = ctx.now();
-    const expiresAt = resolveExpiry(input.expires_at, governing, now);
+    // An origin gate is the host's policy. A gate the agent picked can only shorten the no-gate expiry.
+    const expiresAt = gate
+      ? resolveExpiry(input.expires_at, gate, now)
+      : earliest(
+          resolveExpiry(input.expires_at, undefined, now),
+          callerGate ? resolveExpiry(input.expires_at, callerGate, now) : null,
+        );
 
     // Attachments: encrypt now (so an offline desktop can publish later) and spool the ciphertext.
     const descriptors: DecisionContentV1['attachments'] = [];
@@ -289,12 +296,18 @@ export class Publisher {
     return res.bytes;
   }
 
-  /** Whether a repeat call names the same images (by plaintext digest) as the question it would return. */
-  private async sameAttachments(
+  /**
+   * Whether a repeat call is bound like the question it would return: the same governing gate, the same
+   * enforced level and the same images (by plaintext digest).
+   */
+  private async sameBinding(
     origin: QuestionOrigin,
     input: AskHumanInput,
     row: QuestionRow,
+    gateId: string | null,
+    requirement: QuestionRow['requirement'],
   ): Promise<boolean> {
+    if (row.origin.workflow_gate_id !== gateId || row.requirement !== requirement) return false;
     const asked = input.attachments ?? [];
     if (asked.length !== row.attachment_digests.length) return false;
     if (asked.length === 0) return true;
@@ -534,4 +547,11 @@ export class Publisher {
       result: 'sent',
     });
   }
+}
+
+/** The earlier of two expiry times; null means never. */
+function earliest(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Date.parse(a) <= Date.parse(b) ? a : b;
 }

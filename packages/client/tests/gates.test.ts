@@ -407,3 +407,138 @@ describe('what never counts as approval', () => {
     expect((await env.bridge.getDecision(r.questionId)).status).toBe('open');
   });
 });
+
+describe('gates only ever add constraints', () => {
+  it('re-asking under a different gate with the same correlation id is a new question', async () => {
+    const env = await designReview();
+    const loose = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: {
+        question: 'Looks fine?',
+        attachments: [{ local_resource_id: 'before' }, { local_resource_id: 'after' }],
+        correlation_id: 'wf-7',
+      },
+    });
+    const gated = await env.ask('wf-7');
+    expect(gated.duplicate).toBe(false);
+    expect(gated.questionId).not.toBe(loose.questionId);
+    expect((await env.bridge.getDecision(gated.questionId)).workflowGateId).toBe(
+      'design-review/final',
+    );
+  });
+
+  it('a gate the agent names cannot lengthen the default expiry', async () => {
+    const policy = new PolicyRegistry();
+    policy.register({
+      gateId: 'no-expiry-set',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+    });
+    const { bridge, store } = await setupBridge({ policy });
+    const far = new Date(Date.now() + 90 * 86_400_000).toISOString();
+    const r = await bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q', workflow_gate_id: 'no-expiry-set', expires_at: far },
+    });
+    const exp = Date.parse((await store.getQuestion(r.questionId))!.expires_at!);
+    expect(exp - Date.now()).toBeLessThanOrEqual(30 * 86_400_000 + 1000);
+  });
+
+  it("one gate's choices must respect another gate's protected option ids", async () => {
+    const policy = new PolicyRegistry();
+    policy.register({
+      gateId: 'only-a',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+      allowedOptionIds: ['a'],
+    });
+    policy.register({
+      gateId: 'a-or-b',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+      choices: [
+        { id: 'a', label: 'A' },
+        { id: 'b', label: 'B' },
+      ],
+    });
+    const { bridge } = await setupBridge({ policy });
+    await expect(
+      bridge.registerQuestion({
+        origin: origin({ workflow_gate_id: 'only-a' }),
+        input: { question: 'q', workflow_gate_id: 'a-or-b' },
+      }),
+    ).rejects.toThrow(/not permitted/);
+  });
+});
+
+describe('proxy answers and confirmations under a bound gate', () => {
+  async function proxyAnswered() {
+    const policy = new PolicyRegistry();
+    policy.register({ ...DESIGN_REVIEW, gateId: 'preview', minRequirement: 'proxy-ok' });
+    const env = await setupBridge({
+      policy,
+      resolver: { resolve: async () => ({ bytes: PNG }) },
+    });
+    const r = await env.bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'preview' }),
+      input: { question: 'Preview ok?', attachments: [{ local_resource_id: 'shot' }] },
+    });
+    await env.bridge.pump();
+    const digests = (await env.store.getQuestion(r.questionId))!.attachment_digests;
+    const desktop = { deviceId: env.identity.config.deviceId, keys: env.identity.keys };
+    const proxyEv = await env.relay.answerEvent({
+      questionId: r.questionId,
+      phone: desktop,
+      action: 'proxy-answer',
+      options: ['approve'],
+      // Even if a proxy answer listed the digests, it reviewed nothing.
+      extra: { reviewed_attachment_digests: digests },
+    });
+    await env.bridge.catchUp();
+    const proxyActionId = (proxyEv.data as { record: { action_id: string } }).record.action_id;
+    return { ...env, qid: r.questionId, proxyActionId };
+  }
+
+  it('a proxy answer is reported as proxy and never as reviewing the images', async () => {
+    const env = await proxyAnswered();
+    expect(await env.bridge.getDecision(env.qid)).toMatchObject({
+      status: 'proxy-answered',
+      provenance: 'proxy',
+      choice: 'approve',
+      reviewedDigestsMatch: false,
+    });
+  });
+
+  it('a confirmation counts only for the proxy answer it names, and attests to no images', async () => {
+    const env = await proxyAnswered();
+    await env.relay.answerEvent({
+      questionId: env.qid,
+      phone: env.phone,
+      action: 'confirm-proxy',
+      expectedRevision: 1,
+      status: 'human-answered',
+      confirmsActionId: 'b'.repeat(26),
+    });
+    await env.bridge.catchUp();
+    expect((await env.bridge.getDecision(env.qid)).status).toBe('proxy-answered');
+    expect(
+      (await env.store.listAudit(50)).some((a) => a.result === 'confirms-another-answer'),
+    ).toBe(true);
+
+    await env.relay.answerEvent({
+      questionId: env.qid,
+      phone: env.phone,
+      action: 'confirm-proxy',
+      expectedRevision: 1,
+      status: 'human-answered',
+      confirmsActionId: env.proxyActionId,
+    });
+    await env.bridge.catchUp();
+    expect(await env.bridge.getDecision(env.qid)).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      choice: 'approve',
+      reviewedDigestsMatch: false,
+    });
+  });
+});

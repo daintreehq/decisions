@@ -130,6 +130,16 @@ export function shapeForGates(
       options = g.choices.map((c) => ({ ...c }));
     }
   }
+  // Choices one gate supplies must still be permitted by every other gate's protected option ids.
+  for (const g of active) {
+    if (!g.allowedOptionIds) continue;
+    const bad = options.find((o) => !g.allowedOptionIds!.includes(o.id));
+    if (bad)
+      throw new BridgeError(
+        'validation_error',
+        `option "${bad.id}" is not permitted by this workflow gate`,
+      );
+  }
   const allowText = active.every((g) => gateAllowsText(g));
   const bindArtifacts = active.some((g) => g.bindArtifacts === true);
   if (!allowText && options.length === 0) {

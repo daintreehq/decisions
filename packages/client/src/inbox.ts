@@ -306,6 +306,19 @@ export class Inbox {
     }
 
     // answer / override / proxy-answer / confirm-proxy
+    if (v.action === 'confirm-proxy') {
+      // A confirmation affirms one specific proxy answer: it must be the one in force here.
+      const target = entries
+        .filter((e) => e.kind === 'answer' && e.action !== 'confirm-proxy')
+        .at(-1);
+      if (
+        !target ||
+        target.action !== 'proxy-answer' ||
+        target.entry_id !== v.record.confirms_action_id
+      ) {
+        return this.reject(row, 'confirms-another-answer');
+      }
+    }
     const { options: opts, allow_text } = this.content(row);
     const chosen = v.content?.selected_option_ids ?? [];
     const text = v.content?.text ?? '';
