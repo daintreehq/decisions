@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { listWorkspace } from '../release/workspace.mjs';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const args = new Set(process.argv.slice(2));
@@ -175,6 +176,16 @@ function tsconfig(moduleKind, resolution) {
     null,
     2,
   );
+}
+
+// The publish script releases every non-private workspace package; each one needs an entry above.
+{
+  const listed = new Set(PACKAGES.map((p) => p.dir));
+  for (const pkg of listWorkspace(ROOT)) {
+    if (!pkg.private && !listed.has(pkg.dir)) {
+      fail(`${pkg.name} (${pkg.dir}) is published but missing from PACKAGES in pack-check.mjs`);
+    }
+  }
 }
 
 const work = mkdtempSync(join(tmpdir(), 'decisions-pack-check-'));
