@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Test (protocol, crypto, worker in workerd, client, cli, model, app)
+        run: pnpm test
+      - name: Build the web app and CLI
+        run: pnpm build:all
+      - name: Validate the Cloudflare deployment config
+        run: pnpm exec wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-out"
+      - name: Deploy-script dry run
+        run: node tools/deploy/deploy.mjs --dry-run
+      - name: Dependency audit (production, high and above)
+        run: pnpm audit --prod --audit-level high
+        continue-on-error: true
+
+  e2e:
+    name: Whole-system test (real Worker, desktop client and PWA in Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install Chromium
+        run: pnpm --filter @daintree/decisions-e2e exec playwright-core install --with-deps chromium
+      - run: pnpm --filter @daintree/decisions-e2e test

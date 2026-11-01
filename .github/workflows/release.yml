@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm test
+      - run: pnpm build:all
+      - name: Bundle the Worker and package artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          pnpm exec wrangler deploy --dry-run --outdir dist-release/worker
+          tar -czf dist-release/decisions-app-${GITHUB_REF_NAME}.tar.gz -C app/dist .
+          (cd dist-release && sha256sum decisions-app-*.tar.gz worker/* > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-release/decisions-app-*.tar.gz
+            dist-release/SHA256SUMS
+          generate_release_notes: true

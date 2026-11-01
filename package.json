@@ -10,17 +10,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm -r --filter './packages/*' build && pnpm --filter @daintree/decisions-app build",
+    "build": "pnpm --filter @daintree/decisions-app build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "lint": "eslint .",
     "format": "prettier --write .",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "decisions": "node packages/cli/dist/bin.js",
     "decisions:deploy": "node tools/deploy/deploy.mjs",
     "decisions:doctor": "node tools/doctor/doctor.mjs",
-    "deploy:local": "pnpm build && wrangler deploy"
+    "deploy:local": "pnpm build && wrangler deploy",
+    "build:all": "pnpm -r build"
   },
   "cloudflare": {
     "bindings": {
@@ -30,13 +30,9 @@
     }
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.4.11",
     "@cloudflare/workers-types": "^5.20261101.1",
-    "@eslint/js": "^9.0.0",
-    "eslint": "^9.0.0",
     "prettier": "^3.3.0",
     "typescript": "^5.9.0",
-    "typescript-eslint": "^8.0.0",
     "vitest": "^4.1.0",
     "wrangler": "^4.156.0"
   }

@@ -1,0 +1,22 @@
+# Threat model
+
+| Threat                                                                  | Control                                                                                     | Test                                                  |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Internet client submits a fake approval                                 | Device signature, role, revision compare-and-swap, policy checks                            | `worker/tests/auth.test.ts`, `questions.test.ts`      |
+| Agent downgrades a mandatory approval                                   | Requirement resolved from trusted policy; caller can only strengthen                        | `packages/protocol` policy tests, client bridge tests |
+| Proxy satisfies a `human-required` question                             | Relay refuses proxy actions; clients re-check; model hard-blocks                            | `questions.test.ts`, `packages/decision-model` tests  |
+| Local web page or process injects answers                               | Loopback bind, Host/Origin checks, per-pane bearer                                          | `packages/client` MCP tests                           |
+| Stolen or forwarded QR                                                  | Five-minute single-use invite, 6-digit code confirmed on the desktop, pinned owner key      | `pairing.test.ts`                                     |
+| Replay of a recorded signed request or answer                           | Nonce window, timestamp skew, idempotency keys, revision CAS, action-id binding             | `auth.test.ts`, `hardening.test.ts`                   |
+| Race across an `await` (revocation, expiry, rotation, upload, deletion) | Re-validate inside the final synchronous transaction; atomic claims                         | `hardening.test.ts`                                   |
+| Wrong pane or session receives an answer                                | Exact host/pane/generation/session/worktree match, else `needs-attention`                   | client delivery tests                                 |
+| Crash between typing and acknowledging                                  | Injection intent first; reconcile by marker; never re-type blindly                          | client delivery tests                                 |
+| Relay tampers with ciphertext, metadata or provenance                   | AEAD with bound AAD; signed records commit to envelope digest; role/provenance verification | crypto and app tests                                  |
+| Compromised push endpoint                                               | Generic payload, no content, endpoint allowlist against SSRF                                | `push-jobs.test.ts`, `tests-node/webpush.test.ts`     |
+| Malicious Markdown, HTML, SVG or terminal escapes in content            | Plain-text renderer, no `innerHTML`, no SVG, magic-byte sniffing, sanitized terminal text   | app and client tests                                  |
+| Provider API keys leak                                                  | Worker secrets only; short-lived one-use tickets; scrubbed provider errors                  | worker voice tests                                    |
+| Excess voice or upload usage                                            | Per-device quotas, session limits, monthly budget by audio duration                         | `hardening.test.ts`                                   |
+| Revoked device keeps access                                             | Immediate lockout, sockets closed, grants withheld, key rotation for new data               | `devices.test.ts`, `hardening.test.ts`                |
+| Orphaned storage                                                        | Reserve/upload/complete state machine, garbage collection, retention jobs                   | `attachments.test.ts`                                 |
+
+Out of scope: a compromised Cloudflare account, a compromised computer or phone, and malicious browser extensions with page access.

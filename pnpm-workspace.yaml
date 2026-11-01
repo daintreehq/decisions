@@ -3,3 +3,4 @@ packages:
   - worker
   - packages/*
   - tools/*
+  - e2e
