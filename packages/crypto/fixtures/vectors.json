@@ -1,0 +1,59 @@
+{
+  "canonical": [
+    {
+      "input": {
+        "b": 1,
+        "a": 2
+      },
+      "expected": "{\"a\":2,\"b\":1}"
+    },
+    {
+      "input": {
+        "1": 4,
+        "€": 1,
+        "\r": 2,
+        "דּ": 3
+      },
+      "expected": "{\"\\r\":2,\"1\":4,\"€\":1,\"דּ\":3}"
+    },
+    {
+      "input": [1e21, 0.000001, 0, 4.5],
+      "expected": "[1e+21,0.000001,0,4.5]"
+    }
+  ],
+  "signature": {
+    "signing_pub": "BOJqVoeQo87hGJdYnoq02AIolJ5RtkzrG2J0COKITx0Gvs1Hg1CYDyh18eCWGLYRo_FSHaNbO_AdkOEvnm71GWA",
+    "message": "{\"a\":[true,null,\"é\"],\"b\":1}",
+    "signature": "r125MmLjJT_ehNzrxTDnul_D_xXEm4ht-1n_6QEyvSNRhFxZPh_SEXwjJippnfYz9EMYkvEKjZoD3hWQ2XgZLA"
+  },
+  "envelope": {
+    "epoch_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "nonce": "AQIDBAUGBwgJCgsM",
+    "envelope": {
+      "crypto_version": 1,
+      "suite": "P256-ECDH-HKDF-SHA256-A256GCM-ECDSA-P256",
+      "key_epoch": 1,
+      "record_id": "record-vec-00001",
+      "purpose": "question-content",
+      "aad": {
+        "installation_id": "inst-vector-0001",
+        "question_id": "question-vec-0001",
+        "record_type": "question",
+        "revision": 0,
+        "sender_device_id": "device-vec-00001"
+      },
+      "nonce": "AQIDBAUGBwgJCgsM",
+      "ciphertext": "TPDrC0K-sOAjx6wlOjoOAWwz43ec5VtjtQP6A-CzAs5_713q8_6J6UMghJC_pEYDGkwuNZqmM3B1j9lkuHDSuz1CqMbN0Vsjyr-NRKYnvk34LmCi9Al9MZLSb7UlCmk_5Ws_Sg"
+    },
+    "plaintext": {
+      "question": "Ship the compact sidebar? 🚀",
+      "options": [
+        {
+          "id": "yes",
+          "label": "Yes"
+        }
+      ]
+    },
+    "aad_string": "{\"aad\":{\"installation_id\":\"inst-vector-0001\",\"question_id\":\"question-vec-0001\",\"record_type\":\"question\",\"revision\":0,\"sender_device_id\":\"device-vec-00001\"},\"crypto_version\":1,\"key_epoch\":1,\"purpose\":\"question-content\",\"record_id\":\"record-vec-00001\",\"suite\":\"P256-ECDH-HKDF-SHA256-A256GCM-ECDSA-P256\"}"
+  }
+}
