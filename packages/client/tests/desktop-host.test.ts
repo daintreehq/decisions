@@ -41,7 +41,7 @@ const OPTIONS = [
 function bridgeFor(
   identity: Identity,
   relay: FakeRelay,
-  extra: { keyStore?: MemoryKeyStore; proxy?: ProxyEngine } = {},
+  extra: { keyStore?: MemoryKeyStore; proxy?: ProxyEngine; now?: () => number } = {},
 ) {
   // Proxy-capable levels are allowlisted here so tests can exercise them without a gate.
   const policy = new PolicyRegistry({ proxyAllowlisted: true });
@@ -63,12 +63,13 @@ function bridgeFor(
     pumpIntervalMs: 0,
     ...(extra.keyStore ? { keyStore: extra.keyStore } : {}),
     ...(extra.proxy ? { proxy: extra.proxy } : {}),
+    ...(extra.now ? { now: extra.now } : {}),
   });
   return { sink, store, client, bridge };
 }
 
 /** An owner, its phone, and an enrolled Host running the bridge, all on one relay. */
-async function hostWorld(extra: { proxy?: ProxyEngine } = {}) {
+async function hostWorld(extra: { proxy?: ProxyEngine; now?: () => number } = {}) {
   const owner = await makeIdentity();
   const relay = new FakeRelay(owner);
   await relay.initOwner();
@@ -276,6 +277,38 @@ describe('a desktop-host bridge after a key rotation', () => {
     expect(sink.typed).toHaveLength(0);
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
+  });
+
+  it('a burst of failed grant fetches never discards the answer; only a long outage gives up on it', async () => {
+    let clock = Date.now();
+    const { relay, owner, phone, host, bridge, sink, store } = await hostWorld({
+      now: () => clock,
+    });
+    const qid = await ask(bridge);
+    const r = await rotate(owner, relay, host);
+    keyRotated(relay, r.epoch);
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'], epoch: r.key });
+    relay.failGrants = 1_000;
+    await bridge.catchUp(); // stores both events; the rotation cannot be applied yet
+    // Many quick retries (one per socket event, say) within a short outage: everything stays queued.
+    for (let i = 0; i < 12; i++) await bridge.inbox.processPending();
+    expect((await store.unprocessedEvents(10)).length).toBe(2);
+    relay.failGrants = 0;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+
+    // A second rotation the relay keeps failing for well past the retry window is eventually consumed, so it
+    // cannot block the inbox forever.
+    const r3 = await rotate(owner, relay, host);
+    keyRotated(relay, r3.epoch);
+    relay.failGrants = 1_000;
+    await bridge.catchUp();
+    for (let i = 0; i < 6; i++) {
+      clock += 5 * 60_000;
+      await bridge.inbox.processPending();
+    }
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect((await store.listAudit(200)).some((a) => a.event === 'event.error')).toBe(true);
   });
 
   it('refuses a grant that is not sealed by the pinned owner and delivers nothing under that epoch', async () => {

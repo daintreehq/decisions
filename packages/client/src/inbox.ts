@@ -18,7 +18,13 @@ export interface InboxCallbacks {
   onRevokedSelf(): void;
 }
 
+/**
+ * A transiently failing event is given up on (consumed with an error) only after this many attempts AND this long
+ * since its first failure. Attempts come as fast as events arrive, so a count alone would let a short outage
+ * (a relay restart, a rate limit) discard a valid answer.
+ */
 const MAX_TRANSIENT_ATTEMPTS = 5;
+const MIN_TRANSIENT_WINDOW_MS = 10 * 60_000;
 
 /** What the relay would hold for this question, derived only from events WE verified. */
 function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
@@ -43,7 +49,7 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
  */
 export class Inbox {
   private readonly serial = new Mutex();
-  private readonly transientAttempts = new Map<number, number>();
+  private readonly transientAttempts = new Map<number, { n: number; since: number }>();
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -86,9 +92,13 @@ export class Inbox {
             if (await this.apply(ev)) drain = true;
           } catch (e) {
             if (e instanceof TransientError) {
-              const n = (this.transientAttempts.get(ev.seq) ?? 0) + 1;
-              this.transientAttempts.set(ev.seq, n);
-              if (n < MAX_TRANSIENT_ATTEMPTS) {
+              const prev = this.transientAttempts.get(ev.seq);
+              const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
+              this.transientAttempts.set(ev.seq, a);
+              if (
+                a.n < MAX_TRANSIENT_ATTEMPTS ||
+                this.ctx.now() - a.since < MIN_TRANSIENT_WINDOW_MS
+              ) {
                 // Leave it unprocessed and stop: later events must not overtake it.
                 await this.ctx.audit.log({
                   event: 'event.deferred',
