@@ -135,8 +135,10 @@ export interface McpHandlerOptions {
   /** Exact `Host` header values accepted. Defaults to the loopback names on `port`. */
   allowedHosts?: () => string[];
   /**
-   * The path the MCP endpoint answers on (default `/mcp`). Matched exactly against the request
-   * path, ignoring the query string: no subpaths, no trailing slash, case-sensitive. Every other
+   * The path the MCP endpoint answers on (default `/mcp`). Matched exactly against the request's
+   * WHATWG-parsed pathname, ignoring the query string: no subpaths, no trailing slash,
+   * case-sensitive, percent-encoding not decoded. Parsing resolves dot segments (`/x/../mcp`,
+   * `/%2e/mcp`) first, so those aliases match; every check below still applies to them. Any other
    * path is 404 before any other check. A host that routes a prefix (such as `/mcp/decisions`) to
    * this handler passes the same path here. Must be one or more `/segment`s of unreserved URL
    * characters (`A-Z a-z 0-9 - . _ ~`), with no `.` or `..` segments; anything else throws.

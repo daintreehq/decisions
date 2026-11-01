@@ -388,6 +388,13 @@ describe('HTTP MCP: mount path', () => {
       expect(r.status, path).toBe(404);
       expect(JSON.parse(r.body)).toEqual({ error: 'not_found' });
     }
+    // percent-encoding is not decoded, but URL parsing resolves dot segments before the match
+    for (const path of ['/mcp%2Fdecisions', '/mcp/decision%73'])
+      expect((await raw(mcp, { path, body: rpc('ping') })).status, path).toBe(404);
+    for (const path of ['/a/../mcp/decisions', '/mcp/x/../decisions', '/mcp/%2e/decisions']) {
+      expect((await raw(mcp, { path, body: rpc('ping') })).status, path).not.toBe(404);
+      expect((await raw(mcp, { path, auth: null, body: rpc('ping') })).status, path).toBe(401);
+    }
     // 404 is decided before auth, Host or Origin, so a wrong path leaks nothing about them
     expect((await raw(mcp, { path: '/mcp', auth: null, body: rpc('ping') })).status).toBe(404);
   });
