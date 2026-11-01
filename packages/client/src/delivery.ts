@@ -6,9 +6,12 @@ import { newId } from '@daintreehq/decisions-crypto';
 import { pickResumeAdapter, unsupportedResumeAdapter } from './resume.js';
 import {
   sameTarget,
+  targetOf,
   type AgentResumeAdapter,
+  type InjectResult,
   type TerminalSink,
   type TerminalTarget,
+  type UnavailableReason,
 } from './sink.js';
 import type { InjectionIntent, LocalDeliveryStatus, QuestionOrigin, QuestionRow } from './types.js';
 
@@ -22,9 +25,70 @@ export interface DeliveryOptions {
 
 export interface DrainResult {
   delivered: number;
-  /** Panes that were busy or whose host was offline: call drain() again later. */
+  /** Held (busy pane, closed wake gate), host offline or just resumed: call drain() again later. */
   deferred: number;
+  /** Nothing was typed and a human has to decide (gone, relaunched without a resume, rejected). */
   needsAttention: number;
+  /** The text may or may not have been typed: `delivery-uncertain`, never re-typed automatically. */
+  uncertain: number;
+}
+
+const EMPTY = (): DrainResult => ({ delivered: 0, deferred: 0, needsAttention: 0, uncertain: 0 });
+
+function add(a: DrainResult, b: DrainResult): void {
+  a.delivered += b.delivered;
+  a.deferred += b.deferred;
+  a.needsAttention += b.needsAttention;
+  a.uncertain += b.uncertain;
+}
+
+/** The local `error_code` for each unavailable reason (kept stable: the UI and relay echoes show them). */
+const UNAVAILABLE_CODE: Record<UnavailableReason, string> = {
+  'host-offline': 'host_offline',
+  relaunched: 'relaunched',
+  gone: 'pane_gone',
+  'generation-mismatch': 'generation_mismatch',
+  'session-mismatch': 'session_mismatch',
+  rejected: 'inject_rejected',
+};
+
+/** Reasons that mean the original agent is no longer at the origin: a verified resume may bring it back. */
+const RESUMABLE = new Set<string>([
+  'relaunched',
+  'gone',
+  'generation-mismatch',
+  'session-mismatch',
+]);
+
+/**
+ * Checks a sink's answer against the contract. Anything unrecognised, and a `delivered` without proof, is
+ * ambiguous: the text may be on screen, so it must never be typed again and never be reported delivered.
+ * `code` is the local error code the engine records when it had to reinterpret the result.
+ */
+export function normalizeInjectResult(raw: unknown): InjectResult & { code?: string } {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const reason = typeof r.reason === 'string' ? { reason: r.reason } : {};
+  switch (r.outcome) {
+    case 'delivered':
+      return typeof r.proof === 'string' && r.proof.length > 0
+        ? { outcome: 'delivered', proof: r.proof }
+        : { outcome: 'ambiguous', code: 'delivered_without_proof' };
+    case 'held':
+      return { outcome: 'held', ...reason };
+    case 'unavailable':
+      return typeof r.reason === 'string' && Object.hasOwn(UNAVAILABLE_CODE, r.reason)
+        ? {
+            outcome: 'unavailable',
+            reason: r.reason as UnavailableReason,
+            ...(typeof r.detail === 'string' ? { detail: r.detail } : {}),
+          }
+        : // Nothing was typed, but the engine cannot route an unknown reason: a human decides.
+          { outcome: 'unavailable', reason: 'rejected', code: 'unavailable_unknown_reason' };
+    case 'ambiguous':
+      return { outcome: 'ambiguous', ...reason };
+    default:
+      return { outcome: 'ambiguous', code: 'invalid_inject_result' };
+  }
 }
 
 interface Item {
@@ -45,13 +109,13 @@ export class DeliveryEngine {
 
   /** Serialised: concurrent callers share one pass plus at most one follow-up pass. */
   async drain(): Promise<DrainResult> {
-    if (this.stopped) return { delivered: 0, deferred: 0, needsAttention: 0 };
+    if (this.stopped) return EMPTY();
     if (this.running) {
       this.again = true;
       return this.running;
     }
     this.running = (async () => {
-      const total: DrainResult = { delivered: 0, deferred: 0, needsAttention: 0 };
+      const total = EMPTY();
       try {
         do {
           this.again = false;
@@ -59,6 +123,7 @@ export class DeliveryEngine {
           total.delivered += r.delivered;
           total.deferred = r.deferred;
           total.needsAttention += r.needsAttention;
+          total.uncertain += r.uncertain;
         } while (this.again && !this.stopped);
       } finally {
         this.running = null;
@@ -76,7 +141,7 @@ export class DeliveryEngine {
 
   private async pass(): Promise<DrainResult> {
     const { ctx } = this;
-    const out: DrainResult = { delivered: 0, deferred: 0, needsAttention: 0 };
+    const out = EMPTY();
     await this.flushAcks();
     const candidates = (await ctx.store.listQuestions()).filter(
       (q) =>
@@ -85,10 +150,16 @@ export class DeliveryEngine {
         q.delivery_status !== 'needs-attention' &&
         q.delivery_status !== 'delivery-uncertain',
     );
-    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash.
+    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash. So
+    // does an intent still in state `intent`: passes are serialised, so one found here belongs to an attempt
+    // that failed before it was settled. The text may be on screen; recover() reconciles it at start.
+    const unsettled = new Set(
+      (await ctx.store.openIntents()).filter((i) => i.state === 'intent').map((i) => i.question_id),
+    );
     const all: QuestionRow[] = [];
     for (const q of candidates)
-      if (!(await ctx.store.hasUncertainIntent(q.question_id))) all.push(q);
+      if (!unsettled.has(q.question_id) && !(await ctx.store.hasUncertainIntent(q.question_id)))
+        all.push(q);
     // One lane per pane: answers go in question-creation order (alias is monotonic).
     const lanes = new Map<string, QuestionRow[]>();
     for (const q of all) {
@@ -98,10 +169,7 @@ export class DeliveryEngine {
     for (const qs of lanes.values()) {
       if (this.stopped) break;
       qs.sort((a, b) => a.alias - b.alias);
-      const r = await this.laneDeliver(qs);
-      out.delivered += r.delivered;
-      out.deferred += r.deferred;
-      out.needsAttention += r.needsAttention;
+      add(out, await this.laneDeliver(qs));
     }
     return out;
   }
@@ -109,40 +177,58 @@ export class DeliveryEngine {
   private async resolveTarget(
     q: QuestionRow,
   ): Promise<{ target: TerminalTarget } | { defer: true } | { attention: string }> {
-    const { o } = this;
-    const loc = await o.sink.locate(q.origin);
-    switch (loc.state) {
-      case 'alive':
-        return loc.target ? { target: loc.target } : { attention: 'no_target' };
-      case 'host-offline':
-        await this.setStatus(q, 'pending-host');
-        return { defer: true };
-      case 'generation-mismatch':
-        return { attention: 'generation_mismatch' };
-      case 'gone':
-      case 'session-mismatch': {
-        const adapter =
-          pickResumeAdapter(o.adapters ?? [], q.origin) ??
-          unsupportedResumeAdapter(q.origin.agent_kind);
-        const probe = await adapter.probe(q.origin.host_id);
-        if (probe.supported && (await adapter.canResume(q.origin))) {
-          const r = await adapter.resume(q.origin);
-          if (r.ready) return this.adopt(q, r.target, `adapter:${adapter.kind}`);
-        } else if (o.sink.resume) {
-          const t = await o.sink.resume(q.origin);
-          if (t) return this.adopt(q, t, 'sink');
-        }
-        return { attention: loc.state === 'gone' ? 'pane_gone' : 'session_mismatch' };
-      }
+    const loc = await this.o.sink.locate(q.origin);
+    if (loc.state === 'alive') {
+      if (!loc.target) return { attention: 'no_target' };
+      // Defence in depth: whatever the sink believes, the engine only types into the exact origin.
+      if (!sameTarget(loc.target, targetOf(q.origin))) return { attention: 'target_mismatch' };
+      return { target: loc.target };
     }
+    return this.unavailable(q, loc.state);
   }
 
-  private async adopt(q: QuestionRow, target: TerminalTarget, strategy: string) {
+  /** Route a destination that cannot take the answer: wait, resume through a verified path, or attention. */
+  private async unavailable(
+    q: QuestionRow,
+    reason: string,
+  ): Promise<{ target: TerminalTarget } | { defer: true } | { attention: string }> {
+    const { o } = this;
+    if (reason === 'host-offline') {
+      await this.setStatus(q, 'pending-host');
+      return { defer: true };
+    }
+    const code = Object.hasOwn(UNAVAILABLE_CODE, reason)
+      ? UNAVAILABLE_CODE[reason as UnavailableReason]
+      : 'unavailable_unknown_reason';
+    if (!RESUMABLE.has(reason)) return { attention: code };
+    const adapter =
+      pickResumeAdapter(o.adapters ?? [], q.origin) ??
+      unsupportedResumeAdapter(q.origin.agent_kind);
+    const probe = await adapter.probe(q.origin.host_id);
+    if (probe.supported && (await adapter.canResume(q.origin))) {
+      const r = await adapter.resume(q.origin);
+      if (r.ready) return this.adopt(q, r.target, `adapter:${adapter.kind}`);
+    } else if (o.sink.resume) {
+      const t = await o.sink.resume(q.origin);
+      if (t) return this.adopt(q, t, 'sink');
+    }
+    return { attention: code };
+  }
+
+  private async adopt(
+    q: QuestionRow,
+    target: TerminalTarget,
+    strategy: string,
+  ): Promise<{ target: TerminalTarget } | { attention: string }> {
+    // Resume restores the agent in its ORIGINAL worktree; anything else would cross a destination boundary.
+    if (target.worktreeId !== q.origin.worktree_id) return { attention: 'resume_wrong_worktree' };
     const origin: QuestionOrigin = {
       ...q.origin,
       host_id: target.hostId,
       pane_id: target.paneId,
       terminal_generation: target.terminalGeneration,
+      ownership_principal: target.ownershipPrincipal,
+      agent_incarnation: target.agentIncarnation,
       agent_session_id: target.agentSessionId,
     };
     await this.ctx.store.updateQuestion(q.question_id, { origin, agent_resume_strategy: strategy });
@@ -157,7 +243,7 @@ export class DeliveryEngine {
 
   private async laneDeliver(qs: QuestionRow[]): Promise<DrainResult> {
     const { ctx, o } = this;
-    const res: DrainResult = { delivered: 0, deferred: 0, needsAttention: 0 };
+    const res = EMPTY();
     let target: TerminalTarget | null = null;
     const items: Item[] = [];
     for (const q of qs) {
@@ -186,14 +272,8 @@ export class DeliveryEngine {
     for (const chunk of chunks) {
       if (this.stopped) break;
       const r = await this.injectChunk(target, chunk);
-      if (r === 'ok') res.delivered += chunk.length;
-      else if (r === 'busy') {
-        res.deferred++;
-        break;
-      } else {
-        res.needsAttention += chunk.length;
-        break;
-      }
+      add(res, r);
+      if (r.delivered === 0) break; // anything but delivered stops the lane: ordering is preserved
     }
     return res;
   }
@@ -229,25 +309,32 @@ export class DeliveryEngine {
     });
   }
 
-  private async injectChunk(
-    target: TerminalTarget,
-    chunk: Item[],
-  ): Promise<'ok' | 'busy' | 'failed'> {
+  private async injectChunk(target: TerminalTarget, chunk: Item[]): Promise<DrainResult> {
     const { ctx, o } = this;
+    const res = EMPTY();
     const text = batchNotices(
       chunk.map((i) => this.block(i)),
       Number.MAX_SAFE_INTEGER,
     )[0]!;
     // 0. Revalidate every distinct question's destination IMMEDIATELY before typing. Anything that moved
     //    (resumed into another session, relaunched, closed) is deferred, never typed into the wrong place.
-    const seen = new Set<string>();
-    for (const i of chunk) {
-      if (seen.has(i.q.question_id)) continue;
-      seen.add(i.q.question_id);
-      const loc = await o.sink.locate(i.q.origin);
-      if (loc.state !== 'alive' || !loc.target || !sameTarget(loc.target, target)) return 'busy';
+    const questions = [...new Map(chunk.map((i) => [i.q.question_id, i.q])).values()];
+    for (const q of questions) {
+      const loc = await o.sink.locate(q.origin);
+      if (
+        loc.state !== 'alive' ||
+        !loc.target ||
+        !sameTarget(loc.target, target) ||
+        !sameTarget(loc.target, targetOf(q.origin))
+      ) {
+        res.deferred++;
+        return res;
+      }
     }
-    if (!(await o.sink.isIdle(target))) return 'busy';
+    if (!(await o.sink.isIdle(target))) {
+      res.deferred++;
+      return res;
+    }
     const now = ctx.now();
     // 1. Persist the intent BEFORE touching the terminal.
     for (const i of chunk) {
@@ -258,6 +345,8 @@ export class DeliveryEngine {
         host_id: target.hostId,
         pane_id: target.paneId,
         terminal_generation: target.terminalGeneration,
+        ownership_principal: target.ownershipPrincipal,
+        agent_incarnation: target.agentIncarnation,
         state: 'intent',
         created_at: now,
         updated_at: now,
@@ -267,30 +356,85 @@ export class DeliveryEngine {
         last_attempt_at: new Date(now).toISOString(),
       });
     }
-    let result;
+    // 2. Type, and take the sink's word only in the shapes the contract allows.
+    let result: InjectResult & { code?: string };
+    let thrown: unknown = undefined;
     try {
-      result = await o.sink.inject(target, text, chunk[0]!.intentId);
+      result = normalizeInjectResult(await o.sink.inject(target, text, chunk[0]!.intentId));
     } catch (e) {
-      // The terminal may or may not have received the text: never retry blindly.
-      for (const i of chunk)
-        await this.attention(i.q, 'inject_threw', 'delivery-uncertain', i.intentId);
-      await ctx.audit.log({ event: 'inject.threw', result: (e as Error).message.slice(0, 80) });
-      return 'failed';
+      thrown = e ?? 'null';
+      result = { outcome: 'ambiguous', code: 'inject_threw' };
     }
-    if (!result.ok) {
-      for (const i of chunk)
-        await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
-      if (result.reason === 'busy') return 'busy';
-      for (const i of chunk)
-        await this.attention(i.q, result.reason ?? 'inject_failed', 'needs-attention');
-      return 'failed';
+    if (thrown !== undefined) {
+      // Settle first (below), log afterwards: nothing fallible may run between a possible write and the
+      // durable record that it may have happened.
+      const message = thrown instanceof Error ? thrown.message : String(thrown);
+      const settled = await this.settleChunk(chunk, questions, result, res);
+      await ctx.audit
+        .log({ event: 'inject.threw', result: message.slice(0, 80) })
+        .catch(() => undefined);
+      return settled;
     }
-    for (const i of chunk) {
-      await ctx.store.updateIntent(i.intentId, { state: 'typed', updated_at: ctx.now() });
-      await this.markDelivered(i.q.question_id, i.entry.entry_id, i.intentId, i.entry.revision);
-      await this.ack(i.intentId);
+    return this.settleChunk(chunk, questions, result, res);
+  }
+
+  /** Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. */
+  private async settleChunk(
+    chunk: Item[],
+    questions: QuestionRow[],
+    result: InjectResult & { code?: string },
+    res: DrainResult,
+  ): Promise<DrainResult> {
+    const { ctx } = this;
+    switch (result.outcome) {
+      case 'delivered':
+        for (const i of chunk) {
+          await ctx.store.updateIntent(i.intentId, { state: 'typed', updated_at: ctx.now() });
+          await this.markDelivered(
+            i.q.question_id,
+            i.entry.entry_id,
+            i.intentId,
+            i.entry.revision,
+            result.proof,
+          );
+          await this.ack(i.intentId);
+        }
+        res.delivered += chunk.length;
+        return res;
+      case 'ambiguous': {
+        // The terminal may or may not have received the text: never retry blindly.
+        const code = result.code ?? 'inject_ambiguous';
+        for (const i of chunk) await this.attention(i.q, code, 'delivery-uncertain', i.intentId);
+        res.uncertain += chunk.length;
+        return res;
+      }
+      case 'held':
+      case 'unavailable': {
+        // Nothing was written: close the intents so neither recovery nor the uncertain guard trips on them.
+        for (const i of chunk)
+          await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
+        if (result.outcome === 'held') {
+          res.deferred++;
+          return res;
+        }
+        await ctx.audit.log({
+          event: 'inject.unavailable',
+          result: result.reason,
+          ...(result.detail ? { detail: { detail: result.detail.slice(0, 80) } } : {}),
+        });
+        for (const q of questions) {
+          const n = chunk.filter((i) => i.q.question_id === q.question_id).length;
+          const routed = await this.unavailable(q, result.reason);
+          if ('attention' in routed) {
+            await this.attention(q, result.code ?? routed.attention, 'needs-attention');
+            res.needsAttention += n;
+          } else {
+            res.deferred += n; // waiting for the host, or resumed: a later pass delivers it
+          }
+        }
+        return res;
+      }
     }
-    return 'ok';
   }
 
   private async markDelivered(
@@ -298,6 +442,8 @@ export class DeliveryEngine {
     entryId: string,
     injectionId: string,
     revision: number,
+    /** The sink's proof of the write; null when a crash-recovery marker was found instead. */
+    proof: string | null,
   ): Promise<void> {
     // Re-read inside the shared lock so a concurrent inbox append is never overwritten with a stale copy.
     const q = await this.ctx.lock.run(async () => {
@@ -321,7 +467,8 @@ export class DeliveryEngine {
       event: 'answer.delivered',
       question_id: questionId,
       requirement: q.requirement,
-      result: 'typed',
+      result: proof === null ? 'marker-found' : 'typed',
+      ...(proof !== null ? { detail: { proof: proof.slice(0, 120) } } : {}),
     });
   }
 
@@ -421,12 +568,17 @@ export class DeliveryEngine {
       }
       let found = false;
       try {
-        const loc = await o.sink.locate({
+        // Look in exactly the run the text was typed into, as the intent recorded it.
+        const typedInto: QuestionOrigin = {
           ...q.origin,
+          host_id: intent.host_id,
           pane_id: intent.pane_id,
           terminal_generation: intent.terminal_generation,
-        });
-        if (loc.state === 'alive' && loc.target)
+          ownership_principal: intent.ownership_principal,
+          agent_incarnation: intent.agent_incarnation,
+        };
+        const loc = await o.sink.locate(typedInto);
+        if (loc.state === 'alive' && loc.target && sameTarget(loc.target, targetOf(typedInto)))
           found = await o.sink.hasMarker(loc.target, intent.injection_id);
       } catch {
         found = false;
@@ -441,6 +593,7 @@ export class DeliveryEngine {
             entry.entry_id,
             intent.injection_id,
             entry.revision,
+            null,
           );
         await ctx.store.updateIntent(intent.injection_id, {
           state: 'typed',

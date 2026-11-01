@@ -77,6 +77,8 @@ describe('D: ownership and correlation are scoped to the complete trusted origin
       host_id: 'host-local',
       pane_id: 'pane-1',
       terminal_generation: 1,
+      ownership_principal: 'principal-1',
+      agent_incarnation: 'inc-1',
       agent_session_id: 'sess-1',
       worktree_id: 'wt-1',
     };
@@ -86,6 +88,8 @@ describe('D: ownership and correlation are scoped to the complete trusted origin
       { ...own, agent_session_id: 'sess-2' },
       { ...own, worktree_id: 'wt-2' },
       { ...own, host_id: 'other-host' },
+      { ...own, ownership_principal: 'principal-2' }, // relaunched: same pane id, new run
+      { ...own, agent_incarnation: 'inc-2' },
     ]) {
       await expect(env.bridge.getDecision(r.questionId, stranger)).rejects.toMatchObject({
         code: 'not_found',
@@ -116,7 +120,15 @@ describe('D: ownership and correlation are scoped to the complete trusted origin
       origin: origin({ worktree_id: 'wt-9' }),
       input: { question: 'approve?', correlation_id: 'wf-1' },
     });
-    expect(new Set([a.questionId, b.questionId, c.questionId, d.questionId]).size).toBe(4);
+    const e = await env.bridge.registerQuestion({
+      origin: origin({ ownership_principal: 'principal-2' }),
+      input: { question: 'approve?', correlation_id: 'wf-1' },
+    });
+    const f = await env.bridge.registerQuestion({
+      origin: origin({ agent_incarnation: 'inc-2' }),
+      input: { question: 'approve?', correlation_id: 'wf-1' },
+    });
+    expect(new Set([a, b, c, d, e, f].map((x) => x.questionId)).size).toBe(6);
     const again = await env.bridge.registerQuestion({
       origin: origin(),
       input: { question: 'approve?', correlation_id: 'wf-1' },

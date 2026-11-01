@@ -223,6 +223,9 @@ export async function importDecisions(
         host_id: 'imported',
         pane_id: 'imported',
         terminal_generation: 0,
+        // Empty: an imported record belongs to no live run, so no pane can ever match it.
+        ownership_principal: '',
+        agent_incarnation: '',
         agent_kind: 'imported',
         agent_session_id: null,
         project_id: String(r.project_id ?? 'imported'),

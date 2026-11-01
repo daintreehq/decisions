@@ -86,22 +86,43 @@ export interface DecisionView {
 }
 
 /**
- * The COMPLETE trusted identity of the asking terminal. A relaunched terminal (new generation), a new agent
- * session or a different worktree that happens to reuse a pane id is a different asker.
+ * The COMPLETE trusted identity of the asking terminal. A relaunched terminal (new generation or new
+ * ownership principal), a restarted agent (new incarnation), a new agent session or a different worktree
+ * that happens to reuse a pane id is a different asker.
  */
 export interface PaneIdentity {
   host_id: string;
   pane_id: string;
   terminal_generation: number;
+  ownership_principal: string;
+  agent_incarnation: string;
   agent_session_id: string | null;
   worktree_id: string;
 }
+
+/** The identity a pane presents, taken from the origin its credential resolves to. */
+export function paneIdentityOf(o: QuestionOrigin): PaneIdentity {
+  return {
+    host_id: o.host_id,
+    pane_id: o.pane_id,
+    terminal_generation: o.terminal_generation,
+    ownership_principal: o.ownership_principal,
+    agent_incarnation: o.agent_incarnation,
+    agent_session_id: o.agent_session_id,
+    worktree_id: o.worktree_id,
+  };
+}
+
+/** An empty principal or incarnation (a row migrated from before they existed) never matches anyone. */
+const known = (a: string, b: string) => typeof a === 'string' && a !== '' && a === b;
 
 function sameAsker(o: QuestionOrigin, p: PaneIdentity): boolean {
   return (
     o.host_id === p.host_id &&
     o.pane_id === p.pane_id &&
     o.terminal_generation === p.terminal_generation &&
+    known(o.ownership_principal, p.ownership_principal) &&
+    known(o.agent_incarnation, p.agent_incarnation) &&
     o.agent_session_id === p.agent_session_id &&
     o.worktree_id === p.worktree_id
   );

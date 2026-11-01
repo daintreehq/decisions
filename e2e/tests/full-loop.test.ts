@@ -46,6 +46,8 @@ class RecordingSink implements TerminalSink {
         hostId: o.host_id,
         paneId: o.pane_id,
         terminalGeneration: o.terminal_generation,
+        ownershipPrincipal: o.ownership_principal,
+        agentIncarnation: o.agent_incarnation,
         agentSessionId: o.agent_session_id,
         worktreeId: o.worktree_id,
       },
@@ -56,7 +58,7 @@ class RecordingSink implements TerminalSink {
   }
   async inject(_t: TerminalTarget, text: string, id: string) {
     this.typed.push({ text, id });
-    return { ok: true as const, proof: 'e2e' };
+    return { outcome: 'delivered' as const, proof: 'e2e' };
   }
   async hasMarker(_t: TerminalTarget, id: string) {
     return this.typed.some((x) => x.text.includes(`injection_id: ${id}`));
@@ -166,6 +168,8 @@ describe.skipIf(!chromiumPath)(
           host_id: 'host_e2e00001',
           pane_id: 'pane-e2e',
           terminal_generation: 1,
+          ownership_principal: 'principal-e2e',
+          agent_incarnation: 'inc-e2e',
           agent_kind: 'claude-code',
           agent_session_id: 'sess-e2e',
           project_id: 'proj',

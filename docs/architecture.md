@@ -18,7 +18,7 @@ Holding an MCP call open for hours is fragile: other agent CLIs time out tool ca
 
 ## Flow
 
-1. The agent calls `ask_human`. The bridge authenticates the pane (a per-pane bearer token, never a pane id sent by the agent), resolves the enforced requirement level from trusted workflow policy, and writes the question and its origin (host, pane, generation, session, worktree) to the local store **before** any network I/O.
+1. The agent calls `ask_human`. The bridge authenticates the pane (a per-pane bearer token, never a pane id sent by the agent), resolves the enforced requirement level from trusted workflow policy, and writes the question and its origin (host, pane, generation, ownership principal, agent incarnation, session, worktree) to the local store **before** any network I/O.
 2. The bridge encrypts the question, signs a record that commits to the ciphertext, uploads any encrypted screenshots, and publishes through the outbound queue. Offline is fine; it publishes later exactly once.
 3. The relay's Durable Object validates the signatures, appends an event to its ledger, schedules the push and reminders, and pushes the event to connected devices over hibernatable WebSockets.
 4. The phone verifies the record against the owner key it pinned when it paired, decrypts it, and shows it. You answer; the phone encrypts and signs the answer.

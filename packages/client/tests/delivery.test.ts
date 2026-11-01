@@ -63,9 +63,9 @@ describe('verified answers reach the exact pane', () => {
     expect(sink.typed).toHaveLength(1);
   });
 
-  it('an inject() reporting busy leaves the answer pending, not failed', async () => {
+  it('an inject() reporting held leaves the answer pending, not failed', async () => {
     const { bridge, relay, phone, sink, qid, store } = await asked();
-    sink.injectBehaviour = 'busy';
+    sink.injectBehaviour = 'held';
     await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
     await bridge.catchUp();
     expect((await store.getQuestion(qid))!.delivery_status).toBe('desktop-received');
@@ -123,6 +123,8 @@ describe('verified answers reach the exact pane', () => {
       hostId: 'host-local',
       paneId: 'pane-9',
       terminalGeneration: 5,
+      ownershipPrincipal: 'principal-9',
+      agentIncarnation: 'inc-9',
       worktreeId: 'wt-1',
       agentSessionId: 'sess-1',
     };
@@ -130,12 +132,25 @@ describe('verified answers reach the exact pane', () => {
       adapters: [fakeResumeAdapter('claude', target)],
     });
     sink.panes.delete('pane-1');
-    sink.addPane('pane-9', { generation: 5, session: 'sess-1' });
+    sink.addPane('pane-9', {
+      generation: 5,
+      session: 'sess-1',
+      principal: 'principal-9',
+      incarnation: 'inc-9',
+    });
     await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
     await bridge.catchUp();
     expect(sink.typed).toHaveLength(1);
     expect(sink.typed[0]!.target.paneId).toBe('pane-9');
-    expect((await store.getQuestion(qid))!.agent_resume_strategy).toBe('adapter:claude');
+    const row = (await store.getQuestion(qid))!;
+    expect(row.agent_resume_strategy).toBe('adapter:claude');
+    // the resumed run's full identity becomes the destination
+    expect(row.origin).toMatchObject({
+      pane_id: 'pane-9',
+      terminal_generation: 5,
+      ownership_principal: 'principal-9',
+      agent_incarnation: 'inc-9',
+    });
   });
 
   it('default resume stubs report unsupported rather than inventing flags', async () => {

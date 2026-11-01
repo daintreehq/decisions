@@ -35,6 +35,7 @@ import {
   type QuestionOrigin,
   type TerminalSink,
   type TerminalTarget,
+  type UnavailableReason,
   type WebSocketLike,
 } from '../src/index.js';
 
@@ -85,6 +86,8 @@ export const origin = (over: Partial<QuestionOrigin> = {}): QuestionOrigin => ({
   host_id: 'host-local',
   pane_id: 'pane-1',
   terminal_generation: 1,
+  ownership_principal: 'principal-1',
+  agent_incarnation: 'inc-1',
   agent_kind: 'claude',
   agent_session_id: 'sess-1',
   project_id: 'proj-1',
@@ -445,28 +448,45 @@ export class FakeRelay {
   }
 }
 
+type FakePane = {
+  generation: number;
+  session: string | null;
+  idle: boolean;
+  hostOffline?: boolean;
+  principal: string;
+  incarnation: string;
+};
+
+/** What the next inject() reports. `throw` simulates a crash mid-write (the text may be on screen). */
+export type FakeInjectBehaviour =
+  | 'ok'
+  | 'throw'
+  | 'throw-string'
+  | 'held'
+  | 'ambiguous'
+  | 'no-proof'
+  | 'legacy-ok'
+  | { unavailable: UnavailableReason };
+
 export class FakeSink implements TerminalSink {
-  panes = new Map<
-    string,
-    { generation: number; session: string | null; idle: boolean; hostOffline?: boolean }
-  >();
+  panes = new Map<string, FakePane>();
   typed: { target: TerminalTarget; text: string; id: string }[] = [];
-  injectBehaviour: 'ok' | 'throw' | 'busy' | 'fail' = 'ok';
+  injectBehaviour: FakeInjectBehaviour = 'ok';
+  injectCalls = 0;
   resumeTarget: TerminalTarget | null = null;
   locateCalls = 0;
   /** Return a state for the Nth locate() call to simulate the terminal changing underneath us. */
   locateOverride: ((call: number, o: QuestionOrigin) => LocateResult | undefined) | null = null;
 
-  addPane(
-    paneId: string,
-    over: Partial<{
-      generation: number;
-      session: string | null;
-      idle: boolean;
-      hostOffline: boolean;
-    }> = {},
-  ) {
-    this.panes.set(paneId, { generation: 1, session: 'sess-1', idle: true, ...over });
+  addPane(paneId: string, over: Partial<FakePane> = {}) {
+    this.panes.set(paneId, {
+      generation: 1,
+      session: 'sess-1',
+      idle: true,
+      principal: 'principal-1',
+      incarnation: 'inc-1',
+      ...over,
+    });
   }
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     this.locateCalls++;
@@ -476,6 +496,8 @@ export class FakeSink implements TerminalSink {
     if (!p) return { state: 'gone' };
     if (p.hostOffline) return { state: 'host-offline' };
     if (p.generation !== o.terminal_generation) return { state: 'generation-mismatch' };
+    if (p.principal !== o.ownership_principal || p.incarnation !== o.agent_incarnation)
+      return { state: 'relaunched' };
     if (p.session !== o.agent_session_id) return { state: 'session-mismatch' };
     return {
       state: 'alive',
@@ -483,6 +505,8 @@ export class FakeSink implements TerminalSink {
         hostId: o.host_id,
         paneId: o.pane_id,
         terminalGeneration: p.generation,
+        ownershipPrincipal: p.principal,
+        agentIncarnation: p.incarnation,
         agentSessionId: p.session,
         worktreeId: o.worktree_id,
       },
@@ -492,14 +516,20 @@ export class FakeSink implements TerminalSink {
     return this.panes.get(t.paneId)?.idle ?? false;
   }
   async inject(t: TerminalTarget, text: string, id: string): Promise<InjectResult> {
-    if (this.injectBehaviour === 'throw') {
+    this.injectCalls++;
+    const b = this.injectBehaviour;
+    if (b === 'throw' || b === 'throw-string') {
       this.typed.push({ target: t, text, id }); // it may have been typed before the crash
+      if (b === 'throw-string') throw 'boom'; // eslint-disable-line no-throw-literal
       throw new Error('boom');
     }
-    if (this.injectBehaviour === 'busy') return { ok: false, reason: 'busy' };
-    if (this.injectBehaviour === 'fail') return { ok: false, reason: 'write_failed' };
+    if (b === 'held') return { outcome: 'held', reason: 'busy' };
+    if (typeof b === 'object') return { outcome: 'unavailable', reason: b.unavailable };
     this.typed.push({ target: t, text, id });
-    return { ok: true, proof: 'p' };
+    if (b === 'ambiguous') return { outcome: 'ambiguous', reason: 'enter_dropped' };
+    if (b === 'no-proof') return { outcome: 'delivered' } as unknown as InjectResult;
+    if (b === 'legacy-ok') return { ok: true, proof: 'p' } as unknown as InjectResult;
+    return { outcome: 'delivered', proof: `pty_written:${id}` };
   }
   async hasMarker(t: TerminalTarget, injectionId: string) {
     return this.typed.some(
