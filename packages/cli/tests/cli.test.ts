@@ -199,7 +199,11 @@ describe('sinks and MCP instructions', () => {
     expect(await sink.hasMarker(t, 'inj-1')).toBe(true);
     expect(await sink.hasMarker(t, 'inj-2')).toBe(false);
     const lines: string[] = [];
-    const s = await new DemoSink({ kind: 'stdout' }, (l) => lines.push(l)).inject(t, 'abc', 'x');
+    const s = await new DemoSink({ kind: 'stdout' }, (l) => void lines.push(l)).inject(
+      t,
+      'abc',
+      'x',
+    );
     expect(s).toEqual({ outcome: 'delivered', proof: 'stdout' });
     expect(lines.join('')).toContain('abc');
     expect((await sink.locate({ ...cliOrigin(), host_id: 'other' })).state).toBe('gone');
@@ -219,6 +223,21 @@ describe('sinks and MCP instructions', () => {
     });
     const t = (await sink.locate(cliOrigin())).target!;
     expect(await sink.inject(t, 'hello', 'i')).toMatchObject({ outcome: 'ambiguous' });
+  });
+  it('stdout sink waits for an acknowledged writer and is ambiguous if the write fails later', async () => {
+    const t = (await new DemoSink({ kind: 'stdout' }, () => {}).locate(cliOrigin())).target!;
+    let finished = false;
+    const slow = new DemoSink({ kind: 'stdout' }, async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      finished = true;
+    });
+    expect(await slow.inject(t, 'abc', 'x')).toEqual({ outcome: 'delivered', proof: 'stdout' });
+    expect(finished).toBe(true);
+    const failing = new DemoSink({ kind: 'stdout' }, async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+    expect(await failing.inject(t, 'abc', 'x')).toMatchObject({ outcome: 'ambiguous' });
   });
   it('the CLI origin carries a fixed, non-empty run identity that its sink echoes', async () => {
     const o = cliOrigin('mcp');

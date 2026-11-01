@@ -461,6 +461,7 @@ type FakePane = {
 export type FakeInjectBehaviour =
   | 'ok'
   | 'throw'
+  | 'throw-string'
   | 'held'
   | 'ambiguous'
   | 'no-proof'
@@ -517,8 +518,9 @@ export class FakeSink implements TerminalSink {
   async inject(t: TerminalTarget, text: string, id: string): Promise<InjectResult> {
     this.injectCalls++;
     const b = this.injectBehaviour;
-    if (b === 'throw') {
+    if (b === 'throw' || b === 'throw-string') {
       this.typed.push({ target: t, text, id }); // it may have been typed before the crash
+      if (b === 'throw-string') throw 'boom'; // eslint-disable-line no-throw-literal
       throw new Error('boom');
     }
     if (b === 'held') return { outcome: 'held', reason: 'busy' };

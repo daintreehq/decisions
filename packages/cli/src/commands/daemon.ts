@@ -66,18 +66,22 @@ export const EXEC_SINK_TEMPFAIL = 75;
  * command's stdin. Every CLI pane is "alive" and always idle. Daintree replaces this with its wake gate.
  *
  * Results are honest about what is known:
- * - stdout: delivered once the line has been handed to the writer; a writer that throws is ambiguous.
+ * - stdout: delivered once the writer has confirmed the write (the real CLI waits for stdout's write
+ *   callback); a write that fails is ambiguous.
  * - file: a file that cannot be opened is unavailable (nothing written); a failed write is ambiguous;
  *   delivered after the whole text has been written.
- * - exec: delivered only when the command read all of its input and exited 0. Exit 75 means held (the
- *   command did nothing; retried later). Any other exit, or exiting without reading all of the input, is
- *   ambiguous because the command may have acted on the text. A command that cannot be started is
- *   unavailable.
+ * - exec: the command is the terminal, and its exit status is its own report. Exit 0 says "I took the
+ *   text" and counts as delivered only if all of the input was also handed to it (a command that exits
+ *   before the pipe drains is ambiguous). The bridge cannot see inside the command, so a command that exits
+ *   0 without using its input is misreporting. Exit 75 means held (the command did nothing; retried later).
+ *   Any other exit is ambiguous, because the command may have acted on the text. A command that cannot be
+ *   started is unavailable.
  */
 export class DemoSink implements TerminalSink {
   constructor(
     private readonly spec: SinkSpec,
-    private readonly out: (line: string) => void,
+    /** Writes one line; when it returns a promise, the line counts as written only once that resolves. */
+    private readonly out: (line: string) => void | Promise<void>,
   ) {}
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     if (o.host_id !== 'cli') return { state: 'gone' };
@@ -101,7 +105,7 @@ export class DemoSink implements TerminalSink {
     switch (this.spec.kind) {
       case 'stdout':
         try {
-          this.out('\n' + text + '\n');
+          await this.out('\n' + text + '\n');
           return { outcome: 'delivered', proof: 'stdout' };
         } catch {
           return { outcome: 'ambiguous', reason: 'stdout_write_failed' };
@@ -258,7 +262,7 @@ export interface DaemonOptions {
 
 export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Promise<void> {
   const rt = await openRuntime(ctx, g);
-  const sink = new DemoSink(parseSink(o.sink), ctx.out);
+  const sink = new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out);
   // Agents reach files only through a folder the human designated (per pane), never by naming a path.
   const bridge = buildBridge(rt, sink, {
     resolver: o.mcp?.attachmentsDir
@@ -336,7 +340,7 @@ export async function ask(
   },
 ): Promise<void> {
   const rt = await openRuntime(ctx, g);
-  const bridge = buildBridge(rt, new DemoSink(parseSink(o.sink), ctx.out), {
+  const bridge = buildBridge(rt, new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out), {
     resolver: humanFileResolver,
   });
   try {

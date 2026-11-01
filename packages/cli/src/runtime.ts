@@ -20,6 +20,8 @@ export interface Ctx {
   fetch: typeof fetch;
   webSocket?: WebSocketFactory;
   out(line: string): void;
+  /** Like `out`, but resolves only once the line has really been written (rejects if the write fails). */
+  outAcked?(line: string): Promise<void>;
   err(line: string): void;
   /** Ask a question on the terminal; resolves to the answer text. */
   prompt(question: string, opts?: { secret?: boolean }): Promise<string>;
@@ -51,6 +53,10 @@ export function makeCtx(g: GlobalOptions): Ctx {
     json: g.json === true,
     fetch: globalThis.fetch,
     out: (l) => process.stdout.write(l + '\n'),
+    outAcked: (l) =>
+      new Promise<void>((resolve, reject) =>
+        process.stdout.write(l + '\n', (e) => (e ? reject(e) : resolve())),
+      ),
     err: (l) => process.stderr.write(l + '\n'),
     prompt: promptLine,
     env: process.env,

@@ -150,10 +150,16 @@ export class DeliveryEngine {
         q.delivery_status !== 'needs-attention' &&
         q.delivery_status !== 'delivery-uncertain',
     );
-    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash.
+    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash. So
+    // does an intent still in state `intent`: passes are serialised, so one found here belongs to an attempt
+    // that failed before it was settled. The text may be on screen; recover() reconciles it at start.
+    const unsettled = new Set(
+      (await ctx.store.openIntents()).filter((i) => i.state === 'intent').map((i) => i.question_id),
+    );
     const all: QuestionRow[] = [];
     for (const q of candidates)
-      if (!(await ctx.store.hasUncertainIntent(q.question_id))) all.push(q);
+      if (!unsettled.has(q.question_id) && !(await ctx.store.hasUncertainIntent(q.question_id)))
+        all.push(q);
     // One lane per pane: answers go in question-creation order (alias is monotonic).
     const lanes = new Map<string, QuestionRow[]>();
     for (const q of all) {
@@ -352,12 +358,34 @@ export class DeliveryEngine {
     }
     // 2. Type, and take the sink's word only in the shapes the contract allows.
     let result: InjectResult & { code?: string };
+    let thrown: unknown = undefined;
     try {
       result = normalizeInjectResult(await o.sink.inject(target, text, chunk[0]!.intentId));
     } catch (e) {
-      await ctx.audit.log({ event: 'inject.threw', result: (e as Error).message.slice(0, 80) });
+      thrown = e ?? 'null';
       result = { outcome: 'ambiguous', code: 'inject_threw' };
     }
+    if (thrown !== undefined) {
+      // Settle first (below), log afterwards: nothing fallible may run between a possible write and the
+      // durable record that it may have happened.
+      const message = thrown instanceof Error ? thrown.message : String(thrown);
+      const settled = await this.settleChunk(chunk, questions, result, res);
+      await ctx.audit
+        .log({ event: 'inject.threw', result: message.slice(0, 80) })
+        .catch(() => undefined);
+      return settled;
+    }
+    return this.settleChunk(chunk, questions, result, res);
+  }
+
+  /** Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. */
+  private async settleChunk(
+    chunk: Item[],
+    questions: QuestionRow[],
+    result: InjectResult & { code?: string },
+    res: DrainResult,
+  ): Promise<DrainResult> {
+    const { ctx } = this;
     switch (result.outcome) {
       case 'delivered':
         for (const i of chunk) {

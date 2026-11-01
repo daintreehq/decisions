@@ -352,4 +352,60 @@ describe('sink outcomes', () => {
     const r = await bridge.delivery.drain();
     expect(r).toMatchObject({ delivered: 0, uncertain: 1, needsAttention: 0 });
   });
+
+  it('a sink that throws a non-Error after typing is still settled uncertain, never re-typed', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    sink.injectBehaviour = 'throw-string';
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp().catch(() => undefined);
+    sink.injectBehaviour = 'ok';
+    await bridge.notifyPaneIdle().catch(() => undefined);
+    await bridge.notifyPaneIdle().catch(() => undefined);
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('delivery-uncertain');
+    expect(await store.hasUncertainIntent(qid)).toBe(true);
+  });
+
+  it('a failing audit write after an ambiguous inject cannot reopen the answer for typing', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    sink.injectBehaviour = 'throw';
+    const append = store.appendAudit.bind(store);
+    store.appendAudit = async (e) => {
+      if (e.event === 'inject.threw') throw new Error('disk full');
+      return append(e);
+    };
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp().catch(() => undefined);
+    sink.injectBehaviour = 'ok';
+    await bridge.notifyPaneIdle().catch(() => undefined);
+    expect(sink.typed).toHaveLength(1);
+    expect(await store.hasUncertainIntent(qid)).toBe(true);
+  });
+
+  it('an attempt whose intent was left open by an in-process failure blocks the question until recovery', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    for (const ev of relay.events) await bridge.inbox.persist(ev);
+    await bridge.inbox.processPending();
+    // an earlier attempt in this process wrote its intent and then died before settling it
+    await store.putIntent({
+      injection_id: 'orphan',
+      question_id: qid,
+      answer_revision: 1,
+      host_id: 'host-local',
+      pane_id: 'pane-1',
+      terminal_generation: 1,
+      ownership_principal: 'principal-1',
+      agent_incarnation: 'inc-1',
+      state: 'intent',
+      created_at: 1,
+      updated_at: 1,
+    });
+    await bridge.notifyPaneIdle();
+    expect(sink.typed).toHaveLength(0);
+    // recovery (bridge start) reconciles it: no marker on screen => uncertain, still never typed
+    expect(await bridge.delivery.recover()).toEqual({ reconciled: 0, uncertain: 1 });
+    await bridge.notifyPaneIdle();
+    expect(sink.typed).toHaveLength(0);
+  });
 });
