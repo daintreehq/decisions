@@ -1,0 +1,445 @@
+import { LIMITS, type DecisionContentV1, type LedgerEvent } from '@daintree/decisions-protocol';
+import { AuditLog } from './audit.js';
+import { BridgeError } from './content.js';
+import {
+  MemorySpool,
+  type AttachmentResolver,
+  type AttachmentSpool,
+  type BridgeContext,
+} from './context.js';
+import { DeliveryEngine, type DrainResult } from './delivery.js';
+import { EventVerifier } from './inbound.js';
+import { Inbox } from './inbox.js';
+import { PolicyRegistry } from './policy.js';
+import { Publisher, type RegisterResult } from './publisher.js';
+import { parseAnswers, type AnswerEntry } from './answers.js';
+import type { Identity } from './identity.js';
+import type { ProxyEngine, ProxyOutcome } from './proxy.js';
+import { RelayClient } from './relay.js';
+import type { AgentResumeAdapter, TerminalSink } from './sink.js';
+import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
+import type { LocalStore } from './store.js';
+import type { QuestionOrigin, QuestionRow } from './types.js';
+
+export interface BridgeOptions {
+  identity: Identity;
+  store: LocalStore;
+  sink: TerminalSink;
+  policy?: PolicyRegistry;
+  resolver?: AttachmentResolver;
+  spool?: AttachmentSpool;
+  proxy?: ProxyEngine;
+  proxyTimeoutMs?: number;
+  adapters?: AgentResumeAdapter[];
+  auditPath?: string;
+  debugContent?: boolean;
+  client?: RelayClient;
+  fetch?: typeof fetch;
+  webSocket?: WebSocketFactory;
+  now?: () => number;
+  batch?: boolean;
+  /** Background retry cadence for the outbox and busy panes. Default 30 s; 0 disables. */
+  pumpIntervalMs?: number;
+}
+
+export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
+
+export interface DecisionView {
+  questionId: string;
+  alias: number;
+  status: QuestionRow['local_status'];
+  requirement: QuestionRow['requirement'];
+  deliveryStatus: QuestionRow['delivery_status'];
+  revision: number;
+  expiresAt: string | null;
+  answers: {
+    revision: number;
+    source: 'human' | 'proxy' | 'system';
+    choices: string[];
+    text: string;
+    correction: boolean;
+    delivered: boolean;
+    createdAt: string;
+  }[];
+}
+
+export interface PaneIdentity {
+  host_id: string;
+  pane_id: string;
+}
+
+type Listener = {
+  state: (s: BridgeState) => void;
+  socket: (s: SocketState, detail?: string) => void;
+  delivered: (questionId: string) => void;
+  error: (e: Error) => void;
+};
+
+/**
+ * The narrow host-level API Daintree calls: register a question for a pane, and deliver answers back.
+ * Everything else (relay protocol, crypto, durable queues, verification) lives behind it.
+ */
+export class DecisionsBridge {
+  readonly ctx: BridgeContext;
+  readonly publisher: Publisher;
+  readonly verifier: EventVerifier;
+  readonly inbox: Inbox;
+  readonly delivery: DeliveryEngine;
+  readonly socket: RelaySocket;
+  state: BridgeState = 'created';
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private pumping: Promise<void> | null = null;
+  private listeners: { [K in keyof Listener]: Listener[K][] } = {
+    state: [],
+    socket: [],
+    delivered: [],
+    error: [],
+  };
+
+  constructor(private readonly o: BridgeOptions) {
+    const client =
+      o.client ??
+      new RelayClient({
+        identity: o.identity,
+        ...(o.fetch ? { fetch: o.fetch } : {}),
+        ...(o.now ? { now: o.now } : {}),
+      });
+    this.ctx = {
+      identity: o.identity,
+      client,
+      store: o.store,
+      audit: new AuditLog(o.store, {
+        ...(o.auditPath ? { jsonlPath: o.auditPath } : {}),
+        ...(o.debugContent ? { debugContent: true } : {}),
+        ...(o.now ? { now: () => new Date(o.now!()) } : {}),
+      }),
+      policy: o.policy ?? new PolicyRegistry(),
+      spool: o.spool ?? new MemorySpool(),
+      resolver: o.resolver,
+      now: o.now ?? Date.now,
+    };
+    this.publisher = new Publisher(this.ctx);
+    this.verifier = new EventVerifier(this.ctx);
+    this.inbox = new Inbox(this.ctx, this.verifier, { onRevokedSelf: () => this.markRevoked() });
+    this.delivery = new DeliveryEngine(this.ctx, {
+      sink: o.sink,
+      ...(o.adapters ? { adapters: o.adapters } : {}),
+      ...(o.batch !== undefined ? { batch: o.batch } : {}),
+    });
+    this.socket = new RelaySocket({
+      client,
+      getCursor: () => this.ctx.store.getCursor(),
+      ...(o.webSocket ? { webSocket: o.webSocket } : {}),
+      handlers: {
+        onEvent: (ev) => this.onSocketEvent(ev),
+        onCaughtUp: () => this.pump(),
+        onState: (s, d) => this.listeners.socket.forEach((l) => l(s, d)),
+        onRevoked: () => this.markRevoked(),
+        onError: (e) => this.emitError(e),
+      },
+    });
+  }
+
+  on<K extends keyof Listener>(event: K, cb: Listener[K]): () => void {
+    (this.listeners[event] as Listener[K][]).push(cb);
+    return () => {
+      const arr = this.listeners[event] as Listener[K][];
+      arr.splice(arr.indexOf(cb), 1);
+    };
+  }
+
+  private emitError(e: Error): void {
+    this.listeners.error.forEach((l) => l(e));
+  }
+
+  /* ---------------- lifecycle ---------------- */
+
+  /** Reconcile interrupted injections, connect the socket, start the retry timer. */
+  async start(opts: { socket?: boolean } = {}): Promise<void> {
+    if (this.state === 'running') return;
+    this.state = 'running';
+    this.listeners.state.forEach((l) => l(this.state));
+    await this.delivery.recover();
+    if (opts.socket !== false) this.socket.start();
+    const every = this.o.pumpIntervalMs ?? 30_000;
+    if (every > 0) {
+      this.timer = setInterval(
+        () => void this.pump().catch((e) => this.emitError(e as Error)),
+        every,
+      );
+      (this.timer as { unref?: () => void }).unref?.();
+    }
+    void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.socket.stop();
+    this.delivery.stopped = true;
+    this.state = 'stopped';
+    this.listeners.state.forEach((l) => l(this.state));
+  }
+
+  private markRevoked(): void {
+    if (this.state === 'revoked') return;
+    this.state = 'revoked';
+    this.delivery.stopped = true;
+    this.socket.stop();
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.listeners.state.forEach((l) => l('revoked'));
+  }
+
+  /* ---------------- Daintree-facing API ---------------- */
+
+  /** Commits locally and returns immediately; publishing happens in the background. */
+  async registerQuestion(args: {
+    origin: QuestionOrigin;
+    input: unknown;
+  }): Promise<RegisterResult> {
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const r = await this.publisher.register(args.origin, args.input);
+    if (!r.duplicate) void this.pump().catch((e) => this.emitError(e as Error));
+    return r;
+  }
+
+  async cancelQuestion(questionId: string, pane?: PaneIdentity): Promise<void> {
+    await this.owned(questionId, pane);
+    await this.publisher.enqueueCancel(questionId);
+    void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
+    const row = await this.owned(questionId, pane);
+    return this.view(row);
+  }
+
+  async listPending(pane?: PaneIdentity): Promise<DecisionView[]> {
+    const rows = await this.ctx.store.listQuestions({
+      status: ['queued', 'open', 'proxy-answered'],
+    });
+    return rows
+      .filter(
+        (r) => !pane || (r.origin.host_id === pane.host_id && r.origin.pane_id === pane.pane_id),
+      )
+      .map((r) => this.view(r));
+  }
+
+  /** Only the owning pane may see or cancel a question; others get the same error as an unknown id. */
+  private async owned(questionId: string, pane?: PaneIdentity): Promise<QuestionRow> {
+    const row = await this.ctx.store.getQuestion(questionId);
+    if (
+      !row ||
+      (pane && (row.origin.host_id !== pane.host_id || row.origin.pane_id !== pane.pane_id))
+    ) {
+      throw new BridgeError('not_found', 'unknown question');
+    }
+    return row;
+  }
+
+  private view(row: QuestionRow): DecisionView {
+    return {
+      questionId: row.question_id,
+      alias: row.alias,
+      status: row.local_status,
+      requirement: row.requirement,
+      deliveryStatus: row.delivery_status,
+      revision: row.question_revision,
+      expiresAt: row.expires_at,
+      answers: parseAnswers(row.answers_json)
+        .filter((e: AnswerEntry) => e.kind === 'answer')
+        .map((e) => ({
+          revision: e.revision,
+          source: e.source,
+          choices: e.choices.map((c) => c.id),
+          text: e.text,
+          correction: e.correction,
+          delivered: e.delivered,
+          createdAt: e.created_at,
+        })),
+    };
+  }
+
+  /** The pane became idle (Daintree's wake gate): try pending deliveries now. */
+  async notifyPaneIdle(): Promise<DrainResult> {
+    return this.delivery.drain();
+  }
+
+  async retryDelivery(questionId: string): Promise<DrainResult> {
+    await this.delivery.retry(questionId);
+    return this.delivery.drain();
+  }
+
+  /* ---------------- pump ---------------- */
+
+  /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
+  pump(): Promise<void> {
+    if (this.state === 'revoked' || this.state === 'stopped') return Promise.resolve();
+    if (this.pumping) return this.pumping;
+    this.pumping = (async () => {
+      try {
+        const flushed = await this.publisher.flush();
+        for (const id of flushed.created) await this.maybeRunProxy(id);
+        if (flushed.created.length > 0) await this.publisher.flush();
+        await this.inbox.processPending();
+        await this.deliverNow();
+      } finally {
+        this.pumping = null;
+      }
+    })();
+    return this.pumping;
+  }
+
+  private async deliverNow(): Promise<void> {
+    const before = await this.ctx.store.listQuestions({
+      status: ['open', 'proxy-answered', 'human-answered', 'expired'],
+    });
+    const r = await this.delivery.drain();
+    if (r.delivered > 0) {
+      for (const q of before) {
+        const after = await this.ctx.store.getQuestion(q.question_id);
+        if (
+          after &&
+          after.delivery_status === 'terminal-delivered' &&
+          q.delivery_status !== 'terminal-delivered'
+        ) {
+          this.listeners.delivered.forEach((l) => l(q.question_id));
+        }
+      }
+    }
+  }
+
+  /* ---------------- inbound ---------------- */
+
+  private async onSocketEvent(ev: LedgerEvent): Promise<void> {
+    const { cursor } = await this.inbox.persist(ev); // durable BEFORE the ack
+    try {
+      this.socket.ack(cursor);
+    } catch {
+      /* socket closed; the next sync re-sends from the stored cursor */
+    }
+    if (await this.inbox.processPending()) await this.deliverNow();
+  }
+
+  /** HTTP catch-up (no socket): page through events after the stored cursor. */
+  async catchUp(): Promise<number> {
+    let cursor = await this.ctx.store.getCursor();
+    for (;;) {
+      const page = await this.ctx.client.events(cursor, LIMITS.eventPageSize);
+      for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
+      cursor = await this.ctx.store.advanceCursor();
+      if (!page.has_more) {
+        await this.ctx.store.forceCursor(page.next_after);
+        cursor = await this.ctx.store.getCursor();
+        break;
+      }
+    }
+    try {
+      await this.ctx.client.deliveriesReceived(cursor);
+    } catch {
+      /* informational */
+    }
+    if (await this.inbox.processPending()) await this.deliverNow();
+    return cursor;
+  }
+
+  /* ---------------- proxy ---------------- */
+
+  private async maybeRunProxy(questionId: string): Promise<void> {
+    const row = await this.ctx.store.getQuestion(questionId);
+    if (!row || row.requirement === 'human-required' || !this.o.proxy) return;
+    await this.runProxy(questionId);
+  }
+
+  /** Hard-fails for human-required questions: a proxy can never be asked about those. */
+  async runProxy(questionId: string): Promise<'answered' | 'abstained' | 'skipped'> {
+    const { ctx } = this;
+    const row = await ctx.store.getQuestion(questionId);
+    if (!row) throw new BridgeError('not_found', 'unknown question');
+    if (row.requirement === 'human-required') {
+      await ctx.audit.log({
+        event: 'proxy.refused',
+        question_id: questionId,
+        requirement: row.requirement,
+        result: 'human-required',
+      });
+      throw new BridgeError(
+        'proxy_forbidden',
+        'the decision model may never act on a human-required question',
+      );
+    }
+    if (!this.o.proxy || row.local_status !== 'open') return 'skipped';
+    const markerKey = `proxy:${questionId}`;
+    if (await ctx.store.getMeta(markerKey)) return 'skipped';
+    await ctx.store.setMeta(markerKey, 'started');
+
+    const content = JSON.parse(row.content_json ?? '{}') as DecisionContentV1;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.o.proxyTimeoutMs ?? 25_000);
+    let outcome: ProxyOutcome;
+    try {
+      outcome = await this.o.proxy.suggest(
+        {
+          questionId,
+          question: content.question,
+          ...(content.context ? { context: content.context } : {}),
+          options: content.options ?? [],
+          requirement: row.requirement,
+          projectId: row.origin.project_id,
+          createdAt: row.origin_created_at,
+        },
+        ac.signal,
+      );
+    } catch (e) {
+      outcome = { action: 'abstain', reason: `model-error:${(e as Error).name}` };
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const optionIds = new Set((content.options ?? []).map((o) => o.id));
+    const gate = ctx.policy.get(row.origin.workflow_gate_id);
+    const valid =
+      outcome.action === 'answer' &&
+      outcome.risk_flags.length === 0 &&
+      outcome.confidence >= 0 &&
+      outcome.confidence <= 1 &&
+      outcome.selected_option_ids.every(
+        (id) =>
+          optionIds.has(id) && (!gate?.allowedOptionIds || gate.allowedOptionIds.includes(id)),
+      ) &&
+      (optionIds.size === 0 || outcome.selected_option_ids.length > 0 || !!outcome.answer_text);
+    if (outcome.action === 'answer' && valid) {
+      await this.publisher.enqueueProxyAction('proxy-answer', questionId, {
+        content_version: 1,
+        selected_option_ids: outcome.selected_option_ids,
+        ...(outcome.answer_text ? { text: outcome.answer_text } : {}),
+        reviewed_attachment_digests: [],
+        model_id: outcome.model_id,
+        prompt_template_version: outcome.prompt_template_version,
+        confidence: outcome.confidence,
+        retrieval_reference_ids: outcome.retrieval_reference_ids,
+        ...(outcome.rationale ? { rationale: outcome.rationale } : {}),
+      });
+      await ctx.store.setMeta(markerKey, 'answered');
+      await ctx.audit.log({
+        event: 'proxy.answer',
+        question_id: questionId,
+        requirement: row.requirement,
+        provenance: 'proxy',
+        result: 'queued',
+      });
+      return 'answered';
+    }
+    await this.publisher.enqueueProxyAction('proxy-abstain', questionId);
+    await ctx.store.setMeta(markerKey, 'abstained');
+    await ctx.audit.log({
+      event: 'proxy.abstain',
+      question_id: questionId,
+      requirement: row.requirement,
+      result: outcome.action === 'abstain' ? outcome.reason.slice(0, 60) : 'invalid-suggestion',
+    });
+    return 'abstained';
+  }
+}

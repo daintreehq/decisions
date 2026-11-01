@@ -1,0 +1,35 @@
+{
+  "name": "@daintree/decisions-cli",
+  "version": "0.1.0",
+  "description": "The `decisions` command: set up, pair, listen and serve the Decisions HTTP MCP.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "decisions": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@daintree/decisions-client": "workspace:*",
+    "@daintree/decisions-crypto": "workspace:*",
+    "@daintree/decisions-protocol": "workspace:*",
+    "commander": "^14.0.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.5",
+    "tsup": "^8.5.0",
+    "typescript": "~5.9.0",
+    "vitest": "^4.1.0"
+  }
+}
