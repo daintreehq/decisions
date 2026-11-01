@@ -22,7 +22,7 @@ describe('question verification', () => {
   it('verifies, decrypts and validates a genuine question', async () => {
     const w = await makeWorld();
     const e = await questionEvent(w);
-    const r = await verifyQuestionEvent(e.data, NOW, ctx(w));
+    const r = await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.content.question).toBe('Use the compact sidebar?');
@@ -38,14 +38,14 @@ describe('question verification', () => {
           env.ciphertext.slice(0, -2) + (env.ciphertext.endsWith('AA') ? 'BB' : 'AA');
       },
     });
-    const r = await verifyQuestionEvent(e.data, NOW, ctx(w));
+    const r = await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!);
     expect(r).toMatchObject({ ok: false });
   });
 
   it('rejects a question signed by a phone', async () => {
     const w = await makeWorld();
     const e = await questionEvent(w, { signer: w.phone });
-    const r = await verifyQuestionEvent(e.data, NOW, ctx(w));
+    const r = await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!);
     expect(r).toEqual({ ok: false, reason: 'questions may only be signed by a desktop' });
   });
 
@@ -68,7 +68,7 @@ describe('question verification', () => {
     const e = await questionEvent(w, {
       signer: { id: rogueId, keys: rogue, cert: rogueCert, signingPub: '', exchangePub: '' },
     });
-    expect(await verifyQuestionEvent(e.data, NOW, ctx(w))).toEqual({
+    expect(await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!)).toEqual({
       ok: false,
       reason: 'unknown signer',
     });
@@ -77,12 +77,17 @@ describe('question verification', () => {
   it('rejects content that fails the schema and the wrong key epoch', async () => {
     const w = await makeWorld();
     const bad = await questionEvent(w, { content: { question: '' } });
-    expect(await verifyQuestionEvent(bad.data, NOW, ctx(w))).toEqual({
+    expect(await verifyQuestionEvent(bad.data, NOW, ctx(w), bad.question_id!)).toEqual({
       ok: false,
       reason: 'question content is malformed',
     });
     const e = await questionEvent(w);
-    const r = await verifyQuestionEvent(e.data, NOW, { ...ctx(w), epochKeys: new Map() });
+    const r = await verifyQuestionEvent(
+      e.data,
+      NOW,
+      { ...ctx(w), epochKeys: new Map() },
+      e.question_id!,
+    );
     expect(r).toMatchObject({ ok: false });
     if (!r.ok) expect(r.reason).toMatch(/epoch key/);
   });
@@ -91,7 +96,7 @@ describe('question verification', () => {
     const w = await makeWorld();
     const other = await makeWorld();
     const e = await questionEvent(other);
-    expect(await verifyQuestionEvent(e.data, NOW, ctx(w))).toEqual({
+    expect(await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!)).toEqual({
       ok: false,
       reason: 'question belongs to another installation',
     });
@@ -103,12 +108,12 @@ describe('action verification and provenance', () => {
     const w = await makeWorld();
     const q = await questionEvent(w, { requirement: 'proxy-ok' });
     const human = await actionEvent(w, { questionId: q.question_id!, action: 'answer' });
-    const hr = await verifyActionEvent(human.data, NOW, ctx(w));
+    const hr = await verifyActionEvent(human.data, NOW, ctx(w), human.question_id!);
     expect(hr.ok && hr.value.provenance).toBe('human');
     if (hr.ok)
       expect(hr.value.content).toMatchObject({ selected_option_ids: ['yes'], text: 'go ahead' });
     const proxy = await actionEvent(w, { questionId: q.question_id!, action: 'proxy-answer' });
-    const pr = await verifyActionEvent(proxy.data, NOW, ctx(w));
+    const pr = await verifyActionEvent(proxy.data, NOW, ctx(w), proxy.question_id!);
     expect(pr.ok && pr.value.provenance).toBe('proxy');
   });
 
@@ -120,7 +125,7 @@ describe('action verification and provenance', () => {
       action: 'answer',
       signer: w.desktop,
     });
-    const r = await verifyActionEvent(forged.data, NOW, ctx(w));
+    const r = await verifyActionEvent(forged.data, NOW, ctx(w), forged.question_id!);
     expect(r).toEqual({ ok: false, reason: 'a owner-desktop cannot sign answer' });
   });
 
@@ -132,7 +137,7 @@ describe('action verification and provenance', () => {
       action: 'proxy-answer',
       signer: w.phone,
     });
-    expect(await verifyActionEvent(forged.data, NOW, ctx(w))).toEqual({
+    expect(await verifyActionEvent(forged.data, NOW, ctx(w), forged.question_id!)).toEqual({
       ok: false,
       reason: 'a phone cannot sign proxy-answer',
     });
@@ -146,7 +151,7 @@ describe('action verification and provenance', () => {
       action: 'proxy-answer',
       provenance: 'human',
     });
-    expect(await verifyActionEvent(proxy.data, NOW, ctx(w))).toEqual({
+    expect(await verifyActionEvent(proxy.data, NOW, ctx(w), proxy.question_id!)).toEqual({
       ok: false,
       reason: 'relay provenance disagrees with the signed action',
     });
@@ -162,8 +167,8 @@ describe('action verification and provenance', () => {
       action: 'answer',
       envelopeQuestionId: a.question_id!,
     });
-    const r = await verifyActionEvent(lifted.data, NOW, ctx(w));
-    expect(r).toEqual({ ok: false, reason: 'envelope binding mismatch' });
+    const r = await verifyActionEvent(lifted.data, NOW, ctx(w), lifted.question_id!);
+    expect(r).toEqual({ ok: false, reason: 'question id does not match the signed record' });
   });
 
   it('rejects a corrupted signature', async () => {
@@ -172,7 +177,7 @@ describe('action verification and provenance', () => {
     const e = await actionEvent(w, { questionId: q.question_id!, action: 'answer' });
     const rec = (e.data as { record: { signature: string } }).record;
     rec.signature = bytesToBase64Url(randomBytes(64));
-    expect(await verifyActionEvent(e.data, NOW, ctx(w))).toEqual({
+    expect(await verifyActionEvent(e.data, NOW, ctx(w), e.question_id!)).toEqual({
       ok: false,
       reason: 'signature or ciphertext does not match',
     });
@@ -186,9 +191,19 @@ describe('revoked devices keep their history but lose the future', () => {
     const revokedAt = '2026-11-01T10:00:00.000Z';
     w.trust.markRevoked(w.phone.id, revokedAt);
     const before = await actionEvent(w, { questionId: q.question_id!, action: 'answer' });
-    const ok = await verifyActionEvent(before.data, '2026-11-01T09:59:59.000Z', ctx(w));
+    const ok = await verifyActionEvent(
+      before.data,
+      '2026-11-01T09:59:59.000Z',
+      ctx(w),
+      before.question_id!,
+    );
     expect(ok.ok).toBe(true);
-    const after = await verifyActionEvent(before.data, '2026-11-01T10:00:01.000Z', ctx(w));
+    const after = await verifyActionEvent(
+      before.data,
+      '2026-11-01T10:00:01.000Z',
+      ctx(w),
+      before.question_id!,
+    );
     expect(after).toEqual({ ok: false, reason: 'signed by a device after it was revoked' });
   });
 });
@@ -205,5 +220,33 @@ describe('trust store', () => {
     ).rejects.toThrow(/pinned/);
     expect(await w.trust.addCert(other.owner.cert, null)).toBe(false);
     expect(w.trust.get(w.phone.id)?.role).toBe('phone');
+  });
+});
+
+describe('question id binding (event ↔ signed record ↔ envelope)', () => {
+  it('rejects a genuine question delivered under another question’s id', async () => {
+    const w = await makeWorld();
+    const a = await questionEvent(w);
+    const b = await questionEvent(w);
+    const r = await verifyQuestionEvent(a.data, NOW, ctx(w), b.question_id!);
+    expect(r).toEqual({ ok: false, reason: 'question id does not match the signed record' });
+    expect((await verifyQuestionEvent(a.data, NOW, ctx(w), a.question_id!)).ok).toBe(true);
+  });
+
+  it('rejects a validly signed record whose envelope was encrypted for a different question', async () => {
+    const w = await makeWorld();
+    const other = await questionEvent(w);
+    const e = await questionEvent(w, { envelopeQuestionId: other.question_id! });
+    const r = await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!);
+    expect(r).toEqual({ ok: false, reason: 'question id does not match the signed record' });
+  });
+
+  it('rejects an action delivered under another question’s id, before decrypting anything', async () => {
+    const w = await makeWorld();
+    const a = await questionEvent(w);
+    const b = await questionEvent(w);
+    const answerForA = await actionEvent(w, { questionId: a.question_id!, action: 'answer' });
+    const r = await verifyActionEvent(answerForA.data, NOW, ctx(w), b.question_id!);
+    expect(r).toEqual({ ok: false, reason: 'question id does not match the signed record' });
   });
 });

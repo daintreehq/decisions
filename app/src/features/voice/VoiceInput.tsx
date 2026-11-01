@@ -14,7 +14,8 @@ import {
   type SpanChoice,
 } from './correction.js';
 import { VoiceClient } from './client.js';
-import { MicUnavailableError, startMic, type Capture } from './capture.js';
+import { MicUnavailableError, startMic } from './capture.js';
+import { DictationSession, type SessionPhase } from './session.js';
 
 type Phase = 'idle' | 'connecting' | 'listening' | 'finishing' | 'cleaning';
 
@@ -56,33 +57,40 @@ export function VoiceInput({
   const [level, setLevel] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [spans, setSpans] = useState<Span[]>([]);
+  const [suggestion, setSuggestion] = useState<{
+    corrected: string;
+    region: DictationRegion;
+    reason: string;
+    spans: Span[];
+  } | null>(null);
   const [disclose, setDisclose] = useState(false);
   const valueRef = useRef(value);
   valueRef.current = value;
   const spansText = useRef<string | null>(null);
-  const clientRef = useRef<VoiceClient | null>(null);
-  const micRef = useRef<Capture | null>(null);
+  const sessionRef = useRef<DictationSession | null>(null);
+  /** Whether the human is physically holding the button (hold-to-talk), tracked apart from the async startup. */
+  const pressed = useRef(false);
+  const disabledRef = useRef(!!disabled);
+  disabledRef.current = !!disabled;
 
   // Span offsets are only meaningful for the exact text they were computed against.
   const spansValid = spans.length > 0 && spansText.current === value;
 
-  const teardown = useCallback(() => {
-    micRef.current?.stop();
-    micRef.current = null;
-    clientRef.current?.cancel();
-    clientRef.current = null;
-  }, []);
-  useEffect(() => teardown, [teardown]);
+  useEffect(
+    () => () => {
+      sessionRef.current?.cancel();
+      sessionRef.current = null;
+    },
+    [],
+  );
 
   const end = useCallback(
     async (note?: string) => {
-      const client = clientRef.current;
-      if (!client) return;
-      micRef.current?.stop();
-      micRef.current = null;
+      const session = sessionRef.current;
+      if (!session) return;
       setPhase('finishing');
-      const raw = (await client.stop()).trim();
-      clientRef.current = null;
+      const raw = (await session.finish()).trim();
+      if (sessionRef.current === session) sessionRef.current = null;
       setLive({ final: '', interim: '' });
       setLevel(0);
       if (!raw) {
@@ -97,7 +105,12 @@ export function VoiceInput({
       const region: DictationRegion = { start, end: start + raw.length, raw };
       onChange(withRaw); // raw is in the editor (and autosaved as an encrypted draft) before any clean-up runs
       setMessage(note ?? null);
-      if (!correctionAvailable || !app.getRelay() || v.correction === 'off') {
+      if (
+        !correctionAvailable ||
+        !app.getRelay() ||
+        v.correction === 'off' ||
+        disabledRef.current
+      ) {
         setPhase('idle');
         return;
       }
@@ -113,11 +126,29 @@ export function VoiceInput({
         keyterms,
         editorAtStart: withRaw,
         getEditorText: () => valueRef.current,
-        post: async (path, body) => relay.raw('POST', path, body),
+        post: (path, body, signal) => relay.raw('POST', path, body, signal),
       });
       setPhase('idle');
       if (outcome.kind === 'kept-raw') {
         setMessage(KEPT[outcome.reason]);
+        return;
+      }
+      const shifted = outcome.spans.map((x) => ({
+        ...x,
+        start: x.start + region.start,
+        end: x.end + region.start,
+      }));
+      if (!outcome.autoApply) {
+        // Not a conservative edit: shown as a suggestion. The human's dictated words stay in the editor untouched.
+        setSuggestion({
+          corrected: outcome.result.corrected_text,
+          region,
+          reason: outcome.reviewReason ?? 'the wording changed',
+          spans: shifted,
+        });
+        setMessage(
+          'The clean-up changed more than punctuation, so it is only a suggestion. Your words are unchanged.',
+        );
         return;
       }
       const applied = applyToRegion(valueRef.current, region, outcome.result.corrected_text);
@@ -125,11 +156,6 @@ export function VoiceInput({
         setMessage(KEPT['editor-changed']);
         return;
       }
-      const shifted = outcome.spans.map((s) => ({
-        ...s,
-        start: s.start + region.start,
-        end: s.end + region.start,
-      }));
       spansText.current = applied.text;
       onChange(applied.text);
       setSpans(shifted);
@@ -142,17 +168,39 @@ export function VoiceInput({
     [correctionAvailable, onChange, v.correction, view.content],
   );
 
+  const acceptSuggestion = () => {
+    if (!suggestion) return;
+    const applied = applyToRegion(valueRef.current, suggestion.region, suggestion.corrected);
+    setSuggestion(null);
+    if (!applied) {
+      setMessage(KEPT['editor-changed']);
+      return;
+    }
+    spansText.current = applied.text;
+    onChange(applied.text);
+    setSpans(suggestion.spans);
+    setMessage('Suggestion applied. Check it before you submit.');
+  };
+
   // Never keep recording while the app is hidden.
   useEffect(() => {
     const h = () => {
-      if (document.visibilityState === 'hidden' && clientRef.current)
+      if (document.visibilityState === 'hidden' && sessionRef.current)
         void end('Recording stopped because the app was hidden.');
     };
     document.addEventListener('visibilitychange', h);
     return () => document.removeEventListener('visibilitychange', h);
   }, [end]);
 
+  // The editor was locked (question changed, answer sent, ...): stop and finalize capture, keeping the words so far.
+  useEffect(() => {
+    if (disabled && sessionRef.current) {
+      void end('Dictation stopped because the question changed. Your words so far were kept.');
+    }
+  }, [disabled, end]);
+
   const begin = async () => {
+    if (sessionRef.current || disabledRef.current) return;
     if (!v.consent) {
       setDisclose(true);
       return;
@@ -161,30 +209,42 @@ export function VoiceInput({
     if (!relay || !snap.config) return;
     setMessage(null);
     setSpans([]);
-    setPhase('connecting');
+    setSuggestion(null);
     const labels = view.content?.options.map((o) => o.label) ?? [];
-    let readyResolve: () => void = () => undefined;
-    const ready = new Promise<void>((res) => (readyResolve = res));
-    const client = new VoiceClient({
-      origin: snap.config.relayOrigin,
-      provider: v.transcription,
-      keyterms: buildKeyterms(view.content?.question ?? '', labels),
-      postJson: (path, body) => relay.json('POST', path, { body }),
-      onState: (s) => s === 'ready' && readyResolve(),
-      onText: setLive,
-      onError: (m) => setMessage(m),
-    });
-    clientRef.current = client;
+    const keyterms = buildKeyterms(view.content?.question ?? '', labels);
+    const config = snap.config;
+    const session = new DictationSession(
+      {
+        makeClient: (onReady) =>
+          new VoiceClient({
+            origin: config.relayOrigin,
+            provider: v.transcription,
+            keyterms,
+            postJson: (path, body) => relay.json('POST', path, { body }),
+            onState: (st) => st === 'ready' && onReady(),
+            onText: setLive,
+            onError: (m) => setMessage(m),
+          }),
+        startMic,
+        onLevel: setLevel,
+      },
+      (p: SessionPhase) =>
+        setPhase(
+          p === 'starting'
+            ? 'connecting'
+            : p === 'listening'
+              ? 'listening'
+              : p === 'finishing'
+                ? 'finishing'
+                : 'idle',
+        ),
+    );
+    sessionRef.current = session;
     try {
-      await client.start();
-      await Promise.race([
-        ready,
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
-      ]);
-      micRef.current = await startMic((pcm) => client.sendAudio(pcm), setLevel);
-      setPhase('listening');
+      const r = await session.start();
+      if (r === 'cancelled' && sessionRef.current === session) sessionRef.current = null;
     } catch (e) {
-      teardown();
+      if (sessionRef.current === session) sessionRef.current = null;
       setPhase('idle');
       setMessage(
         e instanceof MicUnavailableError
@@ -194,8 +254,30 @@ export function VoiceInput({
     }
   };
 
-  const toggle = () =>
-    phase === 'listening' ? void end() : phase === 'idle' ? void begin() : undefined;
+  /** Hold-to-talk release or pointer cancel: abort a startup in progress, or finish a live recording. */
+  const release = () => {
+    if (!pressed.current) return;
+    pressed.current = false;
+    const session = sessionRef.current;
+    if (!session) return;
+    if (session.phase === 'starting') {
+      session.cancel();
+      sessionRef.current = null;
+      setPhase('idle');
+    } else if (session.phase === 'listening') {
+      void end();
+    }
+  };
+
+  const toggle = () => {
+    const session = sessionRef.current;
+    if (session?.phase === 'listening') void end();
+    else if (session?.phase === 'starting') {
+      session.cancel();
+      sessionRef.current = null;
+      setPhase('idle');
+    } else if (!session) void begin();
+  };
 
   if (!available || disabled) {
     return (
@@ -214,13 +296,19 @@ export function VoiceInput({
           type="button"
           className={`btn mic ${phase === 'listening' ? 'recording' : ''}`}
           aria-pressed={phase === 'listening'}
-          disabled={phase === 'connecting' || phase === 'finishing' || phase === 'cleaning'}
+          // Never disabled while connecting: a disabled button would swallow the release that cancels startup.
+          disabled={phase === 'finishing' || phase === 'cleaning'}
           {...(hold
             ? {
                 onPointerDown: (e) => {
-                  if (e.button === 0 && phase === 'idle') void begin();
+                  if (e.button !== 0) return;
+                  pressed.current = true;
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                  void begin();
                 },
-                onPointerUp: () => phase === 'listening' && void end(),
+                onPointerUp: release,
+                onPointerCancel: release,
+                onLostPointerCapture: release,
                 onClick: (e) => e.detail === 0 && toggle(), // keyboard activation
               }
             : { onClick: toggle })}
@@ -231,7 +319,7 @@ export function VoiceInput({
             style={{ transform: `scale(${1 + Math.min(level * 6, 1)})` }}
           />
           {phase === 'idle' && (hold ? 'Hold to dictate' : 'Dictate')}
-          {phase === 'connecting' && 'Connecting…'}
+          {phase === 'connecting' && 'Connecting… (tap to cancel)'}
           {phase === 'listening' && (hold ? 'Release to finish' : 'Tap to finish')}
           {phase === 'finishing' && 'Finishing…'}
           {phase === 'cleaning' && 'Cleaning up…'}
@@ -249,6 +337,20 @@ export function VoiceInput({
         <p className="note" role="status">
           {message}
         </p>
+      )}
+      {suggestion && (
+        <div className="card suggestion" role="group" aria-label="Suggested clean-up">
+          <p className="note">Suggested clean-up (needs your OK, {suggestion.reason}):</p>
+          <p className="draft-text">{suggestion.corrected}</p>
+          <div className="row">
+            <button type="button" className="btn primary small" onClick={acceptSuggestion}>
+              Use suggestion
+            </button>
+            <button type="button" className="btn small" onClick={() => setSuggestion(null)}>
+              Keep what I said
+            </button>
+          </div>
+        </div>
       )}
       {spansValid && (
         <ul className="spans" aria-label="Words to double-check">

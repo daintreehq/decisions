@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ActionBody } from '@daintree/decisions-protocol';
 import { newId } from '@daintree/decisions-crypto';
-import { buildAnswerRequest, highestEpoch } from '../src/domain/answer.js';
+import {
+  assertReviewable,
+  buildAnswerRequest,
+  highestEpoch,
+  StaleQuestionError,
+} from '../src/domain/answer.js';
 import { QuestionStore } from '../src/domain/model.js';
 import { verifyActionEvent } from '../src/domain/verify.js';
 import { actionEvent, makeWorld, questionEvent } from './helpers.js';
@@ -39,6 +44,7 @@ describe('building human answers', () => {
       epochKey: highestEpoch(w.epochs),
       view,
       kind: 'answer',
+      expectedRevision: 0,
       selected: ['no'],
       text: 'keep the shortcuts',
       reviewedDigests: ['a'.repeat(64)],
@@ -59,6 +65,7 @@ describe('building human answers', () => {
         trust: w.trust,
         epochKeys: w.epochs,
       },
+      q.question_id!,
     );
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -87,6 +94,7 @@ describe('building human answers', () => {
       epochKey: highestEpoch(w.epochs),
       view: s.get(q.question_id!)!,
       kind: 'answer',
+      expectedRevision: 0,
       selected: ['yes'],
       reviewedDigests: [],
       idempotencyKey: 'fixedkey1234',
@@ -108,6 +116,7 @@ describe('building human answers', () => {
     await s.ingest(proxyEv);
     const view = s.get(q.question_id!)!;
     const common = {
+      expectedRevision: 1,
       installationId: w.installationId,
       deviceId: w.phone.id,
       signingKey: w.phone.keys.signing.privateKey,
@@ -150,11 +159,91 @@ describe('building human answers', () => {
         epochKey: highestEpoch(w.epochs),
         view: s.get(q.question_id!)!,
         kind: 'confirm-proxy',
+        expectedRevision: 0,
         selected: [],
         reviewedDigests: [],
       }),
-    ).rejects.toThrow(/no verified proxy/);
+    ).rejects.toThrow(/changed/);
     expect(() => highestEpoch(new Map())).toThrow(/no content key/);
     expect(newId()).toHaveLength(32);
+  });
+});
+
+describe('signing only what the human reviewed', () => {
+  it('signs the revision the human saw even though the live view has moved on', async () => {
+    const w = await makeWorld();
+    const s = new QuestionStore({
+      installationId: w.installationId,
+      trust: w.trust,
+      epochKeys: () => w.epochs,
+    });
+    const q = await questionEvent(w);
+    await s.ingest(q);
+    await s.ingest(await actionEvent(w, { questionId: q.question_id!, action: 'answer' }));
+    const view = s.get(q.question_id!)!; // the live object: revision 1
+    const reviewed = view.revision;
+    // The human opens "overrule" at revision 1. Meanwhile another phone's override lands (revision 2) in the same object.
+    await s.ingest(
+      await actionEvent(w, { questionId: q.question_id!, action: 'override', expectedRevision: 1 }),
+    );
+    expect(view.revision).toBe(2);
+    expect(() => assertReviewable(view, reviewed, 'override')).toThrow(StaleQuestionError);
+    await expect(
+      buildAnswerRequest({
+        installationId: w.installationId,
+        deviceId: w.phone.id,
+        signingKey: w.phone.keys.signing.privateKey,
+        epochKey: highestEpoch(w.epochs),
+        view,
+        kind: 'override',
+        expectedRevision: reviewed,
+        selected: ['no'],
+        reason: 'stale',
+        reviewedDigests: [],
+      }),
+    ).rejects.toBeInstanceOf(StaleQuestionError);
+  });
+
+  it('signs exactly the reviewed revision when it is still current', async () => {
+    const w = await makeWorld();
+    const s = new QuestionStore({
+      installationId: w.installationId,
+      trust: w.trust,
+      epochKeys: () => w.epochs,
+    });
+    const q = await questionEvent(w);
+    await s.ingest(q);
+    await s.ingest(await actionEvent(w, { questionId: q.question_id!, action: 'answer' }));
+    const view = s.get(q.question_id!)!;
+    const req = await buildAnswerRequest({
+      installationId: w.installationId,
+      deviceId: w.phone.id,
+      signingKey: w.phone.keys.signing.privateKey,
+      epochKey: highestEpoch(w.epochs),
+      view,
+      kind: 'override',
+      expectedRevision: 1,
+      selected: ['no'],
+      reason: 'changed my mind',
+      reviewedDigests: [],
+    });
+    expect(req.expectedRevision).toBe(1);
+    expect(ActionBody.parse(JSON.parse(req.bodyText)).action.record.expected_revision).toBe(1);
+  });
+
+  it('refuses an answer when the question is no longer open, or an override when it is', async () => {
+    const w = await makeWorld();
+    const s = new QuestionStore({
+      installationId: w.installationId,
+      trust: w.trust,
+      epochKeys: () => w.epochs,
+    });
+    const q = await questionEvent(w);
+    await s.ingest(q);
+    const view = s.get(q.question_id!)!;
+    expect(() => assertReviewable(view, 0, 'answer')).not.toThrow();
+    expect(() => assertReviewable(view, 0, 'override')).toThrow(StaleQuestionError);
+    await s.ingest(await actionEvent(w, { questionId: q.question_id!, action: 'cancel' }));
+    expect(() => assertReviewable(view, 0, 'answer')).toThrow(StaleQuestionError);
   });
 });

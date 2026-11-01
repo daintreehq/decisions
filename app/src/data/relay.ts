@@ -97,6 +97,7 @@ export class Relay {
     path: string,
     query: Query | undefined,
     bodyText: string | undefined,
+    signal?: AbortSignal,
   ): Promise<Response> {
     const q = queryString(query);
     const fullPath = API_PREFIX + path;
@@ -121,6 +122,7 @@ export class Relay {
         credentials: 'omit',
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
+        ...(signal ? { signal } : {}),
       });
     } catch {
       throw new RelayError('network', 0, 'Could not reach the relay');
@@ -149,19 +151,20 @@ export class Relay {
     return (await res.json()) as T;
   }
 
-  async bytes(path: string): Promise<Uint8Array> {
-    const res = await this.send('GET', path, undefined, undefined);
+  async bytes(path: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const res = await this.send('GET', path, undefined, undefined, signal);
     if (!res.ok) throw await parseError(res);
     return new Uint8Array(await res.arrayBuffer());
   }
 
   /** Raw signed response (voice/correct needs status handling of its own). */
-  async raw(method: string, path: string, body?: unknown): Promise<Response> {
+  async raw(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
     return this.send(
       method,
       path,
       undefined,
       body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
     );
   }
 }

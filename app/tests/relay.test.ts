@@ -104,3 +104,28 @@ describe('relay client', () => {
     vi.restoreAllMocks();
   });
 });
+
+describe('abort signals reach the network layer', () => {
+  it('forwards the signal for raw() and bytes(), and an abort surfaces as a network error', async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const f = (async (_u: string, init: RequestInit) =>
+      new Promise<Response>((_res, rej) => {
+        seen.push(init.signal ?? undefined);
+        init.signal?.addEventListener('abort', () =>
+          rej(new DOMException('aborted', 'AbortError')),
+        );
+      })) as unknown as typeof fetch;
+    const { relay: r } = await relay(f);
+    const c1 = new AbortController();
+    const p1 = r.raw('POST', '/voice/correct', { a: 1 }, c1.signal);
+    const c2 = new AbortController();
+    const p2 = r.bytes('/attachments/x/content', c2.signal);
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen).toContain(c1.signal);
+    expect(seen).toContain(c2.signal);
+    c1.abort();
+    c2.abort();
+    await expect(p1).rejects.toMatchObject({ code: 'network' });
+    await expect(p2).rejects.toMatchObject({ code: 'network' });
+  });
+});

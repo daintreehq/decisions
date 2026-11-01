@@ -11,7 +11,7 @@ import {
   type EpochKey,
 } from '@daintree/decisions-crypto';
 import type { QuestionView } from './model.js';
-import { lastProxyAction } from './selectors.js';
+import { effectiveStatus, lastProxyAction, proxyNeedsReview, submitKind } from './selectors.js';
 
 export type HumanActionKind = Extract<ActionKind, 'answer' | 'override' | 'confirm-proxy'>;
 
@@ -22,6 +22,11 @@ export interface AnswerInput {
   epochKey: EpochKey;
   view: QuestionView;
   kind: HumanActionKind;
+  /**
+   * The revision the human actually looked at. The view object is live (the store mutates it as events
+   * arrive), so this must be captured by the caller at review time and is what gets signed.
+   */
+  expectedRevision: number;
   selected: string[];
   text?: string;
   reason?: string;
@@ -44,7 +49,8 @@ export interface BuiltRequest {
  * (including after an app restart) is byte-identical and the relay's idempotency key keeps it exactly-once.
  */
 export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> {
-  const expectedRevision = i.view.revision;
+  const expectedRevision = i.expectedRevision;
+  assertReviewable(i.view, expectedRevision, i.kind);
   const actionId = newId();
   const idempotencyKey = i.idempotencyKey ?? newId();
   let envelope = null;
@@ -106,4 +112,32 @@ export function highestEpoch(keys: ReadonlyMap<number, EpochKey>): EpochKey {
   for (const k of keys.values()) if (!best || k.epoch > best.epoch) best = k;
   if (!best) throw new Error('no content key available on this device');
   return best;
+}
+
+export class StaleQuestionError extends Error {
+  constructor(
+    message = 'This question changed after you opened it. Review the update and try again.',
+  ) {
+    super(message);
+    this.name = 'StaleQuestionError';
+  }
+}
+
+/**
+ * Refuses to sign an action against anything the human did not review: the question must still be at the
+ * revision they saw and the action must still be legal there. Called right before signing, not at render time.
+ */
+export function assertReviewable(
+  view: QuestionView,
+  reviewedRevision: number,
+  kind: HumanActionKind,
+  now = Date.now(),
+): void {
+  if (view.revision !== reviewedRevision) throw new StaleQuestionError();
+  if (kind === 'confirm-proxy') {
+    if (effectiveStatus(view, now) !== 'proxy-answered' || !proxyNeedsReview(view, now))
+      throw new StaleQuestionError();
+    return;
+  }
+  if (submitKind(view, now) !== kind) throw new StaleQuestionError();
 }

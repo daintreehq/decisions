@@ -18,6 +18,7 @@ import {
   type EpochKey,
 } from '@daintree/decisions-crypto';
 import { Db, type ConfigRecord, type DeviceKeyRecord } from '../data/db.js';
+import { ImageCache, type ImageContext, type ImageResult } from '../data/images.js';
 import { Drafts, Outbox } from '../data/outbox.js';
 import { runPairing, type PairingPhase } from '../data/pairing.js';
 import { publicJson, Relay, RelayError } from '../data/relay.js';
@@ -48,14 +49,7 @@ export interface AppSnapshot {
   devices: DevicesResponse | null;
 }
 
-export interface LoadedImage {
-  url: string;
-  sha256: string;
-  mime: string;
-}
-
-export type ImageResult =
-  { ok: true; image: LoadedImage } | { ok: false; reason: 'expired' | 'error'; message: string };
+export type { ImageResult, LoadedImage } from '../data/images.js';
 
 export class AppController {
   private snap: AppSnapshot;
@@ -70,7 +64,10 @@ export class AppController {
   outbox: Outbox | null = null;
   drafts: Drafts | null = null;
   sync: SyncEngine | null = null;
-  private images = new Map<string, Promise<ImageResult>>();
+  readonly images = new ImageCache({
+    createUrl: (b) => URL.createObjectURL(b),
+    revokeUrl: (u) => URL.revokeObjectURL(u),
+  });
   private swReg: ServiceWorkerRegistration | null = null;
   private bound = false;
 
@@ -224,19 +221,18 @@ export class AppController {
   }
 
   async wipe(): Promise<void> {
+    // Order matters: cut off everything that could still deliver or reveal data BEFORE touching storage, and
+    // never wait on the network. A stalled download must not be able to delay or undo an erase.
     this.sync?.stop();
-    for (const p of this.images.values()) {
-      const r = await p;
-      if (r.ok) URL.revokeObjectURL(r.image.url);
-    }
-    this.images.clear();
-    await this.db?.wipe();
+    this.images.dispose();
+    const db = this.db;
     this.db = null;
     this.relay = this.store = this.outbox = this.drafts = this.sync = this.trust = null;
     this.keys = this.cacheKey = null;
     this.epochKeys.clear();
-    if (typeof caches !== 'undefined') for (const k of await caches.keys()) await caches.delete(k);
     this.patch({ phase: 'unpaired', config: null, devices: null, connection: 'idle' });
+    await db?.wipe();
+    if (typeof caches !== 'undefined') for (const k of await caches.keys()) await caches.delete(k);
     this.db = await Db.open();
   }
 
@@ -310,6 +306,8 @@ export class AppController {
   async submit(args: {
     view: QuestionView;
     kind: HumanActionKind;
+    /** The revision the human reviewed; signed as-is and refused if the question has moved on. */
+    expectedRevision: number;
     selected: string[];
     text: string;
     reason?: string;
@@ -323,6 +321,7 @@ export class AppController {
       epochKey: highestEpoch(this.epochKeys),
       view: args.view,
       kind: args.kind,
+      expectedRevision: args.expectedRevision,
       selected: args.selected,
       text: args.text,
       reason: args.reason,
@@ -348,22 +347,19 @@ export class AppController {
   /* ---------------- attachments ---------------- */
 
   loadImage(view: QuestionView, d: AttachmentDescriptor): Promise<ImageResult> {
-    const cached = this.images.get(d.attachment_id);
-    if (cached) return cached;
-    const p = this.fetchImage(view, d);
-    this.images.set(d.attachment_id, p);
-    p.then((r) => {
-      if (!r.ok) this.images.delete(d.attachment_id); // allow retry on failure
-    });
-    return p;
+    return this.images.load(d.attachment_id, (ctx) => this.fetchImage(view, d, ctx));
   }
 
-  private async fetchImage(view: QuestionView, d: AttachmentDescriptor): Promise<ImageResult> {
+  private async fetchImage(
+    view: QuestionView,
+    d: AttachmentDescriptor,
+    ctx: ImageContext,
+  ): Promise<ImageResult> {
     try {
       const epoch = this.epochKeys.get(d.key_epoch);
       if (!epoch || !this.relay || !this.snap.config)
         return { ok: false, reason: 'error', message: 'Missing key for this attachment' };
-      const cipher = await this.relay.bytes(`/attachments/${d.attachment_id}/content`);
+      const cipher = await this.relay.bytes(`/attachments/${d.attachment_id}/content`, ctx.signal);
       const plain = await decryptAttachment(
         epoch,
         {
@@ -381,7 +377,7 @@ export class AppController {
         return { ok: false, reason: 'error', message: 'The file is not the image it claims to be' };
       const blob = new Blob([plain as unknown as BlobPart], { type: mime });
       if (typeof createImageBitmap === 'function') (await createImageBitmap(blob)).close();
-      return { ok: true, image: { url: URL.createObjectURL(blob), sha256: d.sha256, mime } };
+      return { ok: true, image: { url: ctx.makeUrl(blob), sha256: d.sha256, mime } };
     } catch (e) {
       if (e instanceof RelayError && (e.status === 404 || e.status === 410)) {
         return {

@@ -1,5 +1,6 @@
 import {
   EventData,
+  applyAction,
   type ActionKind,
   type DecisionContentV1,
   type LedgerEvent,
@@ -10,6 +11,7 @@ import {
 } from '@daintree/decisions-protocol';
 import type { EpochKey } from '@daintree/decisions-crypto';
 import { verifyActionEvent, verifyQuestionEvent, type AnswerContent } from './verify.js';
+import { lastProxyAction } from './selectors.js';
 import type { TrustStore } from './trust.js';
 
 export interface ActionView {
@@ -179,15 +181,28 @@ export class QuestionStore {
       case 'decision.created': {
         if (!qid) break;
         const parsed = EventData.created.safeParse(d);
-        const v = await this.verifyWithRetry(() =>
-          verifyQuestionEvent(d, ev.occurred_at, this.vctx()),
-        );
         if (!parsed.success) {
           this.malformedEvents++;
-          this.views.set(qid, this.stub(qid, ev, 'malformed question event'));
+          if (!this.views.has(qid))
+            this.views.set(qid, this.stub(qid, ev, 'malformed question event'));
           break;
         }
         const rec = parsed.data.record;
+        const existing = this.views.get(qid);
+        // A question is created exactly once. A second "created" for a known id can never replace what we hold.
+        if (existing && existing.verification.ok) {
+          existing.integrityIssues.push('duplicate question event ignored');
+          break;
+        }
+        const v = await this.verifyWithRetry(() =>
+          verifyQuestionEvent(d, ev.occurred_at, this.vctx(), qid),
+        );
+        if (!v.ok) {
+          // Never adopt fields from a record that did not verify for THIS id (it may belong to another question).
+          if (!existing) this.views.set(qid, this.stub(qid, ev, v.reason));
+          else existing.verification = { ok: false, reason: v.reason };
+          break;
+        }
         const issues: string[] = [];
         // The signed record is authoritative for routing metadata; a disagreeing relay is an integrity issue.
         if (parsed.data.requirement !== rec.requirement)
@@ -206,8 +221,8 @@ export class QuestionStore {
           createdSeq: ev.seq,
           lastSeq: ev.seq,
           lastEventAt: ev.occurred_at,
-          verification: v.ok ? { ok: true } : { ok: false, reason: v.reason },
-          content: v.ok ? v.value.content : null,
+          verification: { ok: true },
+          content: v.value.content,
           actions: [],
           deliveries: {},
           attachmentsAvailable: {},
@@ -231,55 +246,99 @@ export class QuestionStore {
           view.integrityIssues.push(`malformed ${ev.event_type} event`);
           break;
         }
-        const v = await this.verifyWithRetry(() =>
-          verifyActionEvent(d, ev.occurred_at, this.vctx()),
-        );
         const rec = parsed.data.record;
         const base = {
           actionId: rec.action_id,
           action: rec.action,
           provenance: parsed.data.provenance,
-          revision: parsed.data.revision,
+          revision: view.revision,
           createdAt: rec.created_at,
           seq: ev.seq,
           signerDeviceId: rec.signer_device_id,
         };
-        if (v.ok) {
-          view.actions.push({
-            ...base,
-            provenance: v.value.provenance,
-            signerRole: v.value.signerRole,
-            content: v.value.content,
-            verified: true,
-          });
-        } else {
+        const reject = (reason: string) => {
           view.actions.push({
             ...base,
             signerRole: null,
             content: null,
             verified: false,
-            error: v.reason,
+            error: reason,
           });
-          view.integrityIssues.push(`${rec.action}: ${v.reason}`);
+          view.integrityIssues.push(`${rec.action}: ${reason}`);
+        };
+
+        const v = await this.verifyWithRetry(() =>
+          verifyActionEvent(d, ev.occurred_at, this.vctx(), qid),
+        );
+        if (!v.ok) {
+          reject(v.reason);
+          break;
         }
-        // Status and revision are routing metadata asserted by the relay; the signed content above is what we trust.
-        view.status = parsed.data.status;
-        view.revision = parsed.data.revision;
-        if (rec.action === 'proxy-abstain') view.proxyAbstained = true;
-        if (rec.action === 'reopen') {
-          view.expiresAt = rec.expires_at;
-          view.proxyAbstained = false;
+        if (!view.verification.ok) {
+          reject('the question itself could not be verified');
+          break;
         }
+        if (rec.action === 'confirm-proxy') {
+          const latest = lastProxyAction(view);
+          if (!latest || rec.confirms_action_id !== latest.actionId) {
+            reject('confirms a proxy answer that is not the latest one');
+            break;
+          }
+        }
+        // Trusted state moves only through the shared transition table, using the CERTIFIED signer role,
+        // the SIGNED expected revision and the question's SIGNED requirement. Relay metadata plays no part.
+        let tr;
+        try {
+          tr = applyAction(
+            {
+              status: view.status,
+              revision: view.revision,
+              requirement: view.requirement,
+              proxyAbstained: view.proxyAbstained,
+            },
+            rec.action,
+            v.value.signerRole,
+            rec.expected_revision,
+          );
+        } catch (e) {
+          reject(e instanceof Error ? e.message : 'illegal transition');
+          break;
+        }
+        if (parsed.data.status !== tr.status || parsed.data.revision !== tr.revision) {
+          view.integrityIssues.push(
+            `${rec.action}: relay status/revision differ from the verified transition (ignored)`,
+          );
+        }
+        view.actions.push({
+          ...base,
+          revision: tr.revision,
+          provenance: v.value.provenance,
+          signerRole: v.value.signerRole,
+          content: v.value.content,
+          verified: true,
+        });
+        view.status = tr.status;
+        view.revision = tr.revision;
+        view.proxyAbstained = tr.proxyAbstained;
+        if (rec.action === 'reopen') view.expiresAt = rec.expires_at;
         view.lastSeq = ev.seq;
         view.lastEventAt = ev.occurred_at;
         break;
       }
       case 'decision.expired': {
+        // Unsigned and relay-asserted: only believed once the SIGNED deadline has really passed by the relay's own clock.
         const v = qid ? this.views.get(qid) : undefined;
-        if (v && v.status === 'open') v.status = 'expired';
-        if (v) {
+        if (!v) break;
+        if (
+          v.status === 'open' &&
+          v.expiresAt &&
+          Date.parse(ev.occurred_at) >= Date.parse(v.expiresAt)
+        ) {
+          v.status = 'expired';
           v.lastSeq = ev.seq;
           v.lastEventAt = ev.occurred_at;
+        } else if (v.status === 'open') {
+          v.integrityIssues.push('expiry reported before the signed deadline (ignored)');
         }
         break;
       }

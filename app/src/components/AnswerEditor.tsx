@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { app } from '../app/controller.js';
 import type { QuestionView } from '../domain/model.js';
 import { announce } from '../lib/announce.js';
+import { submitKind } from '../domain/selectors.js';
 import { VoiceInput } from '../features/voice/VoiceInput.js';
 import { ConfirmDialog } from './Dialog.js';
 import type { ReviewState } from './AttachmentGallery.js';
@@ -72,13 +73,26 @@ export function AnswerEditor({ view, mode, review, initial, onDone, onCancel }: 
   const reasonOk = mode === 'answer' || reason.trim().length > 0;
   const canSubmit = !busy && !stale && hasAnswer && reasonOk && imagesReady;
 
+  // A confirmation for a revision that is no longer current must not stay armed.
+  useEffect(() => {
+    if (confirm && stale) setConfirm(false);
+  }, [confirm, stale]);
+
   const submit = async () => {
+    // Re-check at the moment of sending (not just when the button was enabled): the dialog can sit open while
+    // another device commits a newer revision.
+    if (view.revision !== baseRevision || submitKind(view) !== mode) {
+      setConfirm(false);
+      setError('This question changed while you were answering. Review the update before sending.');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       await app.submit({
         view,
         kind: mode,
+        expectedRevision: baseRevision,
         selected,
         text,
         reason: mode === 'override' ? reason : undefined,

@@ -120,6 +120,8 @@ export async function questionEvent(
     signer?: Actor;
     expiresAt?: string | null;
     seq?: number;
+    /** Encrypt the envelope for a different question id than the one the record is signed for. */
+    envelopeQuestionId?: string;
     tamper?: (e: { ciphertext: string }) => void;
   } = {},
 ): Promise<LedgerEvent> {
@@ -128,7 +130,7 @@ export async function questionEvent(
   const envelope = await encryptEnvelope({
     epochKey: w.epoch,
     installationId: w.installationId,
-    questionId,
+    questionId: o.envelopeQuestionId ?? questionId,
     recordId: questionId,
     recordType: 'question',
     revision: 0,

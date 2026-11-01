@@ -51,10 +51,16 @@ export async function verifyQuestionEvent(
   data: unknown,
   occurredAt: string,
   ctx: VerifyCtx,
+  /** The ledger event's own (unsigned) question id; it must be the one the signer actually signed. */
+  eventQuestionId: string | null,
 ): Promise<Verified<VerifiedQuestion>> {
   const parsed = EventData.created.safeParse(data);
   if (!parsed.success) return fail('malformed question event');
   const { record, envelope } = parsed.data;
+  // Checked before anything is decrypted: a relay must not be able to file one question's signed content under another id.
+  if (eventQuestionId !== record.question_id || envelope.aad.question_id !== record.question_id) {
+    return fail('question id does not match the signed record');
+  }
   if (record.installation_id !== ctx.installationId)
     return fail('question belongs to another installation');
   if (record.signer_device_id !== record.originating_device_id)
@@ -97,10 +103,17 @@ export async function verifyActionEvent(
   data: unknown,
   occurredAt: string,
   ctx: VerifyCtx,
+  eventQuestionId: string | null,
 ): Promise<Verified<VerifiedAction>> {
   const parsed = EventData.action.safeParse(data);
   if (!parsed.success) return fail('malformed action event');
   const { record, envelope } = parsed.data;
+  if (
+    eventQuestionId !== record.question_id ||
+    (envelope && envelope.aad.question_id !== record.question_id)
+  ) {
+    return fail('question id does not match the signed record');
+  }
   if (record.installation_id !== ctx.installationId)
     return fail('action belongs to another installation');
   if (record.action !== parsed.data.action)

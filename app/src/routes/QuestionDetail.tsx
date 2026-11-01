@@ -202,6 +202,7 @@ export function QuestionDetail({ id }: { id: string }) {
                     .submit({
                       view,
                       kind: 'confirm-proxy',
+                      expectedRevision: proxy.revision,
                       selected: [],
                       text: '',
                       reviewedDigests: [],

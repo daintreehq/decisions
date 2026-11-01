@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyToRegion,
+  classifyChange,
   buildKeyterms,
   detectDrift,
   polarityCounts,
@@ -231,5 +232,113 @@ describe('keyterms', () => {
     expect(t).toContain('useEffect');
     expect(t.every((k) => k.length <= 50)).toBe(true);
     expect(t.length).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('conservative auto-apply', () => {
+  const auto = (raw: string, fixed: string) => classifyChange(raw, fixed);
+
+  it('auto-applies formatting-only clean-ups that keep order and negation', () => {
+    expect(auto('yes keep the sidebar', 'Yes, keep the sidebar.').auto).toBe(true);
+    expect(auto('do not delete prod', "Don't delete prod.").auto).toBe(true);
+    expect(
+      auto(
+        'the modal should be smaller but keep the keyboard shortcuts',
+        'The modal should be smaller, but keep the keyboard shortcuts.',
+      ).auto,
+    ).toBe(true);
+  });
+
+  it('requires explicit acceptance when a negation moves to another clause (the reviewed attack)', () => {
+    const raw = 'Do not delete prod. Delete dev.';
+    const fixed = 'Delete prod. Do not delete dev.';
+    expect(detectDrift(raw, fixed, [])).toBeNull(); // the older guards alone let this through
+    const c = auto(raw, fixed);
+    expect(c.auto).toBe(false);
+    expect(c.reason).toMatch(/around "not"/);
+  });
+
+  it('requires acceptance for reordering without any negation', () => {
+    expect(
+      auto('ship the api then the web app today', 'Ship the web app today, then the api.').auto,
+    ).toBe(false);
+  });
+
+  it('requires acceptance when a negation is added, dropped or swapped', () => {
+    expect(auto('merge it', 'Do not merge it.').auto).toBe(false);
+    expect(auto('do not merge it', 'Merge it.').auto).toBe(false);
+    expect(auto('approve this', 'Reject this.').auto).toBe(false);
+  });
+
+  it('requires acceptance when words next to a negation change', () => {
+    expect(auto('do not merge the branch now', 'Do not rebase the branch now.').auto).toBe(false);
+  });
+
+  it('refuses to auto-apply very long passages instead of guessing', () => {
+    const long = 'word '.repeat(2500);
+    expect(auto(long, long).auto).toBe(false);
+  });
+
+  it('runCorrection reports the moved-negation case as a suggestion, not an auto-apply', async () => {
+    const raw = 'Do not delete prod. Delete dev.';
+    const r = await req(raw, async () => ok('Delete prod. Do not delete dev.'), {
+      keyterms: [],
+    }).run();
+    expect(r).toMatchObject({ kind: 'applied', autoApply: false });
+    const good = await req('yes keep the sidebar', async () => ok('Yes, keep the sidebar.')).run();
+    expect(good).toMatchObject({ kind: 'applied', autoApply: true });
+  });
+});
+
+describe('the deadline is real', () => {
+  const raw = 'yes keep the sidebar';
+  it('aborts the request itself when time runs out', async () => {
+    let aborted = false;
+    const r = await req(
+      raw,
+      (_p, _b, signal) =>
+        new Promise((_res, rej) =>
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            rej(new Error('aborted'));
+          }),
+        ),
+    ).run();
+    expect(r).toEqual({ kind: 'kept-raw', reason: 'timeout' });
+    expect(aborted).toBe(true);
+  });
+
+  it('does not hang and discards a late result even if the transport ignores the abort signal', async () => {
+    const t0 = Date.now();
+    const r = await req(
+      raw,
+      () => new Promise((res) => setTimeout(() => res(ok('Yes, keep the sidebar.')), 300)),
+    ).run();
+    expect(r).toEqual({ kind: 'kept-raw', reason: 'timeout' });
+    expect(Date.now() - t0).toBeLessThan(250);
+  });
+
+  it('discards a response whose body arrives after the deadline', async () => {
+    const slowBody = {
+      ok: true,
+      json: () =>
+        new Promise((res) =>
+          setTimeout(
+            () =>
+              res({
+                model: 'm',
+                result: {
+                  corrected_text: 'Yes, keep the sidebar.',
+                  uncertain_spans: [],
+                  applied_commands: [],
+                  warnings: [],
+                },
+              }),
+            300,
+          ),
+        ),
+    } as unknown as Response;
+    const r = await req(raw, async () => slowBody).run();
+    expect(r).toEqual({ kind: 'kept-raw', reason: 'timeout' });
   });
 });

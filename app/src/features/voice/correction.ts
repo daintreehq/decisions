@@ -12,7 +12,18 @@ export type KeptRawReason =
   'timeout' | 'provider-error' | 'malformed' | 'editor-changed' | 'drift' | 'unavailable';
 
 export type CorrectionOutcome =
-  | { kind: 'applied'; result: CorrectionResult; model: string; spans: Span[] }
+  | {
+      kind: 'applied';
+      result: CorrectionResult;
+      model: string;
+      spans: Span[];
+      /**
+       * True only for conservative changes (token order and negation placement preserved). Anything else is a
+       * suggestion the human must accept explicitly; it is never written over what they dictated on its own.
+       */
+      autoApply: boolean;
+      reviewReason?: string;
+    }
   | { kind: 'kept-raw'; reason: KeptRawReason; detail?: string };
 
 export interface Span {
@@ -99,6 +110,56 @@ export function detectDrift(
   return null;
 }
 
+function wordTokens(s: string): string[] {
+  return normalizeForPolarity(s).match(/[a-z0-9]+/g) ?? [];
+}
+
+function lcsLength(a: readonly string[], b: readonly string[]): number {
+  let prev = new Uint16Array(b.length + 1);
+  let cur = new Uint16Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1]! + 1 : Math.max(prev[j]!, cur[j - 1]!);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[b.length]!;
+}
+
+export interface ChangeClass {
+  auto: boolean;
+  reason?: string;
+}
+
+/**
+ * Decides whether a corrected passage may replace the dictated text without the human looking at it.
+ * Only conservative edits qualify: most words stay in the same order, and every polarity word (not, no,
+ * never, approve, reject, ...) keeps the same neighbours, so a negation cannot migrate to a different clause.
+ * Everything else is offered as a suggestion that needs an explicit Accept.
+ */
+export function classifyChange(raw: string, corrected: string): ChangeClass {
+  const a = wordTokens(raw);
+  const b = wordTokens(corrected);
+  if (a.length > 2000 || b.length > 2000)
+    return { auto: false, reason: 'too long to check automatically' };
+  const pa = a.flatMap((t, i) => (POLARITY_WORDS.has(t) ? [i] : []));
+  const pb = b.flatMap((t, i) => (POLARITY_WORDS.has(t) ? [i] : []));
+  if (pa.length !== pb.length || pa.some((ia, k) => a[ia] !== b[pb[k]!])) {
+    return { auto: false, reason: 'a yes/no/negation word changed' };
+  }
+  for (let k = 0; k < pa.length; k++) {
+    for (const off of [-1, 1, 2]) {
+      if (a[pa[k]! + off] !== b[pb[k]! + off]) {
+        return { auto: false, reason: `the words around "${a[pa[k]!]}" changed` };
+      }
+    }
+  }
+  const longest = Math.max(a.length, b.length);
+  if (longest > 0 && lcsLength(a, b) < 0.85 * longest)
+    return { auto: false, reason: 'the wording or order changed a lot' };
+  return { auto: true };
+}
+
 /** Keep only well-formed, non-overlapping spans that do not split a surrogate pair. */
 export function validSpans(text: string, spans: readonly Span[]): Span[] {
   const ok = spans.filter((s) => {
@@ -173,46 +234,65 @@ export interface CorrectionRequest {
   timeoutMs?: number;
 }
 
+const TIMED_OUT = Symbol('timed out');
+
 export async function runCorrection(r: CorrectionRequest): Promise<CorrectionOutcome> {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), r.timeoutMs ?? 8000);
+  const ms = r.timeoutMs ?? 8000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The deadline is enforced here, independently of whether the request honours its abort signal.
+  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      resolve(TIMED_OUT);
+    }, ms);
+  });
+  const within = <T>(p: Promise<T>) => Promise.race([p, deadline]);
   try {
-    let res: Response;
+    let res: Response | typeof TIMED_OUT;
     try {
-      res = await r.post(
-        '/voice/correct',
-        {
-          protocol_version: PROTOCOL_VERSION,
-          provider: r.provider,
-          consent: true,
-          raw_transcript: r.raw,
-          question: r.question,
-          option_labels: r.optionLabels,
-          keyterms: r.keyterms,
-        },
-        ctl.signal,
+      res = await within(
+        r.post(
+          '/voice/correct',
+          {
+            protocol_version: PROTOCOL_VERSION,
+            provider: r.provider,
+            consent: true,
+            raw_transcript: r.raw,
+            question: r.question,
+            option_labels: r.optionLabels,
+            keyterms: r.keyterms,
+          },
+          ctl.signal,
+        ),
       );
     } catch {
       return { kind: 'kept-raw', reason: ctl.signal.aborted ? 'timeout' : 'unavailable' };
     }
+    if (res === TIMED_OUT || ctl.signal.aborted) return { kind: 'kept-raw', reason: 'timeout' };
     if (!res.ok) return { kind: 'kept-raw', reason: 'provider-error' };
-    let body: { result?: unknown; model?: unknown };
+    let body: { result?: unknown; model?: unknown } | typeof TIMED_OUT;
     try {
-      body = (await res.json()) as typeof body;
+      body = await within(res.json() as Promise<{ result?: unknown; model?: unknown }>);
     } catch {
-      return { kind: 'kept-raw', reason: 'malformed' };
+      return { kind: 'kept-raw', reason: ctl.signal.aborted ? 'timeout' : 'malformed' };
     }
+    // A result that arrives after the deadline is discarded, even if it is perfectly good.
+    if (body === TIMED_OUT || ctl.signal.aborted) return { kind: 'kept-raw', reason: 'timeout' };
     const parsed = CorrectionResult.safeParse(body.result);
     if (!parsed.success) return { kind: 'kept-raw', reason: 'malformed' };
     if (r.getEditorText() !== r.editorAtStart)
       return { kind: 'kept-raw', reason: 'editor-changed' };
     const drift = detectDrift(r.raw, parsed.data.corrected_text, r.keyterms);
     if (drift) return { kind: 'kept-raw', reason: 'drift', detail: drift };
+    const change = classifyChange(r.raw, parsed.data.corrected_text);
     return {
       kind: 'applied',
       result: parsed.data,
       model: typeof body.model === 'string' ? body.model : 'unknown',
       spans: validSpans(parsed.data.corrected_text, parsed.data.uncertain_spans),
+      autoApply: change.auto,
+      ...(change.reason ? { reviewReason: change.reason } : {}),
     };
   } finally {
     clearTimeout(timer);
