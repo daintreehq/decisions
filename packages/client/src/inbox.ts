@@ -1,7 +1,15 @@
-import { EventData, type DecisionContentV1, type LedgerEvent } from '@daintree/decisions-protocol';
+import {
+  ApiError,
+  EventData,
+  applyAction,
+  type DecisionContentV1,
+  type LedgerEvent,
+  type QuestionStatus,
+} from '@daintree/decisions-protocol';
 import { parseAnswers, serializeAnswers, type AnswerEntry } from './answers.js';
 import type { BridgeContext } from './context.js';
-import type { EventVerifier } from './inbound.js';
+import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';
+import { Mutex, TransientError } from './mutex.js';
 import type { QuestionRow } from './types.js';
 
 export interface InboxCallbacks {
@@ -9,11 +17,33 @@ export interface InboxCallbacks {
   onRevokedSelf(): void;
 }
 
+const MAX_TRANSIENT_ATTEMPTS = 5;
+
+/** What the relay would hold for this question, derived only from events WE verified. */
+function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
+  switch (s) {
+    case 'queued': // the create receipt may have been lost; the relay has it as open
+    case 'open':
+      return 'open';
+    case 'proxy-answered':
+    case 'human-answered':
+    case 'cancelled':
+    case 'expired':
+      return s;
+    default:
+      return null; // publish-failed etc.: the relay should not be sending events for it
+  }
+}
+
 /**
- * Persists ledger events BEFORE anything is acknowledged, then verifies and applies them in seq order.
- * Unverifiable events are rejected and audited; they never reach a terminal.
+ * Persists ledger events BEFORE anything is acknowledged, then verifies and applies them strictly in seq
+ * order and only up to the confirmed (contiguous) frontier. Unverifiable events are rejected and audited;
+ * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order.
  */
 export class Inbox {
+  private readonly serial = new Mutex();
+  private readonly transientAttempts = new Map<number, number>();
+
   constructor(
     private readonly ctx: BridgeContext,
     private readonly verifier: EventVerifier,
@@ -34,25 +64,48 @@ export class Inbox {
     return { isNew, cursor };
   }
 
-  /** Apply every stored-but-unprocessed event in order. Returns true if any delivery may now be pending. */
-  async processPending(): Promise<boolean> {
-    let drain = false;
-    for (;;) {
-      const batch = await this.ctx.store.unprocessedEvents(50);
-      if (batch.length === 0) return drain;
-      for (const stored of batch) {
-        const ev = JSON.parse(stored.json) as LedgerEvent;
-        try {
-          if (await this.apply(ev)) drain = true;
-        } catch (e) {
-          await this.ctx.audit.log({
-            event: 'event.error',
-            result: (e as Error).message.slice(0, 80),
-          });
+  /** True when we hold events beyond the confirmed frontier: something between them is missing or unconfirmed. */
+  async hasGap(): Promise<boolean> {
+    const cursor = await this.ctx.store.getCursor();
+    const pending = await this.ctx.store.unprocessedEvents(1000);
+    return pending.some((e) => e.seq > cursor);
+  }
+
+  /** Apply every stored-but-unprocessed event up to the frontier, in order. True if any delivery may now be pending. */
+  processPending(): Promise<boolean> {
+    return this.serial.run(async () => {
+      let drain = false;
+      for (;;) {
+        const cursor = await this.ctx.store.getCursor();
+        const batch = (await this.ctx.store.unprocessedEvents(50)).filter((e) => e.seq <= cursor);
+        if (batch.length === 0) return drain;
+        for (const stored of batch) {
+          const ev = JSON.parse(stored.json) as LedgerEvent;
+          try {
+            if (await this.apply(ev)) drain = true;
+          } catch (e) {
+            if (e instanceof TransientError) {
+              const n = (this.transientAttempts.get(ev.seq) ?? 0) + 1;
+              this.transientAttempts.set(ev.seq, n);
+              if (n < MAX_TRANSIENT_ATTEMPTS) {
+                // Leave it unprocessed and stop: later events must not overtake it.
+                await this.ctx.audit.log({
+                  event: 'event.deferred',
+                  result: e.message.slice(0, 80),
+                });
+                return drain;
+              }
+            }
+            await this.ctx.audit.log({
+              event: 'event.error',
+              result: (e as Error).message.slice(0, 80),
+            });
+          }
+          this.transientAttempts.delete(ev.seq);
+          await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
         }
-        await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
       }
-    }
+    });
   }
 
   private options(row: QuestionRow): DecisionContentV1['options'] {
@@ -63,15 +116,19 @@ export class Inbox {
     }
   }
 
-  private async save(
+  private async reject(
     row: QuestionRow,
-    patch: Partial<QuestionRow>,
-    entries: AnswerEntry[],
-  ): Promise<void> {
-    await this.ctx.store.updateQuestion(row.question_id, {
-      ...patch,
-      answers_json: serializeAnswers(entries),
+    reason: string,
+    extra: { provenance?: string } = {},
+  ): Promise<false> {
+    await this.ctx.audit.log({
+      event: 'event.rejected',
+      question_id: row.question_id,
+      requirement: row.requirement,
+      result: reason,
+      ...extra,
     });
+    return false;
   }
 
   private async apply(ev: LedgerEvent): Promise<boolean> {
@@ -79,75 +136,62 @@ export class Inbox {
     switch (ev.event_type) {
       case 'device.revoked': {
         const d = EventData.deviceRevoked.safeParse(ev.data);
-        this.verifier.invalidate();
-        if (d.success && d.data.device_id === ctx.identity.config.deviceId) {
-          await ctx.audit.log({ event: 'device.revoked-self' });
-          this.cb.onRevokedSelf();
+        if (d.success) {
+          // Persist the revocation point (ledger order) so a stale device directory cannot undo it.
+          await ctx.store.setMeta(revokedKey(d.data.device_id), String(ev.seq));
+          if (d.data.device_id === ctx.identity.config.deviceId) {
+            await ctx.audit.log({ event: 'device.revoked-self' });
+            this.cb.onRevokedSelf();
+          }
         }
+        this.verifier.invalidate();
+        await ctx.refreshIdentity?.();
         return false;
       }
       case 'device.approved':
+        this.verifier.invalidate();
+        return false;
       case 'device.key_rotated':
         this.verifier.invalidate();
+        await ctx.refreshIdentity?.();
         return false;
       default:
         break;
     }
     if (!ev.question_id) return false;
-    const row = await ctx.store.getQuestion(ev.question_id);
-    if (!row || row.history_only) return false; // not ours (or imported history): never act on it
+    const peek = await ctx.store.getQuestion(ev.question_id);
+    if (!peek || peek.history_only) return false; // not ours (or imported history): never act on it
 
-    switch (ev.event_type) {
-      case 'decision.created': {
-        const patch: Partial<QuestionRow> = { remote_event_seq: ev.seq };
-        if (row.local_status === 'queued') patch.local_status = 'open';
-        await ctx.store.updateQuestion(row.question_id, patch);
-        return false;
-      }
-      case 'decision.answer.committed':
-      case 'decision.answer.overridden':
-      case 'decision.proxy.committed':
-      case 'decision.proxy.confirmed':
-        return this.applyAnswer(ev, row);
-      case 'decision.proxy.abstained':
-        await ctx.audit.log({
-          event: 'proxy.abstained',
-          question_id: row.question_id,
-          requirement: row.requirement,
-        });
-        return false;
-      case 'decision.cancelled': {
-        const entries = parseAnswers(row.answers_json).map((e) =>
-          e.delivered ? e : { ...e, deliver: false },
-        );
-        await this.save(row, { local_status: 'cancelled', remote_event_seq: ev.seq }, entries);
-        await ctx.audit.log({
-          event: 'question.cancelled',
-          question_id: row.question_id,
-          result: 'relay',
-        });
-        return false;
-      }
-      case 'decision.deleted': {
-        const entries = parseAnswers(row.answers_json).map((e) => ({ ...e, deliver: false }));
-        await this.save(row, { local_status: 'cancelled', remote_event_seq: ev.seq }, entries);
-        return false;
-      }
-      case 'decision.reopened': {
-        const rev =
-          typeof ev.question_revision === 'number' ? ev.question_revision : row.question_revision;
-        await ctx.store.updateQuestion(row.question_id, {
-          local_status: 'open',
-          question_revision: rev,
-          remote_event_seq: ev.seq,
-        });
-        return false;
-      }
-      case 'decision.expired':
-        return this.applyExpired(ev, row);
-      default:
-        return false;
+    if (EVENT_ACTION[ev.event_type]) {
+      const v = await this.verifier.verifyAction(ev); // may throw TransientError; no lock held across the network
+      if (!v.ok) return this.reject(peek, v.reason);
+      return ctx.lock.run(() => this.applyVerified(ev, v));
     }
+    return ctx.lock.run(async () => {
+      const row = await ctx.store.getQuestion(ev.question_id!);
+      if (!row) return false;
+      switch (ev.event_type) {
+        case 'decision.created': {
+          const patch: Partial<QuestionRow> = { remote_event_seq: ev.seq };
+          if (row.local_status === 'queued') patch.local_status = 'open';
+          await ctx.store.updateQuestion(row.question_id, patch);
+          return false;
+        }
+        case 'decision.deleted': {
+          const entries = parseAnswers(row.answers_json).map((e) => ({ ...e, deliver: false }));
+          await ctx.store.updateQuestion(row.question_id, {
+            local_status: 'cancelled',
+            remote_event_seq: ev.seq,
+            answers_json: serializeAnswers(entries),
+          });
+          return false;
+        }
+        case 'decision.expired':
+          return this.applyExpired(ev, row);
+        default:
+          return false;
+      }
+    });
   }
 
   private async applyExpired(ev: LedgerEvent, row: QuestionRow): Promise<boolean> {
@@ -168,11 +212,12 @@ export class Inbox {
       deliver: true,
       delivered: false,
     });
-    await this.save(
-      row,
-      { local_status: 'expired', remote_event_seq: ev.seq, delivery_status: 'desktop-received' },
-      entries,
-    );
+    await this.ctx.store.updateQuestion(row.question_id, {
+      local_status: 'expired',
+      remote_event_seq: ev.seq,
+      delivery_status: 'desktop-received',
+      answers_json: serializeAnswers(entries),
+    });
     await this.ctx.audit.log({
       event: 'question.expired',
       question_id: row.question_id,
@@ -181,32 +226,84 @@ export class Inbox {
     return true;
   }
 
-  private async applyAnswer(ev: LedgerEvent, row: QuestionRow): Promise<boolean> {
+  /** Runs under ctx.lock with a fresh read of the row, so history appends never clobber delivery bookkeeping. */
+  private async applyVerified(
+    ev: LedgerEvent,
+    v: Extract<VerifiedAnswer, { ok: true }>,
+  ): Promise<boolean> {
     const { ctx } = this;
-    const v = await this.verifier.verifyAction(ev);
-    if (!v.ok) {
-      await ctx.audit.log({
-        event: 'event.rejected',
-        question_id: row.question_id,
-        requirement: row.requirement,
-        result: v.reason,
-      });
-      return false;
-    }
+    const row = await ctx.store.getQuestion(v.record.question_id);
+    if (!row || row.history_only) return false;
     const entries = parseAnswers(row.answers_json);
-    if (entries.some((e) => e.entry_id === v.record.action_id)) return false; // duplicate delivery of the same event
-    // Defence in depth: the relay should refuse this, but a proxy must never satisfy human-required.
+    if (entries.some((e) => e.entry_id === v.record.action_id)) return false; // already applied
+
+    // Defence in depth: a proxy must never satisfy human-required, whatever the relay says.
     if (v.provenance === 'proxy' && row.requirement === 'human-required') {
-      await ctx.audit.log({
-        event: 'event.rejected',
-        question_id: row.question_id,
-        requirement: row.requirement,
-        provenance: 'proxy',
-        result: 'proxy-on-human-required',
-      });
-      return false;
+      return this.reject(row, 'proxy-on-human-required', { provenance: 'proxy' });
     }
-    const newRevision = v.record.expected_revision + 1;
+    const status = protocolStatus(row.local_status);
+    if (status === null) return this.reject(row, 'question-not-live');
+
+    // The ONLY source of truth for what an action does: the shared transition table over locally verified
+    // state. Stale/losing signed actions fail the revision check here instead of being re-delivered.
+    let t;
+    try {
+      t = applyAction(
+        {
+          status,
+          revision: row.question_revision,
+          requirement: row.requirement,
+          proxyAbstained: false,
+        },
+        v.action,
+        v.signerRole,
+        v.record.expected_revision,
+      );
+    } catch (e) {
+      return this.reject(row, e instanceof ApiError ? `transition:${e.code}` : 'transition:error');
+    }
+    const declared = EventData.action.safeParse(ev.data).data;
+    if (!declared || declared.revision !== t.revision || declared.status !== t.status) {
+      return this.reject(row, 'relay-metadata-mismatch');
+    }
+    if (t.noop) return false;
+
+    const patch: Partial<QuestionRow> = {
+      local_status: t.status as QuestionRow['local_status'],
+      question_revision: t.revision,
+      remote_event_seq: ev.seq,
+    };
+
+    switch (v.action) {
+      case 'cancel': {
+        const dropped = entries.map((e) => (e.delivered ? e : { ...e, deliver: false }));
+        await ctx.store.updateQuestion(row.question_id, {
+          ...patch,
+          answers_json: serializeAnswers(dropped),
+        });
+        await ctx.audit.log({
+          event: 'question.cancelled',
+          question_id: row.question_id,
+          result: 'relay',
+        });
+        return false;
+      }
+      case 'reopen':
+        await ctx.store.updateQuestion(row.question_id, patch);
+        return false;
+      case 'proxy-abstain':
+        await ctx.store.updateQuestion(row.question_id, { remote_event_seq: ev.seq });
+        await ctx.audit.log({
+          event: 'proxy.abstained',
+          question_id: row.question_id,
+          requirement: row.requirement,
+        });
+        return false;
+      default:
+        break;
+    }
+
+    // answer / override / proxy-answer / confirm-proxy
     const opts = this.options(row);
     const chosen = v.content?.selected_option_ids ?? [];
     const gate = ctx.policy.get(row.origin.workflow_gate_id);
@@ -216,60 +313,38 @@ export class Inbox {
         (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)),
     );
     if (bad !== undefined) {
-      await ctx.audit.log({
-        event: 'event.rejected',
-        question_id: row.question_id,
-        requirement: row.requirement,
-        result: 'unknown-option',
-      });
       await ctx.store.updateQuestion(row.question_id, {
         delivery_status: 'needs-attention',
         error_code: 'unknown_option',
       });
-      return false;
+      return this.reject(row, 'unknown-option');
     }
+    // Null provenance is never human: answer-like actions always carry an explicit human/proxy provenance.
+    if (v.provenance === null) return this.reject(row, 'missing-provenance');
+    const labelOf = (id: string) => opts.find((o) => o.id === id)?.label;
     const entry: AnswerEntry = {
       entry_id: v.record.action_id,
       kind: 'answer',
-      action:
-        v.action === 'answer' ||
-        v.action === 'override' ||
-        v.action === 'proxy-answer' ||
-        v.action === 'confirm-proxy'
-          ? v.action
-          : 'answer',
-      revision: newRevision,
-      source: v.provenance ?? 'human',
-      choices: chosen.map((id) => ({
-        id,
-        ...(opts.find((o) => o.id === id)?.label
-          ? { label: opts.find((o) => o.id === id)!.label }
-          : {}),
-      })),
+      action: v.action as AnswerEntry['action'],
+      revision: t.revision,
+      source: v.provenance,
+      choices: chosen.map((id) => ({ id, ...(labelOf(id) ? { label: labelOf(id)! } : {}) })),
       text: v.content?.text ?? '',
       reviewed_attachment_digests: v.content?.reviewed_attachment_digests ?? [],
       correction: v.action === 'override',
       ...(v.content?.confidence !== undefined ? { confidence: v.content.confidence } : {}),
       ...(v.content?.model_id ? { model_id: v.content.model_id } : {}),
       created_at: v.record.created_at,
-      // Confirmations are logged only; everything else must reach the agent.
-      deliver: v.action !== 'confirm-proxy',
+      deliver: t.deliverable,
       delivered: false,
     };
     entries.push(entry);
-    const status = (EventData.action.safeParse(ev.data).data?.status ??
-      row.local_status) as QuestionRow['local_status'];
-    await this.save(
-      row,
-      {
-        local_status: status,
-        question_revision: Math.max(row.question_revision, newRevision),
-        remote_event_seq: ev.seq,
-        delivery_status: entry.deliver ? 'desktop-received' : row.delivery_status,
-        error_code: null,
-      },
-      entries,
-    );
+    await ctx.store.updateQuestion(row.question_id, {
+      ...patch,
+      delivery_status: entry.deliver ? 'desktop-received' : row.delivery_status,
+      error_code: null,
+      answers_json: serializeAnswers(entries),
+    });
     await ctx.audit.log({
       event: entry.deliver ? 'answer.received' : 'answer.confirmed',
       question_id: row.question_id,

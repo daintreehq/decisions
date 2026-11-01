@@ -26,6 +26,7 @@ import {
   type SerializedDeviceKeys,
 } from '@daintree/decisions-crypto';
 import { RelayError } from './errors.js';
+import { RelayClient } from './relay.js';
 
 export interface RelayConfig {
   relayOrigin: string;
@@ -37,6 +38,8 @@ export interface RelayConfig {
 /** Everything secret the owner desktop holds. Daintree stores this with Electron safeStorage. */
 export interface StoredIdentity {
   v: 1;
+  /** `false` while a setup is staged but not yet confirmed by the relay. Absent once claimed. */
+  claimed?: boolean;
   config: RelayConfig;
   keys: SerializedDeviceKeys;
   /** All epoch keys ever issued, raw base64url; old epochs stay so history remains readable. */
@@ -153,6 +156,11 @@ export async function loadIdentity(store: KeyStore): Promise<Identity> {
     throw new Error(
       'not set up: run `decisions setup` (or claim the relay from Daintree settings)',
     );
+  if (s.claimed === false) {
+    throw new Error(
+      'setup was interrupted before the relay confirmed it: run `decisions setup` again',
+    );
+  }
   return importIdentity(s);
 }
 
@@ -200,56 +208,107 @@ export interface ClaimOptions {
   fetch?: typeof fetch;
 }
 
-/** First-time setup: generate owner keys + epoch 1, self-signed cert, claim the relay once. */
+/**
+ * First-time setup: generate owner keys + epoch 1, self-signed cert, claim the relay once.
+ *
+ * The complete identity is staged DURABLY (marked `claimed: false`) BEFORE the claim request, and reused on
+ * retry. A crash or dropped connection after the relay accepted the claim therefore never strands the owner
+ * keys: the next run reuses the same keys and finishes the claim instead of generating new ones.
+ */
 export async function claimRelay(
   opts: ClaimOptions,
 ): Promise<{ identity: Identity; claim: ClaimResponse }> {
   const f = opts.fetch ?? fetch;
   const origin = normalizeOrigin(opts.origin);
-  if ((await opts.store.load()) !== null) {
+  const existing = await opts.store.load();
+  if (existing && existing.claimed !== false) {
     throw new Error('an identity already exists in this key store; refusing to overwrite it');
   }
-  const keys = await generateDeviceKeys(true);
-  const installationId = newId();
-  const deviceId = newId();
-  const label = (opts.label ?? 'Daintree').slice(0, 60);
-  const signingPub = await exportPublicKey(keys.signing.publicKey);
-  const exchangePub = await exportPublicKey(keys.exchange.publicKey);
+  let stored: StoredIdentity;
+  if (existing) {
+    // Resume an interrupted setup, but only for the same relay.
+    if (existing.config.relayOrigin !== origin) {
+      throw new Error(
+        `an unfinished setup for ${existing.config.relayOrigin} exists; finish it or remove it first`,
+      );
+    }
+    stored = existing;
+  } else {
+    const keys = await generateDeviceKeys(true);
+    stored = {
+      v: 1,
+      claimed: false,
+      config: {
+        relayOrigin: origin,
+        installationId: newId(),
+        deviceId: newId(),
+        label: (opts.label ?? 'Daintree').slice(0, 60),
+      },
+      keys: await serializeDeviceKeys(keys),
+      epochs: [{ epoch: 1, raw: bytesToBase64Url(generateEpochKeyBytes()) }],
+      currentEpoch: 1,
+    };
+    await opts.store.save(stored); // durable BEFORE the relay can possibly learn about these keys
+  }
+  const identity = await importIdentity(stored);
   const cert = await issueDeviceCert({
-    issuerDeviceId: deviceId,
-    issuerSigningKey: keys.signing.privateKey,
-    installationId,
-    deviceId,
+    issuerDeviceId: identity.config.deviceId,
+    issuerSigningKey: identity.keys.signing.privateKey,
+    installationId: identity.config.installationId,
+    deviceId: identity.config.deviceId,
     role: 'owner-desktop',
-    label,
-    signingPub,
-    exchangePub,
+    label: identity.config.label,
+    signingPub: identity.signingPub,
+    exchangePub: identity.exchangePub,
   });
+  const finish = async (claim: ClaimResponse) => {
+    const done: StoredIdentity = { ...stored, vapidPublicKey: claim.vapid_public_key };
+    delete done.claimed;
+    await opts.store.save(done);
+    return { identity: await importIdentity(done), claim };
+  };
   const res = await f(`${origin}/api/v1/setup/claim`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       protocol_version: PROTOCOL_VERSION,
       claim_secret: opts.claimSecret,
-      installation_id: installationId,
+      installation_id: identity.config.installationId,
       cert,
     }),
+  }).catch((e: Error) => {
+    // Network trouble: the relay may or may not have accepted it. The staged identity stays for the retry.
+    throw new RelayError('network_error', e.message || 'network error', 0);
   });
   const text = await res.text();
-  if (!res.ok) throw RelayError.fromBody(res.status, text);
-  const claim = JSON.parse(text) as ClaimResponse;
-  const raw = generateEpochKeyBytes();
-  const stored: StoredIdentity = {
-    v: 1,
-    config: { relayOrigin: origin, installationId, deviceId, label },
-    keys: await serializeDeviceKeys(keys),
-    epochs: [{ epoch: 1, raw: bytesToBase64Url(raw) }],
-    currentEpoch: 1,
-    vapidPublicKey: claim.vapid_public_key,
-  };
-  // The relay is claimed at this point; persist immediately so the keys cannot be lost.
-  await opts.store.save(stored);
-  return { identity: await importIdentity(stored), claim };
+  if (res.ok) return finish(JSON.parse(text) as ClaimResponse);
+  const err = RelayError.fromBody(res.status, text);
+  if (err.code === 'already_claimed') {
+    // Was it OUR earlier attempt that succeeded (response lost)? Prove it with a signed request.
+    const client = new RelayClient({ identity, fetch: f, maxRetries: 0 });
+    try {
+      await client.devices();
+    } catch (probe) {
+      if (probe instanceof RelayError && probe.code !== 'network_error' && !probe.retryable) {
+        // Definitely claimed by someone else: the staged keys are useless.
+        await opts.store.clear();
+        throw err;
+      }
+      throw probe; // unreachable right now: keep the staged identity and try again later
+    }
+    let vapid = '';
+    try {
+      vapid = (await client.pushConfig()).vapid_public_key;
+    } catch {
+      /* optional */
+    }
+    return finish({
+      installation_id: identity.config.installationId,
+      vapid_public_key: vapid,
+      server_time: new Date().toISOString(),
+    });
+  }
+  throw err;
 }
 
 /* ---------- recovery kit ---------- */

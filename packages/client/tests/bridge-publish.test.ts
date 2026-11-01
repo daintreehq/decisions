@@ -12,7 +12,7 @@ describe('requirement enforcement', () => {
     expect(r.requirement).toBe('human-required');
     expect((await store.getQuestion(r.questionId))!.requirement).toBe('human-required');
   });
-  it('a trusted gate sets the floor; callers may only strengthen', async () => {
+  it('a trusted origin gate sets the floor; callers may only strengthen', async () => {
     const policy = new PolicyRegistry();
     policy.register({
       gateId: 'design-review',
@@ -22,26 +22,48 @@ describe('requirement enforcement', () => {
     policy.register({ gateId: 'naming', minRequirement: 'proxy-first', policyVersion: 1 });
     const { bridge } = await setupBridge({ policy });
     const a = await bridge.registerQuestion({
-      origin: origin(),
-      input: {
-        question: 'a',
-        workflow_gate_id: 'design-review',
-        requested_requirement: 'proxy-first',
-      },
+      origin: origin({ workflow_gate_id: 'design-review' }),
+      input: { question: 'a', requested_requirement: 'proxy-first' },
     });
     const b = await bridge.registerQuestion({
-      origin: origin(),
-      input: { question: 'b', workflow_gate_id: 'naming', requested_requirement: 'proxy-ok' },
+      origin: origin({ workflow_gate_id: 'naming' }),
+      input: { question: 'b', requested_requirement: 'proxy-ok' },
     });
     const c = await bridge.registerQuestion({
-      origin: origin(),
-      input: { question: 'c', workflow_gate_id: 'naming', requested_requirement: 'human-required' },
+      origin: origin({ workflow_gate_id: 'naming' }),
+      input: { question: 'c', requested_requirement: 'human-required' },
     });
     expect([a.requirement, b.requirement, c.requirement]).toEqual([
       'human-required',
       'proxy-first',
       'human-required',
     ]);
+  });
+  it('an agent cannot swap the origin gate for a weaker registered one', async () => {
+    const policy = new PolicyRegistry();
+    policy.register({
+      gateId: 'design-review',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+    });
+    policy.register({ gateId: 'chatty', minRequirement: 'proxy-ok', policyVersion: 1 });
+    const { bridge, store } = await setupBridge({ policy });
+    const r = await bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'design-review' }),
+      input: {
+        question: 'approve the design?',
+        workflow_gate_id: 'chatty',
+        requested_requirement: 'proxy-ok',
+      },
+    });
+    expect(r.requirement).toBe('human-required');
+    expect((await store.getQuestion(r.questionId))!.origin.workflow_gate_id).toBe('design-review');
+    // with no origin gate, naming a lax registered gate does not relax the default either
+    const r2 = await bridge.registerQuestion({
+      origin: origin({ pane_id: 'pane-2' }),
+      input: { question: 'q', workflow_gate_id: 'chatty', requested_requirement: 'proxy-ok' },
+    });
+    expect(r2.requirement).toBe('human-required');
   });
   it('an unknown gate id grants nothing; allowlist enables proxy levels', async () => {
     const closed = await setupBridge();
@@ -74,8 +96,8 @@ describe('requirement enforcement', () => {
     const { bridge } = await setupBridge({ policy });
     await expect(
       bridge.registerQuestion({
-        origin: origin(),
-        input: { question: 'q', workflow_gate_id: 'g', options: [{ id: 'yolo', label: 'Yolo' }] },
+        origin: origin({ workflow_gate_id: 'g' }),
+        input: { question: 'q', options: [{ id: 'yolo', label: 'Yolo' }] },
       }),
     ).rejects.toThrow(/not permitted/);
   });
@@ -148,8 +170,8 @@ describe('validation', () => {
     const { bridge, store } = await setupBridge({ policy });
     const far = new Date(Date.now() + 90 * 86_400_000).toISOString();
     const r = await bridge.registerQuestion({
-      origin: origin(),
-      input: { question: 'q', workflow_gate_id: 'g', expires_at: far },
+      origin: origin({ workflow_gate_id: 'g' }),
+      input: { question: 'q', expires_at: far },
     });
     const exp = Date.parse((await store.getQuestion(r.questionId))!.expires_at!);
     expect(exp - Date.now()).toBeLessThanOrEqual(3_600_000 + 1000);

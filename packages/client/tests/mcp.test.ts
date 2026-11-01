@@ -203,6 +203,40 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
   });
 });
 
+describe('HTTP MCP: a relaunched terminal is a different asker', () => {
+  it('a fresh credential for the same pane id (new generation) cannot read or cancel the old question', async () => {
+    const { mcp, bridge } = await boot();
+    const ask = await call(mcp, 'ask_human', { question: 'old session question' });
+    const id = ask.structuredContent.question_id;
+    // simulate Daintree relaunching the terminal: same pane id, new generation, new bearer
+    const auth = new TokenMapAuthenticator();
+    auth.register(
+      'relaunched-token-CCCCCCCCCCCCCCCC',
+      origin({ terminal_generation: 2, agent_session_id: 'sess-2' }),
+    );
+    const second = await startDecisionsMcpServer({ bridge, authenticator: auth });
+    try {
+      const r = await call(
+        second,
+        'get_decision',
+        { question_id: id },
+        'relaunched-token-CCCCCCCCCCCCCCCC',
+      );
+      expect(r.isError).toBe(true);
+      expect(r.content[0].text).toContain('not_found');
+      const c = await call(
+        second,
+        'cancel_question',
+        { question_id: id },
+        'relaunched-token-CCCCCCCCCCCCCCCC',
+      );
+      expect(c.isError).toBe(true);
+    } finally {
+      await second.close();
+    }
+  });
+});
+
 describe('HTTP MCP: security', () => {
   it('requires the pane bearer; never echoes it', async () => {
     const { mcp } = await boot();

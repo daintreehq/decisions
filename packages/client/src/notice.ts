@@ -12,6 +12,19 @@ export const PREFACE =
 
 export const MAX_COMMENT_CHARS = 4000;
 export const MAX_NOTICE_BYTES = 8000;
+/** Upper bound for ONE block's UTF-8 size; leaves room for the preface and neighbours in a batched chunk. */
+export const MAX_BLOCK_BYTES = 6000;
+
+const enc = new TextEncoder();
+const byteLen = (s: string): number => enc.encode(s).length;
+const REPLACEMENT = String.fromCharCode(0xfffd);
+
+/** Cut to at most `max` UTF-8 bytes without splitting a code point. */
+function truncateBytes(s: string, max: number): string {
+  if (max <= 0) return '';
+  const cut = new TextDecoder('utf-8').decode(enc.encode(s).subarray(0, max));
+  return cut.endsWith(REPLACEMENT) ? cut.slice(0, -1) : cut;
+}
 
 const CSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const OSC = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g;
@@ -60,47 +73,63 @@ export interface AnswerNoticeInput {
 }
 
 export function formatAnswerNotice(n: AnswerNoticeInput): string {
-  const lines: string[] = [BLOCK_START];
-  lines.push(`question_id: ${oneLine(n.questionId, 80)}${n.alias ? ` (q-${n.alias})` : ''}`);
-  lines.push(`revision: ${Math.max(0, Math.trunc(n.revision))}`);
-  if (n.injectionId) lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
-  if (n.kind === 'expired') {
-    lines.push('source: system');
-    lines.push('status: expired');
-    lines.push('authorised: no');
-    lines.push(
-      'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
-    );
-  } else {
-    lines.push(`source: ${n.source}`);
-    if (n.source === 'proxy') {
+  const comment = n.kind === 'answer' && n.comment ? sanitizeText(n.comment) : '';
+  const build = (c: string): string => {
+    const lines: string[] = [BLOCK_START];
+    lines.push(`question_id: ${oneLine(n.questionId, 80)}${n.alias ? ` (q-${n.alias})` : ''}`);
+    lines.push(`revision: ${Math.max(0, Math.trunc(n.revision))}`);
+    if (n.injectionId) lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
+    if (n.kind === 'expired') {
+      lines.push('source: system');
+      lines.push('status: expired');
+      lines.push('authorised: no');
       lines.push(
-        'note: This is a proxy answer from the decision model, not the human. The human may still confirm or overrule it.',
+        'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
       );
-      if (n.modelId) lines.push(`model: ${oneLine(n.modelId, 80)}`);
-      if (typeof n.confidence === 'number')
-        lines.push(`confidence: ${Math.round(n.confidence * 100) / 100}`);
+    } else {
+      lines.push(`source: ${n.source}`);
+      if (n.source === 'proxy') {
+        lines.push(
+          'note: This is a proxy answer from the decision model, not the human. The human may still confirm or overrule it.',
+        );
+        if (n.modelId) lines.push(`model: ${oneLine(n.modelId, 80)}`);
+        if (typeof n.confidence === 'number')
+          lines.push(`confidence: ${Math.round(n.confidence * 100) / 100}`);
+      }
+      if (n.correction) {
+        lines.push(
+          'note: This CORRECTS an earlier answer. Reassess any work that depended on the previous answer.',
+        );
+      }
+      if (n.choices && n.choices.length > 0) {
+        lines.push(`choice: ${n.choices.map((x) => oneLine(x.id, 64)).join(', ')}`);
+        const labels = n.choices.filter((x) => x.label).map((x) => oneLine(x.label!, 120));
+        if (labels.length > 0) lines.push(`choice_label: ${labels.join(', ')}`);
+      }
+      if (c) {
+        const [first, ...rest] = c.split('\n');
+        lines.push(`comment: ${first}`);
+        for (const r of rest) lines.push(`  ${r}`);
+      }
     }
-    if (n.correction) {
-      lines.push(
-        'note: This CORRECTS an earlier answer. Reassess any work that depended on the previous answer.',
-      );
-    }
-    if (n.choices && n.choices.length > 0) {
-      lines.push(`choice: ${n.choices.map((c) => oneLine(c.id, 64)).join(', ')}`);
-      const labels = n.choices.filter((c) => c.label).map((c) => oneLine(c.label!, 120));
-      if (labels.length > 0) lines.push(`choice_label: ${labels.join(', ')}`);
-    }
-    const comment = n.comment ? sanitizeText(n.comment) : '';
-    if (comment) {
-      const [first, ...rest] = comment.split('\n');
-      lines.push(`comment: ${first}`);
-      for (const r of rest) lines.push(`  ${r}`);
-    }
+    lines.push(BLOCK_END);
+    return lines.join('\n');
+  };
+
+  // Enforce the UTF-8 byte budget on the whole block. Only the free-text comment is ever cut, never the
+  // metadata, the delimiters or the instruction lines.
+  let c = comment;
+  let out = build(c);
+  for (let i = 0; i < 12 && byteLen(out) > MAX_BLOCK_BYTES && c.length > 0; i++) {
+    const over = byteLen(out) - MAX_BLOCK_BYTES;
+    const keep = Math.max(0, byteLen(c) - over - byteLen(TRUNCATED) - 8);
+    c = keep > 0 ? truncateBytes(c, keep).trimEnd() + TRUNCATED : '';
+    out = build(c);
   }
-  lines.push(BLOCK_END);
-  return lines.join('\n');
+  return out;
 }
+
+const TRUNCATED = ' …[truncated]';
 
 /** Combine several blocks under one preface, splitting so no typed chunk exceeds the byte cap. */
 export function batchNotices(blocks: string[], maxBytes = MAX_NOTICE_BYTES): string[] {

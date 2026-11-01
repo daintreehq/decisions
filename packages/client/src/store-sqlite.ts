@@ -178,14 +178,13 @@ function fromRow(r: Row): QuestionRow {
 }
 
 export class SqliteLocalStore implements LocalStore {
+  readonly durable = true;
   private db: DatabaseSync;
   private stmts = new Map<string, StatementSync>();
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec(
-      'PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;',
-    );
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
     this.migrate();
   }
 
@@ -278,8 +277,12 @@ export class SqliteLocalStore implements LocalStore {
     const r = this.st('SELECT * FROM questions WHERE question_id = ?').get(id) as Row | undefined;
     return r ? fromRow(r) : null;
   }
-  async updateQuestion(id: string, patch: Partial<QuestionRow>) {
-    const cur = await this.getQuestion(id);
+  private getQuestionSync(id: string): QuestionRow | null {
+    const r = this.st('SELECT * FROM questions WHERE question_id = ?').get(id) as Row | undefined;
+    return r ? fromRow(r) : null;
+  }
+  private updateQuestionSync(id: string, patch: Partial<QuestionRow>): QuestionRow | null {
+    const cur = this.getQuestionSync(id);
     if (!cur) return null;
     const next: QuestionRow = {
       ...cur,
@@ -292,6 +295,10 @@ export class SqliteLocalStore implements LocalStore {
       `UPDATE questions SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE question_id = ?`,
     ).run(...(cols.map((c) => r[c]) as never[]), id);
     return next;
+  }
+  // Fully synchronous bodies: no await between the read and the write, so concurrent callers cannot interleave.
+  async updateQuestion(id: string, patch: Partial<QuestionRow>) {
+    return this.updateQuestionSync(id, patch);
   }
   async listQuestions(filter: { status?: QuestionRow['local_status'][]; paneId?: string } = {}) {
     const rows = this.st('SELECT * FROM questions ORDER BY alias ASC').all() as Row[];
@@ -431,6 +438,42 @@ export class SqliteLocalStore implements LocalStore {
     return rows.map((r) => this.intentFrom(r));
   }
 
+  async hasUncertainIntent(questionId: string) {
+    const r = this.st(
+      `SELECT 1 AS x FROM injection_intents WHERE question_id = ? AND state = 'uncertain' LIMIT 1`,
+    ).get(questionId);
+    return r !== undefined;
+  }
+  async settleIntent(
+    intentId: string,
+    intentPatch: Partial<InjectionIntent>,
+    questionId: string,
+    questionPatch: Partial<QuestionRow>,
+  ) {
+    this.tx(() => {
+      const row = this.st('SELECT * FROM injection_intents WHERE injection_id = ?').get(
+        intentId,
+      ) as Row | undefined;
+      if (row) {
+        const next = { ...this.intentFrom(row), ...intentPatch };
+        this.st(
+          `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,host_id,pane_id,terminal_generation,state,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+        ).run(
+          next.injection_id,
+          next.question_id,
+          next.answer_revision,
+          next.host_id,
+          next.pane_id,
+          next.terminal_generation,
+          next.state,
+          next.created_at,
+          next.updated_at,
+        );
+      }
+      this.updateQuestionSync(questionId, questionPatch);
+    });
+  }
   async appendAudit(e: AuditEntry) {
     this.st('INSERT INTO audit(at,json) VALUES(?,?)').run(e.at, JSON.stringify(e));
   }

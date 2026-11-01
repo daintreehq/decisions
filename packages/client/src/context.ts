@@ -1,8 +1,11 @@
+import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { sha256Hex } from '@daintree/decisions-crypto';
 import type { AuditLog } from './audit.js';
 import type { Identity } from './identity.js';
 import type { PolicyRegistry } from './policy.js';
 import type { RelayClient } from './relay.js';
+import type { Mutex } from './mutex.js';
 import type { LocalStore } from './store.js';
 import type { QuestionOrigin } from './types.js';
 
@@ -15,6 +18,22 @@ export async function paneRef(hostId: string, paneId: string): Promise<string> {
 }
 export async function gateHash(gateId: string): Promise<string> {
   return sha256Hex(`decisions/gate/${gateId}`);
+}
+
+/** Everything that identifies WHERE a question came from. Used to scope ownership and correlation ids. */
+export async function originScope(o: QuestionOrigin): Promise<string> {
+  return (
+    await sha256Hex(
+      JSON.stringify([
+        'decisions/scope',
+        o.host_id,
+        o.pane_id,
+        o.terminal_generation,
+        o.agent_session_id,
+        o.worktree_id,
+      ]),
+    )
+  ).slice(0, 32);
 }
 
 export interface AttachmentSpool {
@@ -36,6 +55,43 @@ export class MemorySpool implements AttachmentSpool {
   }
 }
 
+/**
+ * Durable spool for encrypted attachment ciphertext awaiting upload: files (0600) in a private directory (0700),
+ * written atomically and fsynced. Required whenever the local store survives restarts.
+ */
+export class FileSpool implements AttachmentSpool {
+  constructor(private readonly dir: string) {}
+  private path(id: string): string {
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error('invalid spool id');
+    return join(this.dir, id);
+  }
+  async put(id: string, bytes: Uint8Array): Promise<void> {
+    const target = this.path(id);
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    await chmod(this.dir, 0o700);
+    const tmp = `${target}.tmp`;
+    const fh = await open(tmp, 'w', 0o600);
+    try {
+      await fh.writeFile(bytes);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, target);
+  }
+  async get(id: string): Promise<Uint8Array | null> {
+    try {
+      return new Uint8Array(await readFile(this.path(id)));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw e;
+    }
+  }
+  async delete(id: string): Promise<void> {
+    await rm(this.path(id), { force: true });
+  }
+}
+
 /** Scope-checked attachment source supplied by the host; the agent only ever names an id, never a path. */
 export interface AttachmentResolver {
   resolve(origin: QuestionOrigin, localResourceId: string): Promise<{ bytes: Uint8Array } | null>;
@@ -50,4 +106,8 @@ export interface BridgeContext {
   spool: AttachmentSpool;
   resolver: AttachmentResolver | undefined;
   now: () => number;
+  /** Serialises read-modify-write sections that touch a question's answer history. */
+  lock: Mutex;
+  /** Reload identity + epoch material from the key store (another process may have rotated). */
+  refreshIdentity?: () => Promise<void>;
 }

@@ -10,6 +10,7 @@ import type {
 const clone = <T>(v: T): T => structuredClone(v);
 
 export class MemoryLocalStore implements LocalStore {
+  readonly durable = false;
   private meta = new Map<string, string>();
   private questions = new Map<string, QuestionRow>();
   private outbox = new Map<string, OutboxItem>();
@@ -125,6 +126,22 @@ export class MemoryLocalStore implements LocalStore {
     return [...this.intents.values()]
       .filter((i) => i.state === 'intent' || i.state === 'typed')
       .map(clone);
+  }
+  async hasUncertainIntent(questionId: string) {
+    return [...this.intents.values()].some(
+      (i) => i.question_id === questionId && i.state === 'uncertain',
+    );
+  }
+  async settleIntent(
+    intentId: string,
+    intentPatch: Partial<InjectionIntent>,
+    questionId: string,
+    questionPatch: Partial<QuestionRow>,
+  ) {
+    const i = this.intents.get(intentId);
+    const q = this.questions.get(questionId);
+    if (i) Object.assign(i, clone(intentPatch));
+    if (q) Object.assign(q, clone(questionPatch));
   }
   async appendAudit(e: AuditEntry) {
     this.audit.push(clone(e));

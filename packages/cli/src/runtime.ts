@@ -25,6 +25,8 @@ export interface Ctx {
   prompt(question: string, opts?: { secret?: boolean }): Promise<string>;
   env: Record<string, string | undefined>;
   now(): number;
+  /** Read all of standard input (for secrets that must not appear in argv). */
+  readStdin(): Promise<string>;
   keyStore?: KeyStore;
 }
 
@@ -53,6 +55,11 @@ export function makeCtx(g: GlobalOptions): Ctx {
     prompt: promptLine,
     env: process.env,
     now: Date.now,
+    readStdin: async () => {
+      const chunks: Buffer[] = [];
+      for await (const c of process.stdin) chunks.push(c as Buffer);
+      return Buffer.concat(chunks).toString('utf8');
+    },
   };
 }
 

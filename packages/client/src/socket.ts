@@ -25,7 +25,8 @@ export type SocketState = 'idle' | 'connecting' | 'syncing' | 'live' | 'backoff'
 export interface SocketHandlers {
   /** Called for every ledger event, in seq order. Must persist before resolving; the socket never acks itself. */
   onEvent(ev: LedgerEvent): Promise<void> | void;
-  onCaughtUp?(highWater: number): Promise<void> | void;
+  /** `hasMore` means the server cut the replay short; the socket already asked for the next segment. */
+  onCaughtUp?(highWater: number, hasMore: boolean): Promise<void> | void;
   onState?(state: SocketState, detail?: string): void;
   onPairing?(pairingId: string): void;
   /** This device was revoked (4401). The socket stops and never reconnects. */
@@ -237,13 +238,15 @@ export class RelaySocket {
         await this.o.handlers.onEvent(f.event);
         return;
       case 'caught_up':
+        // The handler persists the segment and moves the cursor to high_water BEFORE we ask for more, so a
+        // hole in the ledger can never make us replay the same segment again.
+        await this.o.handlers.onCaughtUp?.(f.high_water, f.has_more);
         if (f.has_more) {
-          // Replay was cut short by the relay's budget: continue from the stored cursor.
-          this.send({ t: 'sync', after: await this.o.getCursor() });
-          return;
+          this.setState('syncing');
+          this.send({ t: 'sync', after: f.high_water });
+        } else {
+          this.setState('live');
         }
-        this.setState('live');
-        await this.o.handlers.onCaughtUp?.(f.high_water);
         return;
       case 'pairing':
         this.o.handlers.onPairing?.(f.pairing_id);
@@ -277,6 +280,11 @@ export class RelaySocket {
   /** Text `ping` is auto-answered by the runtime without waking the Durable Object. */
   sendPing(): void {
     if (this.ws && this.ws.readyState === OPEN) this.ws.send('ping');
+  }
+
+  /** Ask the relay to replay every event after `after` (gap recovery). The reply ends with `caught_up`. */
+  syncFrom(after: number): void {
+    this.send({ t: 'sync', after });
   }
 
   /** Durable receipt of everything up to `seq` (not terminal delivery). */

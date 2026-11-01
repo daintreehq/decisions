@@ -147,7 +147,59 @@ describe.each(impls)('LocalStore contract: %s', (_name, make) => {
   });
 });
 
+describe.each(impls)('atomic intent settlement: %s', (_n, make) => {
+  const base = {
+    injection_id: 'i1',
+    question_id: 'q1',
+    answer_revision: 1,
+    host_id: 'h',
+    pane_id: 'p',
+    terminal_generation: 1,
+    created_at: 1,
+    updated_at: 1,
+  };
+  it('settleIntent updates the intent and the question together; hasUncertainIntent reflects it', async () => {
+    const s = make();
+    await s.commitNewQuestion(row('q1', 1, { local_status: 'open' }), item('o1', 'q1'));
+    await s.putIntent({ ...base, state: 'intent' });
+    expect(await s.hasUncertainIntent('q1')).toBe(false);
+    await s.settleIntent('i1', { state: 'uncertain', updated_at: 9 }, 'q1', {
+      delivery_status: 'delivery-uncertain',
+      error_code: 'x',
+    });
+    expect(await s.hasUncertainIntent('q1')).toBe(true);
+    expect((await s.getIntent('i1'))!.state).toBe('uncertain');
+    expect(await s.getQuestion('q1')).toMatchObject({
+      delivery_status: 'delivery-uncertain',
+      error_code: 'x',
+    });
+    expect(await s.hasUncertainIntent('other')).toBe(false);
+  });
+  it('concurrent partial updates do not clobber each other', async () => {
+    const s = make();
+    await s.commitNewQuestion(row('q1', 1), item('o1', 'q1'));
+    await Promise.all([
+      s.updateQuestion('q1', { local_status: 'open' }),
+      s.updateQuestion('q1', { delivery_status: 'desktop-received' }),
+      s.updateQuestion('q1', { error_code: 'e' }),
+    ]);
+    expect(await s.getQuestion('q1')).toMatchObject({
+      local_status: 'open',
+      delivery_status: 'desktop-received',
+      error_code: 'e',
+    });
+  });
+});
+
 describe('SqliteLocalStore specifics', () => {
+  it('is fully synchronous (FULL) so an injection intent is on disk before the terminal is touched', async () => {
+    const s = new SqliteLocalStore(join(dir, 'sync.db'));
+    expect(s.durable).toBe(true);
+    const db = (s as unknown as { db: DatabaseSync }).db;
+    expect((db.prepare('PRAGMA synchronous').get() as { synchronous: number }).synchronous).toBe(2);
+    await s.close();
+    expect(new MemoryLocalStore().durable).toBe(false);
+  });
   it('versions the schema, uses WAL and survives a reopen', async () => {
     const path = join(dir, 'persist.db');
     const a = new SqliteLocalStore(path);

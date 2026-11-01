@@ -46,9 +46,11 @@ export function buildProgram(): Command {
     .command('setup')
     .description("Claim your deployed relay and create this machine's keys (once).")
     .requiredOption('--url <origin>', 'the https URL of your deployment')
+    .option('--claim-secret-file <file>', 'read the CLAIM_SECRET from a file (recommended)')
+    .option('--claim-secret-stdin', 'read the CLAIM_SECRET from standard input')
     .option(
       '--claim-secret <secret>',
-      'the CLAIM_SECRET you set on the Worker (or $DECISIONS_CLAIM_SECRET)',
+      'the CLAIM_SECRET itself (visible in the process list and shell history: prefer the file, stdin or $DECISIONS_CLAIM_SECRET)',
     )
     .option('--label <name>', 'name for this machine', 'Daintree')
     .action((o) => run((c, g) => setup(c, g, o))());
@@ -93,10 +95,21 @@ export function buildProgram(): Command {
     )
     .option('--port <n>', 'port (default: a free one)', (v) => Number(v))
     .option(
-      '--token <token>',
-      'bearer token agents must present (default: generated and kept in ~/.decisions/mcp-token)',
+      '--token-env <VAR>',
+      'read the bearer token agents must present from this environment variable',
     )
-    .option('--token-file <file>', 'read/create the bearer token in this file')
+    .option(
+      '--token-file <file>',
+      'read/create the bearer token in this file (default: ~/.decisions/mcp-token, mode 0600)',
+    )
+    .option(
+      '--attachments-dir <dir>',
+      'let agents attach files from <dir>/<pane name>/ (default: none)',
+    )
+    .option(
+      '--show-token',
+      'print the literal bearer token once (otherwise only the token file is named)',
+    )
     .option('--sink <sink>', 'stdout | file:<path> | exec:<command>', 'stdout')
     .action((o) =>
       run((c, g) =>
@@ -104,8 +117,10 @@ export function buildProgram(): Command {
           sink: o.sink,
           mcp: {
             ...(o.port ? { port: o.port } : {}),
-            ...(o.token ? { token: o.token } : {}),
+            ...(o.tokenEnv ? { tokenEnv: o.tokenEnv } : {}),
             ...(o.tokenFile ? { tokenFile: o.tokenFile } : {}),
+            ...(o.attachmentsDir ? { attachmentsDir: o.attachmentsDir } : {}),
+            ...(o.showToken ? { showToken: true } : {}),
           },
         }),
       )(),

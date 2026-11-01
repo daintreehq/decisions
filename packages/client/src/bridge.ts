@@ -13,8 +13,9 @@ import { Inbox } from './inbox.js';
 import { PolicyRegistry } from './policy.js';
 import { Publisher, type RegisterResult } from './publisher.js';
 import { parseAnswers, type AnswerEntry } from './answers.js';
-import type { Identity } from './identity.js';
+import { loadIdentity, type Identity, type KeyStore } from './identity.js';
 import type { ProxyEngine, ProxyOutcome } from './proxy.js';
+import { Mutex } from './mutex.js';
 import { RelayClient } from './relay.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
@@ -23,6 +24,8 @@ import type { QuestionOrigin, QuestionRow } from './types.js';
 
 export interface BridgeOptions {
   identity: Identity;
+  /** Needed to pick up epoch keys rotated by another process while this one is running. */
+  keyStore?: KeyStore;
   store: LocalStore;
   sink: TerminalSink;
   policy?: PolicyRegistry;
@@ -63,9 +66,26 @@ export interface DecisionView {
   }[];
 }
 
+/**
+ * The COMPLETE trusted identity of the asking terminal. A relaunched terminal (new generation), a new agent
+ * session or a different worktree that happens to reuse a pane id is a different asker.
+ */
 export interface PaneIdentity {
   host_id: string;
   pane_id: string;
+  terminal_generation: number;
+  agent_session_id: string | null;
+  worktree_id: string;
+}
+
+function sameAsker(o: QuestionOrigin, p: PaneIdentity): boolean {
+  return (
+    o.host_id === p.host_id &&
+    o.pane_id === p.pane_id &&
+    o.terminal_generation === p.terminal_generation &&
+    o.agent_session_id === p.agent_session_id &&
+    o.worktree_id === p.worktree_id
+  );
 }
 
 type Listener = {
@@ -117,6 +137,13 @@ export class DecisionsBridge {
       spool: o.spool ?? new MemorySpool(),
       resolver: o.resolver,
       now: o.now ?? Date.now,
+      lock: new Mutex(),
+      refreshIdentity: async () => {
+        if (!o.keyStore) return;
+        const id = await loadIdentity(o.keyStore);
+        this.ctx.identity = id;
+        this.ctx.client.identity = id;
+      },
     };
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
@@ -132,7 +159,7 @@ export class DecisionsBridge {
       ...(o.webSocket ? { webSocket: o.webSocket } : {}),
       handlers: {
         onEvent: (ev) => this.onSocketEvent(ev),
-        onCaughtUp: () => this.pump(),
+        onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => this.listeners.socket.forEach((l) => l(s, d)),
         onRevoked: () => this.markRevoked(),
         onError: (e) => this.emitError(e),
@@ -220,20 +247,13 @@ export class DecisionsBridge {
     const rows = await this.ctx.store.listQuestions({
       status: ['queued', 'open', 'proxy-answered'],
     });
-    return rows
-      .filter(
-        (r) => !pane || (r.origin.host_id === pane.host_id && r.origin.pane_id === pane.pane_id),
-      )
-      .map((r) => this.view(r));
+    return rows.filter((r) => !pane || sameAsker(r.origin, pane)).map((r) => this.view(r));
   }
 
   /** Only the owning pane may see or cancel a question; others get the same error as an unknown id. */
   private async owned(questionId: string, pane?: PaneIdentity): Promise<QuestionRow> {
     const row = await this.ctx.store.getQuestion(questionId);
-    if (
-      !row ||
-      (pane && (row.origin.host_id !== pane.host_id || row.origin.pane_id !== pane.pane_id))
-    ) {
+    if (!row || (pane && !sameAsker(row.origin, pane))) {
       throw new BridgeError('not_found', 'unknown question');
     }
     return row;
@@ -285,6 +305,7 @@ export class DecisionsBridge {
         if (flushed.created.length > 0) await this.publisher.flush();
         await this.inbox.processPending();
         await this.deliverNow();
+        if (await this.inbox.hasGap()) await this.recoverGap();
       } finally {
         this.pumping = null;
       }
@@ -321,21 +342,61 @@ export class DecisionsBridge {
       /* socket closed; the next sync re-sends from the stored cursor */
     }
     if (await this.inbox.processPending()) await this.deliverNow();
+    if (await this.inbox.hasGap()) await this.recoverGap();
   }
 
-  /** HTTP catch-up (no socket): page through events after the stored cursor. */
-  async catchUp(): Promise<number> {
-    let cursor = await this.ctx.store.getCursor();
-    for (;;) {
-      const page = await this.ctx.client.events(cursor, LIMITS.eventPageSize);
-      for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
-      cursor = await this.ctx.store.advanceCursor();
-      if (!page.has_more) {
-        await this.ctx.store.forceCursor(page.next_after);
-        cursor = await this.ctx.store.getCursor();
-        break;
-      }
+  /** A replay segment finished: everything the relay holds up to `highWater` is now stored. */
+  private async onCaughtUp(highWater: number, hasMore: boolean): Promise<void> {
+    // Holes left by tombstoned (deleted) questions are legitimate; the relay's replay is authoritative.
+    await this.ctx.store.forceCursor(highWater);
+    const cursor = await this.ctx.store.getCursor();
+    try {
+      this.socket.ack(cursor);
+    } catch {
+      /* closed */
     }
+    if (!hasMore) await this.pump();
+    else if (await this.inbox.processPending()) await this.deliverNow();
+  }
+
+  private lastGap = { cursor: -1, at: 0 };
+
+  /**
+   * Events exist beyond the confirmed frontier: ask the relay for an authoritative replay of the hole
+   * instead of acting on events that arrived out of order. Throttled so a persistent hole cannot loop.
+   */
+  async recoverGap(): Promise<void> {
+    const cursor = await this.ctx.store.getCursor();
+    if (cursor === this.lastGap.cursor && this.ctx.now() - this.lastGap.at < 5000) return;
+    this.lastGap = { cursor, at: this.ctx.now() };
+    try {
+      if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing')
+        this.socket.syncFrom(cursor);
+      else await this.catchUp();
+    } catch (e) {
+      this.emitError(e as Error);
+    }
+  }
+
+  /**
+   * HTTP catch-up (no socket): page through events after the stored cursor. After each fully persisted page
+   * the cursor moves to `next_after`, which also steps over legitimate tombstone holes.
+   */
+  async catchUp(): Promise<number> {
+    let after = await this.ctx.store.getCursor();
+    for (;;) {
+      const page = await this.ctx.client.events(after, LIMITS.eventPageSize);
+      for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
+      await this.ctx.store.advanceCursor();
+      if (page.next_after > after) {
+        await this.ctx.store.forceCursor(page.next_after);
+        after = page.next_after;
+      } else if (page.has_more) {
+        throw new Error('relay returned a page that does not advance the cursor');
+      }
+      if (!page.has_more) break;
+    }
+    const cursor = await this.ctx.store.getCursor();
     try {
       await this.ctx.client.deliveriesReceived(cursor);
     } catch {
@@ -376,26 +437,42 @@ export class DecisionsBridge {
     await ctx.store.setMeta(markerKey, 'started');
 
     const content = JSON.parse(row.content_json ?? '{}') as DecisionContentV1;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), this.o.proxyTimeoutMs ?? 25_000);
+    // The gate is the origin's trusted one (registered by the host), never something the agent named.
+    const gateId =
+      row.origin.workflow_gate_id && ctx.policy.get(row.origin.workflow_gate_id)
+        ? row.origin.workflow_gate_id
+        : null;
     let outcome: ProxyOutcome;
-    try {
-      outcome = await this.o.proxy.suggest(
-        {
-          questionId,
-          question: content.question,
-          ...(content.context ? { context: content.context } : {}),
-          options: content.options ?? [],
-          requirement: row.requirement,
-          projectId: row.origin.project_id,
-          createdAt: row.origin_created_at,
-        },
-        ac.signal,
-      );
-    } catch (e) {
-      outcome = { action: 'abstain', reason: `model-error:${(e as Error).name}` };
-    } finally {
-      clearTimeout(timer);
+    if (gateId && this.o.proxy.gateAware !== true) {
+      // Fail closed: the engine cannot see the gate, so its gate-based blocks cannot run. Do not call it.
+      outcome = { action: 'abstain', reason: 'engine-cannot-see-workflow-gate' };
+    } else {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), this.o.proxyTimeoutMs ?? 25_000);
+      try {
+        outcome = await this.o.proxy.suggest(
+          {
+            questionId,
+            question: content.question,
+            ...(content.context ? { context: content.context } : {}),
+            options: content.options ?? [],
+            requirement: row.requirement,
+            projectId: row.origin.project_id,
+            createdAt: row.origin_created_at,
+            kind: content.kind ?? 'mixed',
+            ...(gateId ? { workflowGateId: gateId } : {}),
+            attachments: (content.attachments ?? []).map((a) => ({
+              role: a.role,
+              sha256: a.sha256,
+            })),
+          },
+          ac.signal,
+        );
+      } catch (e) {
+        outcome = { action: 'abstain', reason: `model-error:${(e as Error).name}` };
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     const optionIds = new Set((content.options ?? []).map((o) => o.id));

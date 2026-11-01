@@ -4,7 +4,12 @@ import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
 import { newId } from '@daintree/decisions-crypto';
 import { pickResumeAdapter, unsupportedResumeAdapter } from './resume.js';
-import type { AgentResumeAdapter, TerminalSink, TerminalTarget } from './sink.js';
+import {
+  sameTarget,
+  type AgentResumeAdapter,
+  type TerminalSink,
+  type TerminalTarget,
+} from './sink.js';
 import type { InjectionIntent, LocalDeliveryStatus, QuestionOrigin, QuestionRow } from './types.js';
 
 export interface DeliveryOptions {
@@ -73,13 +78,17 @@ export class DeliveryEngine {
     const { ctx } = this;
     const out: DrainResult = { delivered: 0, deferred: 0, needsAttention: 0 };
     await this.flushAcks();
-    const all = (await ctx.store.listQuestions()).filter(
+    const candidates = (await ctx.store.listQuestions()).filter(
       (q) =>
         !q.history_only &&
         this.pending(q).length > 0 &&
         q.delivery_status !== 'needs-attention' &&
         q.delivery_status !== 'delivery-uncertain',
     );
+    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash.
+    const all: QuestionRow[] = [];
+    for (const q of candidates)
+      if (!(await ctx.store.hasUncertainIntent(q.question_id))) all.push(q);
     // One lane per pane: answers go in question-creation order (alias is monotonic).
     const lanes = new Map<string, QuestionRow[]>();
     for (const q of all) {
@@ -162,12 +171,8 @@ export class DeliveryEngine {
         res.needsAttention++;
         continue;
       }
-      if (
-        target &&
-        (target.paneId !== r.target.paneId ||
-          target.terminalGeneration !== r.target.terminalGeneration)
-      ) {
-        break; // a resumed pane differs; handle on the next pass
+      if (target && !sameTarget(target, r.target)) {
+        break; // a different destination (pane, generation, session or worktree): handle on the next pass
       }
       target = r.target;
       for (const entry of this.pending(q)) items.push({ q, entry, intentId: newId(ctx.now()) });
@@ -233,6 +238,16 @@ export class DeliveryEngine {
       chunk.map((i) => this.block(i)),
       Number.MAX_SAFE_INTEGER,
     )[0]!;
+    // 0. Revalidate every distinct question's destination IMMEDIATELY before typing. Anything that moved
+    //    (resumed into another session, relaunched, closed) is deferred, never typed into the wrong place.
+    const seen = new Set<string>();
+    for (const i of chunk) {
+      if (seen.has(i.q.question_id)) continue;
+      seen.add(i.q.question_id);
+      const loc = await o.sink.locate(i.q.origin);
+      if (loc.state !== 'alive' || !loc.target || !sameTarget(loc.target, target)) return 'busy';
+    }
+    if (!(await o.sink.isIdle(target))) return 'busy';
     const now = ctx.now();
     // 1. Persist the intent BEFORE touching the terminal.
     for (const i of chunk) {
@@ -257,10 +272,8 @@ export class DeliveryEngine {
       result = await o.sink.inject(target, text, chunk[0]!.intentId);
     } catch (e) {
       // The terminal may or may not have received the text: never retry blindly.
-      for (const i of chunk) {
-        await ctx.store.updateIntent(i.intentId, { state: 'uncertain', updated_at: ctx.now() });
-        await this.attention(i.q, 'inject_threw', 'delivery-uncertain');
-      }
+      for (const i of chunk)
+        await this.attention(i.q, 'inject_threw', 'delivery-uncertain', i.intentId);
       await ctx.audit.log({ event: 'inject.threw', result: (e as Error).message.slice(0, 80) });
       return 'failed';
     }
@@ -286,19 +299,24 @@ export class DeliveryEngine {
     injectionId: string,
     revision: number,
   ): Promise<void> {
-    const q = await this.ctx.store.getQuestion(questionId);
-    if (!q) return;
-    const entries = parseAnswers(q.answers_json).map((e) =>
-      e.entry_id === entryId ? { ...e, delivered: true, injection_id: injectionId } : e,
-    );
-    const stillPending = entries.some((e) => e.deliver && !e.delivered);
-    await this.ctx.store.updateQuestion(questionId, {
-      answers_json: serializeAnswers(entries),
-      delivered_revision: Math.max(q.delivered_revision, revision),
-      delivery_status: stillPending ? q.delivery_status : 'terminal-delivered',
-      last_injection_id: injectionId,
-      error_code: null,
+    // Re-read inside the shared lock so a concurrent inbox append is never overwritten with a stale copy.
+    const q = await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(questionId);
+      if (!row) return null;
+      const entries = parseAnswers(row.answers_json).map((e) =>
+        e.entry_id === entryId ? { ...e, delivered: true, injection_id: injectionId } : e,
+      );
+      const stillPending = entries.some((e) => e.deliver && !e.delivered);
+      await this.ctx.store.updateQuestion(questionId, {
+        answers_json: serializeAnswers(entries),
+        delivered_revision: Math.max(row.delivered_revision, revision),
+        delivery_status: stillPending ? row.delivery_status : 'terminal-delivered',
+        last_injection_id: injectionId,
+        error_code: null,
+      });
+      return row;
     });
+    if (!q) return;
     await this.ctx.audit.log({
       event: 'answer.delivered',
       question_id: questionId,
@@ -347,9 +365,21 @@ export class DeliveryEngine {
     q: QuestionRow,
     code: string,
     status: 'needs-attention' | 'delivery-uncertain',
+    uncertainIntentId?: string,
   ): Promise<void> {
     const { ctx } = this;
-    await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
+    if (uncertainIntentId) {
+      // Intent state and the question's delivery state change in ONE atomic write: no crash window in which
+      // the question is still deliverable while its intent is already marked uncertain.
+      await ctx.store.settleIntent(
+        uncertainIntentId,
+        { state: 'uncertain', updated_at: ctx.now() },
+        q.question_id,
+        { delivery_status: status, error_code: code },
+      );
+    } else {
+      await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
+    }
     await ctx.audit.log({
       event: 'delivery.attention',
       question_id: q.question_id,
@@ -419,11 +449,7 @@ export class DeliveryEngine {
         await this.ack(intent.injection_id);
         reconciled++;
       } else {
-        await ctx.store.updateIntent(intent.injection_id, {
-          state: 'uncertain',
-          updated_at: ctx.now(),
-        });
-        await this.attention(q, 'crash_unreconciled', 'delivery-uncertain');
+        await this.attention(q, 'crash_unreconciled', 'delivery-uncertain', intent.injection_id);
         uncertain++;
       }
     }

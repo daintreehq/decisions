@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import QRCode from 'qrcode';
 import {
   RelayError,
@@ -23,11 +24,32 @@ import {
 export async function setup(
   ctx: Ctx,
   g: GlobalOptions,
-  o: { url: string; claimSecret?: string; label?: string },
+  o: {
+    url: string;
+    claimSecret?: string;
+    claimSecretFile?: string;
+    claimSecretStdin?: boolean;
+    label?: string;
+  },
 ): Promise<void> {
-  const secret = o.claimSecret ?? ctx.env.DECISIONS_CLAIM_SECRET;
-  if (!secret)
-    throw new CliError('missing claim secret: pass --claim-secret or set DECISIONS_CLAIM_SECRET');
+  let secret: string | undefined;
+  if (o.claimSecretFile) {
+    secret = (await readFile(o.claimSecretFile, 'utf8')).trim();
+  } else if (o.claimSecretStdin) {
+    secret = (await ctx.readStdin()).trim();
+  } else if (o.claimSecret) {
+    ctx.err(
+      'warning: --claim-secret is visible in the process list and shell history; prefer --claim-secret-file, --claim-secret-stdin or $DECISIONS_CLAIM_SECRET.',
+    );
+    secret = o.claimSecret;
+  } else {
+    secret = ctx.env.DECISIONS_CLAIM_SECRET;
+  }
+  if (!secret) {
+    throw new CliError(
+      'missing claim secret: use --claim-secret-file, --claim-secret-stdin or set DECISIONS_CLAIM_SECRET',
+    );
+  }
   const keyStore = keyStoreFor(ctx, g.passphraseEnv);
   let origin: string;
   try {

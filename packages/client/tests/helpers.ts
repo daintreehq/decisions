@@ -19,6 +19,7 @@ import {
   newId,
   serializeDeviceKeys,
   type DeviceKeys,
+  type EpochKey,
 } from '@daintree/decisions-crypto';
 import { bytesToBase64Url } from '@daintree/decisions-protocol';
 import {
@@ -109,6 +110,11 @@ export class FakeRelay {
   status5xx = 0;
   rejectCreate: number | null = null;
   receipts = new Map<string, unknown>();
+  seqCounter = 0;
+  /** Number of upcoming action POSTs the relay COMMITS (and records) but whose reply is lost. */
+  dropAfterReceive = 0;
+  /** Number of upcoming question creates the relay COMMITS but whose reply is lost. */
+  dropCreateReply = 0;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
 
   constructor(private readonly owner: Identity) {}
@@ -138,6 +144,20 @@ export class FakeRelay {
     this.calls.push({ method, path: url.pathname, body, headers });
     const p = url.pathname;
     let m: RegExpMatchArray | null;
+    if (
+      this.dropAfterReceive > 0 &&
+      method === 'POST' &&
+      /\/(cancel|proxy-answer|proxy-abstain)$/.test(p)
+    ) {
+      this.dropAfterReceive--;
+      throw new TypeError('connection reset after the relay committed');
+    }
+    if (
+      method === 'POST' &&
+      (/^\/api\/v1\/devices\/[^/]+\/revoke$/.test(p) || p === '/api/v1/epoch/rotate')
+    ) {
+      return json(200, { ok: true });
+    }
 
     if (method === 'POST' && p === '/api/v1/questions') {
       if (this.rejectCreate)
@@ -161,6 +181,10 @@ export class FakeRelay {
         event_seq: ev.seq,
       };
       this.receipts.set(b.idempotency_key, receipt);
+      if (this.dropCreateReply > 0) {
+        this.dropCreateReply--;
+        throw new TypeError('connection reset after the relay committed the question');
+      }
       return json(201, receipt);
     }
     if (
@@ -264,7 +288,7 @@ export class FakeRelay {
   ): LedgerEvent {
     const ev: LedgerEvent = {
       protocol_version: PROTOCOL_VERSION,
-      seq: this.events.length + 1,
+      seq: ++this.seqCounter,
       event_id: newId(),
       event_type: type,
       occurred_at: new Date().toISOString(),
@@ -275,6 +299,11 @@ export class FakeRelay {
     };
     this.events.push(ev);
     return ev;
+  }
+
+  /** Burn sequence numbers without leaving events behind: a legitimate ledger hole (tombstoned question). */
+  skipSeq(n: number): void {
+    this.seqCounter += n;
   }
 
   /** Build a validly signed answer event from `phone` (or any signer) for a question the bridge published. */
@@ -290,18 +319,22 @@ export class FakeRelay {
     provenance?: 'human' | 'proxy';
     extra?: Record<string, unknown>;
     signWith?: DeviceKeys;
+    epoch?: EpochKey;
     confirmsActionId?: string;
+    recordType?: string;
+    /** Override what the event's `data` claims (to model a lying relay). */
+    dataOverride?: Record<string, unknown>;
   }): Promise<LedgerEvent> {
     const action = opts.action ?? 'answer';
     const prov = opts.provenance ?? (action === 'proxy-answer' ? 'proxy' : 'human');
     const rev = opts.expectedRevision ?? 0;
     const o = this.owner;
     const env: CryptoEnvelope = await encryptEnvelope({
-      epochKey: o.epochs.get(1)!,
+      epochKey: opts.epoch ?? o.epochs.get(1)!,
       installationId: o.config.installationId,
       questionId: opts.questionId,
       recordId: newId(),
-      recordType: 'answer',
+      recordType: opts.recordType ?? action,
       revision: rev + 1,
       senderDeviceId: opts.phone.deviceId,
       purpose: 'answer-content',
@@ -341,11 +374,8 @@ export class FakeRelay {
             ? 'decision.proxy.confirmed'
             : 'decision.answer.committed');
     const q = this.questions.get(opts.questionId)!;
-    return this.push(
-      type,
-      opts.questionId,
-      rev + 1,
-      EventData.action.parse({
+    return this.push(type, opts.questionId, rev + 1, {
+      ...EventData.action.parse({
         action,
         record: signed.record,
         envelope: signed.envelope,
@@ -354,6 +384,53 @@ export class FakeRelay {
         revision: rev + 1,
         target_host_id: q.signed.record.target_host_id,
         deliverable: action !== 'confirm-proxy',
+      }),
+      ...(opts.dataOverride ?? {}),
+    });
+  }
+
+  /** A signed envelope-less action (cancel / reopen / proxy-abstain) as the relay would emit it. */
+  async plainActionEvent(opts: {
+    questionId: string;
+    signer: { deviceId: string; keys: DeviceKeys };
+    action: 'cancel' | 'reopen' | 'proxy-abstain';
+    expectedRevision?: number;
+    status?: string;
+    revision?: number;
+    eventType?: LedgerEvent['event_type'];
+    provenance?: 'human' | 'proxy' | null;
+  }): Promise<LedgerEvent> {
+    const o = this.owner;
+    const rev = opts.expectedRevision ?? 0;
+    const signed = await buildSignedAction({
+      installationId: o.config.installationId,
+      questionId: opts.questionId,
+      action: opts.action,
+      signerDeviceId: opts.signer.deviceId,
+      signingKey: opts.signer.keys.signing.privateKey,
+      expectedRevision: rev,
+    });
+    const q = this.questions.get(opts.questionId)!;
+    const type =
+      opts.eventType ??
+      (opts.action === 'cancel'
+        ? 'decision.cancelled'
+        : opts.action === 'reopen'
+          ? 'decision.reopened'
+          : 'decision.proxy.abstained');
+    return this.push(
+      type,
+      opts.questionId,
+      opts.revision ?? (opts.action === 'reopen' ? rev + 1 : rev),
+      EventData.action.parse({
+        action: opts.action,
+        record: signed.record,
+        envelope: null,
+        provenance: opts.provenance ?? null,
+        status: opts.status ?? (opts.action === 'cancel' ? 'cancelled' : 'open'),
+        revision: opts.revision ?? (opts.action === 'reopen' ? rev + 1 : rev),
+        target_host_id: q.signed.record.target_host_id,
+        deliverable: false,
       }),
     );
   }
@@ -377,6 +454,8 @@ export class FakeSink implements TerminalSink {
   injectBehaviour: 'ok' | 'throw' | 'busy' | 'fail' = 'ok';
   resumeTarget: TerminalTarget | null = null;
   locateCalls = 0;
+  /** Return a state for the Nth locate() call to simulate the terminal changing underneath us. */
+  locateOverride: ((call: number, o: QuestionOrigin) => LocateResult | undefined) | null = null;
 
   addPane(
     paneId: string,
@@ -391,6 +470,8 @@ export class FakeSink implements TerminalSink {
   }
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     this.locateCalls++;
+    const forced = this.locateOverride?.(this.locateCalls, o);
+    if (forced) return forced;
     const p = this.panes.get(o.pane_id);
     if (!p) return { state: 'gone' };
     if (p.hostOffline) return { state: 'host-offline' };
@@ -403,6 +484,7 @@ export class FakeSink implements TerminalSink {
         paneId: o.pane_id,
         terminalGeneration: p.generation,
         agentSessionId: p.session,
+        worktreeId: o.worktree_id,
       },
     };
   }

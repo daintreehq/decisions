@@ -12,6 +12,8 @@ import type {
  * is async so either synchronous or asynchronous drivers fit. Implementations MUST make each method atomic.
  */
 export interface LocalStore {
+  /** True for stores that survive a restart; they require a durable attachment spool. */
+  readonly durable: boolean;
   getMeta(key: string): Promise<string | null>;
   setMeta(key: string, value: string): Promise<void>;
   /** Next cosmetic `q-N` alias. */
@@ -47,6 +49,15 @@ export interface LocalStore {
   updateIntent(id: string, patch: Partial<InjectionIntent>): Promise<InjectionIntent | null>;
   getIntent(id: string): Promise<InjectionIntent | null>;
   openIntents(): Promise<InjectionIntent[]>;
+  /** True while any intent for this question is unresolved-uncertain: delivery must stay blocked. */
+  hasUncertainIntent(questionId: string): Promise<boolean>;
+  /** Update an intent and its question in ONE atomic write (no crash window between them). */
+  settleIntent(
+    intentId: string,
+    intentPatch: Partial<InjectionIntent>,
+    questionId: string,
+    questionPatch: Partial<QuestionRow>,
+  ): Promise<void>;
 
   appendAudit(e: AuditEntry): Promise<void>;
   listAudit(limit: number): Promise<AuditEntry[]>;

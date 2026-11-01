@@ -60,6 +60,12 @@ export async function approveCandidate(
   candidate: PendingPairing,
 ): Promise<void> {
   const id = client.identity;
+  // The code the human compared must be derived from the exact keys we are about to certify.
+  if ((await localShortCode(candidate)) !== candidate.short_code) {
+    throw new Error(
+      'the relay reported a confirmation code that does not match the candidate keys; refusing to approve',
+    );
+  }
   const cert = await issueDeviceCert({
     issuerDeviceId: id.config.deviceId,
     issuerSigningKey: id.keys.signing.privateKey,
@@ -89,6 +95,23 @@ async function grantsFor(
   epoch: number,
   raw: Uint8Array,
 ): Promise<EpochGrant[]> {
+  // Never seal key material to a key the relay merely CLAIMS belongs to a device: every recipient certificate
+  // must verify against our pinned owner key and be bound to this installation and device.
+  for (const d of devices) {
+    const c = d.cert;
+    const ok =
+      c.issuer_device_id === id.config.deviceId &&
+      c.installation_id === id.config.installationId &&
+      c.device_id === d.device_id &&
+      c.role === d.role &&
+      c.role !== 'owner-desktop' &&
+      (await verifyDeviceCert(c, id.keys.signing.publicKey));
+    if (!ok) {
+      throw new Error(
+        `refusing to seal the content key: device ${d.device_id} has a certificate that does not verify against your owner key`,
+      );
+    }
+  }
   const out: EpochGrant[] = [];
   for (const d of devices) {
     out.push(

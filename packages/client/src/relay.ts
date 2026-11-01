@@ -54,7 +54,8 @@ export function backoffMs(
 }
 
 export class RelayClient {
-  readonly identity: Identity;
+  /** Replaceable: a running listener swaps in rotated epoch material without reconnecting. */
+  identity: Identity;
   private readonly f: typeof fetch;
   private readonly nowFn: () => number;
   private readonly sleep: (ms: number) => Promise<void>;

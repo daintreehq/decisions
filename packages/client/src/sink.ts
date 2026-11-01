@@ -9,6 +9,8 @@ export interface TerminalTarget {
   paneId: string;
   terminalGeneration: number;
   agentSessionId: string | null;
+  /** Part of the destination identity: an answer for worktree A must never land in worktree B. */
+  worktreeId: string;
 }
 
 export interface LocateResult {
@@ -56,4 +58,15 @@ export interface AgentResumeAdapter {
 /** Embeds the marker in the typed notice so `hasMarker` can find it after a crash. */
 export function markerFor(injectionId: string): string {
   return `[decision-injection ${injectionId}]`;
+}
+
+/** Two targets are the same destination only if EVERY identity field matches. */
+export function sameTarget(a: TerminalTarget, b: TerminalTarget): boolean {
+  return (
+    a.hostId === b.hostId &&
+    a.paneId === b.paneId &&
+    a.terminalGeneration === b.terminalGeneration &&
+    a.agentSessionId === b.agentSessionId &&
+    a.worktreeId === b.worktreeId
+  );
 }

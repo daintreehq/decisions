@@ -24,6 +24,11 @@ function claimFetch(
   status = 201,
 ): typeof fetch {
   return (async (url: unknown, init?: RequestInit) => {
+    if (!String(url).endsWith('/api/v1/setup/claim')) {
+      return new Response(JSON.stringify({ code: 'not_authenticated', message: 'not our key' }), {
+        status: 401,
+      });
+    }
     captured.url = String(url);
     captured.body = JSON.parse(String(init?.body));
     return status === 201
@@ -67,7 +72,7 @@ describe('claimRelay', () => {
     expect(JSON.stringify(cap.body)).not.toContain((await store.load())!.epochs[0]!.raw);
     expect((await loadIdentity(store)).config.installationId).toBe(identity.config.installationId);
   });
-  it('refuses to overwrite an existing identity, and stores nothing when the relay rejects', async () => {
+  it('refuses to overwrite a claimed identity; a claim someone else won leaves no stale keys behind', async () => {
     const store = new MemoryKeyStore();
     await expect(
       claimRelay({
@@ -77,7 +82,7 @@ describe('claimRelay', () => {
         fetch: claimFetch({}, 409),
       }),
     ).rejects.toMatchObject({ code: 'already_claimed' });
-    expect(await store.load()).toBeNull();
+    expect(await store.load()).toBeNull(); // proved foreign (our signed probe was refused): staged keys discarded
     await claimRelay({
       origin: 'https://x.example',
       claimSecret: 'c'.repeat(32),
@@ -96,6 +101,93 @@ describe('claimRelay', () => {
   it('only allows http for localhost', () => {
     expect(normalizeOrigin('http://localhost:8787/x')).toBe('http://localhost:8787');
     expect(() => normalizeOrigin('http://evil.example')).toThrow(/https/);
+  });
+});
+
+describe('claim staging: owner keys are never stranded', () => {
+  it('stages the identity durably BEFORE the relay can see it, and reuses it on retry', async () => {
+    const store = new MemoryKeyStore();
+    let stagedAtClaim: string | undefined;
+    const drop: typeof fetch = (async (url: unknown) => {
+      stagedAtClaim = JSON.stringify((await store.load())?.config);
+      throw new TypeError(`connection dropped ${String(url)}`);
+    }) as typeof fetch;
+    await expect(
+      claimRelay({ origin: 'https://x.example', claimSecret: 'c'.repeat(32), store, fetch: drop }),
+    ).rejects.toMatchObject({ code: 'network_error' });
+    const staged = (await store.load())!;
+    expect(staged.claimed).toBe(false);
+    expect(stagedAtClaim).toBe(JSON.stringify(staged.config)); // it was already on disk when the request went out
+    const cap: { body?: Record<string, unknown> } = {};
+    const { identity } = await claimRelay({
+      origin: 'https://x.example',
+      claimSecret: 'c'.repeat(32),
+      store,
+      fetch: claimFetch(cap),
+    });
+    expect(identity.config.deviceId).toBe(staged.config.deviceId);
+    expect(identity.config.installationId).toBe(staged.config.installationId);
+    expect(identity.signingPub).toBe(staged.keys.signing_public);
+    expect((cap.body as { installation_id: string }).installation_id).toBe(
+      staged.config.installationId,
+    );
+    expect((await store.load())!.claimed).toBeUndefined();
+  });
+  it('recovers when the relay accepted the claim but the response was lost', async () => {
+    const store = new MemoryKeyStore();
+    let claimed = false;
+    const relay: typeof fetch = (async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/api/v1/setup/claim')) {
+        if (claimed)
+          return new Response(JSON.stringify({ code: 'already_claimed', message: 'x' }), {
+            status: 409,
+          });
+        claimed = true;
+        throw new TypeError('response lost'); // accepted server-side, never seen by us
+      }
+      if (u.endsWith('/api/v1/devices'))
+        return new Response(JSON.stringify({ key_epoch: 1, owner_device_id: 'x', devices: [] }));
+      if (u.endsWith('/api/v1/push/config'))
+        return new Response(JSON.stringify({ vapid_public_key: 'V'.repeat(87) }));
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+    await expect(
+      claimRelay({ origin: 'https://x.example', claimSecret: 'c'.repeat(32), store, fetch: relay }),
+    ).rejects.toBeTruthy();
+    const staged = (await store.load())!;
+    const { identity } = await claimRelay({
+      origin: 'https://x.example',
+      claimSecret: 'c'.repeat(32),
+      store,
+      fetch: relay,
+    });
+    expect(identity.signingPub).toBe(staged.keys.signing_public); // same keys, claim finished
+    expect(identity.stored.vapidPublicKey).toHaveLength(87);
+    expect((await loadIdentity(store)).config.deviceId).toBe(staged.config.deviceId);
+  });
+  it('an unfinished setup is not usable and cannot be silently retargeted', async () => {
+    const store = new MemoryKeyStore();
+    const drop: typeof fetch = (async () => {
+      throw new TypeError('down');
+    }) as typeof fetch;
+    await expect(
+      claimRelay({
+        origin: 'https://one.example',
+        claimSecret: 'c'.repeat(32),
+        store,
+        fetch: drop,
+      }),
+    ).rejects.toBeTruthy();
+    await expect(loadIdentity(store)).rejects.toThrow(/interrupted/);
+    await expect(
+      claimRelay({
+        origin: 'https://two.example',
+        claimSecret: 'c'.repeat(32),
+        store,
+        fetch: drop,
+      }),
+    ).rejects.toThrow(/unfinished setup/);
   });
 });
 

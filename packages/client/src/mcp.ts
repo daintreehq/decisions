@@ -206,7 +206,13 @@ export function createDecisionsMcpHandler(
   };
 
   async function callTool(origin: QuestionOrigin, name: string, args: Record<string, unknown>) {
-    const pane = { host_id: origin.host_id, pane_id: origin.pane_id };
+    const pane = {
+      host_id: origin.host_id,
+      pane_id: origin.pane_id,
+      terminal_generation: origin.terminal_generation,
+      agent_session_id: origin.agent_session_id,
+      worktree_id: origin.worktree_id,
+    };
     const text = (t: string, structured: unknown, isError = false) => ({
       content: [{ type: 'text', text: t }],
       structuredContent: structured,

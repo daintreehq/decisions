@@ -40,6 +40,7 @@ function mkCtx(
     prompt: async () => answers.shift() ?? '',
     env: over.env ?? {},
     now: Date.now,
+    readStdin: over.readStdin ?? (async () => ''),
     fetch: (async (u: unknown, init?: RequestInit) => {
       const url = new URL(String(u));
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
@@ -172,17 +173,32 @@ describe('sinks and MCP instructions', () => {
     expect(() => parseSink('file:')).toThrow();
     expect(() => parseSink('ftp:x')).toThrow();
   });
-  it('prints the exact claude mcp add line', () => {
-    const lines = mcpAddLines('http://127.0.0.1:8123/mcp', 'TOKEN123').join('\n');
-    expect(lines).toContain(
+  it('prints the exact claude mcp add line only when asked to show the token', () => {
+    const shown = mcpAddLines('http://127.0.0.1:8123/mcp', 'TOKEN123', { show: true }).join('\n');
+    expect(shown).toContain(
       'claude mcp add --transport http decisions http://127.0.0.1:8123/mcp --header "Authorization: Bearer TOKEN123"',
     );
-    expect(lines).toContain('"type": "http"');
+    expect(shown).toContain('"type": "http"');
+    const hidden = mcpAddLines('http://127.0.0.1:8123/mcp', 'TOKEN123', {
+      file: '/h/mcp-token',
+    }).join('\n');
+    expect(hidden).not.toContain('TOKEN123');
+    expect(hidden).toContain(
+      'claude mcp add --transport http decisions http://127.0.0.1:8123/mcp --header "Authorization: Bearer $(cat /h/mcp-token)"',
+    );
+    expect(hidden).toContain('/h/mcp-token');
+    expect(hidden).toContain('--show-token');
   });
   it('file sink appends and can find an injection marker; stdout sink prints', async () => {
     const path = join(root, 'sink.txt');
     const sink = new DemoSink({ kind: 'file', path }, () => {});
-    const t = { hostId: 'cli', paneId: 'cli', terminalGeneration: 1, agentSessionId: null };
+    const t = {
+      hostId: 'cli',
+      paneId: 'cli',
+      terminalGeneration: 1,
+      agentSessionId: null,
+      worktreeId: 'cli',
+    };
     expect((await sink.inject(t, 'hello\ninjection_id: inj-1', 'inj-1')).ok).toBe(true);
     expect(await sink.hasMarker(t, 'inj-1')).toBe(true);
     expect(await sink.hasMarker(t, 'inj-2')).toBe(false);
@@ -194,7 +210,13 @@ describe('sinks and MCP instructions', () => {
   });
   it('exec sink pipes the notice to the command and reports failure', async () => {
     const path = join(root, 'exec.txt');
-    const t = { hostId: 'cli', paneId: 'cli', terminalGeneration: 1, agentSessionId: null };
+    const t = {
+      hostId: 'cli',
+      paneId: 'cli',
+      terminalGeneration: 1,
+      agentSessionId: null,
+      worktreeId: 'cli',
+    };
     expect(
       (
         await new DemoSink({ kind: 'exec', cmd: `cat > ${path}` }, () => {}).inject(
@@ -208,6 +230,34 @@ describe('sinks and MCP instructions', () => {
     expect(
       (await new DemoSink({ kind: 'exec', cmd: 'exit 3' }, () => {}).inject(t, 'x', 'i')).ok,
     ).toBe(false);
+  });
+});
+
+describe('setup: the claim secret does not have to be on the command line', () => {
+  it('reads it from a file, or from stdin, and warns about argv', async () => {
+    const file = join(root, 'claim-secret.txt');
+    writeFileSync(file, 'f'.repeat(40) + '\n');
+    const a = mkCtx();
+    await setup(a.ctx, {}, { url: 'https://relay.example', claimSecretFile: file });
+    expect((a.calls[0]!.body as { claim_secret: string }).claim_secret).toBe('f'.repeat(40));
+    expect(a.err.join('')).not.toContain('warning');
+    const b = mkCtx({ readStdin: async () => 's'.repeat(40) + '\n' });
+    await setup(b.ctx, {}, { url: 'https://relay.example', claimSecretStdin: true });
+    expect((b.calls[0]!.body as { claim_secret: string }).claim_secret).toBe('s'.repeat(40));
+    const c = mkCtx();
+    await setup(c.ctx, {}, { url: 'https://relay.example', claimSecret: 'a'.repeat(40) });
+    expect(c.err.join('\n')).toContain('visible in the process list');
+  });
+  it('does not accept the secret only through argv: the flag set offers file, stdin and env', () => {
+    const setupCmd = buildProgram().commands.find((c) => c.name() === 'setup')!;
+    const flags = setupCmd.options.map((o) => o.long);
+    expect(flags).toEqual(expect.arrayContaining(['--claim-secret-file', '--claim-secret-stdin']));
+    const mcpCmd = buildProgram().commands.find((c) => c.name() === 'mcp')!;
+    const mflags = mcpCmd.options.map((o) => o.long);
+    expect(mflags).not.toContain('--token'); // a bearer in argv is visible to every local user
+    expect(mflags).toEqual(
+      expect.arrayContaining(['--token-env', '--token-file', '--show-token', '--attachments-dir']),
+    );
   });
 });
 

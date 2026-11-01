@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { fakeResumeAdapter, parseAnswers, type TerminalTarget } from '../src/index.js';
+import {
+  PolicyRegistry,
+  fakeResumeAdapter,
+  parseAnswers,
+  type TerminalTarget,
+} from '../src/index.js';
 import { origin, setupBridge, makePhone } from './helpers.js';
 
 async function asked(
@@ -118,6 +123,7 @@ describe('verified answers reach the exact pane', () => {
       hostId: 'host-local',
       paneId: 'pane-9',
       terminalGeneration: 5,
+      worktreeId: 'wt-1',
       agentSessionId: 'sess-1',
     };
     const { bridge, relay, phone, sink, qid, store } = await asked({
@@ -308,12 +314,28 @@ describe('ordering, expiry, proxy labelling', () => {
     expect(env.sink.typed.length).toBe(sinkBefore);
   });
 
-  it('cancelled questions drop undelivered answers', async () => {
-    const { bridge, relay, phone, sink, qid } = await asked();
+  it('cancelling a proxy-answered question drops its undelivered answer', async () => {
+    const env = await asked(
+      { policy: new PolicyRegistry({ proxyAllowlisted: true }) },
+      { requested_requirement: 'proxy-ok' },
+    );
+    const { bridge, relay, sink, qid, identity } = env;
+    const desktop = { deviceId: identity.config.deviceId, keys: identity.keys };
     sink.panes.get('pane-1')!.idle = false;
-    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await relay.answerEvent({
+      questionId: qid,
+      phone: desktop,
+      action: 'proxy-answer',
+      options: ['approve'],
+    });
     await bridge.catchUp();
-    relay.push('decision.cancelled', qid, 1, {});
+    await relay.plainActionEvent({
+      questionId: qid,
+      signer: desktop,
+      action: 'cancel',
+      expectedRevision: 1,
+      status: 'cancelled',
+    });
     await bridge.catchUp();
     sink.panes.get('pane-1')!.idle = true;
     await bridge.notifyPaneIdle();

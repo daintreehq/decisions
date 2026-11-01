@@ -86,7 +86,7 @@ describe('proxy engine hook', () => {
     };
     expect(body.action.record.action).toBe('proxy-answer');
     expect(body.action.record.expected_revision).toBe(0);
-    expect(body.action.envelope.aad.record_type).toBe('answer');
+    expect(body.action.envelope.aad.record_type).toBe('proxy-answer');
     expect(JSON.stringify(sent[0]!.body)).not.toContain('dm-1'); // model id is inside the ciphertext
     expect(relay.calls.filter((c) => c.path.endsWith('/proxy-abstain'))).toHaveLength(0);
   });
@@ -125,5 +125,114 @@ describe('proxy engine hook', () => {
   it('proxy-ok abstain also escalates', async () => {
     const { posts } = await withProxy({ action: 'abstain', reason: 'x' }, 'proxy-ok');
     expect(posts('proxy-abstain')).toHaveLength(1);
+  });
+});
+
+describe('proxy hook receives everything the model guards need', () => {
+  const png = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7, 6, 5, 4, 3, 2,
+  ]);
+  const gatedPolicy = () => {
+    const p = new PolicyRegistry();
+    p.register({ gateId: 'naming', minRequirement: 'proxy-first', policyVersion: 1 });
+    return p;
+  };
+  const gatedInput = {
+    question: 'Rename the tab?',
+    kind: 'approval' as const,
+    options: [{ id: 'yes', label: 'Yes' }],
+    attachments: [{ local_resource_id: 'shot', role: 'after' as const }],
+  };
+  const resolver = { resolve: async () => ({ bytes: png }) };
+
+  it('passes kind, trusted gate, enforced requirement, project and attachment role+sha256', async () => {
+    const seen: unknown[] = [];
+    const proxy: ProxyEngine = {
+      gateAware: true,
+      async suggest(input) {
+        seen.push(input);
+        return { action: 'abstain', reason: 'test' };
+      },
+    };
+    const env = await setupBridge({ proxy, policy: gatedPolicy(), resolver });
+    await env.bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'naming' }),
+      input: gatedInput,
+    });
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(seen).toHaveLength(1);
+    const { sha256Hex } = await import('@daintree/decisions-crypto');
+    expect(seen[0]).toMatchObject({
+      kind: 'approval',
+      workflowGateId: 'naming',
+      requirement: 'proxy-first',
+      projectId: 'proj-1',
+      attachments: [{ role: 'after', sha256: await sha256Hex(png) }],
+    });
+  });
+
+  it("the gate is the origin's trusted one: an agent-named gate is never forwarded", async () => {
+    const seen: { workflowGateId?: string }[] = [];
+    const policy = gatedPolicy();
+    policy.register({ gateId: 'agent-picked', minRequirement: 'proxy-ok', policyVersion: 1 });
+    const proxy: ProxyEngine = {
+      gateAware: true,
+      async suggest(input) {
+        seen.push(input);
+        return { action: 'abstain', reason: 'test' };
+      },
+    };
+    const env = await setupBridge({ proxy, policy, resolver });
+    await env.bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'naming' }),
+      input: { ...gatedInput, workflow_gate_id: 'agent-picked' },
+    });
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(seen[0]?.workflowGateId).toBe('naming');
+  });
+
+  it('a gated question is never offered to an engine that cannot see the gate (fail closed)', async () => {
+    const { e, calls } = engine(answer());
+    expect(e.gateAware).toBeUndefined();
+    const env = await setupBridge({ proxy: e, policy: gatedPolicy(), resolver });
+    const r = await env.bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'naming' }),
+      input: gatedInput,
+    });
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(calls).toHaveLength(0);
+    const posts = env.relay.calls.filter(
+      (c) => c.method === 'POST' && c.path.includes(r.questionId),
+    );
+    expect(posts.some((c) => c.path.endsWith('/proxy-abstain'))).toBe(true);
+    expect(posts.some((c) => c.path.endsWith('/proxy-answer'))).toBe(false);
+    expect(
+      (await env.store.listAudit(50)).some(
+        (a) => a.event === 'proxy.abstain' && a.result === 'engine-cannot-see-workflow-gate',
+      ),
+    ).toBe(true);
+  });
+
+  it('an ungated question may still use an engine that does not declare gate support', async () => {
+    const { e, calls } = engine(answer());
+    const env = await setupBridge({
+      proxy: e,
+      policy: new PolicyRegistry({ proxyAllowlisted: true }),
+    });
+    await env.bridge.registerQuestion({
+      origin: origin(),
+      input: {
+        question: 'q',
+        options: [{ id: 'yes', label: 'Y' }],
+        requested_requirement: 'proxy-ok',
+      },
+    });
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { workflowGateId?: string }).workflowGateId).toBeUndefined();
   });
 });
