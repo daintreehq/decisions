@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULTS } from '@daintreehq/decisions-protocol';
+import { DEFAULTS, LIMITS } from '@daintreehq/decisions-protocol';
 import {
   PolicyRegistry,
   QUESTION_EXPIRY_LIMIT_MS,
@@ -82,10 +82,16 @@ describe('the host default expiry of questions with no origin gate', () => {
     policy.register(gate('hour', { expiryMs: HOUR }));
     const e = await env(policy);
     const tooFar = at(e, QUESTION_EXPIRY_LIMIT_MS + 1);
-    for (const input of [{}, { workflow_gate_id: 'unset' }]) {
+    // No gate, a named gate with no cap, and an origin gate with no cap.
+    const uncapped: [Record<string, unknown>, Parameters<typeof origin>[0]][] = [
+      [{}, {}],
+      [{ workflow_gate_id: 'unset' }, {}],
+      [{}, { workflow_gate_id: 'unset' }],
+    ];
+    for (const [input, over] of uncapped) {
       await expect(
         e.bridge.registerQuestion({
-          origin: origin(),
+          origin: origin(over),
           input: { question: 'q', expires_at: tooFar, ...input },
         }),
       ).rejects.toMatchObject({ code: 'validation_error' });
@@ -96,6 +102,7 @@ describe('the host default expiry of questions with no origin gate', () => {
       at(e, QUESTION_EXPIRY_LIMIT_MS),
     );
     expect(await ask(e, { expires_at: tooFar, workflow_gate_id: 'hour' })).toBe(at(e, HOUR));
+    expect(await ask(e, { expires_at: tooFar }, { workflow_gate_id: 'hour' })).toBe(at(e, HOUR));
   });
 
   it('the host can change the default while the bridge runs', async () => {
@@ -124,11 +131,13 @@ describe('a gate the agent names only shortens the host default', () => {
     expect(await ask(e, { workflow_gate_id: 'hour' })).toBe(at(e, HOUR));
   });
 
-  it('a named gate with no expiry cannot lengthen a finite host default', async () => {
+  it('a named gate with a longer expiry, or none, cannot lengthen a finite host default', async () => {
     const policy = new PolicyRegistry({ defaultQuestionExpiryMs: 2 * DAY });
+    policy.register(gate('longer', { expiryMs: 3 * DAY }));
     policy.register(gate('never', { expiryMs: null }));
     policy.register(gate('unset'));
     const e = await env(policy);
+    expect(await ask(e, { workflow_gate_id: 'longer' })).toBe(at(e, 2 * DAY));
     expect(await ask(e, { workflow_gate_id: 'never' })).toBe(at(e, 2 * DAY));
     expect(await ask(e, { workflow_gate_id: 'unset' })).toBe(at(e, 2 * DAY));
   });
@@ -140,6 +149,23 @@ describe('a gate the agent names only shortens the host default', () => {
     const e = await env(policy);
     expect(await ask(e, { workflow_gate_id: 'never' })).toBeNull();
     expect(await ask(e, { workflow_gate_id: 'unset' })).toBeNull();
+  });
+
+  it("a named gate with a looser cap leaves the agent's request to the no-gate rule", async () => {
+    const never = new PolicyRegistry({ defaultQuestionExpiryMs: null });
+    never.register(gate('never', { expiryMs: null }));
+    never.register(gate('unset'));
+    const a = await env(never);
+    for (const id of ['never', 'unset'])
+      expect(await ask(a, { workflow_gate_id: id, expires_at: at(a, 90 * DAY) })).toBe(
+        at(a, 90 * DAY),
+      );
+    const finite = new PolicyRegistry({ defaultQuestionExpiryMs: 2 * DAY });
+    finite.register(gate('long', { expiryMs: 45 * DAY }));
+    const b = await env(finite);
+    expect(await ask(b, { workflow_gate_id: 'long', expires_at: at(b, 90 * DAY) })).toBe(
+      at(b, 30 * DAY),
+    );
   });
 
   it("a named gate caps an agent's request under a null host default", async () => {
@@ -183,6 +209,11 @@ describe('the expiry rule', () => {
   const now = Date.parse('2026-01-01T00:00:00.000Z');
   const iso = (ms: number) => new Date(now + ms).toISOString();
   const LATEST = new Date(8.64e15).toISOString();
+
+  it('a finite expiry is at most 366 days away, less two minutes for clock skew', () => {
+    expect(LIMITS.maxQuestionExpiryMs).toBe(366 * DAY);
+    expect(QUESTION_EXPIRY_LIMIT_MS).toBe(366 * DAY - 120_000);
+  });
 
   it('without a host default it is 7 days, and at most 30 when asked', () => {
     expect(resolveExpiry(undefined, undefined, now)).toBe(iso(DEFAULTS.questionExpiryMs));

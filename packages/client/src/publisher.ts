@@ -170,7 +170,7 @@ export class Publisher {
     if (expiresAt !== null && Date.parse(expiresAt) > now + QUESTION_EXPIRY_LIMIT_MS) {
       throw new BridgeError(
         'validation_error',
-        `expires_at must be within ${Math.floor(QUESTION_EXPIRY_LIMIT_MS / 86_400_000)} days`,
+        'expires_at is too far ahead: the relay accepts at most 366 days, less two minutes for clock skew',
       );
     }
 
