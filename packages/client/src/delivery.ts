@@ -1,6 +1,6 @@
 import { batchNotices, formatAnswerNotice } from './notice.js';
 import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
-import { openAnswerContent } from './at-rest.js';
+import { openAnswerContent, openQuestionContent } from './at-rest.js';
 import { TransientError } from './mutex.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
@@ -98,6 +98,8 @@ interface Item {
   entry: AnswerEntry;
   /** The answer's content, opened in memory for this attempt only. */
   content: AnswerContent;
+  /** The question as asked, quoted in the block; absent when its sealed content can't be opened now. */
+  question?: string;
   intentId: string;
 }
 
@@ -269,10 +271,20 @@ export class DeliveryEngine {
       // A missing epoch key (rotated by another process, not yet reloaded) just waits for a later pass.
       const opened: Item[] = [];
       let unreadable: 'transient' | 'broken' | null = null;
+      // Only a reference for the agent: an answer is never held back because its question can't be read.
+      const question = await openQuestionContent(ctx, q)
+        .then((c) => c?.question)
+        .catch(() => undefined);
       for (const entry of this.pending(q)) {
         try {
           const content = await openAnswerContent(ctx, q.question_id, entry);
-          opened.push({ q, entry, content, intentId: newId(ctx.now()) });
+          opened.push({
+            q,
+            entry,
+            content,
+            intentId: newId(ctx.now()),
+            ...(question ? { question } : {}),
+          });
         } catch (e) {
           unreadable = e instanceof TransientError ? 'transient' : 'broken';
           break;
@@ -326,6 +338,7 @@ export class DeliveryEngine {
       questionId: i.q.question_id,
       alias: i.q.alias,
       revision: e.revision,
+      ...(i.question ? { question: i.question } : {}),
       source: e.source === 'proxy' ? 'proxy' : 'human',
       choices: e.choices,
       comment: e.text,

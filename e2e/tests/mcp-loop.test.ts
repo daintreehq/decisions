@@ -218,7 +218,9 @@ describe.skipIf(!chromiumPath)(
       expect(asked.isError).toBeFalsy();
       qid = String(asked.structuredContent!.question_id);
       expect(asked.structuredContent).toMatchObject({ enforced_requirement: 'human-required' });
-      expect(asked.content[0]!.text).toMatch(/^Asked as q-\d+\. End your turn now/);
+      expect(asked.content[0]!.text).toMatch(
+        /^Asked as q-\d+\. Carry on with anything that does not depend on the answer/,
+      );
 
       // the same correlation id from the same pane is the same question, not a second one
       const again = await call(paneA, 'ask_human', {
@@ -243,6 +245,7 @@ describe.skipIf(!chromiumPath)(
       expect(sink.typed.map((t) => t.pane)).toEqual(['pane-a']);
       expect(sink.typed[0]!.text).toContain('choice: yes');
       expect(sink.typed[0]!.text).toContain('source: human');
+      expect(sink.typed[0]!.text).toContain('question: Use optimistic updates for the todo list?');
     });
 
     it('get_decision passes the SDK’s outputSchema validation and only the asking pane can read it', async () => {

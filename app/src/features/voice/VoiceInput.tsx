@@ -6,6 +6,8 @@ import { VoiceDisclosure } from '../../components/VoiceDisclosure.js';
 import {
   applyToRegion,
   buildKeyterms,
+  dictationLanguage,
+  precedingText,
   resolveSpan,
   runCorrection,
   type DictationRegion,
@@ -24,9 +26,15 @@ const KEPT: Record<KeptRawReason, string> = {
   'provider-error': 'Clean-up was unavailable, so your words are kept exactly as dictated.',
   malformed: 'Clean-up returned something unexpected, so your words are kept exactly as dictated.',
   'editor-changed': 'You edited the text, so clean-up was not applied.',
-  drift: 'Clean-up changed the meaning, so your words are kept exactly as dictated.',
   unavailable: 'Clean-up was unavailable, so your words are kept exactly as dictated.',
 };
+
+function stillInPlace(text: string, r: { region: DictationRegion; before: string }): boolean {
+  return (
+    text.slice(0, r.region.start) === r.before &&
+    text.slice(r.region.start, r.region.end) === r.region.raw
+  );
+}
 
 export function VoiceInput({
   value,
@@ -57,11 +65,14 @@ export function VoiceInput({
   const [level, setLevel] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [spans, setSpans] = useState<Span[]>([]);
-  const [suggestion, setSuggestion] = useState<{
-    corrected: string;
+  /**
+   * The cleaned passage as it sits in the editor and what was dictated, for "Use what I said", with the text
+   * ahead of it: an edit there moves the passage, so the same words at the old offsets may be other words.
+   */
+  const [revert, setRevert] = useState<{
     region: DictationRegion;
-    reason: string;
-    spans: Span[];
+    raw: string;
+    before: string;
   } | null>(null);
   const [disclose, setDisclose] = useState(false);
   const valueRef = useRef(value);
@@ -75,6 +86,8 @@ export function VoiceInput({
 
   // Span offsets are only meaningful for the exact text they were computed against.
   const spansValid = spans.length > 0 && spansText.current === value;
+  // Going back is offered only while the cleaned passage is still exactly as it landed (or as a marked word left it).
+  const revertable = !!revert && stillInPlace(value, revert);
 
   useEffect(
     () => () => {
@@ -116,14 +129,19 @@ export function VoiceInput({
       }
       setPhase('cleaning');
       const relay = app.getRelay()!;
-      const labels = view.content?.options.map((o) => o.label) ?? [];
-      const keyterms = buildKeyterms(view.content?.question ?? '', labels);
+      const content = view.content;
+      // The question stands in for the agent's last reply, as Daintree gives its cleanup the agent's last message.
       const outcome = await runCorrection({
         provider: v.correction as 'anthropic' | 'openai',
         raw,
-        question: view.content?.question ?? '',
-        optionLabels: labels,
-        keyterms,
+        question: content?.question ?? '',
+        context: content?.context,
+        options: content?.options ?? [],
+        askedAt: view.createdAt,
+        projectLabel: content?.project_label,
+        precedingText: precedingText(withRaw, start),
+        transcriber: v.transcription,
+        language: dictationLanguage(),
         editorAtStart: withRaw,
         getEditorText: () => valueRef.current,
         post: (path, body, signal) => relay.raw('POST', path, body, signal),
@@ -138,19 +156,11 @@ export function VoiceInput({
         start: x.start + region.start,
         end: x.end + region.start,
       }));
-      if (!outcome.autoApply) {
-        // Not a conservative edit: shown as a suggestion. The human's dictated words stay in the editor untouched.
-        setSuggestion({
-          corrected: outcome.result.corrected_text,
-          region,
-          reason: outcome.reviewReason ?? 'the wording changed',
-          spans: shifted,
-        });
-        setMessage(
-          'The clean-up changed more than punctuation, so it is only a suggestion. Your words are unchanged.',
-        );
+      if (!outcome.changed && shifted.length === 0) {
+        setMessage('Clean-up found nothing to change.');
         return;
       }
+      // The clean-up lands as written, as in Daintree: the person reads it here and can go back in one tap.
       const applied = applyToRegion(valueRef.current, region, outcome.result.corrected_text);
       if (!applied) {
         setMessage(KEPT['editor-changed']);
@@ -159,27 +169,37 @@ export function VoiceInput({
       spansText.current = applied.text;
       onChange(applied.text);
       setSpans(shifted);
+      if (outcome.changed)
+        setRevert({
+          region: applied.region,
+          raw,
+          before: applied.text.slice(0, applied.region.start),
+        });
       setMessage(
         shifted.length
           ? 'Cleaned up. Words the model was unsure about are marked below.'
-          : 'Cleaned up. Check it before you submit.',
+          : outcome.lowConfidence
+            ? 'Cleaned up, but the model was unsure of some edits. Check it before you submit.'
+            : 'Cleaned up. Check it before you submit.',
       );
     },
-    [correctionAvailable, onChange, v.correction, view.content],
+    [correctionAvailable, onChange, v.correction, v.transcription, view.content, view.createdAt],
   );
 
-  const acceptSuggestion = () => {
-    if (!suggestion) return;
-    const applied = applyToRegion(valueRef.current, suggestion.region, suggestion.corrected);
-    setSuggestion(null);
-    if (!applied) {
+  const useWhatISaid = () => {
+    if (!revert) return;
+    const current = valueRef.current;
+    const back = stillInPlace(current, revert)
+      ? applyToRegion(current, revert.region, revert.raw)
+      : null;
+    setRevert(null);
+    setSpans([]);
+    if (!back) {
       setMessage(KEPT['editor-changed']);
       return;
     }
-    spansText.current = applied.text;
-    onChange(applied.text);
-    setSpans(suggestion.spans);
-    setMessage('Suggestion applied. Check it before you submit.');
+    onChange(back.text);
+    setMessage('Back to exactly what you said.');
   };
 
   // Never keep recording while the app is hidden.
@@ -209,7 +229,7 @@ export function VoiceInput({
     if (!relay || !snap.config) return;
     setMessage(null);
     setSpans([]);
-    setSuggestion(null);
+    setRevert(null);
     const labels = view.content?.options.map((o) => o.label) ?? [];
     const keyterms = buildKeyterms(view.content?.question ?? '', labels);
     const config = snap.config;
@@ -220,6 +240,7 @@ export function VoiceInput({
             origin: config.relayOrigin,
             provider: v.transcription,
             keyterms,
+            language: dictationLanguage(),
             postJson: (path, body) => relay.json('POST', path, { body }),
             onState: (st) => st === 'ready' && onReady(),
             onText: setLive,
@@ -340,18 +361,11 @@ export function VoiceInput({
           {message}
         </p>
       )}
-      {suggestion && (
-        <div className="card suggestion" role="group" aria-label="Suggested clean-up">
-          <p className="note">Suggested clean-up (needs your OK, {suggestion.reason}):</p>
-          <p className="draft-text">{suggestion.corrected}</p>
-          <div className="row">
-            <button type="button" className="btn primary small" onClick={acceptSuggestion}>
-              Use suggestion
-            </button>
-            <button type="button" className="btn small" onClick={() => setSuggestion(null)}>
-              Keep what I said
-            </button>
-          </div>
+      {revertable && (
+        <div className="row">
+          <button type="button" className="btn small" onClick={useWhatISaid}>
+            Use what I said
+          </button>
         </div>
       )}
       {spansValid && (
@@ -363,29 +377,47 @@ export function VoiceInput({
                 {s.reason ? ` (${s.reason})` : ''}
               </p>
               <div className="chips">
-                {(['corrected', 'candidate', 'raw'] as SpanChoice[]).map((c) => {
-                  const label =
-                    c === 'corrected' ? 'Keep' : c === 'candidate' ? s.candidate : s.raw;
-                  return (
-                    <button
-                      key={c}
-                      type="button"
-                      className="chip"
-                      onClick={() => {
-                        const r = resolveSpan(value, spans, i, c);
-                        spansText.current = r.text;
-                        setSpans(r.spans);
-                        onChange(r.text);
-                      }}
-                    >
-                      {c === 'raw'
-                        ? `Heard: ${label}`
-                        : c === 'candidate'
-                          ? `Maybe: ${label}`
-                          : label}
-                    </button>
-                  );
-                })}
+                {(['corrected', 'candidate', 'raw'] as SpanChoice[])
+                  .filter(
+                    (c) =>
+                      c === 'corrected' ||
+                      (c === 'raw' ? s.raw : s.candidate) !== value.slice(s.start, s.end),
+                  )
+                  .map((c) => {
+                    const label =
+                      c === 'corrected' ? 'Keep' : c === 'candidate' ? s.candidate : s.raw;
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        className="chip"
+                        onClick={() => {
+                          const r = resolveSpan(value, spans, i, c);
+                          const delta = r.text.length - value.length;
+                          if (revertable && revert) {
+                            const end = revert.region.end + delta;
+                            setRevert({
+                              ...revert,
+                              region: {
+                                ...revert.region,
+                                end,
+                                raw: r.text.slice(revert.region.start, end),
+                              },
+                            });
+                          }
+                          spansText.current = r.text;
+                          setSpans(r.spans);
+                          onChange(r.text);
+                        }}
+                      >
+                        {c === 'raw'
+                          ? `Heard: ${label}`
+                          : c === 'candidate'
+                            ? `Maybe: ${label}`
+                            : label}
+                      </button>
+                    );
+                  })}
               </div>
             </li>
           ))}

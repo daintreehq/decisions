@@ -1,17 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyToRegion,
-  classifyChange,
   buildKeyterms,
-  detectDrift,
-  polarityCounts,
+  dictationLanguage,
+  precedingText,
   resolveSpan,
   runCorrection,
   validSpans,
   type Span,
 } from '../src/features/voice/correction.js';
 
-const ok = (corrected: string, spans: unknown[] = []) =>
+const ok = (corrected: string, spans: unknown[] = [], warnings: string[] = []) =>
   new Response(
     JSON.stringify({
       model: 'claude-test',
@@ -19,7 +18,7 @@ const ok = (corrected: string, spans: unknown[] = []) =>
         corrected_text: corrected,
         uncertain_spans: spans,
         applied_commands: [],
-        warnings: [],
+        warnings,
       },
     }),
     { status: 200 },
@@ -39,8 +38,7 @@ function req(
         provider: 'anthropic',
         raw,
         question: 'Use the compact sidebar?',
-        optionLabels: ['Yes', 'No'],
-        keyterms: ['sidebar'],
+        options: [{ label: 'Yes' }, { label: 'No' }],
         editorAtStart: raw,
         getEditorText: () => editor,
         timeoutMs: 50,
@@ -49,52 +47,7 @@ function req(
   };
 }
 
-describe('drift guard', () => {
-  it('passes a faithful clean-up', () => {
-    expect(
-      detectDrift(
-        'the modal should be smaller but keep the keyboard shortcuts',
-        'The modal should be smaller, but keep the keyboard shortcuts.',
-        [],
-      ),
-    ).toBeNull();
-  });
-  it.each([
-    ['yes do it', 'No, do it.', /yes|no/],
-    ['approve this change', 'Reject this change.', /approve|reject/],
-    ['do not merge it', 'Do merge it.', /not/],
-    ["don't merge it", 'Do not merge it.', null], // same polarity, different spelling: allowed
-    ['we can ship', "we can't ship", /not/],
-    ['go ahead without tests', 'Go ahead with tests.', /without/],
-  ])('polarity: %s → %s', (raw, fixed, expected) => {
-    const r = detectDrift(raw, fixed, []);
-    if (expected === null) expect(r).toBeNull();
-    else expect(r).toMatch(expected);
-  });
-  it('rejects absurd length changes in both directions', () => {
-    expect(
-      detectDrift('use the sidebar please', 'Use the sidebar please. '.repeat(10), []),
-    ).toMatch(/length/);
-    expect(detectDrift('use the sidebar for navigation always', 'Use.', [])).toMatch(/length/);
-    expect(detectDrift('', 'anything', [])).toMatch(/nothing/);
-  });
-  it('rejects new numbers and identifiers unless they were said or are keyterms', () => {
-    expect(detectDrift('set the width to something wide', 'Set the width to 480px.', [])).toMatch(
-      /480px/,
-    );
-    expect(
-      detectDrift('call the helper in utils', 'Call the helper in utils/format.ts.', []),
-    ).toMatch(/format/);
-    expect(detectDrift('use effect for this', 'Use useEffect for this.', [])).toMatch(/useEffect/);
-    expect(detectDrift('use effect for this', 'Use useEffect for this.', ['useEffect'])).toBeNull();
-    expect(detectDrift('width of 480 pixels', 'Width of 480 pixels.', [])).toBeNull();
-  });
-  it('counts polarity words consistently', () => {
-    expect(polarityCounts("Don't, never, no. NOT!")).toEqual({ not: 2, never: 1, no: 1 });
-  });
-});
-
-describe('runCorrection keeps the raw text unless everything checks out', () => {
+describe('runCorrection keeps the raw text when the clean-up fails', () => {
   const raw = 'yes keep the sidebar';
   it('applies a good result and returns well-formed spans', async () => {
     const r = await req(raw, async () =>
@@ -156,23 +109,67 @@ describe('runCorrection keeps the raw text unless everything checks out', () => 
     t.setEditor(raw + ' and more');
     expect(await t.run()).toEqual({ kind: 'kept-raw', reason: 'editor-changed' });
   });
-  it('keeps raw when the model flips a decision', async () => {
-    const r = await req(raw, async () => ok('No, keep the sidebar.')).run();
-    expect(r).toMatchObject({ kind: 'kept-raw', reason: 'drift' });
+  it('lands the clean-up as written, with no meaning guard (the person reads it and can go back)', async () => {
+    const r = await req('do not delete prod delete dev', async () =>
+      ok('Delete prod. Do not delete dev.'),
+    ).run();
+    expect(r).toMatchObject({ kind: 'applied', changed: true, lowConfidence: false });
+    if (r.kind === 'applied')
+      expect(r.result.corrected_text).toBe('Delete prod. Do not delete dev.');
+    // A dropped negation and a changed number land too: the old guard refused both.
+    for (const [said, cleaned] of [
+      ["don't ship it", 'Ship it.'],
+      ['use port 8080', 'Use port 8081.'],
+    ]) {
+      const flipped = await req(said!, async () => ok(cleaned!)).run();
+      expect(flipped).toMatchObject({ kind: 'applied', changed: true });
+      if (flipped.kind === 'applied') expect(flipped.result.corrected_text).toBe(cleaned);
+    }
   });
-  it('sends one request with the consent flag and the dictated passage', async () => {
+  it('reports an unchanged passage and a low-confidence clean-up', async () => {
+    expect(await req(raw, async () => ok(raw)).run()).toMatchObject({
+      kind: 'applied',
+      changed: false,
+    });
+    expect(
+      await req(raw, async () => ok('Yes, keep the sidebar.', [], ['low-confidence'])).run(),
+    ).toMatchObject({ kind: 'applied', changed: true, lowConfidence: true });
+  });
+  it('sends one request with the consent flag, the passage and the question as context', async () => {
     let sent: Record<string, unknown> = {};
-    await req(raw, async (p, b) => {
-      sent = { p, ...(b as object) };
-      return ok('Yes, keep the sidebar.');
-    }).run();
+    await req(
+      raw,
+      async (p, b) => {
+        sent = { p, ...(b as object) };
+        return ok('Yes, keep the sidebar.');
+      },
+      {
+        context: 'x'.repeat(5000) + ' the sidebar is 64 px wide.',
+        options: [{ label: 'Yes', description: 'Ship it' }, { label: 'No' }],
+        askedAt: '2026-11-02T10:00:00.000Z',
+        projectLabel: 'web-app',
+        precedingText: 'About the layout:',
+        transcriber: 'xai',
+        language: 'en',
+      },
+    ).run();
     expect(sent).toMatchObject({
       p: '/voice/correct',
       consent: true,
       provider: 'anthropic',
       raw_transcript: raw,
-      option_labels: ['Yes', 'No'],
+      question: 'Use the compact sidebar?',
+      options: [{ label: 'Yes', description: 'Ship it' }, { label: 'No' }],
+      asked_at: '2026-11-02T10:00:00.000Z',
+      project_label: 'web-app',
+      preceding_text: 'About the layout:',
+      transcriber: 'xai',
+      language: 'en',
     });
+    // Only the newest part of a long context leaves the phone; the clean-up keeps no more than that.
+    expect((sent.context as string).length).toBe(3000);
+    expect(sent.context).toMatch(/64 px wide\.$/);
+    expect(sent).not.toHaveProperty('keyterms');
   });
 });
 
@@ -235,58 +232,27 @@ describe('keyterms', () => {
   });
 });
 
-describe('conservative auto-apply', () => {
-  const auto = (raw: string, fixed: string) => classifyChange(raw, fixed);
-
-  it('auto-applies formatting-only clean-ups that keep order and negation', () => {
-    expect(auto('yes keep the sidebar', 'Yes, keep the sidebar.').auto).toBe(true);
-    expect(auto('do not delete prod', "Don't delete prod.").auto).toBe(true);
-    expect(
-      auto(
-        'the modal should be smaller but keep the keyboard shortcuts',
-        'The modal should be smaller, but keep the keyboard shortcuts.',
-      ).auto,
-    ).toBe(true);
+describe('preceding text', () => {
+  it('is the answer before the passage, bounded, without the trailing space', () => {
+    expect(precedingText('About the layout: ', 18)).toBe('About the layout:');
+    expect(precedingText('', 0)).toBe('');
+    expect(precedingText('   ', 3)).toBe('');
   });
-
-  it('requires explicit acceptance when a negation moves to another clause (the reviewed attack)', () => {
-    const raw = 'Do not delete prod. Delete dev.';
-    const fixed = 'Delete prod. Do not delete dev.';
-    expect(detectDrift(raw, fixed, [])).toBeNull(); // the older guards alone let this through
-    const c = auto(raw, fixed);
-    expect(c.auto).toBe(false);
-    expect(c.reason).toMatch(/around "not"/);
+  it('keeps a trailing newline and drops a word the bound cut through', () => {
+    expect(precedingText('First line\n', 11)).toBe('First line\n');
+    const long = 'abc ' + 'w'.repeat(10) + ' ' + 'y '.repeat(250);
+    const got = precedingText(long, long.length);
+    expect(got.length).toBeLessThanOrEqual(500);
+    expect(got.startsWith('w')).toBe(false);
   });
+});
 
-  it('requires acceptance for reordering without any negation', () => {
-    expect(
-      auto('ship the api then the web app today', 'Ship the web app today, then the api.').auto,
-    ).toBe(false);
-  });
-
-  it('requires acceptance when a negation is added, dropped or swapped', () => {
-    expect(auto('merge it', 'Do not merge it.').auto).toBe(false);
-    expect(auto('do not merge it', 'Merge it.').auto).toBe(false);
-    expect(auto('approve this', 'Reject this.').auto).toBe(false);
-  });
-
-  it('requires acceptance when words next to a negation change', () => {
-    expect(auto('do not merge the branch now', 'Do not rebase the branch now.').auto).toBe(false);
-  });
-
-  it('refuses to auto-apply very long passages instead of guessing', () => {
-    const long = 'word '.repeat(2500);
-    expect(auto(long, long).auto).toBe(false);
-  });
-
-  it('runCorrection reports the moved-negation case as a suggestion, not an auto-apply', async () => {
-    const raw = 'Do not delete prod. Delete dev.';
-    const r = await req(raw, async () => ok('Delete prod. Do not delete dev.'), {
-      keyterms: [],
-    }).run();
-    expect(r).toMatchObject({ kind: 'applied', autoApply: false });
-    const good = await req('yes keep the sidebar', async () => ok('Yes, keep the sidebar.')).run();
-    expect(good).toMatchObject({ kind: 'applied', autoApply: true });
+describe('dictation language', () => {
+  it('is English for an English phone and left to the provider otherwise', () => {
+    expect(dictationLanguage('en-GB')).toBe('en');
+    expect(dictationLanguage('EN')).toBe('en');
+    expect(dictationLanguage('de-DE')).toBeUndefined();
+    expect(dictationLanguage('')).toBeUndefined();
   });
 });
 

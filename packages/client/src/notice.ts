@@ -12,6 +12,8 @@ export const PREFACE =
 
 export const MAX_COMMENT_CHARS = 4000;
 export const MAX_REASON_CHARS = 1000;
+/** The question is quoted for reference, so it is the first text cut; the agent can read it whole with get_decision. */
+export const MAX_QUESTION_CHARS = 1000;
 export const MAX_NOTICE_BYTES = 8000;
 /** Upper bound for ONE block's UTF-8 size; leaves room for the preface and neighbours in a batched chunk. */
 export const MAX_BLOCK_BYTES = 6000;
@@ -60,6 +62,8 @@ export interface AnswerNoticeInput {
   questionId: string;
   alias?: number;
   revision: number;
+  /** The question as it was asked, quoted so the agent knows what the answer is to. */
+  question?: string;
   source: 'human' | 'proxy';
   /** Selected option ids and their (decrypted) labels, in order. */
   choices?: { id: string; label?: string }[];
@@ -79,11 +83,18 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
   const comment = n.kind === 'answer' && n.comment ? sanitizeText(n.comment) : '';
   const fullReason =
     n.kind === 'answer' && n.correction && n.reason ? sanitizeText(n.reason, MAX_REASON_CHARS) : '';
-  const build = (c: string, reason: string): string => {
+  const fullQuestion = n.question ? sanitizeText(n.question, MAX_QUESTION_CHARS) : '';
+  const build = (c: string, reason: string, question = fullQuestion): string => {
     const lines: string[] = [BLOCK_START];
+    const field = (name: string, value: string) => {
+      const [first, ...rest] = value.split('\n');
+      lines.push(`${name}: ${first}`);
+      for (const r of rest) lines.push(`  ${r}`);
+    };
     lines.push(`question_id: ${oneLine(n.questionId, 80)}${n.alias ? ` (q-${n.alias})` : ''}`);
     lines.push(`revision: ${Math.max(0, Math.trunc(n.revision))}`);
     if (n.injectionId) lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
+    if (question) field('question', question);
     if (n.kind === 'expired') {
       lines.push('source: system');
       lines.push('status: expired');
@@ -111,11 +122,6 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
         const labels = n.choices.filter((x) => x.label).map((x) => oneLine(x.label!, 120));
         if (labels.length > 0) lines.push(`choice_label: ${labels.join(', ')}`);
       }
-      const field = (name: string, value: string) => {
-        const [first, ...rest] = value.split('\n');
-        lines.push(`${name}: ${first}`);
-        for (const r of rest) lines.push(`  ${r}`);
-      };
       if (reason) field('reason', reason);
       if (c) field('comment', c);
     }
@@ -123,21 +129,23 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
     return lines.join('\n');
   };
 
-  // Enforce the UTF-8 byte budget on the whole block. Only free text is ever cut (the comment first, then a
-  // correction's reason), never the metadata, the delimiters or the instruction lines. Cutting a multi-line
-  // value also drops its continuation indent, so each pass re-measures the rendered block.
+  // Enforce the UTF-8 byte budget on the whole block. Only free text is ever cut (the quoted question first,
+  // then the comment, then a correction's reason), never the metadata, the delimiters or the instruction
+  // lines. Cutting a multi-line value also drops its continuation indent, so each pass re-measures the block.
+  let q = fullQuestion;
   let c = comment;
   let r = fullReason;
-  let out = build(c, r);
+  let out = build(c, r, q);
   const shrink = (v: string): string => {
     const over = byteLen(out) - MAX_BLOCK_BYTES;
     const keep = Math.max(0, byteLen(v) - over - byteLen(TRUNCATED) - 8);
     return keep > 0 ? truncateBytes(v, keep).trimEnd() + TRUNCATED : '';
   };
-  for (let i = 0; i < 24 && byteLen(out) > MAX_BLOCK_BYTES && (c || r); i++) {
-    if (c) c = shrink(c);
+  for (let i = 0; i < 36 && byteLen(out) > MAX_BLOCK_BYTES && (q || c || r); i++) {
+    if (q) q = shrink(q);
+    else if (c) c = shrink(c);
     else r = shrink(r);
-    out = build(c, r);
+    out = build(c, r, q);
   }
   return out;
 }

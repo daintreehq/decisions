@@ -71,7 +71,7 @@ export const TOOLS = [
   {
     name: 'ask_human',
     description:
-      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). Returns immediately: end your turn after calling. The answer is typed into this terminal later.',
+      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). Returns at once, never waiting: keep doing work that does not depend on the answer, and end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -88,10 +88,16 @@ export const TOOLS = [
           maxLength: 32768,
           description: 'Background the human needs to decide.',
         },
-        kind: { type: 'string', enum: ['choice', 'approval', 'text', 'mixed'] },
+        kind: {
+          type: 'string',
+          enum: ['choice', 'approval', 'text', 'mixed'],
+          description:
+            'choice: pick one option. approval: yes/no, offered as Approve and Reject unless you give options. text: an open answer. mixed (the default with options): pick one option or write an answer instead. A note can go with any of them.',
+        },
         options: {
           type: 'array',
           maxItems: 12,
+          description: 'The answers to choose from; the human picks exactly one.',
           items: {
             type: 'object',
             additionalProperties: false,
@@ -327,7 +333,7 @@ export function createDecisionsMcpHandler(
     try {
       if (name === 'ask_human') {
         const r = await bridge.registerQuestion({ origin, input: args });
-        const instruction = `Asked as q-${r.alias}. End your turn now (or continue with unrelated work); the answer will arrive as a message in this terminal.`;
+        const instruction = `Asked as q-${r.alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted.`;
         return text(instruction, {
           question_id: r.questionId,
           status: r.status,
@@ -378,7 +384,7 @@ export function createDecisionsMcpHandler(
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'daintree-decisions', version: SERVER_VERSION },
           instructions:
-            'Use ask_human for decisions that belong to the human, then end your turn; the answer arrives in this terminal.',
+            'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal.',
         });
       }
       case 'notifications/initialized':

@@ -55,7 +55,7 @@ The claim can happen exactly once; afterwards the endpoint is permanently closed
 
 ## Optional dictation
 
-Add provider keys as Worker secrets (Cloudflare dashboard → Workers → your Worker → Settings → Variables and Secrets, or `wrangler secret put NAME`): `XAI_API_KEY` (streaming transcription), `ANTHROPIC_API_KEY` (correction), `OPENAI_API_KEY` (single-provider mode, preview). Read [voice-privacy.md](voice-privacy.md) first. Model names are configuration: `CORRECTION_MODEL` and `OPENAI_CORRECTION_MODEL` in `wrangler.jsonc`.
+Add provider keys as Worker secrets (Cloudflare dashboard → Workers → your Worker → Settings → Variables and Secrets, or `wrangler secret put NAME`): `XAI_API_KEY` (streaming transcription), `ANTHROPIC_API_KEY` (correction), `OPENAI_API_KEY` (single-provider mode, preview). Read [voice-privacy.md](voice-privacy.md) first. Model names are configuration: `ANTHROPIC_CORRECTION_MODEL` (`claude-haiku-5-5`, or `claude-sonnet-5-5`) and `OPENAI_CORRECTION_MODEL` (`gpt-6.1-terra`) in `wrangler.jsonc`, the same defaults Daintree desktop dictation uses.
 
 ## Custom domain
 
