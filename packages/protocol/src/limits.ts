@@ -29,6 +29,8 @@ export const LIMITS = {
   voiceCorrectionChars: 16_000,
   requestSkewMs: 2 * 60 * 1000,
   nonceTtlMs: 10 * 60 * 1000,
+  /** A finite question expiry is at most this far after the relay receives the question (or its reopen). */
+  maxQuestionExpiryMs: 366 * 24 * 60 * 60 * 1000,
 } as const;
 
 export const DEFAULTS = {

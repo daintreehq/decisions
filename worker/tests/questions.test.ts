@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import { LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import { act, ask, claimRelay, events, inRoom, pairDevice, type World } from './helpers.js';
 
@@ -14,6 +14,18 @@ describe('question creation', () => {
     const evs = await events(w.owner);
     expect(ids(evs)).toEqual(['decision.created']);
     expect(evs[0].data.requirement).toBe('human-required');
+  });
+
+  it('accepts no expiry or one within the protocol limit, and refuses one beyond it', async () => {
+    const w = await claimRelay();
+    const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+    expect((await ask(w, { expiresAt: null })).res.status).toBe(201);
+    expect(
+      (await ask(w, { expiresAt: at(LIMITS.maxQuestionExpiryMs - 3_600_000) })).res.status,
+    ).toBe(201);
+    const beyond = await ask(w, { expiresAt: at(LIMITS.maxQuestionExpiryMs + 3_600_000) });
+    expect(beyond.res.status).toBe(400);
+    expect(beyond.res.json.message).toMatch(/within a year/);
   });
 
   it('is idempotent for identical retries and rejects a reused key with a different body', async () => {

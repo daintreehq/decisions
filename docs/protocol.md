@@ -125,8 +125,9 @@ Idempotency: a repeated `idempotency_key` with identical body returns the origin
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent.
 
 Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opaque pane hash). Default expiry is
-chosen by the desktop (`expires_at`, `null` = never). `now >= expires_at` means expired (checked lazily on every
-read/write as well as by the alarm).
+chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the
+future and at most `LIMITS.maxQuestionExpiryMs` (366 days) away. `now >= expires_at` means expired (checked lazily
+on every read/write as well as by the alarm).
 
 ## 7. Event ledger and sync
 

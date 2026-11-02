@@ -130,7 +130,10 @@ export const TOOLS = [
           description:
             'A workflow gate the host registered (e.g. design-review/final). Its choices replace options; it may refuse free text and require attachments.',
         },
-        expires_at: { type: 'string', description: 'ISO time; bounded by workflow policy.' },
+        expires_at: {
+          type: 'string',
+          description: 'ISO time; bounded by host and workflow policy. Omit for the host default.',
+        },
         correlation_id: {
           type: 'string',
           maxLength: 64,
