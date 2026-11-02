@@ -59,6 +59,7 @@ function decisionResult(v: DecisionView) {
       choices: a.choices,
       text: a.text,
       correction: a.correction,
+      reason: a.reason,
       delivered: a.delivered,
       created_at: a.createdAt,
     })),
@@ -137,6 +138,16 @@ export const TOOLS = [
         },
       },
     },
+    // Only adds a question to the owner's own inbox. Clients that gate tool calls on these hints
+    // (Codex asks for approval of anything not read-only unless it is non-destructive and closed-world)
+    // would otherwise make the agent wait in the terminal for permission to ask the human.
+    annotations: {
+      title: 'Ask the human',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
   },
   {
     name: 'get_decision',
@@ -174,6 +185,7 @@ export const TOOLS = [
         error: { type: 'string' },
       },
     },
+    annotations: { title: 'Check a decision', readOnlyHint: true, openWorldHint: false },
   },
   {
     name: 'cancel_question',
@@ -184,6 +196,14 @@ export const TOOLS = [
       additionalProperties: false,
       required: ['question_id'],
       properties: { question_id: { type: 'string' }, reason: { type: 'string', maxLength: 500 } },
+    },
+    // Withdraws a question for good, so clients that confirm destructive calls still confirm this one.
+    annotations: {
+      title: 'Cancel a question',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
     },
   },
 ] as const;

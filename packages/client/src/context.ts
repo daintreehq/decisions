@@ -114,8 +114,9 @@ export interface BridgeContext {
   /**
    * Pick up epoch keys rotated since the identity was loaded: from the key store on the owner desktop (another
    * process may have rotated), from this device's sealed grants on the relay on a `desktop-host`.
+   * `announcedEpoch` is the epoch a rotation event says the relay committed, when one triggered the refresh.
    */
-  refreshIdentity?: () => Promise<void>;
+  refreshIdentity?: (announcedEpoch?: number) => Promise<void>;
   /** The decision model's history, when the host wired one: receives human decisions (see `DecisionLearner`). */
   learner?: DecisionLearner;
 }

@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { PROTOCOL_VERSION, type InfoResponse } from '@daintreehq/decisions-protocol';
 import {
   RelayClient,
@@ -357,6 +357,8 @@ export async function recoveryExport(
     throw new CliError((e as Error).message);
   });
   await writeFile(o.out, JSON.stringify(kit), { mode: 0o600 });
+  // `mode` only applies to a new file: an existing one keeps its permissions unless tightened here.
+  await chmod(o.out, 0o600);
   print(
     ctx,
     `✓ Wrote ${o.out}.\n  Keep the file AND the passphrase somewhere safe, separately. If all copies of your keys are lost, the data on Cloudflare cannot be decrypted.`,

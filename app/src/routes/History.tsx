@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react';
 import { useApp, useNow, useQuestions } from '../app/hooks.js';
 import { Link } from '../app/router.js';
 import {
+  badgeClass,
   currentAnswer,
   effectiveStatus,
+  hiddenQuestionText,
   originLabel,
   proxyNeedsReview,
   statusLabel,
@@ -94,12 +96,10 @@ export function HistoryPage() {
                     <span className="when">{shortDateLabel(v.lastEventAt, now)}</span>
                   </span>
                   <span className="row-text">
-                    {v.content
-                      ? previewText(v.content.question, 140)
-                      : 'Could not verify this question'}
+                    {v.content ? previewText(v.content.question, 140) : hiddenQuestionText(v)}
                   </span>
                   <span className="row-badges">
-                    <span className={`badge ${s}`}>{statusLabel(s)}</span>
+                    <span className={`badge ${badgeClass(s, v)}`}>{statusLabel(s, v)}</span>
                     {proxyNeedsReview(v, now) && <span className="badge warn">To review</span>}
                     {a && v.actions.filter((x) => x.action === 'override').length > 0 && (
                       <span className="badge">Corrected</span>

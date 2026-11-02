@@ -330,6 +330,7 @@ export class DeliveryEngine {
       choices: e.choices,
       comment: e.text,
       correction: e.correction,
+      ...(e.reason ? { reason: e.reason } : {}),
       ...(e.confidence !== undefined ? { confidence: e.confidence } : {}),
       ...(e.model_id ? { modelId: e.model_id } : {}),
       injectionId: i.intentId,

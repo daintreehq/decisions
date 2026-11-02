@@ -251,6 +251,7 @@ export async function importDecisions(
           : [],
         ...(typeof a.confidence === 'number' ? { confidence: a.confidence } : {}),
         ...(typeof a.model_id === 'string' ? { model_id: a.model_id } : {}),
+        ...(typeof a.reason === 'string' && a.reason ? { reason: a.reason } : {}),
       };
       const sealed =
         a.kind === 'answer'

@@ -155,7 +155,7 @@ export class Inbox {
    */
   private async refreshKeys(epoch: number | null): Promise<void> {
     if (epoch !== null && epoch <= this.ctx.identity.currentEpoch) return;
-    await this.ctx.refreshIdentity?.();
+    await this.ctx.refreshIdentity?.(epoch ?? undefined);
   }
 
   private async apply(ev: LedgerEvent): Promise<boolean> {
@@ -403,6 +403,7 @@ export class Inbox {
       reviewed_attachment_digests: v.content?.reviewed_attachment_digests ?? [],
       ...(v.content?.confidence !== undefined ? { confidence: v.content.confidence } : {}),
       ...(v.content?.model_id ? { model_id: v.content.model_id } : {}),
+      ...(v.action === 'override' && v.content?.reason?.trim() ? { reason: v.content.reason } : {}),
     };
     // Only the sealed form is stored; the clear content lives in memory until it is typed.
     const entry: AnswerEntry = {

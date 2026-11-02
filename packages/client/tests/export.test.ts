@@ -125,6 +125,33 @@ describe('import', () => {
     ).rejects.toThrow();
   });
 
+  it("seals a correction's reason on import, so it never sits in clear in the store", async () => {
+    const src = await populated();
+    await src.relay.answerEvent({
+      questionId: src.qid,
+      phone: src.phone,
+      action: 'override',
+      expectedRevision: 1,
+      options: ['y'],
+      extra: { reason: 'REASON-SECRET changed my mind' },
+    });
+    await src.bridge.catchUp();
+    const out = await exportDecisions({
+      store: src.store,
+      identity: src.identity,
+      plaintext: true,
+    });
+    if (out.encrypted) throw new Error('expected a zip');
+    const dst = await setupBridge();
+    await importDecisions({ zip: out.data }, dst.store, dst.identity);
+    const row = (await dst.store.getQuestion(src.qid))!;
+    expect(JSON.stringify(row)).not.toContain('REASON-SECRET');
+    expect((await openAnswers(dst, row)).at(-1)).toMatchObject({
+      correction: true,
+      reason: 'REASON-SECRET changed my mind',
+    });
+  });
+
   const manifestFor = async (files: Record<string, Uint8Array>) => ({
     export_version: 1,
     created_at: 'x',

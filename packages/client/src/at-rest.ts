@@ -47,7 +47,7 @@ export const LOCAL_RECORD = {
 /** What sealing needs: the identity holding the epoch keys, and a way to reload it after a rotation. */
 export interface SealContext {
   identity: Identity;
-  refreshIdentity?: () => Promise<void>;
+  refreshIdentity?: (announcedEpoch?: number) => Promise<void>;
 }
 
 /** The sealed content could not be opened (corrupt, or sealed under a key this identity does not hold). */
@@ -192,6 +192,7 @@ export function sealAnswerContent(
     reviewed_attachment_digests: content.reviewed_attachment_digests,
     ...(content.confidence !== undefined ? { confidence: content.confidence } : {}),
     ...(content.model_id ? { model_id: content.model_id } : {}),
+    ...(content.reason ? { reason: content.reason } : {}),
   };
   return seal(
     ctx,
@@ -227,6 +228,7 @@ export async function openAnswerContent(
         : [],
       ...(typeof c.confidence === 'number' ? { confidence: c.confidence } : {}),
       ...(typeof c.model_id === 'string' && c.model_id ? { model_id: c.model_id } : {}),
+      ...(typeof c.reason === 'string' && c.reason ? { reason: c.reason } : {}),
     };
   }
   if (hasLegacyContent(e)) return legacyContent(e);

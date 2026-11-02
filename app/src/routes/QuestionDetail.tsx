@@ -7,6 +7,7 @@ import { DeliveryProgress, HumanAnswerCard, ProxyCard } from '../components/Card
 import { SafeText } from '../components/SafeText.js';
 import { Link } from '../app/router.js';
 import {
+  badgeClass,
   currentAnswer,
   deliveryProgress,
   effectiveStatus,
@@ -14,6 +15,7 @@ import {
   proxyNeedsReview,
   statusLabel,
   submitKind,
+  unreadableHere,
 } from '../domain/selectors.js';
 import { ChevronLeft, ClockIcon, Origin, PersonIcon } from '../components/Icons.js';
 import { announce } from '../lib/announce.js';
@@ -141,7 +143,13 @@ export function QuestionDetail({ id }: { id: string }) {
     <article
       className="detail"
       aria-labelledby={content ? 'q-title' : undefined}
-      aria-label={content ? undefined : 'Question that could not be verified'}
+      aria-label={
+        content
+          ? undefined
+          : unreadableHere(view)
+            ? 'Question this phone cannot read'
+            : 'Question that could not be verified'
+      }
     >
       <header className="detail-head">
         <Link to="/" className="back">
@@ -165,7 +173,7 @@ export function QuestionDetail({ id }: { id: string }) {
         <p className="detail-badges">
           {/* An answered question's answer card carries the provenance label; no need to say it twice. */}
           {status !== 'human-answered' && status !== 'proxy-answered' && (
-            <span className={`badge ${status}`}>{statusLabel(status)}</span>
+            <span className={`badge ${badgeClass(status, view)}`}>{statusLabel(status, view)}</span>
           )}
           {open && view.requirement === 'human-required' && (
             <span className="badge req">
@@ -185,7 +193,17 @@ export function QuestionDetail({ id }: { id: string }) {
         </p>
       </header>
 
-      {!verified && (
+      {!verified && unreadableHere(view) && (
+        <section className="card">
+          <strong>This phone can’t read this question</strong>
+          <p>
+            It was sealed with a content key this phone was never given, usually because it was
+            asked before this phone was paired. Answer it from a device that was paired then, or ask
+            your agent to ask again.
+          </p>
+        </section>
+      )}
+      {!verified && !unreadableHere(view) && (
         <section className="card danger" role="alert">
           <strong>Could not verify this question</strong>
           <p>

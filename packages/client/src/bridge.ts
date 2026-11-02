@@ -16,7 +16,13 @@ import { sameDigests, type OpenAnswerEntry } from './answers.js';
 import { openAnswers, openQuestionContent, sealStoredContent } from './at-rest.js';
 import { RelayError } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
-import { MemoryKeyStore, loadIdentity, type Identity, type KeyStore } from './identity.js';
+import {
+  MemoryKeyStore,
+  loadIdentity,
+  promoteEpoch,
+  type Identity,
+  type KeyStore,
+} from './identity.js';
 import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex, TransientError } from './mutex.js';
 import { RelayClient } from './relay.js';
@@ -89,6 +95,8 @@ export interface DecisionView {
     choices: string[];
     text: string;
     correction: boolean;
+    /** A correction's reason, as the human gave it ('' when none). */
+    reason: string;
     delivered: boolean;
     createdAt: string;
   }[];
@@ -188,7 +196,7 @@ export class DecisionsBridge {
       now: o.now ?? Date.now,
       lock: new Mutex(),
       ...(o.learner ? { learner: o.learner } : {}),
-      refreshIdentity: () => this.refreshKeys(),
+      refreshIdentity: (announced) => this.refreshKeys(announced),
     };
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
@@ -231,8 +239,17 @@ export class DecisionsBridge {
    * Pick up epoch keys rotated since the identity was loaded. The owner desktop holds every epoch key itself,
    * so it reloads them from the key store (another process may have rotated). A `desktop-host` holds only
    * what the owner sealed to it: it fetches its grants from the relay and opens them with the pinned owner.
+   *
+   * A rotation stages its new epoch in the key store, has the relay commit it, and only then marks it current;
+   * the relay announces the commit (`announced`) in between, and the rotating process may die before that last
+   * step. So an announced epoch whose key the store already holds is made current here, durably, or every
+   * question asked after a revocation would be sealed under the old key, which a newly paired phone cannot
+   * read. The announcement is the relay's word, not proof: a lying relay can at most select a key this
+   * installation generated whose rotation it then refused (phones lacking its grant cannot read what it
+   * seals), a denial of service it can cause anyway. It can never introduce a key: an epoch the store does not
+   * hold is never made current.
    */
-  private async refreshKeys(): Promise<void> {
+  private async refreshKeys(announced?: number): Promise<void> {
     const { ctx, o } = this;
     if (ctx.identity.role === 'desktop-host') {
       let keyStore = o.keyStore ?? this.hostKeys;
@@ -256,7 +273,10 @@ export class DecisionsBridge {
       return;
     }
     if (!o.keyStore) return;
-    const id = await loadIdentity(o.keyStore);
+    const id =
+      announced !== undefined
+        ? await promoteEpoch(o.keyStore, announced)
+        : await loadIdentity(o.keyStore);
     ctx.identity = id;
     ctx.client.identity = id;
   }
@@ -395,6 +415,7 @@ export class DecisionsBridge {
           choices: e.choices.map((c) => c.id),
           text: e.text,
           correction: e.correction,
+          reason: e.reason ?? '',
           delivered: e.delivered,
           createdAt: e.created_at,
         })),

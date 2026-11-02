@@ -29,6 +29,8 @@ export interface AnswerContent {
   reviewed_attachment_digests: string[];
   confidence?: number;
   model_id?: string;
+  /** Why the human corrected an earlier answer (the phone requires one for a correction). */
+  reason?: string;
 }
 
 /** An answer with its content opened. Never stored. */
@@ -47,6 +49,7 @@ export const ANSWER_CONTENT_FIELDS = [
   'reviewed_attachment_digests',
   'confidence',
   'model_id',
+  'reason',
 ] as const;
 
 /** True for an entry from a store written before content was sealed: its content is still in clear. */
@@ -66,6 +69,7 @@ export function legacyContent(e: AnswerEntry): AnswerContent {
       : [],
     ...(typeof r.confidence === 'number' ? { confidence: r.confidence } : {}),
     ...(typeof r.model_id === 'string' && r.model_id ? { model_id: r.model_id } : {}),
+    ...(typeof r.reason === 'string' && r.reason ? { reason: r.reason } : {}),
   };
 }
 

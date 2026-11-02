@@ -4,8 +4,10 @@ import { useApp, useNow, useQuestions } from '../app/hooks.js';
 import { Link } from '../app/router.js';
 import type { QuestionView } from '../domain/model.js';
 import {
+  badgeClass,
   deliveryNeedsAttention,
   effectiveStatus,
+  hiddenQuestionText,
   needsAction,
   originLabel,
   proxyNeedsReview,
@@ -55,7 +57,7 @@ function Row({
           )}
         </span>
         <span className="row-text">
-          {v.content ? previewText(v.content.question, 160) : 'Could not verify this question'}
+          {v.content ? previewText(v.content.question, 160) : hiddenQuestionText(v)}
         </span>
         <span className="row-badges">
           {status === 'open' && showOpen && <span className="badge open">Needs you</span>}
@@ -75,7 +77,7 @@ function Row({
             status === 'expired' ||
             status === 'cancelled' ||
             status === 'unverified') && (
-            <span className={`badge ${status}`}>{statusLabel(status)}</span>
+            <span className={`badge ${badgeClass(status, v)}`}>{statusLabel(status, v)}</span>
           )}
           {deliveryNeedsAttention(v) && (
             <span className="badge warn">Delivery needs attention</span>
