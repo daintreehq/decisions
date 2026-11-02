@@ -1,5 +1,6 @@
 import type { ActionKind } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView } from './model.js';
+import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
   'open' | 'proxy-answered' | 'human-answered' | 'cancelled' | 'expired' | 'unverified';
@@ -39,7 +40,25 @@ export const needsAction = (v: QuestionView, now = Date.now()): boolean =>
   needsYou(v, now) || deliveryNeedsAttention(v);
 
 /** One display vocabulary for every status, shared by the inbox, the detail page and History. */
-export function statusLabel(s: EffectiveStatus): string {
+/**
+ * A correctly signed question this phone holds no key for (typically asked before it was paired): it cannot be
+ * shown or answered here, but nothing about it is suspect, so it is never labelled as failing verification.
+ */
+export const unreadableHere = (v: QuestionView): boolean =>
+  !v.verification.ok && v.verification.reason === NO_EPOCH_KEY;
+
+/** What a list row shows in place of a question it cannot display. */
+export const hiddenQuestionText = (v: QuestionView): string =>
+  unreadableHere(v)
+    ? 'Sealed with a key this phone was not given'
+    : 'Could not verify this question';
+
+/** The badge's style class: an unreadable question gets the plain neutral chip, never the danger colours. */
+export const badgeClass = (s: EffectiveStatus, v: QuestionView): string =>
+  s === 'unverified' && unreadableHere(v) ? 'unreadable' : s;
+
+export function statusLabel(s: EffectiveStatus, v?: QuestionView): string {
+  if (s === 'unverified' && v && unreadableHere(v)) return 'Not readable here';
   switch (s) {
     case 'open':
       return 'Needs you';
@@ -59,7 +78,8 @@ export function statusLabel(s: EffectiveStatus): string {
 /** Project and machine kept apart, so the row can lead with the project and still always show the machine. */
 export function originParts(v: QuestionView): { project: string; machine: string } {
   const c = v.content;
-  if (!c) return { project: 'Unverified question', machine: '' };
+  if (!c)
+    return { project: unreadableHere(v) ? 'Earlier question' : 'Unverified question', machine: '' };
   return { project: c.project_label || 'Daintree', machine: c.machine_label || '' };
 }
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
@@ -134,7 +154,7 @@ export function deliveryProgress(
 /** Plain label for the project/machine filter: decrypted labels only, never raw ids. */
 export function originLabel(v: QuestionView): string {
   const c = v.content;
-  if (!c) return 'Unverified question';
+  if (!c) return unreadableHere(v) ? 'Earlier question' : 'Unverified question';
   return [c.project_label, c.machine_label].filter(Boolean).join(' · ') || 'Daintree';
 }
 

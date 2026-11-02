@@ -135,7 +135,8 @@ export class FileKeyStore implements KeyStore {
     const body = this.passphrase
       ? JSON.stringify(await encryptRecoveryBundle(identity, this.passphrase))
       : JSON.stringify(identity);
-    const tmp = this.file + '.tmp';
+    // A unique name per write: two processes saving at once must not share (and rename away) one temp file.
+    const tmp = `${this.file}.${newId()}.tmp`;
     await writeFile(tmp, body, { mode: 0o600 });
     await chmod(tmp, 0o600);
     await rename(tmp, this.file);
@@ -262,6 +263,20 @@ export async function addEpoch(
     ],
     currentEpoch: opts.makeCurrent === false ? id.currentEpoch : Math.max(id.currentEpoch, epoch),
   };
+  await store.save(stored);
+  return importIdentity(stored);
+}
+
+/**
+ * Make an epoch the key store already holds its current one, saving the change. Re-reads the store right before
+ * writing, so a rotation another process saved meanwhile is kept, not overwritten with an older snapshot. Never
+ * lowers the current epoch and never invents one: an epoch without a key in the store (or at or below the
+ * current one) returns what the store holds, unchanged.
+ */
+export async function promoteEpoch(store: KeyStore, epoch: number): Promise<Identity> {
+  const id = await loadIdentity(store);
+  if (epoch <= id.currentEpoch || !id.epochs.has(epoch)) return id;
+  const stored: StoredIdentity = { ...id.stored, currentEpoch: epoch };
   await store.save(stored);
   return importIdentity(stored);
 }

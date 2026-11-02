@@ -8,7 +8,7 @@ import {
   exportPublicKey,
 } from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
-import { verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
+import { NO_EPOCH_KEY, verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
 import { actionEvent, makeWorld, questionEvent, type World } from './helpers.js';
 
 const ctx = (w: World) => ({
@@ -90,6 +90,32 @@ describe('question verification', () => {
     );
     expect(r).toMatchObject({ ok: false });
     if (!r.ok) expect(r.reason).toMatch(/epoch key/);
+  });
+
+  it('tells a genuine question sealed under a key this phone lacks apart from a forged one', async () => {
+    const w = await makeWorld();
+    const noKeys = { ...ctx(w), epochKeys: new Map() };
+    const genuine = await questionEvent(w);
+    expect(await verifyQuestionEvent(genuine.data, NOW, noKeys, genuine.question_id!)).toEqual({
+      ok: false,
+      reason: NO_EPOCH_KEY,
+    });
+    // altered in transit: still a verification failure, never "just a missing key"
+    const forged = await questionEvent(w, {
+      tamper: (env) => {
+        env.ciphertext =
+          env.ciphertext.slice(0, -2) + (env.ciphertext.endsWith('AA') ? 'BB' : 'AA');
+      },
+    });
+    const r = await verifyQuestionEvent(forged.data, NOW, noKeys, forged.question_id!);
+    expect(r).toMatchObject({ ok: false });
+    if (!r.ok) expect(r.reason).not.toBe(NO_EPOCH_KEY);
+    // signed by the desktop but sealed for another purpose: misbound, so never "just a missing key"
+    const misbound = await questionEvent(w, { purpose: 'answer-content' });
+    expect(await verifyQuestionEvent(misbound.data, NOW, noKeys, misbound.question_id!)).toEqual({
+      ok: false,
+      reason: 'envelope binding mismatch',
+    });
   });
 
   it('rejects another installation', async () => {

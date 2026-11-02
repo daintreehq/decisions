@@ -122,6 +122,8 @@ export async function questionEvent(
     seq?: number;
     /** Encrypt the envelope for a different question id than the one the record is signed for. */
     envelopeQuestionId?: string;
+    /** Seal (and sign) the envelope for another purpose than question content. */
+    purpose?: 'question-content' | 'answer-content';
     tamper?: (e: { ciphertext: string }) => void;
   } = {},
 ): Promise<LedgerEvent> {
@@ -135,7 +137,7 @@ export async function questionEvent(
     recordType: 'question',
     revision: 0,
     senderDeviceId: signer.id,
-    purpose: 'question-content',
+    purpose: o.purpose ?? 'question-content',
     plaintext: o.content ?? SAMPLE_CONTENT,
   });
   const requirement = o.requirement ?? 'human-required';

@@ -21,6 +21,13 @@ import type { TrustStore } from './trust.js';
 
 export type Verified<T> = { ok: true; value: T } | { ok: false; reason: string };
 
+/**
+ * A genuine, correctly signed question sealed under a content key this phone was never given (typically one
+ * asked before this phone was paired, since a new phone receives only the current key). Not a sign of
+ * tampering, so the app tells it apart from every other failure.
+ */
+export const NO_EPOCH_KEY = 'this phone holds no epoch key for this question';
+
 export interface VerifyCtx {
   installationId: string;
   trust: TrustStore;
@@ -74,6 +81,15 @@ export async function verifyQuestionEvent(
     return fail('signature or ciphertext does not match');
   }
   if (envelope.aad.record_type !== 'question') return fail('wrong record type');
+  // Only once the signature and every binding hold: an unsigned, altered or misbound question is a failure,
+  // whatever its epoch says. (decryptEnvelope checks the same bindings, but only after looking up the key.)
+  if (
+    envelope.aad.installation_id !== ctx.installationId ||
+    envelope.aad.sender_device_id !== record.signer_device_id ||
+    envelope.purpose !== 'question-content'
+  )
+    return fail('envelope binding mismatch');
+  if (!ctx.epochKeys.has(envelope.key_epoch)) return fail(NO_EPOCH_KEY);
   let plain: unknown;
   try {
     plain = await decryptEnvelope(envelope, ctx.epochKeys, {

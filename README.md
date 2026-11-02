@@ -43,7 +43,7 @@ You need a Cloudflare account (the free plan is enough for one person), Node 22+
 4. **Add the MCP to your agent:** `pnpm decisions mcp` prints the line for your agent.
 5. **Test it:** `pnpm decisions ask "Does this work?" --option yes=Yes --option no=No` and answer on your phone.
 
-Back up your keys: `pnpm decisions recovery export`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.**
+Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.**
 
 ## Repository layout
 

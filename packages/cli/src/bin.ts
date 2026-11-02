@@ -212,7 +212,7 @@ export function buildProgram(): Command {
   program
     .command('export')
     .description('Export decisions as a password-encrypted archive.')
-    .option('--out <file>')
+    .option('--out <file>', 'where to write the archive')
     .option('--plaintext', 'write an UNENCRYPTED zip (explicit opt-in)')
     .action((o) => run((c, g) => exportCmd(c, g, o))());
   program
@@ -221,18 +221,24 @@ export function buildProgram(): Command {
     .action((f) => run((c, g) => importCmd(c, g, f))());
 
   const recovery = program.command('recovery').description('Back up and verify your keys.');
+  const passphraseHelp =
+    'The passphrase is asked for, or read from $DECISIONS_RECOVERY_PASSPHRASE when it is set.';
   recovery
     .command('export')
-    .requiredOption('--out <file>')
+    .description('Write a passphrase-encrypted recovery kit of this installation’s keys.')
+    .requiredOption('--out <file>', 'where to write the kit (mode 0600)')
+    .addHelpText('after', `\n${passphraseHelp}`)
     .action((o) => run((c, g) => recoveryExport(c, g, o))());
   recovery
     .command('verify <file>')
     .description('Check a recovery kit without installing it.')
+    .addHelpText('after', `\n${passphraseHelp}`)
     .action((f) => run((c) => recoveryVerify(c, f))());
   recovery
     .command('import <file>')
-    .option('--overwrite')
+    .option('--overwrite', 'replace keys already on this machine')
     .description('Restore keys from a recovery kit.')
+    .addHelpText('after', `\n${passphraseHelp}`)
     .action((f, o) => run((c, g) => recoveryImport(c, g, f, o))());
 
   program

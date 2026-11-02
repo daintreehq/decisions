@@ -4,7 +4,7 @@ Everything on the relay is encrypted with keys that only your own devices hold. 
 
 ## What to back up
 
-- The **recovery kit**: a passphrase-protected file with your owner signing and exchange keys and your content keys. Create it with `decisions recovery export` (passphrase of at least 12 characters; PBKDF2-SHA256, 600,000 iterations, AES-256-GCM). Store it somewhere other than the computer it protects, such as a password manager attachment.
+- The **recovery kit**: a passphrase-protected file with your owner signing and exchange keys and your content keys. Create it with `decisions recovery export --out <file>` (passphrase of at least 12 characters, asked for or read from `DECISIONS_RECOVERY_PASSPHRASE`; PBKDF2-SHA256, 600,000 iterations, AES-256-GCM). Store it somewhere other than the computer it protects, such as a password manager attachment.
 - Check it works: `decisions recovery verify <file>`. Daintree's setup wizard requires a successful verification before it finishes.
 
 ## Restoring on a new computer

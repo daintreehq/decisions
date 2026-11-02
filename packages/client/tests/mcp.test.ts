@@ -132,6 +132,38 @@ describe('HTTP MCP: protocol', () => {
     for (const t of TOOLS) expect(new TextEncoder().encode(t.description).length).toBeLessThan(400);
     expect(r.result.tools[0].inputSchema.required).toEqual(['question']);
   });
+  it('tools/list: annotations let approval-gating clients run ask_human and get_decision unprompted', async () => {
+    // MCP defaults an unannotated tool to destructive and open-world. Codex then asks for approval of
+    // every ask_human, so the agent would sit waiting in the terminal for permission to ask the human.
+    const { mcp } = await boot();
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const by = Object.fromEntries(
+      r.result.tools.map((t: { name: string; annotations?: Record<string, unknown> }) => [
+        t.name,
+        t.annotations,
+      ]),
+    );
+    expect(by.ask_human).toEqual({
+      title: 'Ask the human',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    expect(by.get_decision).toEqual({
+      title: 'Check a decision',
+      readOnlyHint: true,
+      openWorldHint: false,
+    });
+    // cancelling cannot be undone, so it stays a call a cautious client confirms
+    expect(by.cancel_question).toEqual({
+      title: 'Cancel a question',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  });
   it('notifications get 202 with no body; batches return arrays; ping works', async () => {
     const { mcp } = await boot();
     const n = await raw(mcp, { body: rpc('notifications/initialized', undefined, undefined) });
