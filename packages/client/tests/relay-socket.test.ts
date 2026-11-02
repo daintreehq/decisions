@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, parseAuthHeader, type LedgerEvent } from '@daintreehq/decisions-protocol';
 import { verifyRequestSignature, importSigningPublicKey } from '@daintreehq/decisions-crypto';
 import {
@@ -23,6 +23,21 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
     status,
     headers: { 'content-type': 'application/json', ...headers },
   });
+
+/**
+ * Waits until `cond` holds. Opening a socket (its ticket request) and sending a tunnelled request
+ * both sign with ECDSA first, off the main thread, so a fixed tick can outrun them on a loaded
+ * runner. Steps that only chain promises still use `tick`.
+ */
+const until = (cond: () => boolean) =>
+  vi.waitFor(
+    () => {
+      if (!cond()) throw new Error('condition not met yet');
+    },
+    { timeout: 2_000, interval: 1 },
+  );
+/** Waits until the n-th socket since the last reset has been opened. */
+const opened = (n = 1) => until(() => FakeSocket.instances.length >= n);
 
 describe('RelayClient retry policy', () => {
   async function client(
@@ -196,7 +211,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('opens with a ticket, syncs from the stored cursor after hello, and dispatches events in order', async () => {
     const { sock, ws, hello, log } = await mkSocket({ cursor: 41 });
     sock.start();
-    await tick(5);
+    await opened();
     expect(ws().url).toBe(
       'ws://relay.test/api/v1/socket?ticket=tkt'
         .replace('ws://', 'wss://')
@@ -231,7 +246,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('reconnects with exponential full-jitter backoff and re-syncs on every reconnect', async () => {
     const { sock, ws, hello, timers } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     await tick(5);
     ws().close(1006, 'lost');
@@ -239,16 +254,16 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
     expect(timers.at(-1)!.ms).toBeGreaterThanOrEqual(1000);
     expect(timers.at(-1)!.ms).toBeLessThanOrEqual(1000);
     timers.at(-1)!.fn();
-    await tick(5);
+    await opened(2);
     ws().close(1006, 'lost again'); // never reached hello => attempt keeps growing
     const first = timers.at(-1)!.ms;
     timers.at(-1)!.fn();
-    await tick(5);
+    await opened(3);
     ws().close(1006, 'lost again');
     expect(timers.at(-1)!.ms).toBeGreaterThan(first);
     expect(timers.at(-1)!.ms).toBeLessThanOrEqual(300_000);
     timers.at(-1)!.fn();
-    await tick(5);
+    await opened(4);
     ws().recv(hello);
     await tick(5);
     expect(JSON.parse(ws().sent.at(-1)!).t).toBe('sync');
@@ -257,7 +272,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('4401 (revoked) stops permanently; 4409 (replaced) stops without a reconnect loop', async () => {
     const a = await mkSocket();
     a.sock.start();
-    await tick(5);
+    await opened();
     a.ws().recv(a.hello);
     await tick(5);
     const before = a.timers.length;
@@ -270,7 +285,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
 
     const b = await mkSocket();
     b.sock.start();
-    await tick(5);
+    await opened();
     b.ws().recv(b.hello);
     await tick(5);
     b.ws().close(4409, 'replaced');
@@ -283,7 +298,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('a revoked frame stops the socket', async () => {
     const { sock, ws, hello, log } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     ws().recv({ t: 'revoked' });
     await tick(5);
@@ -293,7 +308,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('keeps alive with the text ping and ignores pong', async () => {
     const { sock, ws, hello, timers } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     await tick(5);
     const ka = timers.filter((t) => !t.cancelled && t.ms === 4 * 60 * 1000);
@@ -306,20 +321,22 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('tunnels signed requests as req frames and resolves from res frames', async () => {
     const { sock, ws, hello } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     await tick(5);
+    let sent = ws().sent.length;
     const p = sock.request('POST', '/api/v1/deliveries/received', {
       body: { protocol_version: 1, seq: 5 },
     });
-    await tick(5);
+    await until(() => ws().sent.length > sent);
     const frame = JSON.parse(ws().sent.at(-1)!);
     expect(frame).toMatchObject({ t: 'req', method: 'POST', path: '/api/v1/deliveries/received' });
     expect(frame.authorization.startsWith('Decisions-Sig ')).toBe(true);
     ws().recv({ t: 'res', id: frame.id, status: 200, body: '{"ok":true}' });
     expect(await p).toEqual({ ok: true });
+    sent = ws().sent.length;
     const q = sock.request('GET', '/api/v1/devices');
-    await tick(5);
+    await until(() => ws().sent.length > sent);
     const f2 = JSON.parse(ws().sent.at(-1)!);
     ws().recv({
       t: 'res',
@@ -333,11 +350,12 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('rejects in-flight requests when the socket drops', async () => {
     const { sock, ws, hello } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     await tick(5);
+    const sent = ws().sent.length;
     const p = sock.request('GET', '/api/v1/devices');
-    await tick(5);
+    await until(() => ws().sent.length > sent);
     ws().close(1006, 'x');
     await expect(p).rejects.toMatchObject({ code: 'network_error' });
     sock.stop();
@@ -345,7 +363,7 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
   it('surfaces pairing hints and ignores malformed frames', async () => {
     const { sock, ws, hello, log } = await mkSocket();
     sock.start();
-    await tick(5);
+    await opened();
     ws().recv(hello);
     ws().recv({ t: 'pairing', pairing_id: 'pair-1234567' });
     ws().recv('not json');
@@ -365,7 +383,7 @@ describe('bridge + socket: persist before ack, contiguous cursor', () => {
     const orig = env.store.insertEvent.bind(env.store);
     env.store.insertEvent = async (e) => (order.push(`store:${e.seq}`), orig(e));
     await env.bridge.start();
-    await tick(10);
+    await opened();
     const ws = FakeSocket.instances.at(-1)!;
     const send = ws.send.bind(ws);
     ws.send = (d: string) => (
