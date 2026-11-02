@@ -1,14 +1,76 @@
+<div align="center">
+
+<img src="app/public/icons/icon-192.png" width="88" height="88" alt="">
+
 # Daintree Decisions
 
-Let your AI coding agents ask you things, and answer from your phone whenever you get to it.
+**Let your AI coding agents ask you things, and answer from your phone whenever you get to it.**
 
-An agent that hits a question it should not answer alone (a product choice, an ambiguous requirement, approval of a design change) calls one MCP tool, `ask_human`, and stops. Minutes or a day later you answer on your phone, and the answer is typed back into that agent's terminal, resuming the session first if it has to.
+End-to-end encrypted. Self-hosted on your own Cloudflare account. Works with any agent that speaks MCP.
+
+[![CI](https://github.com/daintreehq/decisions/actions/workflows/ci.yml/badge.svg)](https://github.com/daintreehq/decisions/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@daintreehq/decisions-cli?label=npm&color=0f7a4a)](https://www.npmjs.com/package/@daintreehq/decisions-cli)
+[![License](https://img.shields.io/badge/license-Apache--2.0-0f7a4a)](LICENSE)
+[![Deploy to Cloudflare](https://img.shields.io/badge/deploy-Cloudflare%20Workers-f38020?logo=cloudflare&logoColor=white)](https://deploy.workers.cloudflare.com/?url=https://github.com/daintreehq/decisions)
+
+[How it works](#how-it-works) · [Set up](#set-up-in-about-five-minutes) · [Security](#safety-rules-that-do-not-bend) · [Docs](#documentation) · [Develop](#develop)
+
+<br>
+
+<img src="docs/readme/hero.png" alt="A Claude Code session calls ask_human to get approval for a design change and ends its turn. The phone shows the question with before and after screenshots, Approve selected and a note. Thirty-eight minutes later the signed answer is typed back into the same terminal and the agent merges." width="100%">
+
+</div>
+
+<br>
+
+An agent that hits a question it should not answer alone (a product choice, an ambiguous requirement, sign-off on a design change) calls one MCP tool, `ask_human`, and ends its turn. Minutes or a day later you answer on your phone, and the answer is typed back into **that agent's terminal**, resuming the session first if it has to.
 
 Everything runs in **your own Cloudflare account**. There is no Daintree-operated server, no account to create, and nothing for Daintree to read: questions, answers and screenshots are end-to-end encrypted between your computer and your phone.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/daintreehq/decisions)
-
 ## How it works
+
+<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: the inbox, with questions from several projects and machines. Three: a design approval with before and after screenshots, Approve selected and a note. Four: the answered question with its delivery steps all ticked, ending in 'Typed into the agent's terminal'." width="100%">
+
+1. **Your agent asks.** `ask_human` returns at once with an id, and the agent ends its turn (or carries on with unrelated work). Nothing holds a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks stuck.
+2. **Your phone buzzes.** The notification says only that a question is waiting. The question itself is encrypted on your computer and decrypted on your phone.
+3. **You decide, with the context.** The agent's question, its notes, the options it is weighing and any screenshots it attached. Add a note if the agent should know why.
+4. **It lands in the right place.** Your answer is signed on the phone, and typed into the exact pane that asked once that agent is idle. You can watch each step: queued, sent, saved on your relay, received, typed.
+
+## More than yes or no
+
+<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question with a description under each option; a free-text question with a typed answer; an answer from the decision model, labelled with its model, confidence and the earlier decisions it drew on, with Confirm and Overrule buttons; and a correction to an earlier answer, which requires a reason." width="100%">
+
+|                                      |                                                                                                                                                                                                                                           |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Approvals, choices and free text** | Options can carry a description of the trade-off. Text answers can be typed or dictated.                                                                                                                                                  |
+| **Screenshots that matter**          | Agents attach before and after images. They are encrypted like everything else and open full screen, zoomable.                                                                                                                            |
+| **Change your mind**                 | Overrule an answer after the fact. The correction, and your reason for it, reach the agent marked as a correction so it reassesses what it built on the old one.                                                                          |
+| **An optional decision model**       | It answers low-stakes questions the way you would, from your own history, only where a workflow allows it. Its answers are always labelled as a proxy, and you can confirm or overrule them. It can never answer anything that needs you. |
+| **Deadlines**                        | A question can expire. An expired question is reported to the agent as _not authorised_, never as consent.                                                                                                                                |
+| **Quiet hours**                      | Silence notifications overnight. Questions and answers still sync.                                                                                                                                                                        |
+
+## Safety rules that do not bend
+
+- A workflow can require a human (`human-required`). A model, a proxy, or the agent itself can never satisfy it, and the agent cannot lower the level.
+- Only a signed answer from a device you paired counts as a human answer. The relay cannot forge one.
+- Answers are typed into the exact pane they were asked from, or not at all. If that pane or session cannot be found, the answer waits and tells you.
+- Answers are typed as inert, delimited data. Control characters and escape sequences are stripped, and nothing in an answer can close the block or pose as a field.
+- An expired question never authorizes anything.
+- Push notifications say only "a question needs your input". Never the question.
+
+<img src="docs/readme/pairing.png" alt="Pairing and devices: the phone's pairing screen; a six-digit code to check against the same code on the computer; the Devices screen listing the computer and the phone, with the computer's identity fingerprint; and Settings, with theme, notifications that never contain the question, and quiet hours." width="100%">
+
+Pairing is a QR code and a six-digit code you check on both screens. Every device is listed with a fingerprint you can compare against your computer. Revoking a device rotates the content key, so it cannot read anything new.
+
+Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and is not protected, including the places where plaintext necessarily exists (your computer, your phone, and the optional dictation path), and [docs/threat-model.md](docs/threat-model.md) for the attacker it is built against.
+
+## On your phone, or anywhere else
+
+<img src="docs/readme/everywhere.png" alt="The same app in a desktop browser, with the inbox beside an open question, and on a phone in dark mode." width="100%">
+
+The app is an installable PWA served by your own Worker: no app store, push notifications, an offline outbox that sends when you are back in signal, and light and dark themes. On a wide screen the inbox and the question sit side by side.
+
+## Under the hood
 
 ```text
  agent ──ask_human──▶ Decisions MCP ──encrypt+sign──▶  your Cloudflare Worker  ──push──▶ your phone (PWA)
@@ -17,33 +79,43 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
     └── answer typed into the right terminal, when it is idle ◀── hibernatable WebSocket ───┘
 ```
 
-- **Non-blocking.** `ask_human` returns immediately. The agent ends its turn instead of holding a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks "stuck".
-- **The Decisions MCP** is a plain HTTP MCP server that you can add to any agent. Inside Daintree it is wired in for you; anywhere else run `decisions mcp` and it prints the exact `claude mcp add --transport http …` line. It serves `/mcp` by default; `--path /mcp/decisions` (or `path` in `createDecisionsMcpHandler`) mounts it somewhere else, matched exactly.
-- **The relay** is a Cloudflare Worker, one SQLite Durable Object, and a private R2 bucket. The desktop and phone stay connected through Cloudflare's WebSocket Hibernation API, so an idle connection costs almost nothing.
-- **The app** is an installable PWA served by the same Worker, with push notifications, an offline outbox, and optional dictation.
-- **The decision model** (optional) can answer the way you would, from your own decision history, only where a workflow allows it, always labelled as a proxy, never for anything that needs you.
+- **The Decisions MCP** is a plain HTTP MCP server that you can add to any agent. Inside Daintree it is wired in for you; anywhere else run `decisions mcp` and it prints the exact `claude mcp add --transport http …` line. It serves `/mcp` by default; `--path /mcp/decisions` (or `path` in `createDecisionsMcpHandler`) mounts it somewhere else, matched exactly. Its tools carry MCP annotations, so agents that gate tool calls (Codex, for one) let `ask_human` through without asking first.
+- **The relay** is a Cloudflare Worker, one SQLite Durable Object, and a private R2 bucket. The desktop and phone stay connected through Cloudflare's WebSocket Hibernation API, so an idle connection costs almost nothing. It only ever stores ciphertext.
+- **The crypto** is WebCrypto everywhere: P-256 ECDSA and ECDH, HKDF, AES-256-GCM, with content keys in epochs that rotate when a device is revoked.
+- **The protocol** is versioned and written down in [docs/protocol.md](docs/protocol.md). Any server that implements it is a valid relay.
 
-## Safety rules that do not bend
-
-- A workflow can require a human (`human-required`). A model, a proxy, or the agent itself can never satisfy it, and the agent cannot lower the level.
-- Only a signed answer from a device you paired counts as a human answer. The relay cannot forge one.
-- Answers are typed into the exact pane they were asked from, or not at all. If that pane or session cannot be found, the answer waits and tells you.
-- An expired question never authorizes anything.
-- Push notifications say only "a question needs your input". Never the question.
-
-Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and is not protected, including the places where plaintext necessarily exists (your computer, your phone, and the optional dictation path).
-
-## Set up (about five minutes)
+## Set up (in about five minutes)
 
 You need a Cloudflare account (the free plan is enough for one person), Node 22+, and a phone.
 
-1. **Deploy.** Click the button above. Cloudflare copies this repository into your account, creates the R2 bucket and Durable Object, and asks for one secret, `CLAIM_SECRET`: type any long random string (`openssl rand -hex 32`) and keep it for step 2. Prefer a terminal? `npx @daintreehq/decisions-cli deploy` (no clone needed) deploys the relay that matches the CLI's version, generates the secret, shows it once and never saves it. More detail in [docs/self-host.md](docs/self-host.md).
-2. **Claim it** from the computer your agents run on: `pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file <file containing the secret>` (or set `DECISIONS_CLAIM_SECRET`; avoid putting the secret on the command line, where it shows in the process list). In Daintree this is Settings → Decisions. The claim can only happen once.
-3. **Pair your phone:** `pnpm decisions pair` shows a QR code. Scan it, then confirm the same six digits appear on both screens. On iPhone open the link in Safari, tap Share → Add to Home Screen, and open the installed app (iOS only delivers push to installed web apps).
-4. **Add the MCP to your agent:** `pnpm decisions mcp` prints the line for your agent.
-5. **Test it:** `pnpm decisions ask "Does this work?" --option yes=Yes --option no=No` and answer on your phone.
+1. **Deploy.** Click the button below. Cloudflare copies this repository into your account, creates the R2 bucket and Durable Object, and asks for one secret, `CLAIM_SECRET`: type any long random string (`openssl rand -hex 32`) and keep it for step 2.
 
-Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.**
+   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/daintreehq/decisions)
+
+   Prefer a terminal? `npx @daintreehq/decisions-cli deploy` (no clone needed) deploys the relay that matches the CLI's version, generates the secret, shows it once and never saves it. More detail in [docs/self-host.md](docs/self-host.md).
+
+2. **Claim it** from the computer your agents run on:
+
+   ```bash
+   pnpm decisions setup --url https://<your-worker>.workers.dev --claim-secret-file <file containing the secret>
+   ```
+
+   Or set `DECISIONS_CLAIM_SECRET`; avoid putting the secret on the command line, where it shows in the process list. In Daintree this is Settings → Decisions. The claim can only happen once.
+
+3. **Pair your phone.** `pnpm decisions pair` shows a QR code. Scan it, then confirm the same six digits appear on both screens. On iPhone open the link in Safari, tap Share → Add to Home Screen, and open the installed app (iOS only delivers push to installed web apps).
+
+4. **Add the MCP to your agent.** `pnpm decisions mcp` prints the line for your agent.
+
+5. **Test it.**
+
+   ```bash
+   pnpm decisions ask "Does this work?" --option yes=Yes --option no=No
+   ```
+
+   Answer on your phone.
+
+> [!IMPORTANT]
+> Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.** See [docs/key-recovery.md](docs/key-recovery.md).
 
 ## Repository layout
 
@@ -57,6 +129,7 @@ Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json
 | `packages/cli/`            | The `decisions` command                                                                                           |
 | `packages/relay/`          | The prebuilt, checksummed Worker bundle and phone app that `decisions deploy` uploads                             |
 | `packages/decision-model/` | The optional local opinion model                                                                                  |
+| `e2e/`                     | End-to-end tests against a real relay, the real PWA in Chromium, and a real MCP client                            |
 | `tools/`                   | Health check and the package check                                                                                |
 | `docs/`                    | Protocol, architecture, security, operations, and the Daintree integration spec                                   |
 
@@ -81,6 +154,14 @@ pnpm release:publish --dry-run   # what a release would publish to npm, without 
 ```
 
 Releases are published to npm from a `v*` tag; see [docs/operations.md](docs/operations.md#releasing-to-npm).
+
+Every screen in this README is a real capture of the app, driven against a real relay with real encrypted questions. To regenerate the images after a UI change:
+
+```bash
+pnpm build && pnpm build:all
+SCREENSHOTS_DIR=/tmp/decisions-shots pnpm --filter @daintreehq/decisions-e2e test screenshots
+node e2e/scripts/readme-images.mjs /tmp/decisions-shots   # writes docs/readme/*.png
+```
 
 ## License
 

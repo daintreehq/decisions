@@ -375,6 +375,17 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('09-detail-approval-full', { full: true });
     await page.getByRole('radio', { name: /^Approve/ }).check();
     await shot('10-detail-approval-selected');
+    // The README hero: the choice made, a note for the agent, the submit bar armed.
+    const note = page.getByRole('textbox').first();
+    await note.fill('Ship it. Keep the tooltips on every icon.');
+    // Scroll so the status chips sit just under the top bar: question, screenshots, choice and note in one view.
+    await page.evaluate(() => {
+      const bar = document.querySelector('.topbar')!.getBoundingClientRect().bottom;
+      const chips = document.querySelector('.detail-badges')!.getBoundingClientRect().top;
+      window.scrollBy(0, chips - bar - 6);
+    });
+    await shot('10-detail-approval-note');
+    await note.fill('');
     await page.getByRole('button', { name: /Enlarge After/ }).click();
     await page.getByRole('dialog').waitFor();
     await shot('11-dialog-zoom');
@@ -474,6 +485,6 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    expect(written.length).toBe(37);
+    expect(written.length).toBe(38);
   });
 });
