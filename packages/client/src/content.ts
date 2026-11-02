@@ -6,7 +6,7 @@ import {
   utf8ByteLength,
   type DecisionContentV1,
 } from '@daintreehq/decisions-protocol';
-import { gateAllowsText, type WorkflowGate } from './policy.js';
+import { gateAllowsText, questionExpiryPolicy, type WorkflowGate } from './policy.js';
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */
 export const AskHumanInput = z.object({
@@ -162,18 +162,19 @@ export function shapeForGates(
 }
 
 /**
- * Effective expiry. The agent may shorten but not extend beyond what the trusted gate allows:
- * with a gate the cap is its `expiryMs` (null = no expiry allowed); without one it is 30 days.
+ * Effective expiry, by `questionExpiryPolicy`: the agent may shorten but not extend beyond what the trusted gate
+ * allows. With a gate the cap is its `expiryMs` (null or unset = no cap); without one it is 30 days, or the
+ * host's default when that is longer, and none when the host's default is null. `hostDefaultMs` is the host's
+ * default expiry (`PolicyRegistry.defaultQuestionExpiryMs`), 7 days when omitted.
  */
 export function resolveExpiry(
   requested: string | undefined,
   gate: WorkflowGate | undefined,
   now: number,
+  hostDefaultMs: number | null = DEFAULTS.questionExpiryMs,
 ): string | null {
-  const defaultMs = gate?.expiryMs === undefined ? DEFAULTS.questionExpiryMs : gate.expiryMs;
-  const capMs = gate ? gate.expiryMs : 30 * 24 * 60 * 60 * 1000;
-  const base = defaultMs === null ? null : now + defaultMs;
-  if (!requested) return base === null ? null : new Date(base).toISOString();
+  const { defaultMs, maxMs } = questionExpiryPolicy(hostDefaultMs, gate);
+  if (!requested) return defaultMs === null ? null : new Date(now + defaultMs).toISOString();
   const asked = Date.parse(requested);
   if (!Number.isFinite(asked) || asked <= now + 60_000) {
     throw new BridgeError(
@@ -181,8 +182,7 @@ export function resolveExpiry(
       'expires_at must be at least one minute in the future',
     );
   }
-  const cap = capMs === null || capMs === undefined ? null : now + capMs;
-  const eff = cap === null ? asked : Math.min(asked, cap);
+  const eff = maxMs === null ? asked : Math.min(asked, now + maxMs);
   return new Date(eff).toISOString();
 }
 

@@ -1,4 +1,9 @@
-import { enforceRequirement, LIMITS, type Requirement } from '@daintreehq/decisions-protocol';
+import {
+  DEFAULTS,
+  enforceRequirement,
+  LIMITS,
+  type Requirement,
+} from '@daintreehq/decisions-protocol';
 
 /** One answer a gate offers. The phone shows exactly these; answers are accepted only for these ids. */
 export interface GateChoice {
@@ -31,8 +36,66 @@ export interface WorkflowGate {
   bindArtifacts?: boolean;
   /** Optional protected option ids; when set, only these answers are accepted for the gate. */
   allowedOptionIds?: string[];
-  /** Default expiry for this gate, in ms; null = never expires. */
+  /**
+   * Expiry for this gate, in ms: both the default and the latest an agent may ask for; null = never expires.
+   * Unset, the gate's questions take the host's default expiry, and an agent may ask for any expiry.
+   */
   expiryMs?: number | null;
+}
+
+/** The latest an agent may ask a question with no gate to expire, unless the host's default is later. */
+const GATELESS_EXPIRY_CAP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * The furthest ahead, in ms, a question's finite expiry may be: the relay refuses one more than
+ * `LIMITS.maxQuestionExpiryMs` past its own clock, and the margin absorbs the clock skew it tolerates.
+ */
+export const QUESTION_EXPIRY_LIMIT_MS = LIMITS.maxQuestionExpiryMs - LIMITS.requestSkewMs;
+
+/** The shortest default expiry a host may set, in ms. */
+const MIN_DEFAULT_EXPIRY_MS = 60_000;
+
+/** The expiry rule for a question under `gate` (or none), given the host's default expiry. */
+export interface ExpiryPolicy {
+  /** How long the question waits when its agent asks for no expiry, in ms; null = it never expires. */
+  defaultMs: number | null;
+  /**
+   * The latest expiry its agent may ask for, in ms after asking; null = no policy limit (a finite expiry is
+   * still at most `QUESTION_EXPIRY_LIMIT_MS` away).
+   */
+  maxMs: number | null;
+}
+
+/**
+ * The expiry rule for a question. A gate's own `expiryMs` governs its questions. A gate without one takes the
+ * host's default and lets the agent ask for any expiry. With no gate the host's default applies, and an agent
+ * may ask for up to 30 days, or up to the default when it is longer; a host default of null lifts the limit.
+ */
+export function questionExpiryPolicy(
+  hostDefaultMs: number | null = DEFAULTS.questionExpiryMs,
+  gate?: WorkflowGate,
+): ExpiryPolicy {
+  if (gate?.expiryMs !== undefined) return { defaultMs: gate.expiryMs, maxMs: gate.expiryMs };
+  if (gate) return { defaultMs: hostDefaultMs, maxMs: null };
+  return {
+    defaultMs: hostDefaultMs,
+    maxMs: hostDefaultMs === null ? null : Math.max(GATELESS_EXPIRY_CAP_MS, hostDefaultMs),
+  };
+}
+
+function checkDefaultExpiry(ms: unknown): number | null {
+  if (ms === null) return null;
+  if (
+    typeof ms !== 'number' ||
+    !Number.isSafeInteger(ms) ||
+    ms < MIN_DEFAULT_EXPIRY_MS ||
+    ms > QUESTION_EXPIRY_LIMIT_MS
+  ) {
+    throw new RangeError(
+      `defaultQuestionExpiryMs must be null or whole milliseconds from ${MIN_DEFAULT_EXPIRY_MS} to ${QUESTION_EXPIRY_LIMIT_MS}`,
+    );
+  }
+  return ms;
 }
 
 /** Whether free text is accepted under `gate` (no gate: always). */
@@ -60,6 +123,16 @@ function validateGate(gate: WorkflowGate): void {
   }
 }
 
+export interface PolicyRegistryOptions {
+  /** Whether a question with no gate may take a proxy answer when its agent allows one. Default false. */
+  proxyAllowlisted?: boolean;
+  /**
+   * How long a question with no origin gate waits when its agent asks for no expiry, in ms; null = it never
+   * expires. Default 7 days (`DEFAULTS.questionExpiryMs`).
+   */
+  defaultQuestionExpiryMs?: number | null;
+}
+
 /**
  * Trusted workflow policy, registered by the host application (never by an agent). The enforced level
  * is the stricter of the gate level and the caller's request; with no gate the default is human-required
@@ -67,7 +140,15 @@ function validateGate(gate: WorkflowGate): void {
  */
 export class PolicyRegistry {
   private gates = new Map<string, WorkflowGate>();
-  constructor(private readonly opts: { proxyAllowlisted?: boolean } = {}) {}
+  private proxy: boolean;
+  private expiryMs: number | null;
+  constructor(opts: PolicyRegistryOptions = {}) {
+    this.proxy = opts.proxyAllowlisted === true;
+    this.expiryMs =
+      opts.defaultQuestionExpiryMs === undefined
+        ? DEFAULTS.questionExpiryMs
+        : checkDefaultExpiry(opts.defaultQuestionExpiryMs);
+  }
 
   register(gate: WorkflowGate): void {
     validateGate(gate);
@@ -80,7 +161,18 @@ export class PolicyRegistry {
     return gateId ? this.gates.get(gateId) : undefined;
   }
   set proxyAllowlisted(v: boolean) {
-    (this.opts as { proxyAllowlisted?: boolean }).proxyAllowlisted = v;
+    this.proxy = v;
+  }
+  /**
+   * How long a question with no origin gate waits when its agent asks for no expiry, in ms; null = it never
+   * expires. Setting it applies to questions asked from then on; a value out of range throws a RangeError
+   * and leaves the setting as it was.
+   */
+  get defaultQuestionExpiryMs(): number | null {
+    return this.expiryMs;
+  }
+  set defaultQuestionExpiryMs(ms: number | null) {
+    this.expiryMs = checkDefaultExpiry(ms);
   }
   resolve(input: { gateId?: string | null; requested?: Requirement | undefined }): {
     requirement: Requirement;
@@ -91,7 +183,7 @@ export class PolicyRegistry {
     const requirement = enforceRequirement({
       workflowMin: gate?.minRequirement,
       requested: input.requested,
-      proxyAllowlisted: this.opts.proxyAllowlisted === true,
+      proxyAllowlisted: this.proxy === true,
     });
     return { requirement, gate };
   }

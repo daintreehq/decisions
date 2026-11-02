@@ -21,7 +21,6 @@ import { nextAllowed } from '../push/quiet-hours.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
-const MAX_FUTURE_EXPIRY_MS = 366 * 24 * 3600_000;
 
 export interface QuestionRow {
   question_id: string;
@@ -197,7 +196,7 @@ export const createQuestion: Handler = async (room, c) => {
   if (!(await verifyObject(await room.devicePublicKey(signer), record)))
     throw bad('record signature invalid');
   const expiresAt = record.expires_at ? Date.parse(record.expires_at) : null;
-  if (expiresAt !== null && (expiresAt <= t || expiresAt > t + MAX_FUTURE_EXPIRY_MS)) {
+  if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
     throw bad('expires_at must be in the future and within a year (use null for no expiry)');
   }
   if (new Set(record.attachment_ids).size !== record.attachment_ids.length)
@@ -463,7 +462,10 @@ function actionHandler(kind: ActionKind): Handler {
       if (kind === 'reopen') {
         assertQuota(room, q.origin_ref);
         newExpires = record.expires_at ? Date.parse(record.expires_at) : null;
-        if (newExpires !== null && (newExpires <= t || newExpires > t + MAX_FUTURE_EXPIRY_MS)) {
+        if (
+          newExpires !== null &&
+          (newExpires <= t || newExpires > t + LIMITS.maxQuestionExpiryMs)
+        ) {
           throw bad('expires_at must be in the future (or null)');
         }
       }

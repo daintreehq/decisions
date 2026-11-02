@@ -31,6 +31,7 @@ import {
   paneRef,
   type BridgeContext,
 } from './context.js';
+import { QUESTION_EXPIRY_LIMIT_MS } from './policy.js';
 import { sameDigests } from './answers.js';
 import { openProxyDraft, sealProxyDraft } from './at-rest.js';
 import { currentEpochKey } from './identity.js';
@@ -156,13 +157,22 @@ export class Publisher {
 
     const epoch = currentEpochKey(ctx.identity);
     const now = ctx.now();
-    // An origin gate is the host's policy. A gate the agent picked can only shorten the no-gate expiry.
+    // An origin gate is the host's policy. A gate the agent picked can only shorten the no-gate expiry. The
+    // host's default expiry is read now, so a change to it applies from the next question on.
+    const hostDefault = ctx.policy.defaultQuestionExpiryMs;
     const expiresAt = gate
-      ? resolveExpiry(input.expires_at, gate, now)
+      ? resolveExpiry(input.expires_at, gate, now, hostDefault)
       : earliest(
-          resolveExpiry(input.expires_at, undefined, now),
-          callerGate ? resolveExpiry(input.expires_at, callerGate, now) : null,
+          resolveExpiry(input.expires_at, undefined, now, hostDefault),
+          callerGate ? resolveExpiry(input.expires_at, callerGate, now, hostDefault) : null,
         );
+    // The relay refuses a finite expiry too far ahead, and a refused question is dropped: say so now instead.
+    if (expiresAt !== null && Date.parse(expiresAt) > now + QUESTION_EXPIRY_LIMIT_MS) {
+      throw new BridgeError(
+        'validation_error',
+        `expires_at must be within ${Math.floor(QUESTION_EXPIRY_LIMIT_MS / 86_400_000)} days`,
+      );
+    }
 
     // Attachments: encrypt now (so an offline desktop can publish later) and spool the ciphertext.
     const descriptors: DecisionContentV1['attachments'] = [];
