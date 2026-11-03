@@ -10,6 +10,13 @@ import {
   verifyRelayBundle,
   type VerifiedRelayBundle,
 } from '../relay-bundle.js';
+import {
+  openHostChannel,
+  type ClaimState,
+  type HostChannel,
+  type HostChannelOptions,
+  type HostPrefill,
+} from '../host-channel.js';
 import { CliError, keyStoreFor, type Ctx, type GlobalOptions } from '../runtime.js';
 import { VERSION } from '../version.js';
 import {
@@ -36,6 +43,11 @@ import { setup } from './setup.js';
  * dictation providers and their keys) and changes nothing in the account until the user confirms a
  * summary. Provider keys follow the claim secret's path: hidden input, memory, Wrangler's stdin.
  * Without a terminal it asks nothing and runs the default steps, as it always has.
+ *
+ * With `--host-channel`, a host app (Daintree) that started the deploy in a terminal supplies the
+ * questions' defaults and receives the outcome, the claim secret included, over a local socket
+ * (host-channel.ts). The person still answers every question; the claim secret is never shown, and
+ * the relay is not claimed here: the host claims it with its own keys.
  */
 
 export interface DeployOptions {
@@ -50,6 +62,8 @@ export interface DeployOptions {
   label?: string;
   /** Verify and write the deployable bundle here, then stop. */
   outdir?: string;
+  /** The local socket of the host app that started the deploy (host-channel.ts). */
+  hostChannel?: string;
 }
 
 export interface SpawnRequest {
@@ -82,6 +96,25 @@ export interface DeployDeps {
   generateSecret?: () => string;
   sleep?: (ms: number) => Promise<void>;
   nodeVersion?: string;
+  openHostChannel?: (path: string, o: HostChannelOptions) => Promise<HostChannel>;
+  /** Calls `fn` on Ctrl-C while a host-channel deploy runs; returns the unsubscribe. */
+  onInterrupt?: (fn: () => void) => () => void;
+}
+
+/** What a host-channel deploy shares with the run: its defaults, and what it learns on the way. */
+interface HostRun {
+  prefill: HostPrefill;
+  /** Values never shown or passed on in an error: the prefilled keys, then everything else. */
+  secrets: string[];
+  outcome: {
+    url: string | null;
+    claimSecret: string | null;
+    claimState: ClaimState;
+    /** The person declined the summary. */
+    declined: boolean;
+  };
+  interrupted(): boolean;
+  channelOpen(): boolean;
 }
 
 export const DEFAULT_NAME = 'daintree-decisions';
@@ -350,27 +383,117 @@ export function nodeSpawner(
 
 const WORKERS_DEV_URL = /https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/i;
 
+const defaultOnInterrupt = (fn: () => void): (() => void) => {
+  let count = 0;
+  const handler = () => {
+    // Ctrl-C reaches Wrangler too, which stops; the run then stops at its next step and reports
+    // the cancellation to the host. A second Ctrl-C stops at once, without a result.
+    if (++count > 1) process.exit(130);
+    process.stdout.write('\n    Stopping (Ctrl-C again to stop at once).\n');
+    fn();
+  };
+  process.on('SIGINT', handler);
+  return () => process.off('SIGINT', handler);
+};
+
+const HOST = 'the app that started this deploy';
+
 export async function deploy(
   ctx: Ctx,
   g: GlobalOptions,
   o: DeployOptions,
   deps: DeployDeps = {},
 ): Promise<void> {
-  let name = o.name ?? DEFAULT_NAME;
-  let bucket = o.bucket ?? DEFAULT_NAME;
+  if (o.hostChannel === undefined) return runDeploy(ctx, g, o, deps, null);
+  if (o.claim || o.dryRun || o.outdir !== undefined) {
+    throw new CliError(
+      `--host-channel cannot be combined with --claim, --dry-run or --outdir: ${HOST} claims the relay itself`,
+    );
+  }
+  if (ctx.interactive !== true) {
+    throw new CliError('--host-channel needs a terminal: the person at it confirms every answer');
+  }
+  const channel = await (deps.openHostChannel ?? openHostChannel)(o.hostChannel, {
+    cliVersion: deps.version ?? VERSION,
+  });
+  const host: HostRun = {
+    prefill: channel.prefill,
+    secrets: Object.values(channel.prefill.keys).filter((k): k is string => !!k),
+    outcome: { url: null, claimSecret: null, claimState: 'unknown', declined: false },
+    interrupted: () => interrupted,
+    channelOpen: () => channel.isOpen(),
+  };
+  let interrupted = false;
+  let failure: unknown = null;
+  const stop = (deps.onInterrupt ?? defaultOnInterrupt)(() => (interrupted = true));
+  try {
+    await runDeploy(ctx, g, o, deps, host);
+  } catch (e) {
+    failure = e;
+  } finally {
+    stop();
+  }
+  const { outcome } = host;
+  const cancelled =
+    outcome.declined ||
+    (failure !== null &&
+      (interrupted || (failure instanceof CliError && failure.exitCode === 130)));
+  const status = cancelled ? 'cancelled' : failure !== null ? 'failed' : 'completed';
+  const delivered = await channel.sendResult({
+    status,
+    url: outcome.url,
+    claimSecret: outcome.claimSecret,
+    claimState: outcome.claimState,
+    ...(status === 'failed'
+      ? { error: redactSecrets((failure as Error).message ?? String(failure), host.secrets) }
+      : {}),
+  });
+  if (delivered) {
+    ctx.out(
+      outcome.claimSecret
+        ? `\nThe Worker URL and the claim secret went to ${HOST}, which connects the relay with its own keys.`
+        : `\nThe outcome went to ${HOST}.`,
+    );
+  } else {
+    ctx.err(
+      outcome.claimSecret
+        ? `\n${HOST[0]!.toUpperCase()}${HOST.slice(1)} did not confirm it received the claim secret. If the relay does not connect, run the deploy again from it: a relay nobody has claimed gets a new claim secret.`
+        : `\n${HOST[0]!.toUpperCase()}${HOST.slice(1)} did not confirm it received the outcome.`,
+    );
+  }
+  if (failure !== null) throw failure;
+  if (!delivered) throw new CliError(`the outcome could not be handed to ${HOST}`);
+}
+
+async function runDeploy(
+  ctx: Ctx,
+  g: GlobalOptions,
+  o: DeployOptions,
+  deps: DeployDeps,
+  host: HostRun | null,
+): Promise<void> {
+  const pre = host?.prefill;
+  // An explicit flag wins over the host's default, which wins over the built-in one.
+  let name = o.name ?? pre?.name ?? DEFAULT_NAME;
+  let bucket = o.bucket ?? pre?.bucket ?? DEFAULT_NAME;
+  const from = (flag: string, given: string | undefined) =>
+    given !== undefined ? flag : `the name from ${HOST}`;
   if (!WORKER_NAME.test(name)) {
     throw new CliError(
-      `--name "${name}" is not a valid Worker name (lowercase letters, digits and dashes, up to 63)`,
+      `${from('--name', o.name)} "${name}" is not a valid Worker name (lowercase letters, digits and dashes, up to 63)`,
     );
   }
   if (!BUCKET_NAME.test(bucket)) {
     throw new CliError(
-      `--bucket "${bucket}" is not a valid R2 bucket name (lowercase letters, digits and dashes, 3 to 63)`,
+      `${from('--bucket', o.bucket)} "${bucket}" is not a valid R2 bucket name (lowercase letters, digits and dashes, 3 to 63)`,
     );
   }
   if (o.dryRun && o.outdir) throw new CliError('--dry-run and --outdir cannot be combined');
   if (o.accountId !== undefined && !ACCOUNT_ID.test(o.accountId)) {
     throw new CliError('--account-id must be a 32-character Cloudflare account ID');
+  }
+  if (pre?.accountId !== undefined && !ACCOUNT_ID.test(pre.accountId)) {
+    throw new CliError(`the account from ${HOST} is not a 32-character Cloudflare account ID`);
   }
   const say = (l = '') => ctx.out(l);
   const version = deps.version ?? VERSION;
@@ -424,7 +547,7 @@ export async function deploy(
   const env = wranglerEnv(ctx, o.accountId);
 
   /** Values that must never be echoed back, even inside Wrangler's own error output. */
-  const secrets: string[] = [];
+  const secrets: string[] = host?.secrets ?? [];
   const redact = (t: string) => redactSecrets(t, secrets);
 
   const staging = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-deploy-'));
@@ -438,7 +561,10 @@ export async function deploy(
     }
     const at = (id: PlanStepId) => plan.findIndex((s) => s.id === id);
     const heading = (id: PlanStepId) => `\n[${at(id) + 1}] ${plan[at(id)]!.title}`;
-    const step = (i: number) => say(`\n[${i + 1}] ${plan[i]!.title}`);
+    const step = (i: number) => {
+      if (host?.interrupted()) throw new CliError('cancelled', 130);
+      say(`\n[${i + 1}] ${plan[i]!.title}`);
+    };
     const wr: WranglerRun = (args, x = {}) => {
       say(`    $ ${shown(wrangler, args)}`);
       return spawn({
@@ -478,7 +604,8 @@ export async function deploy(
     let answers: DeployAnswers | null = null;
     if (guided) {
       const accounts = accountsFromWhoami(who.stdout);
-      const fixed = o.accountId ?? ctx.env.CLOUDFLARE_ACCOUNT_ID;
+      // A host's account only starts the choice; a flag or the environment fixes it.
+      const fixed = o.accountId ?? ctx.env.CLOUDFLARE_ACCOUNT_ID ?? (accounts.length ? undefined : pre?.accountId);
       const account: CloudflareAccount | null = fixed
         ? (accounts.find((a) => a.id.toLowerCase() === fixed.toLowerCase()) ?? {
             id: fixed,
@@ -489,7 +616,14 @@ export async function deploy(
           : null;
       answers = await askDeployQuestions(
         ctx,
-        { name, bucket, account, accounts },
+        {
+          name,
+          bucket,
+          account,
+          accounts,
+          ...(pre ? { prefill: pre, forHost: true } : {}),
+          ...(pre?.accountId ? { accountId: pre.accountId } : {}),
+        },
         {
           name: { pattern: WORKER_NAME, hint: 'lowercase letters, digits and dashes, up to 63' },
           bucket: { pattern: BUCKET_NAME, hint: 'lowercase letters, digits and dashes, 3 to 63' },
@@ -498,6 +632,7 @@ export async function deploy(
       );
       if (!answers) {
         say('\nCancelled: nothing in your Cloudflare account was changed.');
+        if (host) host.outcome.declined = true;
         return;
       }
       name = answers.name;
@@ -555,9 +690,11 @@ export async function deploy(
     if (dep.status !== 0) throw new CliError(`deploy failed:\n${output(dep)}`);
     const url = output(dep).match(WORKERS_DEV_URL)?.[0];
     say(url ? `    deployed: ${url}` : '    deployed (no workers.dev URL in the output)');
+    if (host && url) host.outcome.url = url;
 
     step(at('claim-secret'));
     const state = url ? await claimState(ctx, url, sleep) : 'unknown';
+    if (host) host.outcome.claimState = state;
     if (state === 'claimed') {
       say('    the relay is already claimed: this was an update, the claim secret is unchanged');
       const keyFailure = await setKeys();
@@ -568,13 +705,21 @@ export async function deploy(
         claimedHere: false,
         state,
         problems: !healthy || keyFailure !== null,
+        forHost: host !== null,
       });
       if (keyFailure) throw keyFailure;
       if (!healthy) throw new CliError('deployed, but the health check found problems');
       return;
     }
+    // A claim secret nobody could receive is never set.
+    if (host && !host.channelOpen()) {
+      throw new CliError(
+        `${HOST} closed its channel, so the claim secret could not reach it; stopping before setting one`,
+      );
+    }
     const claimSecret = (deps.generateSecret ?? (() => randomBytes(32).toString('hex')))();
     secrets.push(claimSecret);
+    if (host) host.outcome.claimSecret = claimSecret;
 
     // From the moment the upload starts the secret may be live on the Worker, so whatever happens
     // next, it is shown (once) before the command ends.
@@ -599,7 +744,11 @@ export async function deploy(
           ? new CliError(
               'deployed, but Wrangler did not print the Worker URL, so the relay was not claimed',
             )
-          : null;
+          : host
+            ? new CliError(
+                `deployed, but Wrangler did not print the Worker URL, so ${HOST} cannot connect the relay`,
+              )
+            : null;
       }
       const healthy = await check(ctx, g, url, sleep, heading('check'));
       if (o.claim) {
@@ -629,6 +778,7 @@ export async function deploy(
         claimedHere,
         state,
         problems: !finished || failure !== null,
+        forHost: host !== null,
       });
     }
     if (failure) throw failure;
@@ -753,6 +903,8 @@ function summary(
     claimedHere: boolean;
     state: 'claimed' | 'unclaimed' | 'unknown';
     problems: boolean;
+    /** The claim secret goes to the host app over its channel, never to the screen. */
+    forHost?: boolean;
   },
 ): void {
   const url = s.url ?? '<your Worker URL, from the Cloudflare dashboard>';
@@ -774,6 +926,14 @@ function summary(
       'This computer claimed the relay, so the claim secret has been used and is not needed again.',
       'Next: pair your phone with `decisions pair`.',
     );
+  } else if (s.claimSecret && s.forHost) {
+    lines.push('  Claim secret  (not shown: it goes to the app that started this deploy)');
+    if (s.state === 'unknown') {
+      lines.push(
+        '',
+        'The relay did not answer yet, so it could not be checked whether it was already claimed.',
+      );
+    }
   } else if (s.claimSecret) {
     lines.push(
       `  Claim secret  ${s.claimSecret}`,

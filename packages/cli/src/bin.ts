@@ -56,8 +56,8 @@ export function buildProgram(): Command {
     .description(
       'Deploy the relay that matches this CLI to your own Cloudflare account (checksummed; the claim secret is shown once, never saved).',
     )
-    .option('--name <name>', 'Worker name', 'daintree-decisions')
-    .option('--bucket <name>', 'R2 bucket name', 'daintree-decisions')
+    .option('--name <name>', 'Worker name (default: daintree-decisions)')
+    .option('--bucket <name>', 'R2 bucket name (default: daintree-decisions)')
     .option('--dry-run', 'verify the bundle and print the plan without changing anything')
     .option(
       '--api-token',
@@ -70,6 +70,10 @@ export function buildProgram(): Command {
     )
     .option('--label <name>', 'name for this computer when claiming', 'Daintree')
     .option('--outdir <dir>', 'only verify and write the deployable bundle to <dir>')
+    .option(
+      '--host-channel <path>',
+      'local socket of the app that started this deploy: it supplies the defaults and receives the result, claim secret included (see docs/self-host.md)',
+    )
     .action((o) => run((c, g) => deploy(c, g, o))());
 
   program

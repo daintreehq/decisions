@@ -1,8 +1,10 @@
+import type { HostPrefill } from '../host-channel.js';
 import { CliError, type Ctx } from '../runtime.js';
 
 /**
  * The questions an interactive `decisions deploy` asks before it changes anything in the Cloudflare
- * account. The answers are plain data, so a host app can later supply them as defaults (#22).
+ * account. A host app can supply defaults for them (`--host-channel`); the person still sees and
+ * confirms or changes every one.
  *
  * Provider keys are read with hidden input, checked against the provider at the step that asked for
  * them, and kept in memory: they reach Wrangler only on standard input.
@@ -162,16 +164,56 @@ async function askName(ctx: Ctx, label: string, dflt: string, rule: NameRule): P
   throw new CliError('no valid answer; nothing was changed');
 }
 
+type KeyAnswer = { key: string; models?: string[]; unchecked?: true };
+
+/**
+ * Checks `key` with its provider. Resolves to the answer when it is accepted, or when it could not
+ * be checked and the user keeps it anyway; otherwise says why and resolves to null.
+ */
+async function tryKey(
+  ctx: Ctx,
+  provider: KeyProvider,
+  key: string,
+  retry: string,
+): Promise<KeyAnswer | null> {
+  const check = await checkProviderKey(ctx.fetch, provider, key);
+  if (check.ok) {
+    ctx.out(`    ${PROVIDER_LABEL[provider]} accepted the key.`);
+    return check.models ? { key, models: check.models } : { key };
+  }
+  if (!check.rejected) {
+    ctx.out(`    Could not check the key with ${PROVIDER_LABEL[provider]} (${check.reason}).`);
+    if (await askYesNo(ctx, 'Use it without checking?', false)) return { key, unchecked: true };
+    ctx.out(`    ${retry}`);
+    return null;
+  }
+  ctx.out(
+    `    ${PROVIDER_LABEL[provider]} ${check.status === 403 ? 'denied access with' : 'rejected'} that key (HTTP ${check.status}). ${retry}`,
+  );
+  return null;
+}
+
 /**
  * Asks for a provider's key until the provider accepts it. An empty answer turns the feature off
- * (resolves to null). A key that could not be checked is kept only if the user says so.
+ * (resolves to null). A key that could not be checked is kept only if the user says so. A key the
+ * host app supplied is offered first, shown only as present; it is checked like a typed one, and
+ * offered once.
  */
 async function askKey(
   ctx: Ctx,
   provider: KeyProvider,
   feature: string,
   onSecret: (v: string) => void,
-): Promise<{ key: string; models?: string[]; unchecked?: true } | null> {
+  prefilled: string | undefined,
+): Promise<KeyAnswer | null> {
+  const retry = `Enter the key again, or press Enter to leave ${feature} off.`;
+  if (prefilled) {
+    ctx.out(`    ${PROVIDER_LABEL[provider]} key: present (from the app that started this deploy).`);
+    if (await askYesNo(ctx, 'Use this key?', true)) {
+      const got = await tryKey(ctx, provider, prefilled, retry);
+      if (got) return got;
+    } else ctx.out(`    Enter another key, or press Enter to leave ${feature} off.`);
+  }
   for (let i = 0; i < MAX_TRIES; i++) {
     const key = (
       await ctx.prompt(`${PROVIDER_LABEL[provider]} API key (input hidden): `, { secret: true })
@@ -181,20 +223,8 @@ async function askKey(
       return null;
     }
     onSecret(key);
-    const check = await checkProviderKey(ctx.fetch, provider, key);
-    if (check.ok) {
-      ctx.out(`    ${PROVIDER_LABEL[provider]} accepted the key.`);
-      return check.models ? { key, models: check.models } : { key };
-    }
-    if (!check.rejected) {
-      ctx.out(`    Could not check the key with ${PROVIDER_LABEL[provider]} (${check.reason}).`);
-      if (await askYesNo(ctx, 'Use it without checking?', false)) return { key, unchecked: true };
-      ctx.out(`    Enter the key again, or press Enter to leave ${feature} off.`);
-      continue;
-    }
-    ctx.out(
-      `    ${PROVIDER_LABEL[provider]} ${check.status === 403 ? 'denied access with' : 'rejected'} that key (HTTP ${check.status}). Enter it again, or press Enter to leave ${feature} off.`,
-    );
+    const got = await tryKey(ctx, provider, key, retry);
+    if (got) return got;
   }
   throw new CliError(`no key ${PROVIDER_LABEL[provider]} accepted; nothing was changed`);
 }
@@ -205,6 +235,12 @@ export interface QuestionDefaults {
   account: CloudflareAccount | null;
   /** Every account the login can use, when there is a choice to make. */
   accounts?: CloudflareAccount[];
+  /** The account the choice starts on, when there is one. */
+  accountId?: string;
+  /** Defaults from the host app for the dictation questions, keys included. */
+  prefill?: HostPrefill;
+  /** The claim secret goes to the host app instead of the screen. */
+  forHost?: boolean;
 }
 
 export interface QuestionRules {
@@ -228,15 +264,18 @@ export async function askDeployQuestions(
 ): Promise<DeployAnswers | null> {
   const say = (l = '') => ctx.out(l);
 
+  const pre = d.prefill ?? { keys: {} };
   say('\nWhat will be created');
   let account = d.account;
   if (d.accounts && d.accounts.length > 1 && !account) {
     say('    Your Cloudflare login can use several accounts:');
+    const start =
+      d.accounts.find((a) => a.id.toLowerCase() === d.accountId?.toLowerCase()) ?? d.accounts[0]!;
     const id = await askChoice(
       ctx,
       'Account to deploy to:',
       d.accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.id})` })),
-      d.accounts[0]!.id,
+      start.id,
     );
     account = d.accounts.find((a) => a.id === id)!;
   }
@@ -259,7 +298,7 @@ export async function askDeployQuestions(
   );
   say(`    ${E2EE_NOTE}`);
   let transcription: DeployAnswers['transcription'] = null;
-  if (await askYesNo(ctx, 'Use dictation?', false)) {
+  if (await askYesNo(ctx, 'Use dictation?', !!pre.transcription)) {
     const provider = await askChoice<TranscriptionProvider>(
       ctx,
       'Transcription provider:',
@@ -267,9 +306,9 @@ export async function askDeployQuestions(
         { value: 'xai', label: PROVIDER_LABEL.xai },
         { value: 'openai', label: PROVIDER_LABEL.openai },
       ],
-      'xai',
+      pre.transcription?.provider ?? 'xai',
     );
-    const got = await askKey(ctx, provider, 'dictation', onSecret);
+    const got = await askKey(ctx, provider, 'dictation', onSecret, pre.keys[provider]);
     if (got) {
       keys[provider] = got.key;
       if (got.unchecked) unchecked.push(provider);
@@ -284,7 +323,7 @@ export async function askDeployQuestions(
   );
   say(`    ${E2EE_NOTE}`);
   let cleanup: DeployAnswers['cleanup'] = null;
-  if (await askYesNo(ctx, 'Use transcript cleanup?', false)) {
+  if (await askYesNo(ctx, 'Use transcript cleanup?', !!pre.cleanup)) {
     const provider = await askChoice<CleanupProvider>(
       ctx,
       'Cleanup provider:',
@@ -292,20 +331,24 @@ export async function askDeployQuestions(
         { value: 'anthropic', label: PROVIDER_LABEL.anthropic },
         { value: 'openai', label: PROVIDER_LABEL.openai },
       ],
-      transcription?.provider === 'openai' ? 'openai' : 'anthropic',
+      pre.cleanup?.provider ?? (transcription?.provider === 'openai' ? 'openai' : 'anthropic'),
     );
     const models = CLEANUP_MODELS[provider];
+    // A model the host remembers that is not offered here (an outdated one) is never deployed.
+    const wanted = pre.cleanup?.provider === provider ? pre.cleanup.model : undefined;
+    if (wanted && !models.includes(wanted))
+      say(`    ${wanted} is not offered for cleanup; the default is ${models[0]}.`);
     const model = await askChoice(
       ctx,
       'Cleanup model:',
       models.map((m) => ({ value: m, label: m })),
-      models[0]!,
+      wanted && models.includes(wanted) ? wanted : models[0]!,
     );
     let ok = true;
     if (keys[provider]) {
       say(`    Using the ${PROVIDER_LABEL[provider]} key entered for dictation.`);
     } else {
-      const got = await askKey(ctx, provider, 'transcript cleanup', onSecret);
+      const got = await askKey(ctx, provider, 'transcript cleanup', onSecret, pre.keys[provider]);
       if (got) {
         keys[provider] = got.key;
         if (got.unchecked) unchecked.push(provider);
@@ -332,7 +375,7 @@ export async function askDeployQuestions(
     unchecked,
   };
   say('');
-  for (const l of summaryLines(answers)) say(l);
+  for (const l of summaryLines(answers, d.forHost)) say(l);
   say('');
   if (!(await askYesNo(ctx, 'Deploy with these settings?', false))) return null;
   return answers;
@@ -343,7 +386,7 @@ export function describeAccount(a: CloudflareAccount | null): string {
 }
 
 /** The confirmation summary. Keys appear only as present or absent. */
-export function summaryLines(a: DeployAnswers): string[] {
+export function summaryLines(a: DeployAnswers, forHost = false): string[] {
   const key = (p: KeyProvider) =>
     a.keys[p] ? (a.unchecked.includes(p) ? 'present (not checked)' : 'present') : 'absent';
   return [
@@ -357,6 +400,8 @@ export function summaryLines(a: DeployAnswers): string[] {
     `    OpenAI key           ${key('openai')}`,
     `    Anthropic key        ${key('anthropic')}`,
     '    A key already set on an existing Worker with this name is kept.',
-    '    A claim secret is generated and shown once at the end.',
+    forHost
+      ? '    A claim secret is generated and handed to the app that started this deploy, not shown.'
+      : '    A claim secret is generated and shown once at the end.',
   ];
 }
