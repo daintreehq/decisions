@@ -9,7 +9,7 @@ import {
   type KeyboardEvent,
   type Ref,
 } from 'react';
-import { useLayer } from '../app/layers.js';
+import { stageCovered, useLayer, useStageCovered } from '../app/layers.js';
 import type { QuestionView } from '../domain/model.js';
 import { Compare, type Side } from './files/Compare.js';
 import {
@@ -79,14 +79,18 @@ export function AttachmentGallery({
   const scope = scopeKey(view);
   const [presented, setPresented] = useState(() => presentationLog.get(scope));
   useEffect(() => setPresented(presentationLog.get(scope)), [scope]);
+  // A hidden page, or anything covering the workspace (the navigator sheet, a sheet or dialog, the full-height
+  // editor), means nothing on the stage is being seen. When it uncovers, `present` changes and every surface that
+  // presents (inline, viewer, comparison) re-checks what is now in front of the person.
+  const covered = useStageCovered();
   const present = useCallback(
     (it: FileItem) => {
       const r = results[it.d.attachment_id];
       if (!r?.ok || r.image.sha256 !== it.d.sha256) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (covered || stageCovered()) return;
       if (presentationLog.mark(scope, it.key)) setPresented(presentationLog.get(scope));
     },
-    [results, scope],
+    [results, scope, covered],
   );
   const review = useMemo(
     () => computeReview(items, results, presented),
