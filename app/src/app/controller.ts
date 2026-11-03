@@ -178,7 +178,10 @@ export class AppController {
         if (connection === 'live') void this.outbox?.flush();
       },
       onSynced: (at) => this.patch({ lastSyncedAt: at, syncing: false, lastError: null }),
-      onRevoked: () => this.patch({ phase: 'revoked' }),
+      onRevoked: () => {
+        this.teardown();
+        this.patch({ phase: 'revoked' });
+      },
       onError: (e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) }),
     });
     this.patch({ phase: 'ready', config, syncing: true });
@@ -230,9 +233,31 @@ export class AppController {
     };
   }
 
+  private teardowns = new Set<() => void>();
+
+  /**
+   * In-memory owners outside this controller (dictation) that must forget everything, synchronously, when the device
+   * is unpaired or revoked.
+   */
+  registerTeardown(fn: () => void): () => void {
+    this.teardowns.add(fn);
+    return () => this.teardowns.delete(fn);
+  }
+
+  private teardown() {
+    for (const fn of this.teardowns) {
+      try {
+        fn();
+      } catch {
+        /* one owner failing must not keep the others alive */
+      }
+    }
+  }
+
   async wipe(): Promise<void> {
     // Order matters: cut off everything that could still deliver or reveal data BEFORE touching storage, and
     // never wait on the network. A stalled download must not be able to delay or undo an erase.
+    this.teardown();
     this.sync?.stop();
     this.images.dispose();
     const db = this.db;

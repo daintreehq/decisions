@@ -156,4 +156,25 @@ describe('evidence for approvals', () => {
   it('an approval with no files reported yet is not approvable', () => {
     expect(verdict(input({ c, selected: ['yes'] })).canSend).toBe(false);
   });
+
+  it('a correction to an approval needs the same evidence as the approval', () => {
+    const base = {
+      c,
+      mode: 'correction' as const,
+      selected: ['no'],
+      reason: 'The diff was wrong.',
+      current: { selected: ['yes'], text: '' },
+    };
+    const failed = verdict(
+      input({ ...base, evidence: { total: 2, loaded: 0, presented: 0, expired: 0, failed: 1 } }),
+    );
+    expect(failed.canSend).toBe(false);
+    expect(failed.remainingFiles).toBe(2);
+    expect(verdict(input(base)).canSend).toBe(false);
+    expect(
+      verdict(
+        input({ ...base, evidence: { total: 2, loaded: 2, presented: 2, expired: 0, failed: 0 } }),
+      ).canSend,
+    ).toBe(true);
+  });
 });

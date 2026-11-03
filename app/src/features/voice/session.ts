@@ -13,7 +13,12 @@ export interface VoiceLike {
 export interface SessionDeps {
   /** `onReady` must be invoked when the provider announces it is ready (transcript.created). */
   makeClient(onReady: () => void): VoiceLike;
-  startMic(onFrame: (pcm: ArrayBuffer) => void, onLevel?: (rms: number) => void): Promise<Capture>;
+  /** `signal` aborts when the attempt is cancelled, so a permission granted late releases its tracks at once. */
+  startMic(
+    onFrame: (pcm: ArrayBuffer) => void,
+    onLevel?: (rms: number) => void,
+    signal?: AbortSignal,
+  ): Promise<Capture>;
   onLevel?: (rms: number) => void;
   /** The microphone delivered something other than digital silence (Daintree's mic-live signal). */
   onMicLive?: () => void;
@@ -21,6 +26,7 @@ export interface SessionDeps {
   onMicSilent?: () => void;
   /** The provider failed after capture began (the words received so far are still returned by `finish`). */
   onFailure?: (e: Error) => void;
+  /** Bounds the whole provider startup: the voice ticket, the socket and readiness. */
   readyTimeoutMs?: number;
   silenceGraceMs?: number;
   /** Frames held while the provider connects: ~15 s of 100 ms frames; past that the oldest are dropped. */
@@ -79,6 +85,8 @@ export class DictationSession {
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
   /** Wakes a startup parked on the provider so cancellation takes effect at once. */
   private abortWait: (() => void) | null = null;
+  /** Aborts the microphone's own startup when this attempt is cancelled. */
+  private micAbort: AbortController | null = null;
   /** Frames dropped from the head of a full startup queue. */
   droppedFrames = 0;
   private speaking = false;
@@ -102,6 +110,8 @@ export class DictationSession {
 
   private cleanup() {
     clearTimeout(this.silenceTimer);
+    this.micAbort?.abort();
+    this.micAbort = null;
     this.mic?.stop();
     this.mic = null;
     this.client?.cancel();
@@ -170,22 +180,22 @@ export class DictationSession {
       this.abortWait = () => rej(new Error('cancelled'));
     });
     aborted.catch(() => undefined);
+    const micAbort = new AbortController();
+    this.micAbort = micAbort;
 
-    // The provider side: ticket, socket, `transcript.created`, then drain what the microphone already heard.
+    // The provider side: ticket, socket, `transcript.created`, then drain what the microphone already heard. The
+    // deadline covers all of it, the ticket request included, and a cancel ends the wait at any step.
     const provider = (async () => {
-      await client.start();
-      if (!current()) throw new Error('cancelled');
+      const deadline = new Promise<never>((_, rej) => {
+        timer = setTimeout(
+          () => rej(new Error('The dictation service did not respond.')),
+          this.deps.readyTimeoutMs ?? 10_000,
+        );
+      });
       try {
-        await Promise.race([
-          readySignal,
-          aborted,
-          new Promise<never>((_, rej) => {
-            timer = setTimeout(
-              () => rej(new Error('The dictation service did not respond.')),
-              this.deps.readyTimeoutMs ?? 10_000,
-            );
-          }),
-        ]);
+        await Promise.race([client.start(), aborted, deadline]);
+        if (!current()) throw new Error('cancelled');
+        await Promise.race([readySignal, aborted, deadline]);
       } finally {
         clearTimeout(timer);
       }
@@ -201,6 +211,7 @@ export class DictationSession {
       const opening = this.deps.startMic(
         (pcm) => this.onFrame(gen, client, pcm),
         this.deps.onLevel,
+        micAbort.signal,
       );
       // A microphone this attempt never adopts (cancelled, or the provider failed first) is stopped the moment the
       // permission resolves, so none keeps running without a visible owner.

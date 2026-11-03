@@ -44,11 +44,17 @@ function rig(
   };
   const mic: Capture = { stop: () => void log.push('mic.stop') };
   const phases: SessionPhase[] = [];
-  const startMic = vi.fn((onFrame: (b: ArrayBuffer) => void) => {
-    log.push('startMic');
-    frameSink = onFrame;
-    return micGate.promise;
-  });
+  const startMic = vi.fn(
+    (
+      onFrame: (b: ArrayBuffer) => void,
+      _onLevel?: (rms: number) => void,
+      _signal?: AbortSignal,
+    ) => {
+      log.push('startMic');
+      frameSink = onFrame;
+      return micGate.promise;
+    },
+  );
   const session = new DictationSession(
     {
       makeClient: (r) => {
@@ -170,6 +176,43 @@ describe('dictation session startup races', () => {
     await t.flush();
     expect(t.log).toContain('mic.stop');
     expect(t.session.phase).toBe('idle');
+  });
+
+  it('bounds the whole startup wait, a stalled voice ticket included, so Stop still ends', async () => {
+    const t = rig({ readyTimeoutMs: 20 });
+    const p = t.session.start(); // the ticket request (client.start) never answers
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const raw = await Promise.race([
+      t.session.finish(),
+      new Promise((r) => setTimeout(() => r('hung'), 500)),
+    ]);
+    expect(raw).toBe('');
+    expect(t.session.phase).toBe('idle');
+  });
+
+  it('cancel() settles a Stop waiting on a stalled voice ticket at once', async () => {
+    const t = rig();
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const finishing = t.session.finish();
+    t.session.cancel();
+    const raw = await Promise.race([
+      finishing,
+      new Promise((r) => setTimeout(() => r('hung'), 200)),
+    ]);
+    expect(raw).toBe('');
+  });
+
+  it('passes the microphone a cancellation signal that cancel() aborts', async () => {
+    const t = rig();
+    void t.session.start();
+    await vi.waitFor(() => expect(t.startMic).toHaveBeenCalled());
+    const signal = t.startMic.mock.calls[0]![2] as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(false);
+    t.session.cancel();
+    expect(signal?.aborted).toBe(true);
   });
 
   it('ignores a second start while one is running', async () => {

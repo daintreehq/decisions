@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 /** The app the dictation owner and the draft store talk to, with drafts kept in memory. */
 const h = vi.hoisted(() => ({
   stored: new Map<string, unknown>(),
+  /** While set, every draft save waits for it (slow storage). */
+  saveGate: null as Promise<void> | null,
+  /** While set, new clients never get their voice ticket (a stalled `/voice/session`). */
+  stallTicket: false,
   prefs: {
     theme: 'system',
     dismissedInstall: false,
@@ -20,8 +24,12 @@ vi.mock('../src/app/controller.js', () => ({
     getSnapshot: () => ({ phase: 'ready', prefs: h.prefs, online: true, info: null, config: null }),
     getRelay: () => null,
     registerUpdateGuard: () => () => undefined,
+    registerTeardown: () => () => undefined,
     drafts: {
-      save: async (k: string, d: unknown) => void h.stored.set(k, structuredClone(d)),
+      save: async (k: string, d: unknown) => {
+        if (h.saveGate) await h.saveGate;
+        h.stored.set(k, structuredClone(d));
+      },
       load: async (k: string) => (h.stored.get(k) as never) ?? null,
       delete: async (k: string) => void h.stored.delete(k),
     },
@@ -69,8 +77,12 @@ function rig(over: Partial<DictationDeps> = {}) {
         interim: '',
       };
       clients.push(c);
+      const stall = h.stallTicket;
       return {
-        start: async () => void queueMicrotask(() => c.opts.onState?.('ready')),
+        start: async () => {
+          if (stall) await new Promise(() => undefined);
+          queueMicrotask(() => c.opts.onState?.('ready'));
+        },
         sendAudio: () => undefined,
         stop: async () => {
           c.stopped = true;
@@ -145,6 +157,8 @@ const cleaned = (corrected: string): CorrectionOutcome => ({
 
 beforeEach(() => {
   h.stored.clear();
+  h.saveGate = null;
+  h.stallTicket = false;
   h.prefs.voice = { consent: true, transcription: 'xai', correction: 'anthropic', mode: 'tap' };
 });
 
@@ -492,5 +506,206 @@ describe('the Dictate button', () => {
     expect(btn.getAttribute('aria-label')).toBe('Stop dictation');
     expect(btn.getAttribute('aria-pressed')).toBe('true');
     expect(host.textContent).not.toMatch(/Send/);
+  });
+});
+
+describe('stale work from an earlier attempt never wins', () => {
+  async function recording(t: ReturnType<typeof rig>, b: Binding) {
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+  }
+
+  it('an old Stop finishing on slow storage leaves a newer recording running and owned', async () => {
+    const t = rig();
+    const b = bindingFor();
+    await recording(t, b);
+    await t.say('hello world');
+    const save = deferred<void>();
+    h.saveGate = save.promise;
+    void t.d.stop(); // the raw checkpoint is now waiting on storage
+    await flush();
+    expect(t.d.getState().phase).toBe('finishing');
+    act(() => t.d.discard());
+    await recording(t, b);
+    expect(t.d.getState().phase).toBe('recording');
+    h.saveGate = null;
+    await act(async () => save.resolve());
+    await flush();
+    expect(t.d.getState().phase).toBe('recording');
+    expect(t.d.isActive()).toBe(true);
+    expect(t.mic.stops).toBe(1); // only the first microphone was released
+  });
+
+  it('a stalled voice ticket cannot make Stop ineffective for the next recording', async () => {
+    const t = rig();
+    const b = bindingFor();
+    h.stallTicket = true;
+    await recording(t, b); // the microphone opened while /voice/session hangs
+    expect(t.d.getState().phase).toBe('recording');
+    void t.d.stop();
+    await flush();
+    act(() => t.d.discard());
+    h.stallTicket = false;
+    await recording(t, b);
+    expect(t.d.getState().phase).toBe('recording');
+    void t.d.stop();
+    await flush();
+    await flush();
+    expect(t.mic.stops).toBe(2);
+    expect(t.d.getState().phase).not.toBe('recording');
+  });
+
+  it('"Keep typing" while consent is being saved means the microphone never starts', async () => {
+    h.prefs.voice.consent = false;
+    const saving = deferred<void>();
+    const t = rig({ setConsent: () => saving.promise });
+    const b = bindingFor();
+    act(() => t.d.request(b));
+    const accepting = t.d.acceptConsent();
+    act(() => t.d.declineConsent());
+    await act(async () => saving.resolve());
+    void accepting;
+    await flush();
+    await t.listen();
+    expect(t.mic.calls).toBe(0);
+    expect(t.d.getState().phase).toBe('idle');
+  });
+
+  it('hiding the app while consent is being saved means the microphone never starts', async () => {
+    h.prefs.voice.consent = false;
+    const saving = deferred<void>();
+    const t = rig({ setConsent: () => saving.promise });
+    const b = bindingFor();
+    act(() => t.d.request(b));
+    const accepting = t.d.acceptConsent();
+    act(() => t.d.onHidden());
+    await act(async () => saving.resolve());
+    void accepting;
+    await flush();
+    await t.listen();
+    expect(t.mic.calls).toBe(0);
+    expect(t.d.getState().phase).toBe('idle');
+  });
+});
+
+describe('typing around a passage before Stop', () => {
+  it('typing ahead of the passage after its last words keeps the raw text, never a cleanup of a stale slice', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('hello world');
+    act(() => drafts.edit(b.key, { text: 'please hello world' }));
+    await act(() => t.d.stop());
+    if (t.cleanup.gate) await act(async () => t.cleanup.gate!.resolve(cleaned('Please, hello.')));
+    await flush();
+    expect(text(b)).toBe('please hello world');
+    expect(t.d.getState().phase).toBe('idle');
+    expect(t.d.getState().message?.text).toBe(MESSAGES.edited);
+  });
+
+  it('typing after the passage still lets the cleanup tidy exactly the dictated words', async () => {
+    let raw = '';
+    const t = rig({
+      correct: async (r) => {
+        raw = r.raw;
+        return cleaned('Hello, world.');
+      },
+    });
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('hello world');
+    act(() => drafts.edit(b.key, { text: 'hello world and more' }));
+    await act(() => t.d.stop());
+    await flush();
+    expect(raw).toBe('hello world');
+    expect(text(b)).toBe('Hello, world. and more');
+  });
+});
+
+describe('a passage belongs to the revision it was reviewed against', () => {
+  it('words from a capture still finishing are refused once the draft is rebound to a newer revision', async () => {
+    const t = rig({ correct: undefined });
+    h.prefs.voice.correction = 'off';
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first');
+    const stopping = t.d.stop();
+    act(() => drafts.rebind(b.key, 1));
+    await t.say('late words');
+    await act(() => stopping);
+    expect(text(b)).toBe('first');
+  });
+
+  it('Review update settles capture first, so its words land before the draft moves to the new revision', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first');
+    const rebinding = t.d.rebind(b.key, 1);
+    await t.say('last words');
+    await act(() => rebinding);
+    await flush();
+    const d = drafts.get(b.key)!;
+    expect(d.text).toBe('first last words');
+    expect(d.revision).toBe(1);
+    expect(t.d.getState().phase).toBe('idle');
+    expect(t.mic.stops).toBe(1);
+  });
+});
+
+describe('unpairing and revocation', () => {
+  it('teardown aborts a running cleanup and nothing late can restore the old binding', async () => {
+    let signal: AbortSignal | undefined;
+    const gate = deferred<CorrectionOutcome>();
+    const t = rig({
+      relay: () => ({
+        json: async () => ({}) as never,
+        raw: (_m, _p, _b, s) => {
+          signal = s;
+          return new Promise<Response>(() => undefined);
+        },
+      }),
+      correct: (req) => {
+        void req.post('/api/v1/voice/correct', {}, new AbortController().signal);
+        return gate.promise;
+      },
+    });
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('hello world');
+    await act(() => t.d.stop());
+    expect(t.d.getState().phase).toBe('cleaning');
+    act(() => t.d.teardown());
+    expect(signal?.aborted).toBe(true);
+    expect(t.d.getState()).toMatchObject({ phase: 'idle', binding: null, message: null });
+    await act(async () => gate.resolve(cleaned('Hello, world.')));
+    await flush();
+    expect(t.d.getState()).toMatchObject({ phase: 'idle', binding: null, message: null });
+    expect(text(b)).toBe('hello world');
+  });
+
+  it('teardown during recording releases the microphone and drops every late word', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    act(() => t.d.teardown());
+    expect(t.mic.stops).toBe(1);
+    expect(t.clients[0]!.cancelled).toBe(true);
+    await t.say('late');
+    expect(text(b)).toBe('');
+    expect(t.d.getState()).toMatchObject({ phase: 'idle', binding: null });
   });
 });
