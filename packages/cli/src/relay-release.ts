@@ -9,7 +9,12 @@ import { CliError } from './runtime.js';
  */
 
 export const RELAY_PACKAGE = '@daintreehq/decisions-relay';
+/** The official registry, the one the CLI itself is published to. Mirrors are not consulted. */
 export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
+/** Bounds on a relay tarball: compressed, unpacked, and number of files. */
+const MAX_TARBALL_BYTES = 32 * 1024 * 1024;
+const MAX_UNPACKED_BYTES = 128 * 1024 * 1024;
+const MAX_FILES = 2000;
 
 /** An inclusive range of wire protocol majors. */
 export interface ProtocolRange {
@@ -30,7 +35,10 @@ export interface RelayRelease {
 
 /* ---------- versions ---------- */
 
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+const NUM = '(0|[1-9]\\d*)';
+const SEMVER = new RegExp(
+  `^${NUM}\\.${NUM}\\.${NUM}(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`,
+);
 
 export function isVersion(v: string): boolean {
   return SEMVER.test(v);
@@ -80,7 +88,8 @@ export function parseProtocolRange(s: string): ProtocolRange {
   return { min, max };
 }
 
-export const formatRange = (r: ProtocolRange) => (r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`);
+export const formatRange = (r: ProtocolRange) =>
+  r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`;
 
 /* ---------- the registry ---------- */
 
@@ -97,11 +106,6 @@ function repositoryOf(meta: unknown): string | null {
   const r = (meta as { repository?: unknown } | null)?.repository;
   const url = typeof r === 'string' ? r : (r as { url?: unknown } | undefined)?.url;
   return typeof url === 'string' ? url : null;
-}
-
-export function registryUrl(env: Record<string, string | undefined>): string {
-  const r = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || DEFAULT_REGISTRY;
-  return r.replace(/\/+$/, '');
 }
 
 /** Every published release of the relay, oldest first. */
@@ -150,7 +154,11 @@ export async function downloadRelease(fetchFn: typeof fetch, r: RelayRelease): P
     throw new CliError(`could not download relay ${r.version}: ${(e as Error).message}`);
   }
   if (!res.ok) throw new CliError(`downloading relay ${r.version} failed with HTTP ${res.status}`);
+  const declared = Number(res.headers.get('content-length'));
+  if (declared > MAX_TARBALL_BYTES)
+    throw new CliError(`relay ${r.version} is too large to download`);
   const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > MAX_TARBALL_BYTES) throw new CliError(`relay ${r.version} is too large`);
   const want = r.integrity
     .split(/\s+/)
     .filter((s) => s.startsWith('sha512-'))
@@ -208,16 +216,20 @@ function paxPath(data: Buffer): string | undefined {
 export function extractTarball(gz: Buffer): Map<string, Buffer> {
   let tar: Buffer;
   try {
-    tar = gunzipSync(gz);
+    tar = gunzipSync(gz, { maxOutputLength: MAX_UNPACKED_BYTES });
   } catch {
-    throw new CliError('the relay tarball is not valid gzip');
+    throw new CliError('the relay tarball is not valid gzip, or unpacks too large');
   }
   const files = new Map<string, Buffer>();
   let off = 0;
   let nextPath: string | undefined;
+  let ended = false;
   while (off + 512 <= tar.length) {
     const h = tar.subarray(off, off + 512);
-    if (h.every((b) => b === 0)) break;
+    if (h.every((b) => b === 0)) {
+      ended = true;
+      break;
+    }
     let sum = 0;
     for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i]!;
     if (sum !== octal(h.subarray(148, 156)))
@@ -242,14 +254,16 @@ export function extractTarball(gz: Buffer): Map<string, Buffer> {
     const full = nextPath ?? (prefix ? `${prefix}/${name}` : name);
     nextPath = undefined;
     if (type === '5') continue;
-    if (type !== '0' && type !== '\0' && type !== '7') {
+    if (type !== '0' && type !== '\0') {
       throw new CliError(`the relay tarball contains a non-file entry (${full}); refusing it`);
     }
-    const slash = full.indexOf('/');
-    const rel = slash === -1 ? '' : full.slice(slash + 1);
-    if (!safeRelative(rel)) throw new CliError(`the relay tarball contains an unsafe path: ${full}`);
+    const rel = full.startsWith('package/') ? full.slice('package/'.length) : '';
+    if (!safeRelative(rel))
+      throw new CliError(`the relay tarball contains an unsafe path: ${full}`);
+    if (files.size >= MAX_FILES) throw new CliError('the relay tarball has too many files');
     if (files.has(rel)) throw new CliError(`the relay tarball lists ${rel} twice`);
     files.set(rel, Buffer.from(data));
   }
+  if (!ended) throw new CliError('the relay tarball is truncated');
   return files;
 }

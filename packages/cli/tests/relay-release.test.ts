@@ -5,9 +5,9 @@ import {
   compareVersions,
   downloadRelease,
   extractTarball,
+  isVersion,
   listRelayReleases,
   parseProtocolRange,
-  registryUrl,
   type RelayRelease,
 } from '../src/relay-release.js';
 
@@ -69,11 +69,11 @@ describe('versions', () => {
     expect(() => parseProtocolRange('^1')).toThrow(/must be/);
   });
 
-  it('takes the registry from the npm environment', () => {
-    expect(registryUrl({})).toBe('https://registry.npmjs.org');
-    expect(registryUrl({ npm_config_registry: 'https://npm.example.com/' })).toBe(
-      'https://npm.example.com',
-    );
+  it('accepts only valid semver', () => {
+    expect(isVersion('1.2.3')).toBe(true);
+    expect(isVersion('1.2.3-rc.1+build.5')).toBe(true);
+    for (const v of ['01.2.3', '1.2', '1.2.3-', '1.2.3-01', 'v1.2.3'])
+      expect(isVersion(v)).toBe(false);
   });
 });
 
@@ -165,5 +165,16 @@ describe('extractTarball', () => {
       /unsafe path/,
     );
     expect(() => extractTarball(Buffer.from('not gzip'))).toThrow(/gzip/);
+    expect(() => extractTarball(tarball([{ path: 'other/a.txt', data: 'x' }]))).toThrow(
+      /unsafe path/,
+    );
+    expect(() =>
+      extractTarball(
+        tarball([
+          { path: 'package/a', data: 'x' },
+          { path: 'package/a', data: 'y' },
+        ]),
+      ),
+    ).toThrow(/twice/);
   });
 });

@@ -68,7 +68,11 @@ export class CloudflareApi {
     const { status, body } = await this.request<T>(path);
     if (status >= 200 && status < 300 && body?.success !== false && body?.result !== undefined)
       return body.result;
-    const why = body?.errors?.map((e) => e.message).filter(Boolean).join('; ') || `HTTP ${status}`;
+    const why =
+      body?.errors
+        ?.map((e) => e.message)
+        .filter(Boolean)
+        .join('; ') || `HTTP ${status}`;
     throw new CliError(`Cloudflare refused to ${what}: ${why}`);
   }
 
@@ -78,7 +82,11 @@ export class CloudflareApi {
     if (status === 404) return null;
     if (status >= 200 && status < 300 && body?.success !== false && body?.result !== undefined)
       return body.result;
-    const why = body?.errors?.map((e) => e.message).filter(Boolean).join('; ') || `HTTP ${status}`;
+    const why =
+      body?.errors
+        ?.map((e) => e.message)
+        .filter(Boolean)
+        .join('; ') || `HTTP ${status}`;
     throw new CliError(`Cloudflare refused to ${what}: ${why}`);
   }
 
@@ -87,9 +95,17 @@ export class CloudflareApi {
     const sep = path.includes('?') ? '&' : '?';
     for (let page = 1; page <= 50; page++) {
       const { status, body } = await this.request<T[]>(`${path}${sep}page=${page}&per_page=50`);
-      if (status < 200 || status >= 300 || body?.success === false || !Array.isArray(body?.result)) {
+      if (
+        status < 200 ||
+        status >= 300 ||
+        body?.success === false ||
+        !Array.isArray(body?.result)
+      ) {
         const why =
-          body?.errors?.map((e) => e.message).filter(Boolean).join('; ') || `HTTP ${status}`;
+          body?.errors
+            ?.map((e) => e.message)
+            .filter(Boolean)
+            .join('; ') || `HTTP ${status}`;
         throw new CliError(`Cloudflare refused to ${what}: ${why}`);
       }
       out.push(...body.result);
@@ -165,7 +181,13 @@ export class CloudflareApi {
       `read whether "${name}" is on workers.dev`,
     );
     const carried: WorkerSnapshot['carried'] = {};
-    for (const k of ['observability', 'placement', 'limits', 'tail_consumers', 'logpush'] as const) {
+    for (const k of [
+      'observability',
+      'placement',
+      'limits',
+      'tail_consumers',
+      'logpush',
+    ] as const) {
       if (settings[k] !== undefined && settings[k] !== null) carried[k] = settings[k];
     }
     return {

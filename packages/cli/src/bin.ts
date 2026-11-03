@@ -16,6 +16,7 @@ import {
 } from './commands/ops.js';
 import { deploy } from './commands/deploy.js';
 import { remove } from './commands/remove.js';
+import { update } from './commands/update.js';
 import { devices, pair, revoke, rotate, setup } from './commands/setup.js';
 import { hostAccept, hostEnroll, hostRequest } from './commands/host.js';
 import { VERSION } from './version.js';
@@ -87,6 +88,27 @@ export function buildProgram(): Command {
     )
     .option('--dry-run', 'list what would be removed without deleting anything')
     .action((target, o) => run((c, g) => remove(c, g, target, o))());
+
+  program
+    .command('update')
+    .description(
+      'Update a deployed relay to the newest compatible release, keeping its claim, data, bucket, secrets and settings.',
+    )
+    .requiredOption('--url <origin>', 'the https URL of the relay')
+    .option('--name <name>', 'the Worker name, when it cannot be found from the URL')
+    .option('--account-id <id>', 'Cloudflare account ID, if your login or token has several')
+    .option(
+      '--protocol <range>',
+      "protocol versions the caller supports, like 1 or 1-2 (default: this CLI's own)",
+    )
+    .option('--to <version>', 'update to exactly this release instead of the newest compatible one')
+    .option('-y, --yes', 'do not ask for confirmation')
+    .option('--dry-run', 'show what would change without changing anything')
+    .option(
+      '--api-token',
+      "ask for a Cloudflare API token (kept in memory) instead of Wrangler's browser login",
+    )
+    .action((o) => run((c, g) => update(c, g, o))());
 
   program
     .command('setup')
