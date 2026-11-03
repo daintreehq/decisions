@@ -31,9 +31,11 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
  */
 const OUT = process.env.DESIGN_CAPTURE_DIR ?? process.env.SCREENSHOTS_DIR;
 const chromiumPath = findChromium();
-const PORT = 8801;
+const PORT = Number(process.env.SCREENSHOTS_PORT ?? 8801);
 const PHONE = { width: 390, height: 844 };
 const WIDE = { width: 1280, height: 820 };
+const WIDER = { width: 1440, height: 900 };
+const TABLET = { width: 834, height: 1194 };
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -64,10 +66,23 @@ class Sink implements TerminalSink {
   }
 }
 
+/** Lets the conflict capture have the model answer first, after the phone queued its own answer offline. */
+let conflictArmed = false;
+
 /** Answers only the changelog question, so the inbox holds one proxy answer and one abstention. */
 const proxy: ProxyEngine = {
   gateAware: true,
   async suggest(input) {
+    if (conflictArmed && input.question.startsWith('Which log level'))
+      return {
+        action: 'answer',
+        selected_option_ids: ['info'],
+        confidence: 0.81,
+        model_id: 'decision-model-bm25 v1',
+        prompt_template_version: '1',
+        retrieval_reference_ids: [],
+        risk_flags: [],
+      };
     if (!input.question.startsWith('Should the changelog entry'))
       return { action: 'abstain', reason: 'low-confidence' };
     return {
@@ -111,6 +126,86 @@ async function mockUi(browser: Browser, variant: 'before' | 'after'): Promise<Ui
   return buf;
 }
 
+/** Renders arbitrary markup as a PNG, for the multi-file gallery fixture. */
+async function mockShot(
+  browser: Browser,
+  size: { width: number; height: number },
+  body: string,
+): Promise<Uint8Array> {
+  const page = await browser.newPage({ viewport: size });
+  await page.setContent(
+    `<body style="margin:0;font:14px -apple-system,system-ui,sans-serif">${body}</body>`,
+  );
+  const buf = new Uint8Array(await page.screenshot({ type: 'png' }));
+  await page.close();
+  return buf;
+}
+
+const settingRow = (label: string, value: string) =>
+  `<div style="display:flex;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #e6e1d8;background:#ffffff"><span>${label}</span><span style="color:#6b6458">${value}</span></div>`;
+
+/** Five different screens for the strip: wide desktop, a tall phone capture, a dialog, a chart, a terminal. */
+async function galleryShots(browser: Browser): Promise<Record<string, Uint8Array>> {
+  return {
+    'g-settings.png': await mockShot(
+      browser,
+      { width: 1280, height: 800 },
+      `<div style="display:flex;height:800px;background:#f6f0e6;color:#1c2028">
+        <div style="width:240px;background:#f2e9da;padding:20px;box-sizing:border-box;border-right:1px solid #ddd3c2">
+          ${['General', 'Appearance', 'Agents', 'Keyboard', 'Notifications'].map((t, i) => `<div style="padding:10px 12px;border-radius:8px;margin:2px 0;${i === 1 ? 'background:#fff;font-weight:600' : ''}">${t}</div>`).join('')}
+        </div>
+        <div style="flex:1;padding:32px 40px">
+          <div style="font-size:24px;font-weight:700;margin-bottom:20px">Appearance</div>
+          <div style="border:1px solid #ddd3c2;border-radius:10px;overflow:hidden;max-width:720px">
+            ${settingRow('Theme', 'Match device')}${settingRow('Density', 'Compact')}${settingRow('Sidebar', 'Collapse below 900 px')}${settingRow('Font size', '14 px')}${settingRow('Reduce motion', 'Follow system')}
+          </div>
+        </div>
+      </div>`,
+    ),
+    'g-phone.png': await mockShot(
+      browser,
+      { width: 390, height: 1200 },
+      `<div style="background:#110d0b;color:#e4e4e7;min-height:1200px;padding:56px 18px 18px;box-sizing:border-box">
+        <div style="font-size:26px;font-weight:700;margin-bottom:16px">Agents</div>
+        ${Array.from({ length: 9 }, (_, i) => `<div style="background:#1f1b19;border:1px solid #2e2926;border-radius:12px;padding:16px;margin-bottom:12px"><div style="font-weight:600">checkout-${i + 1}</div><div style="color:#a1a1aa;margin-top:6px">${i % 3 === 0 ? 'Waiting for you' : 'Working · 4 files changed'}</div></div>`).join('')}
+      </div>`,
+    ),
+    'g-dialog.png': await mockShot(
+      browser,
+      { width: 900, height: 560 },
+      `<div style="height:560px;display:grid;place-items:center;background-color:#3a3632">
+        <div style="width:440px;background:#fff;border-radius:14px;padding:24px;color:#1c2028;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+          <div style="font-size:18px;font-weight:700">Delete this workspace?</div>
+          <p style="color:#454d56;line-height:1.5">checkout-3 has 2 unsaved changes. They will be lost.</p>
+          <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px"><span style="padding:10px 16px;border:1px solid #ccc;border-radius:8px">Cancel</span><span style="padding:10px 16px;background:#aa3931;color:#fff;border-radius:8px">Delete</span></div>
+        </div>
+      </div>`,
+    ),
+    'g-chart.png': await mockShot(
+      browser,
+      { width: 1000, height: 620 },
+      `<div style="height:620px;background:#1a1918;color:#e4e4e7;padding:28px;box-sizing:border-box">
+        <div style="font-size:18px;font-weight:700;margin-bottom:24px">Webhook retries, last 24 h</div>
+        <div style="display:flex;align-items:flex-end;gap:14px;height:440px;border-bottom:1px solid #3f3b38">
+          ${[40, 62, 55, 90, 140, 210, 320, 280, 190, 120, 80, 60, 45, 70, 110].map((h) => `<div style="flex:1;height:${h}px;background:#36ce94;border-radius:4px 4px 0 0"></div>`).join('')}
+        </div>
+      </div>`,
+    ),
+    'g-terminal.png': await mockShot(
+      browser,
+      { width: 1100, height: 520 },
+      `<pre style="margin:0;height:520px;background:#110d0b;color:#e4e4e7;padding:22px;font:15px/1.6 ui-monospace,Menlo,monospace;box-sizing:border-box">$ pnpm test
+ ✓ checkout/cart.test.ts (14)
+ ✓ checkout/payment.test.ts (22)
+ × checkout/retry.test.ts (3)
+   → expected 5 retries, received 3
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 38 passed (39)</pre>`,
+    ),
+  };
+}
+
 describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   let relay: RunningRelay;
   let browser: Browser;
@@ -119,6 +214,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   let bridge: DecisionsBridge;
   let client: RelayClient;
   let keyStore: FileKeyStore;
+  const local = new MemoryLocalStore();
   const images = new Map<string, Uint8Array>();
   const written: string[] = [];
   const ids: Record<string, string> = {};
@@ -149,18 +245,45 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   const theme = async (scheme: 'light' | 'dark') => {
     await page.emulateMedia({ colorScheme: scheme });
   };
+  /** The inline gallery shows its active file and every thumbnail has loaded. */
+  const filesReady = async () => {
+    await page.locator('.fx-inline-stage .fs-slide.is-active img').waitFor({ timeout: 30_000 });
+    await until(
+      async () =>
+        (await page.locator('.fx-thumb img').count()) === (await page.locator('.fx-thumb').count()),
+      30_000,
+      'every thumbnail to load',
+    );
+  };
   const open = async (text: string) => {
     await page.goto(relay.origin + '/');
     await page.getByText(text).first().click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+  };
+  /** Opens a question straight from its id, as a notification would. */
+  const openId = async (key: string) => {
+    await page.goto(`${relay.origin}/q/${ids[key]}`);
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+  };
+  /** Types into the dock's editor (opening it from the draft field) and closes it again. */
+  const typeAnswer = async (text: string, keepOpen = false) => {
+    await page.locator('.dock .dock-field').first().click();
+    await page.locator('#ws-editor').fill(text);
+    if (!keepOpen) await page.locator('.dock-field.done').click();
   };
 
   beforeAll(async () => {
     mkdirSync(OUT!, { recursive: true });
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    browser = await chromium.launch({
+      executablePath: chromiumPath!,
+      headless: true,
+      // A fake microphone (a steady tone) so dictation and Settings' microphone test run for real.
+      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+    });
     images.set('before.png', await mockUi(browser, 'before'));
     images.set('after.png', await mockUi(browser, 'after'));
+    for (const [k, v] of Object.entries(await galleryShots(browser))) images.set(k, v);
     context = await browser.newContext({
       viewport: PHONE,
       deviceScaleFactor: 2,
@@ -190,11 +313,19 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.goto(relay.origin + '/privacy');
     await shot('03-privacy', { full: true });
     await page.goto(relay.origin + '/pair');
-    await page.getByText('Paste the link instead').click();
+    await shot('04-pair-start');
+    await page.getByRole('button', { name: 'Paste pairing link' }).click();
     await shot('04-pair-no-invite');
-    // Headless Chromium has no camera, which is exactly the scanner's failure state.
+    // The camera is never granted here, which is exactly the scanner's failure state.
     await page.goto(relay.origin + '/pair');
-    await page.getByRole('button', { name: 'Scan QR code' }).click();
+    // The fake media device gives Chromium a camera; take it away again for the scanner's failure state.
+    await page.evaluate(() => {
+      const md = navigator.mediaDevices;
+      const real = md.getUserMedia.bind(md);
+      md.getUserMedia = (c) =>
+        c?.video ? Promise.reject(new DOMException('No camera', 'NotFoundError')) : real(c);
+    });
+    await page.getByRole('button', { name: 'Scan pairing code' }).click();
     await page.locator('.scanner [role="alert"]').waitFor({ timeout: 15_000 });
     await shot('04-pair-scan-error');
 
@@ -210,7 +341,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     bridge = new DecisionsBridge({
       identity,
       keyStore,
-      store: new MemoryLocalStore(),
+      store: local,
       sink: new Sink(),
       client,
       proxy,
@@ -224,10 +355,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // The invite is read from the fragment on load, so force a real load rather than a hash change.
     await page.goto('about:blank');
     await page.goto(invite.url);
-    await page.getByRole('button', { name: 'Pair this phone' }).waitFor();
+    await page.getByRole('button', { name: 'Pair this device' }).waitFor();
     await shot('05-pair-invite');
-    await page.getByRole('button', { name: 'Pair this phone' }).click();
-    await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Pair this device' }).click();
+    await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
     await shot('06-pair-code');
     const cand = await until(
       async () =>
@@ -237,7 +368,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing is waiting on you').waitFor({ timeout: 30_000 });
+    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
     await shot('07-inbox-empty');
   });
 
@@ -354,58 +485,56 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // Answer the rename question through the UI, so one item is answered and delivered.
     await open('Rename “Canopy”');
     await page.getByRole('radio', { name: /Yes, rename/ }).check();
-    await page.getByRole('button', { name: /Submit decision/ }).click();
+    await shot('30-ws-approval-selected');
+    // A note, so History and its timeline show an answer with words in it.
+    await typeAnswer('Inbox reads better in the sidebar.');
+    await page.getByRole('button', { name: 'Send decision' }).click();
     await page
-      .locator('ol[aria-label="Delivery progress"] li[aria-current="step"]')
-      .filter({ hasText: 'Typed into' })
+      .locator('.dock .stage')
+      .filter({ hasText: 'Delivered to the agent' })
       .waitFor({ timeout: 30_000 });
     await shot('15-detail-answered');
-    await page.getByRole('button', { name: /Change this answer/ }).click();
+    await page.locator('.dock').getByRole('button', { name: 'Change answer' }).click();
     await page.getByRole('radio', { name: /Keep Canopy/ }).check();
-    await page.getByLabel('Why are you changing it?').fill('Canopy is the brand name; keep it.');
-    await shot('16-detail-override', { full: true });
-    await page.getByRole('button', { name: /Send correction/ }).click();
+    await typeAnswer('Canopy is the brand name; keep it.');
+    await shot('16-detail-override');
+    await page.getByRole('button', { name: 'Send correction' }).click();
     await page.getByRole('dialog').waitFor();
     await shot('17-dialog-overrule');
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    // Send it, so History and the activity timeline have a correction to show.
+    await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 });
 
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('09-detail-approval');
     await shot('09-detail-approval-full', { full: true });
     await page.getByRole('radio', { name: /^Approve/ }).check();
     await shot('10-detail-approval-selected');
-    // The README hero: the choice made, a note for the agent, the submit bar armed.
-    const note = page.getByRole('textbox').first();
-    await note.fill('Ship it. Keep the tooltips on every icon.');
-    // Scroll so the status chips sit just under the top bar: question, screenshots, choice and note in one view.
-    await page.evaluate(() => {
-      const bar = document.querySelector('.topbar')!.getBoundingClientRect().bottom;
-      const chips = document.querySelector('.detail-badges')!.getBoundingClientRect().top;
-      window.scrollBy(0, chips - bar - 6);
-    });
+    // The README hero: the choice made, a note for the agent, Send armed above Dictate.
+    await typeAnswer('Ship it. Keep the tooltips on every icon.');
     await shot('10-detail-approval-note');
-    await note.fill('');
+    await typeAnswer('');
+    await page.getByRole('tab', { name: /^After/ }).click();
     await page.getByRole('button', { name: /Enlarge After/ }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.locator('.fx-viewer .fs-slide.is-active img').waitFor({ timeout: 30_000 });
     await shot('11-dialog-zoom');
-    await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
+    await page.getByRole('button', { name: 'Close viewer' }).click();
+    await page.locator('.fx-viewer').waitFor({ state: 'detached' });
 
     await open('Which retry strategy');
     await shot('12-detail-choice', { full: true });
     await open('Which version should it describe');
-    await page
-      .getByRole('textbox')
-      .first()
-      .fill('Describe v3 only. Move the v2 steps to an appendix');
-    await shot('13-detail-text', { full: true });
+    await typeAnswer('Describe v3 only. Move the v2 steps to an appendix');
+    await shot('13-detail-text');
+    await typeAnswer('');
 
     await page.goto(relay.origin + '/');
     await page.getByRole('button', { name: /Model answers/ }).click();
     await page.getByText('Should the changelog entry').first().waitFor({ timeout: 30_000 });
     await shot('19-inbox-proxy-tab');
     await page.getByText('Should the changelog entry').first().click();
-    await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
+    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
     await shot('14-detail-proxy', { full: true });
 
     // Wait out the short-lived question's expiry (usually already past by now).
@@ -428,16 +557,173 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Rename “Canopy”').first().waitFor({ timeout: 30_000 });
     await shot('21-history');
     await page.goto(relay.origin + '/devices');
-    await page.getByText('This phone', { exact: true }).waitFor({ timeout: 30_000 });
+    await page.getByRole('heading', { name: 'This device' }).waitFor({ timeout: 30_000 });
     await shot('22-devices');
     await page.goto(relay.origin + '/settings');
-    await page.getByRole('heading', { name: 'Quiet hours and reminders' }).waitFor();
-    await page.getByLabel('Quiet hours', { exact: true }).check();
-    await shot('23-settings', { full: true });
-    await page.getByRole('button', { name: /Unpair this phone/ }).click();
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
+    await page.locator('[data-section-row="quiet-hours"] .value:not(:empty)').waitFor();
+    await shot('23-settings');
+    await shot('70-settings-index', { full: true });
+
+    // Appearance: the three theme cards, applied immediately.
+    await page.getByRole('link', { name: /Appearance/ }).click();
+    await page.getByRole('heading', { name: 'Appearance' }).waitFor();
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('71-appearance');
+    // A choice is stored before it shows as selected, so waiting for the mark also waits for the write.
+    const pickTheme = async (name: string) => {
+      await page.getByText(name, { exact: true }).click();
+      await page.locator('.theme-card.on .theme-name', { hasText: name }).waitFor();
+    };
+    await pickTheme('Daintree');
+    await shot('71-appearance-daintree');
+    await pickTheme('Bondi');
+    await shot('71-appearance-bondi');
+    await pickTheme('Match device');
+
+    // Dictation, and the microphone test on Chromium's fake device.
+    await page.goto(relay.origin + '/settings/dictation');
+    await page.getByRole('heading', { name: 'Dictation' }).waitFor();
+    await shot('72-dictation', { full: true });
+    await context.grantPermissions(['microphone'], { origin: relay.origin });
+    await page.getByRole('button', { name: 'Test microphone' }).click();
+    await page.getByText(/Listening/).waitFor({ timeout: 15_000 });
+    await page.waitForTimeout(1200);
+    await shot('72-dictation-mic-test', { full: true });
+    await page.getByRole('button', { name: 'Stop' }).click();
+    await context.clearPermissions();
+    // This relay has no provider keys. To show the configured screen, its info answer reports keys for display
+    // only; nothing here starts dictation, so no provider is ever contacted.
+    await page.route('**/api/v1/info', async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response: res,
+        json: { ...body, voice: { xai: true, anthropic: true, openai: true } },
+      });
+    });
+    await page.goto(relay.origin + '/settings/dictation');
+    await page.getByRole('switch', { name: 'Dictation' }).click();
     await page.getByRole('dialog').waitFor();
+    await shot('72-dictation-consent');
+    await page.getByRole('button', { name: /turn on dictation/ }).click();
+    await page.getByText('Tap to start', { exact: true }).waitFor();
+    await shot('72-dictation-on', { full: true });
+    await page.getByRole('switch', { name: 'Dictation' }).click();
+    await page.getByText('Tap to start', { exact: true }).waitFor({ state: 'hidden' });
+    await page.unroute('**/api/v1/info');
+
+    await page.goto(relay.origin + '/settings/notifications');
+    await page.getByRole('heading', { name: 'Notifications' }).waitFor();
+    await shot('73-notifications');
+
+    // Quiet hours: loaded, dirty, invalid, the leave guard, then saved.
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await shot('74-quiet-hours', { full: true });
+    await page.getByLabel('Quiet hours', { exact: true }).check();
+    await page.getByText('Unsaved changes').waitFor();
+    await shot('74-quiet-hours-dirty');
+    await shot('74-quiet-hours-dirty-full', { full: true });
+    await page.getByLabel('Until').fill('22:00');
+    await page
+      .getByText(/can’t start and end at the same time/)
+      .first()
+      .waitFor();
+    await shot('74-quiet-hours-invalid', { full: true });
+    await page.getByLabel('Until').fill('07:00');
+    await page.locator('.s-back').click();
+    await page.getByRole('dialog', { name: 'Save your changes?' }).waitFor();
+    await shot('74-quiet-hours-leave');
+    await page.getByRole('button', { name: 'Keep editing' }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByText('Saved on your relay').waitFor({ timeout: 20_000 });
+    await shot('74-quiet-hours-saved');
+
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await shot('75-devices', { full: true });
+    await page.locator('.s-device').first().click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('75-device-details');
+    await page.keyboard.press('Escape');
+
+    await page.goto(relay.origin + '/settings/privacy');
+    await page.getByRole('heading', { name: 'Privacy & security' }).waitFor();
+    await shot('76-privacy', { full: true });
+    await page.getByRole('button', { name: 'Unpair…' }).click();
+    await page
+      .getByRole('dialog')
+      .getByText(/unsent answer/)
+      .waitFor();
     await shot('24-dialog-erase');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+
+    await page.goto(relay.origin + '/settings/about');
+    await page.getByRole('heading', { name: 'About & help' }).waitFor();
+    await shot('77-about');
+    await page.getByRole('button', { name: /Keyboard shortcuts/ }).click();
+    await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor();
+    await shot('77-shortcuts');
+    await page.keyboard.press('Escape');
+
+    await theme('dark');
+    await page.goto(relay.origin + '/settings');
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
+    await shot('70-settings-index-dark');
+    await page.goto(relay.origin + '/settings/appearance');
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('71-appearance-dark');
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await page.getByLabel('Remind me to review model answers').click();
+    await shot('74-quiet-hours-dirty-dark');
+    await page.getByRole('button', { name: 'Discard' }).click();
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await page.locator('.s-device').nth(1).click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('75-device-details-dark');
+    await page.keyboard.press('Escape');
+    await theme('light');
+
+    // Desktop: the index beside the open section, in both themes.
+    await page.setViewportSize(WIDE);
+    await page.goto(relay.origin + '/settings');
+    await page.getByRole('heading', { name: 'Appearance' }).waitFor();
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('78-desktop-settings');
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await shot('78-desktop-quiet-hours');
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await page.locator('.s-device').first().click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('78-desktop-device-details');
+    await page.keyboard.press('Escape');
+    await theme('dark');
+    await page.goto(relay.origin + '/settings/about');
+    await page.getByRole('heading', { name: 'About & help' }).waitFor();
+    await shot('78-desktop-about-dark');
+    await page.goto(relay.origin + '/install');
+    await shot('78-desktop-install-dark');
+    await theme('light');
+    await page.goto(relay.origin + '/install');
+    await shot('78-desktop-install');
+    await page.setViewportSize(PHONE);
 
     await page.goto(relay.origin + '/');
     await page.getByText('Approve the compact sidebar').first().waitFor({ timeout: 30_000 });
@@ -452,18 +738,19 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Approve the compact sidebar').first().waitFor({ timeout: 30_000 });
     await shot('26-inbox-dark');
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('27-detail-approval-dark', { full: true });
     await page.goto(`${relay.origin}/q/${ids.proxy}`);
-    await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
+    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
     await shot('28-detail-proxy-dark', { full: true });
     await page.goto(relay.origin + '/settings');
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
     await shot('29-settings-dark', { full: true });
     await theme('light');
 
     await page.setViewportSize(WIDE);
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('30-wide-inbox-detail');
     await page.goto(relay.origin + '/');
     await shot('31-wide-inbox');
@@ -474,17 +761,536 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.setViewportSize(PHONE);
   });
 
+  it('captures the navigator, History records and the desktop rail', async () => {
+    const rows = () => page.locator('.navigator .qrow');
+    const waitRows = async () => {
+      await rows().first().waitFor({ timeout: 30_000 });
+    };
+
+    // Phone: the Questions page, search, filter chips and the filtered empty state.
+    await page.setViewportSize(PHONE);
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: /Needs you/ }).click();
+    await waitRows();
+    await shot('60-phone-questions');
+    await page.getByRole('searchbox', { name: 'Search questions' }).fill('retry');
+    await page.getByText('Which retry strategy').first().waitFor();
+    await page.waitForTimeout(300);
+    await shot('60-phone-search');
+    await page.getByRole('button', { name: 'Clear search' }).click();
+    await page.getByLabel('Filter by project').selectOption('billing-api');
+    await page.getByRole('button', { name: /Project: billing-api/ }).waitFor();
+    await shot('60-phone-filter-chip');
+    await page.getByRole('button', { name: /Project: billing-api/ }).click();
+    await page.getByLabel('Filter by project').selectOption('docs-site');
+    await page.getByText('No questions match these filters.').waitFor();
+    await shot('60-phone-filter-empty');
+    await page.getByRole('button', { name: 'Clear filters' }).first().click();
+    await waitRows();
+
+    // Phone: open a question from the list, open the navigator over it, then Back restores the list.
+    await page.getByText('Which retry strategy').first().click();
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-phone-navigator-sheet');
+    await page.keyboard.press('Escape');
+    await page
+      .locator('dialog.nav-sheet[open]')
+      .waitFor({ state: 'detached' })
+      .catch(() => undefined);
+    await page.goBack();
+    await waitRows();
+    await shot('60-phone-back-restored');
+
+    // Phone: History, grouped; a search that only an earlier answer satisfies; a record with its timeline.
+    await page.goto(relay.origin + '/history');
+    await page.getByText('Changed once').first().waitFor({ timeout: 30_000 });
+    await shot('60-phone-history', { full: true });
+    await page.getByRole('searchbox', { name: 'Search history' }).fill('reads better');
+    await page.getByText('Matched an earlier answer').first().waitFor();
+    await shot('60-phone-history-search');
+    await page.getByRole('button', { name: 'Clear search' }).click();
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('dialog.record-sheet[open] .timeline').waitFor();
+    await shot('60-phone-history-record');
+    await page.locator('dialog.record-sheet .tl-delivery summary').first().click();
+    await shot('60-phone-history-record-delivery');
+    await theme('dark');
+    await shot('60-phone-history-record-dark');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/');
+    await waitRows();
+    await shot('60-phone-questions-dark');
+    await page.getByRole('button', { name: /Model answers/ }).click();
+    await page.getByText('Should the changelog entry').first().click();
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-phone-navigator-sheet-dark');
+    await page.keyboard.press('Escape');
+    await page
+      .getByRole('button', { name: /Needs you/ })
+      .first()
+      .click()
+      .catch(() => undefined);
+    await theme('light');
+
+    // Tablet: one centred surface, top navigation, the navigator as a side sheet, the record from the right.
+    await page.setViewportSize(TABLET);
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: /Needs you/ }).click();
+    await waitRows();
+    await shot('60-tablet-questions');
+    await page.getByText('Approve the compact sidebar').first().click();
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-tablet-navigator-sheet');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('dialog.record-sheet[open] .timeline').waitFor();
+    await shot('60-tablet-history-record');
+    await page.keyboard.press('Escape');
+
+    // Desktop: the rail beside a question, the calm Questions column, History with a record, search, offline.
+    for (const [vp, tag] of [
+      [WIDE, '1280'],
+      [WIDER, '1440'],
+    ] as const) {
+      await page.setViewportSize(vp);
+      await page.goto(relay.origin + '/');
+      await page.locator('.rail .qrow').first().waitFor({ timeout: 30_000 });
+      await shot(`60-desktop-${tag}-choose`);
+      await page.locator('.rail .qrow', { hasText: 'Approve the compact sidebar' }).click();
+      await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+      await page.waitForTimeout(600);
+      await shot(`60-desktop-${tag}-question`);
+      await page.goto(relay.origin + '/history');
+      await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+      await page.locator('.history-record .timeline').waitFor();
+      await shot(`60-desktop-${tag}-history`);
+    }
+    await page.setViewportSize(WIDE);
+    await page.keyboard.press('Control+K');
+    await page.keyboard.type('billing');
+    await page.waitForTimeout(400);
+    await shot('60-desktop-search');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow').first().waitFor({ timeout: 30_000 });
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.waitForTimeout(500);
+    await shot('60-desktop-offline');
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await theme('dark');
+    await page.goto(relay.origin + '/');
+    await page.locator('.rail .qrow', { hasText: 'Which retry strategy' }).click();
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+    await shot('60-desktop-question-dark');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('.history-record .timeline').waitFor();
+    await shot('60-desktop-history-dark');
+    // Close the record (a history layer) so nothing pops history under the next navigation.
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/');
+    await theme('light');
+  });
+
+  it('captures files: gallery, viewer, comparison, All files and failures', async () => {
+    // Earlier blocks finish at desktop sizes; this one starts on a phone.
+    await page.setViewportSize(PHONE);
+    const r = await bridge.registerQuestion({
+      origin: {
+        machine_label: 'Greg’s MacBook Pro',
+        host_id: 'host_01JC8Z4MQ7',
+        pane_id: 'p9',
+        terminal_generation: 1,
+        ownership_principal: 'principal-p9',
+        agent_incarnation: '1',
+        agent_kind: 'claude-code',
+        agent_session_id: 's-p9',
+        project_id: 'checkout',
+        worktree_id: 'wt-p9',
+        worktree_root: '/work/checkout',
+        workflow_gate_id: null,
+      },
+      input: {
+        question: 'Which of these should I fix before the checkout release?',
+        context: 'Five captures from the release candidate.',
+        kind: 'choice',
+        options: [
+          { id: 'retry', label: 'The retry test' },
+          { id: 'dialog', label: 'The delete dialog copy' },
+        ],
+        attachments: [
+          { local_resource_id: 'g-settings.png', alt: 'Appearance settings, desktop' },
+          { local_resource_id: 'g-phone.png', alt: 'Agents list on a phone' },
+          { local_resource_id: 'g-dialog.png', alt: 'Delete dialog' },
+          { local_resource_id: 'g-chart.png', alt: 'Webhook retries chart' },
+          { local_resource_id: 'g-terminal.png' },
+        ],
+      },
+    });
+    ids.gallery = r.questionId;
+    await bridge.pump();
+    const openGallery = async () => {
+      await page.goto(`${relay.origin}/q/${ids.gallery}`);
+      await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
+    };
+    const toFiles = async () => {
+      await page.evaluate(() => {
+        const el = document.querySelector('.fx-files')!;
+        window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 64);
+      });
+    };
+    const viewer = page.locator('.fx-viewer');
+
+    // Phone, light: the five-file strip, a tall capture, All files.
+    await openGallery();
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-strip-phone');
+    await page.getByRole('tab', { name: /^Agents list on a phone/ }).click();
+    await shot('50-gallery-tall-phone');
+    await page.getByRole('button', { name: /All files/ }).click();
+    await page.locator('.fx-grid').waitFor();
+    await shot('50-allfiles-phone');
+    await page.keyboard.press('Escape');
+    await page.locator('.fx-grid').waitFor({ state: 'detached' });
+
+    // The before/after approval: inline, viewer at Fit, zoomed, Move, menu, handoff, question, compare.
+    await open('Approve the compact sidebar');
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-phone');
+    await page.getByRole('tab', { name: /^After/ }).click();
+    await page.getByRole('button', { name: 'Enlarge After' }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-fit-phone');
+    const box = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
+    await page.mouse.dblclick(box.x + box.width * 0.3, box.y + box.height * 0.45);
+    await shot('50-viewer-zoomed-phone');
+    await viewer.getByRole('button', { name: 'Move', exact: true }).click();
+    await viewer.getByRole('button', { name: 'Move right' }).click();
+    await shot('50-viewer-move-phone');
+    await viewer.getByRole('button', { name: 'Done' }).click();
+    await page.keyboard.press('0');
+    await viewer.getByRole('button', { name: 'File menu' }).click();
+    await page.getByRole('menu').waitFor();
+    await shot('50-viewer-menu-phone');
+    await page.getByRole('menuitem', { name: 'Download' }).click();
+    await page.getByRole('dialog', { name: 'Download this file?' }).waitFor();
+    await shot('50-viewer-handoff-phone');
+    await page
+      .getByRole('dialog', { name: 'Download this file?' })
+      .getByRole('button', { name: 'Cancel' })
+      .click();
+    await viewer.getByRole('button', { name: 'Question', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Question', exact: true }).waitFor();
+    await shot('50-viewer-question-phone');
+    await page.keyboard.press('Escape');
+    await viewer.getByRole('button', { name: 'Compare before and after' }).click();
+    await page.locator('.fx-compare .fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-compare-phone');
+    await page.locator('.fx-compare').getByRole('button', { name: 'Before', exact: true }).click();
+    await page.keyboard.press('+');
+    await page.keyboard.press('+');
+    await shot('50-compare-phone-before-zoomed');
+    await page.getByRole('button', { name: 'Close comparison' }).click();
+    await viewer.waitFor();
+    await page.getByRole('button', { name: 'Close viewer' }).click();
+    await viewer.waitFor({ state: 'detached' });
+
+    // Dark.
+    await theme('dark');
+    await toFiles();
+    await shot('50-gallery-phone-dark');
+    await page.getByRole('button', { name: /^Enlarge/ }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-fit-phone-dark');
+    await page.keyboard.press('Escape');
+    await viewer.waitFor({ state: 'detached' });
+    await theme('light');
+
+    // Failures, on a fresh load: one file will not load, one fails verification, one the relay deleted.
+    const order: string[] = [];
+    await context.route('**/attachments/*/content', async (route) => {
+      const id = /attachments\/([^/]+)\/content/.exec(route.request().url())?.[1] ?? '';
+      if (!order.includes(id)) order.push(id);
+      const i = order.indexOf(id);
+      if (i === 2)
+        return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+      if (i === 3) return route.fulfill({ status: 200, body: Buffer.alloc(2048, 7) });
+      if (i === 4)
+        return route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 'not_found', message: 'gone' }),
+        });
+      return route.continue();
+    });
+    await openGallery();
+    await page.locator('.fx-thumb.is-expired').waitFor({ timeout: 30_000 });
+    await page.getByRole('tab', { name: /^Delete dialog/ }).click();
+    await toFiles();
+    await shot('50-gallery-error-phone');
+    await page.getByRole('tab', { name: /^Webhook retries chart/ }).click();
+    await shot('50-gallery-unverified-phone');
+    await page.getByRole('button', { name: /All files/ }).click();
+    await page.locator('.fx-grid').waitFor();
+    await shot('50-allfiles-states-phone');
+    await page.keyboard.press('Escape');
+    await context.unroute('**/attachments/*/content');
+
+    // Wide.
+    await page.setViewportSize(WIDE);
+    await open('Approve the compact sidebar');
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-wide');
+    await page.getByRole('button', { name: /^Enlarge/ }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-wide');
+    await viewer.getByRole('button', { name: 'Compare before and after' }).click();
+    await page.locator('.fx-compare .fx-pane img.is-sized').nth(1).waitFor({ timeout: 30_000 });
+    await shot('50-compare-wide');
+    await page.keyboard.press('+');
+    await page.keyboard.press('+');
+    await shot('50-compare-wide-zoomed');
+    await theme('dark');
+    await shot('50-compare-wide-dark');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await theme('light');
+    await openGallery();
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-strip-wide');
+    await page.setViewportSize(PHONE);
+  });
+
+  it('captures every workspace state at both sizes in both themes', async () => {
+    // A question the model will answer while the phone's own answer waits offline: the conflict.
+    const r = await bridge.registerQuestion({
+      origin: {
+        machine_label: 'Greg’s MacBook Pro',
+        host_id: 'host_01JC8Z4MQ7',
+        pane_id: 'p9',
+        terminal_generation: 1,
+        ownership_principal: 'principal-p9',
+        agent_incarnation: '1',
+        agent_kind: 'claude-code',
+        agent_session_id: 's-p9',
+        project_id: 'billing-api',
+        worktree_id: 'wt-p9',
+        worktree_root: '/work/billing-api',
+        workflow_gate_id: null,
+      },
+      input: {
+        question: 'Which log level should the retry worker use in production?',
+        kind: 'choice',
+        requested_requirement: 'proxy-ok',
+        options: [
+          { id: 'debug', label: 'Debug' },
+          { id: 'info', label: 'Info' },
+          { id: 'warn', label: 'Warn' },
+        ],
+      },
+    });
+    ids.conflict = r.questionId;
+    await bridge.pump();
+
+    const sizes: [string, { width: number; height: number }][] = [
+      ['p', PHONE],
+      ['w', WIDE],
+    ];
+    for (const [sz, vp] of sizes) {
+      await page.setViewportSize(vp);
+      for (const scheme of ['light', 'dark'] as const) {
+        await theme(scheme);
+        const tag = `${sz}-${scheme}`;
+        await openId('text');
+        await shot(`40-ws-text-empty-${tag}`);
+        await typeAnswer('Describe v3 only, and move the v2 steps to an appendix.', true);
+        await shot(`40-ws-editor-${tag}`);
+        await page.locator('.dock-field.done').click();
+        await shot(`40-ws-draft-${tag}`);
+        await typeAnswer('');
+        await openId('choice');
+        await page.getByRole('radio', { name: /Exponential backoff/ }).check();
+        await shot(`40-ws-choice-selected-${tag}`);
+        await openId('design');
+        await filesReady();
+        await shot(`40-ws-approval-${tag}`);
+        await openId('answered');
+        await page.locator('.dock .stage').waitFor({ timeout: 30_000 });
+        await shot(`40-ws-answered-${tag}`);
+        await page
+          .locator('.dock')
+          .getByRole('button', { name: /Change answer|Resume correction/ })
+          .click();
+        await page.locator('#ws-correction').waitFor();
+        await shot(`40-ws-correction-${tag}`);
+        await page.locator('#ws-correction').getByRole('button', { name: 'Cancel' }).click();
+        await openId('proxy');
+        await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
+        await shot(`40-ws-model-${tag}`);
+        await openId('expired');
+        await shot(`40-ws-expired-${tag}`);
+        await openId('cancelled');
+        await shot(`40-ws-withdrawn-${tag}`);
+      }
+    }
+    await theme('light');
+    await page.setViewportSize(PHONE);
+
+    // The conflict: the phone queues its answer offline, the model answers first, the phone reconnects.
+    await openId('conflict');
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.getByRole('radio', { name: /^Warn/ }).check();
+    await page.getByRole('button', { name: 'Send answer' }).click();
+    await page.locator('.dock .stage').waitFor({ timeout: 10_000 });
+    await shot('40-ws-queued-offline');
+    conflictArmed = true;
+    // The model passed on it when it was asked; let it look again now.
+    await local.setMeta(`proxy:${ids.conflict}`, '');
+    expect(await bridge.runProxy(ids.conflict!)).toBe('answered');
+    await bridge.pump();
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.locator('#ws-conflict').waitFor({ timeout: 30_000 });
+    await shot('40-ws-conflict');
+    await theme('dark');
+    await shot('40-ws-conflict-dark');
+    await page.setViewportSize(WIDE);
+    await shot('40-ws-conflict-w-dark');
+    await theme('light');
+    await page.setViewportSize(PHONE);
+
+    // Dictation, through the real app and a fake microphone; the relay's speech and cleanup are stood in for here.
+    await context.route('**/api/v1/info', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({
+        response: res,
+        json: { ...body, voice: { xai: true, anthropic: true, openai: false } },
+      });
+    });
+    await context.route('**/api/v1/voice/session', (route) =>
+      route.fulfill({
+        json: {
+          ticket: 'dGlja2V0dGlja2V0dGlja2V0',
+          ws_path: '/api/v1/voice/ws',
+          provider: 'xai',
+          sample_rate: 16000,
+          max_session_ms: 300_000,
+          expires_at: new Date(Date.now() + 30_000).toISOString(),
+        },
+      }),
+    );
+    let releaseCleanup: () => void = () => undefined;
+    await context.route('**/api/v1/voice/correct', async (route) => {
+      await new Promise<void>((res) => (releaseCleanup = res));
+      await route.fulfill({
+        json: {
+          model: 'claude-haiku',
+          result: {
+            corrected_text:
+              'Describe v3 only, and move the v2 steps into an appendix at the very end.',
+            uncertain_spans: [],
+            applied_commands: [],
+            warnings: [],
+          },
+        },
+      });
+    });
+    await context.routeWebSocket('**/api/v1/voice/ws**', (ws) => {
+      let frames = 0;
+      ws.send(JSON.stringify({ type: 'transcript.created' }));
+      ws.onMessage((m) => {
+        if (typeof m === 'string') {
+          if (m.includes('audio.done')) {
+            ws.send(
+              JSON.stringify({
+                type: 'transcript.partial',
+                text: 'at the end',
+                is_final: true,
+              }),
+            );
+            ws.send(JSON.stringify({ type: 'transcript.done', text: '' }));
+          }
+          return;
+        }
+        frames++;
+        if (frames === 4)
+          ws.send(
+            JSON.stringify({
+              type: 'transcript.partial',
+              text: 'describe v3 only and move the v2 steps',
+              is_final: true,
+            }),
+          );
+        if (frames === 6)
+          ws.send(
+            JSON.stringify({
+              type: 'transcript.partial',
+              text: 'into an appendix',
+              is_final: true,
+            }),
+          );
+        if (frames === 8)
+          ws.send(JSON.stringify({ type: 'transcript.partial', text: 'at the', is_final: false }));
+      });
+    });
+    await page.goto(relay.origin + '/');
+    await page.waitForTimeout(800);
+    await openId('text');
+    await page.getByRole('button', { name: /^Dictate/ }).click();
+    await page.getByRole('dialog').waitFor();
+    await shot('40-ws-dictation-consent');
+    await page.getByRole('button', { name: 'Enable and start dictation' }).click();
+    await page.locator('.status.rec').waitFor({ timeout: 15_000 });
+    await page.locator('.live-text .interim').waitFor({ timeout: 15_000 });
+    await shot('40-ws-recording');
+    await theme('dark');
+    await shot('40-ws-recording-dark');
+    await theme('light');
+    await page.getByRole('button', { name: 'Stop dictation' }).click();
+    await page.getByText('Tidying wording…').waitFor({ timeout: 15_000 });
+    await shot('40-ws-cleaning');
+    releaseCleanup();
+    await page.locator('.status.review').waitFor({ timeout: 15_000 });
+    await shot('40-ws-cleaned');
+    await page.setViewportSize(WIDE);
+    await shot('40-ws-cleaned-w');
+    await page.setViewportSize(PHONE);
+    await typeAnswer('');
+    await context.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   it('captures the revoked phone', async () => {
     const list = await client.devices();
     const phone = list.devices.find((d) => d.role === 'phone' && !d.revoked_at);
     expect(phone).toBeTruthy();
     await revokeAndRotate(client, keyStore, phone!.device_id);
     await page.goto(relay.origin + '/');
-    await page.getByText('This phone was removed').waitFor({ timeout: 30_000 });
+    await page.getByText('This device is no longer paired').waitFor({ timeout: 30_000 });
     await shot('33-revoked');
+    await theme('dark');
+    await shot('33-revoked-dark');
+    await theme('light');
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    expect(written.length).toBe(38);
+    expect(new Set(written).size).toBe(written.length);
   });
 });

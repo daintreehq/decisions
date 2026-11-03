@@ -14,6 +14,8 @@ export interface VoiceClientOptions {
   onState?: (s: VoiceState) => void;
   /** Live text: `final` is committed so far, `interim` may still change. */
   onText?: (t: { final: string; interim: string }) => void;
+  /** One newly locked chunk of words, in order, as it is finalized (for writing into the draft live). */
+  onFinal?: (text: string) => void;
   onError?: (message: string) => void;
   doneTimeoutMs?: number;
 }
@@ -31,8 +33,12 @@ export class VoiceClient {
   private doneText: string | null = null;
   private doneWaiter: ((raw: string) => void) | null = null;
   private doneTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Frames offered before the provider said it was ready are dropped, never queued. */
+  /** Frames offered before the provider said it was ready are dropped here; the session queues them instead. */
   droppedFrames = 0;
+  /** The provider did not confirm the end of the passage in time; the words received so far stand. */
+  timedOut = false;
+  /** Bumped by `cancel()`, so a ticket that answers after it opens no socket. */
+  private generation = 0;
 
   constructor(private readonly o: VoiceClientOptions) {}
 
@@ -42,16 +48,18 @@ export class VoiceClient {
   }
 
   async start(): Promise<void> {
+    const gen = ++this.generation;
     this.set('connecting');
-    const session = VoiceSessionResponse.parse(
-      await this.o.postJson('/voice/session', {
-        protocol_version: PROTOCOL_VERSION,
-        provider: this.o.provider,
-        consent: true,
-        keyterms: this.o.keyterms,
-        language: this.o.language,
-      }),
-    );
+    const answer = await this.o.postJson('/voice/session', {
+      protocol_version: PROTOCOL_VERSION,
+      provider: this.o.provider,
+      consent: true,
+      keyterms: this.o.keyterms,
+      language: this.o.language,
+    });
+    // Cancelled (or restarted) while the ticket was on its way: nothing owns a socket opened now.
+    if (gen !== this.generation) throw new Error('cancelled');
+    const session = VoiceSessionResponse.parse(answer);
     const base = this.o.origin.replace(/^http/, 'ws');
     const path = session.ws_path.includes('ticket=')
       ? session.ws_path
@@ -85,7 +93,10 @@ export class VoiceClient {
         const text = typeof m.text === 'string' ? m.text : '';
         if (m.is_final) {
           // Providers can repeat a locked chunk; ignore an exact consecutive duplicate.
-          if (text && this.finals.at(-1) !== text) this.finals.push(text);
+          if (text && this.finals.at(-1) !== text) {
+            this.finals.push(text);
+            this.o.onFinal?.(text);
+          }
           this.interim = '';
         } else {
           this.interim = text;
@@ -132,8 +143,16 @@ export class VoiceClient {
     this.ws.send(JSON.stringify({ type: 'audio.done' }));
     return new Promise<string>((resolve) => {
       this.doneWaiter = resolve;
-      this.doneTimer = setTimeout(() => this.finish(), this.o.doneTimeoutMs ?? 5000);
+      this.doneTimer = setTimeout(() => {
+        this.timedOut = true;
+        this.finish();
+      }, this.o.doneTimeoutMs ?? 5000);
     });
+  }
+
+  /** Words heard but not yet locked by the provider. */
+  pendingInterim(): string {
+    return this.interim.trim();
   }
 
   rawText(): string {
@@ -164,6 +183,7 @@ export class VoiceClient {
   }
 
   cancel(): void {
+    this.generation++;
     this.close();
     this.set('idle');
   }

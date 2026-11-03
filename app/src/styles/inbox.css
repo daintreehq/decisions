@@ -1,0 +1,124 @@
+/* ---------- shared list pieces (also used by Devices) ---------- */
+.row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+}
+.row-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.row-badges:empty {
+  display: none;
+}
+.list > .card .row-top {
+  flex-wrap: wrap;
+}
+.list > .card .row-top strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.origin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.origin .project {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.origin .machine {
+  color: var(--text-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.when {
+  flex: none;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.page > .note {
+  margin-bottom: 14px;
+}
+
+/* ---------- page titles for list pages ---------- */
+.page-title {
+  font-size: var(--text-question);
+  line-height: 1.3;
+  margin: 4px 0 2px;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.page-head .seg {
+  margin: 0;
+}
+
+/* ---------- Questions at 1100px and up: a calm right column ---------- */
+.choose {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 48px 32px 15vh;
+  text-align: center;
+  color: var(--text-2);
+}
+.choose h1,
+.choose h2 {
+  margin: 16px 0 4px;
+  font-size: var(--text-lg);
+  color: var(--text);
+}
+.choose p {
+  margin: 4px 0;
+  max-width: 40ch;
+}
+.choose .btn {
+  margin-top: 20px;
+}
+.choose-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  border: 1px solid var(--line-default);
+  box-shadow: var(--shadow-1);
+  color: var(--text-2);
+}
+.choose-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 24px !important;
+  font-size: var(--text-xs);
+}
+.choose-hint kbd {
+  min-width: 22px;
+  text-align: center;
+}
+.choose-hint kbd:last-of-type {
+  margin-right: 4px;
+}
+@media (hover: none) {
+  .choose-hint {
+    display: none;
+  }
+}

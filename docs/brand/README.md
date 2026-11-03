@@ -10,17 +10,19 @@ A check was tried first and dropped: it reads as "approved" or "done", the state
 
 Everything else is generated from it by [`app/scripts/make-icons.mjs`](../../app/scripts/make-icons.mjs) (`pnpm --filter @daintreehq/decisions-app icons`):
 
-| File | Use |
-| --- | --- |
-| `icon.svg` | Favicon. `#0f7a4a` on light browser chrome, `#3fbf86` on dark (`prefers-color-scheme` inside the SVG). |
-| `icon-192.png`, `icon-512.png` | Manifest `any`: the mark on the dark rounded tile. Also the notification `icon`. |
-| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark well inside the 80% safe-zone circle. |
-| `apple-touch-icon.png` | 180×180, opaque, square: iOS applies its own corners. |
-| `badge-96.png` | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel. |
+| File                                             | Use                                                                                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `icon.svg`                                       | Favicon. Bondi's deep-water `#004e6b` on light browser chrome, Daintree mint `#36ce94` on dark (`prefers-color-scheme` inside the SVG). |
+| `icon-192.png`, `icon-512.png`                   | Manifest `any`: the mark on the dark rounded tile. Also the notification `icon`.                                                        |
+| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark well inside the 80% safe-zone circle.                                                 |
+| `apple-touch-icon.png`                           | 180×180, opaque, square: iOS applies its own corners.                                                                                   |
+| `badge-96.png`                                   | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel.                                     |
 
 ## Colours
 
-From the app's tokens: tile `#0b1411` (dark surface), mark `#3fbf86` (dark-theme accent), `#0f7a4a` (light-theme accent). The mark sits beside Daintree's own mint-on-near-black icon as a sibling; it relates through colour, weight and simplicity and does not borrow Daintree's canopy, trunk or roots.
+The icon wears Daintree's own app tile: mark `#36ce94` (Daintree's accent) on tile `#151616` (the tile in Daintree's `build/icon-design.svg`), so the two apps sit side by side on a home screen or dock as one family. The mark itself stays Decisions' own: it relates through colour, weight and simplicity and does not borrow Daintree's canopy, trunk or roots.
+
+Inside the app every colour comes from Daintree's theme engine (the Daintree and Bondi themes, generated into `app/src/styles/theme.generated.css` by `pnpm --filter @daintreehq/decisions-app theme`); see [the redesign guide](../design/redesign.md#2-visual-system).
 
 ## Previews
 

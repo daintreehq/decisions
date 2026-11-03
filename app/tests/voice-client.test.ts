@@ -25,7 +25,8 @@ class FakeWS implements WebSocketLike {
   }
 }
 
-function make(over: { doneTimeoutMs?: number } = {}) {
+function make(over: { doneTimeoutMs?: number; ticket?: Promise<void> } = {}) {
+  const { ticket, ...opts } = over;
   const sockets: FakeWS[] = [];
   const states: VoiceState[] = [];
   const texts: { final: string; interim: string }[] = [];
@@ -38,6 +39,7 @@ function make(over: { doneTimeoutMs?: number } = {}) {
     language: 'en',
     postJson: (async (path: string, body: Record<string, unknown>) => {
       posted.push({ path, body });
+      await ticket;
       return {
         ticket: 'VOICETICKET',
         ws_path: '/api/v1/voice/ws',
@@ -55,7 +57,7 @@ function make(over: { doneTimeoutMs?: number } = {}) {
     onState: (s) => states.push(s),
     onText: (t) => texts.push(t),
     onError: (m) => errors.push(m),
-    ...over,
+    ...opts,
   });
   return { c, sockets, states, texts, errors, posted };
 }
@@ -181,5 +183,32 @@ describe('voice protocol client', () => {
     expect(ws.closed).toBe(true);
     expect(t.c.state).toBe('idle');
     vi.useRealTimers();
+  });
+
+  it('a ticket that arrives after cancel() opens no socket', async () => {
+    let answer!: () => void;
+    const t = make({ ticket: new Promise<void>((r) => (answer = r)) });
+    const started = t.c.start();
+    started.catch(() => undefined);
+    await Promise.resolve();
+    expect(t.posted).toHaveLength(1);
+    t.c.cancel(); // the session gave up (cancelled, or its deadline passed)
+    answer();
+    await expect(started).rejects.toThrow();
+    expect(t.sockets).toHaveLength(0);
+    expect(t.c.state).toBe('idle');
+  });
+
+  it('a start after a cancelled one still connects', async () => {
+    let answer!: () => void;
+    const t = make({ ticket: new Promise<void>((r) => (answer = r)) });
+    const first = t.c.start();
+    first.catch(() => undefined);
+    t.c.cancel();
+    const second = t.c.start();
+    answer();
+    await second;
+    expect(t.sockets).toHaveLength(1);
+    expect(t.c.state).toBe('connecting');
   });
 });

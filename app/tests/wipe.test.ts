@@ -20,4 +20,14 @@ describe('wiping an unpaired controller never waits on downloads', () => {
     expect(aborted).toBe(true);
     expect(ctl.getSnapshot().phase).toBe('unpaired');
   });
+
+  it('tears down registered in-memory owners synchronously, before the erase is awaited', async () => {
+    const ctl = new AppController('https://relay.example');
+    let ran = 0;
+    ctl.registerTeardown(() => void ran++);
+    const wiping = ctl.wipe();
+    expect(ran).toBe(1);
+    await wiping;
+    expect(ran).toBe(1);
+  });
 });

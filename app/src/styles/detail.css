@@ -1,0 +1,479 @@
+/* ---------- question workspace body (owned by the workspace work) ---------- */
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--tap-min);
+  margin-left: -6px;
+  padding-right: 8px;
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.page-back:hover {
+  color: var(--text);
+}
+
+/* The question is the page's h1: 22/30, 600, slightly tight. */
+#q-title {
+  outline: none;
+  scroll-margin-top: 16px;
+}
+.question {
+  font-size: var(--text-question);
+  font-weight: 600;
+  line-height: 30px;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+  max-width: 68ch;
+}
+.question p {
+  margin: 0 0 0.5rem;
+}
+.question p:last-child {
+  margin-bottom: 0;
+}
+.question code {
+  font-size: 0.8em;
+}
+@media (max-width: 359px) {
+  .question {
+    line-height: 28px;
+  }
+}
+
+/* One principal status plus only useful extras. Colour sits on the glyph, never the words. */
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  /* Every item carries its separator; the one that starts a line is clipped away by the negative margin. */
+  margin: 8px 0 16px -20px;
+  clip-path: inset(0 0 0 20px);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+}
+.status-line > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-line > span::before {
+  content: '·';
+  flex: none;
+  width: 20px;
+  margin-right: -6px;
+  text-align: center;
+  color: var(--text-3);
+}
+.principal {
+  color: var(--text);
+  font-weight: 500;
+}
+.principal svg {
+  color: var(--text-2);
+}
+.principal.proxy-answered svg {
+  color: var(--model);
+}
+.principal.human-answered svg {
+  color: var(--success-text);
+}
+.principal.unverified svg {
+  color: var(--danger-text);
+}
+.due.soon {
+  color: var(--text);
+  font-weight: 500;
+}
+.due.soon svg {
+  color: var(--warning-text);
+}
+
+/* Disclosures: context, delivery, question details. One hairline card each, a literal preview when closed. */
+.disclosure {
+  margin: 12px 0;
+  padding: 0 14px;
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+.disclosure > summary {
+  min-height: 48px;
+  gap: 10px;
+}
+.summary-title {
+  flex: none;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.summary-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.disclosure[open] .summary-preview {
+  display: none;
+}
+.disclosure[open] {
+  padding-bottom: 12px;
+}
+.disclosure .safe-text {
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+.disclosure .safe-text p:first-child {
+  margin-top: 0;
+}
+
+.decision {
+  margin: 16px 0 8px;
+}
+.decision > * + * {
+  margin-top: 12px;
+}
+
+/* Options: full-width radio cards. Selected is a neutral lift with a text-secondary edge, never an accent wash. */
+.options {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.options > legend {
+  margin-bottom: 8px;
+  padding: 0;
+}
+.option {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  min-height: 56px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-card);
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    border-color var(--dur) var(--ease-out),
+    box-shadow var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .option:hover {
+    background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 3%);
+  }
+}
+.option:active {
+  transform: scale(0.99);
+  transition-duration: 1ms;
+}
+.option:has(.option-desc) {
+  align-items: flex-start;
+}
+.option:has(.option-desc) input {
+  margin-top: 1px;
+}
+.option.on {
+  background: var(--surface-raised);
+  border-color: var(--text-2);
+  box-shadow:
+    inset 0 0 0 1px var(--text-2),
+    var(--shadow-1);
+}
+.options:disabled .option {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.option-body {
+  min-width: 0;
+}
+.option-label {
+  font-weight: 500;
+  font-size: var(--text-md);
+  line-height: 24px;
+}
+.option-current {
+  font-weight: 400;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.option-desc p {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  font-weight: 400;
+}
+
+/* Answers: a read-only card with author and time. */
+.answer-card {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-1);
+  scroll-margin: 16px;
+}
+.answer-card > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.answer-card h2 {
+  margin: 0;
+}
+.answer-when {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.answer-choice {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: 26px;
+}
+.answer-text {
+  font-size: var(--text-md);
+}
+.answer-text p {
+  margin: 4px 0 0;
+}
+.answer-reason {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.eyebrow-inline {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-right: 4px;
+}
+/* Model provenance: the violet diamond and the words "Model answer", always together. */
+.answer-card.model {
+  border-color: color-mix(in oklab, var(--model) 32%, var(--line-default));
+  background: color-mix(in oklab, var(--surface-card) 100%, var(--model) 4%);
+}
+.model-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.model-label svg {
+  color: var(--model);
+  fill: color-mix(in oklab, var(--model) 30%, transparent);
+}
+.model-meta {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.model-note {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.answer-card .disclosure {
+  margin: 10px 0 0;
+  background: transparent;
+}
+
+/* Correction mode. */
+.correction {
+  display: grid;
+  gap: 12px;
+  scroll-margin-top: 12px;
+}
+.correction-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.correction-head h2 {
+  margin: 0;
+}
+.correction-tools {
+  display: inline-flex;
+  gap: 6px;
+}
+.current-answer {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-subtle);
+}
+.current-answer .answer-choice {
+  font-size: var(--text-md);
+}
+.field-button {
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-input);
+  background: var(--surface-input);
+  color: var(--text);
+  text-align: left;
+  cursor: text;
+}
+.field-button-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.field-button-empty {
+  color: var(--text-placeholder);
+}
+.field-button-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Conflict: what is in force, and what this device tried to send. */
+.conflict {
+  display: grid;
+  gap: 10px;
+  scroll-margin-top: 12px;
+}
+.conflict-pane {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  background: var(--surface-card);
+}
+.conflict-pane.mine {
+  border-style: dashed;
+}
+.conflict-pane h3 {
+  margin: 0 0 4px;
+}
+.callout-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin: 0;
+}
+.callout-text {
+  margin: 2px 0 0;
+}
+.callout > div {
+  min-width: 0;
+}
+.callout .btn {
+  margin-top: 8px;
+}
+
+/* Closed questions. */
+.closed {
+  display: grid;
+  gap: 12px;
+}
+.closed-options ul {
+  margin: 4px 0 0;
+  padding-left: 1.2rem;
+  color: var(--text-2);
+}
+.closed-draft {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--line-default);
+}
+
+/* The record: delivery and question details. */
+.record {
+  margin-top: 20px;
+}
+.details-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.details-list dt {
+  color: var(--text-2);
+}
+.details-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Delivery stepper: done steps carry a check and words, the live step a filled ring. */
+.stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  position: relative;
+  font-size: var(--text-sm);
+}
+.stepper::before {
+  content: '';
+  position: absolute;
+  left: 8.25px;
+  top: 14px;
+  bottom: 14px;
+  width: 1.5px;
+  background: var(--line-strong);
+}
+.stepper li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 30px;
+  color: var(--text-2);
+}
+.step-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-input);
+  background: var(--surface-card);
+}
+.stepper li.done {
+  color: var(--text);
+}
+.stepper li.done .step-mark {
+  border-color: var(--success);
+  background: color-mix(in oklab, var(--success) 14%, var(--surface-card));
+  color: var(--success-text);
+}
+.stepper li.current {
+  color: var(--text);
+  font-weight: 600;
+}
+.stepper li.current:not(.done) .step-mark {
+  border-color: var(--text);
+  background: var(--text);
+  box-shadow: inset 0 0 0 3.5px var(--surface-card);
+}
+.dock-stepper .step-mark {
+  background: var(--surface-raised);
+}

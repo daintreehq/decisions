@@ -395,8 +395,8 @@ describe.skipIf(!LIVE)('live dictation: real Grok, Anthropic and OpenAI through 
 
       const invite = await createPairingInvite(client, 'phone');
       await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this phone' }).click();
-      await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
+      await page.getByRole('button', { name: 'Pair this device' }).click();
+      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
       const cand = await until(
         async () =>
           (await client.pendingPairings()).pending.find((p) => p.pairing_id === invite.pairingId),
@@ -449,39 +449,56 @@ describe.skipIf(!LIVE)('live dictation: real Grok, Anthropic and OpenAI through 
         await bridge.pump();
         await page.goto(`${relay.origin}/`);
         await page.getByText(`(${cleanup})`).first().click({ timeout: 30_000 });
-        await page.locator('article.detail').waitFor({ timeout: 30_000 });
+        await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
 
-        const box = page.locator('textarea').first();
-        await box.fill('');
-        await page.getByRole('button', { name: 'Dictate' }).click();
-        await page.getByRole('button', { name: 'Tap to finish' }).waitFor({ timeout: 20_000 });
+        await page.getByRole('button', { name: /^Dictate/ }).click();
+        const consent = page.getByRole('button', { name: 'Enable and start dictation' });
+        if (await consent.isVisible().catch(() => false)) await consent.click();
+        await page.getByRole('button', { name: 'Stop dictation' }).waitFor({ timeout: 20_000 });
         // The fake microphone plays the clip once from when capture starts; let it finish and settle.
         const seconds = audio.pcm.length / 32000;
         await page.waitForTimeout(Math.ceil(seconds * 1000) + 1500);
-        await page.getByRole('button', { name: 'Tap to finish' }).click();
-        const status = page.getByRole('status');
-        await until(
+        await page.getByRole('button', { name: 'Stop dictation' }).click();
+        const back = page.getByRole('button', { name: 'Use original wording' });
+        const message = await until(
           async () => {
-            const t = (await status.allInnerTexts()).join(' ');
-            return /Cleaned up|nothing to change|kept exactly|edited the text/.test(t) ? t : null;
+            if (
+              await page
+                .getByText('Tidying wording…')
+                .isVisible()
+                .catch(() => false)
+            )
+              return null;
+            if (
+              await back
+                .first()
+                .isVisible()
+                .catch(() => false)
+            )
+              return 'cleaned';
+            const t = (await page.locator('.dock-status').allInnerTexts()).join(' ');
+            return /Kept your original wording|edited the text/.test(t) ? t : null;
           },
           60_000,
           'the clean-up to finish',
         );
-        const message = (await status.allInnerTexts()).join(' ');
+        const box = page.locator('#ws-editor');
+        await page.locator('.dock .dock-field').first().click();
         const cleaned = await box.inputValue();
-        const back = page.getByRole('button', { name: 'Use what I said' });
-        const canGoBack = await back.isVisible();
+        await page.locator('.dock-field.done').click();
+        const canGoBack = await back.first().isVisible();
         let heard = cleaned;
         if (canGoBack) {
-          await back.click();
+          await back.first().click();
+          await page.locator('.dock .dock-field').first().click();
           heard = await box.inputValue();
+          await page.locator('.dock-field.done').click();
         }
         const last = corrections.at(-1);
         console.log(
           `[pwa ${cleanup}${last ? ` ${last.ms} ms` : ''}] ${message}\n  heard:   ${heard}\n  cleaned: ${cleaned}`,
         );
-        expect(message).toMatch(/Cleaned up/);
+        expect(message).toBe('cleaned');
         expect(last?.status).toBe(200);
         expect(cleaned.toLowerCase()).toContain('durable');
         expect(canGoBack).toBe(true);

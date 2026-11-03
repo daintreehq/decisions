@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { LinkIcon, RefreshIcon } from './Icons.js';
+import { Callout } from './settings/ui.js';
 
 interface Detector {
   detect(source: CanvasImageSource): Promise<{ rawValue: string }[]>;
@@ -8,6 +10,8 @@ declare global {
     BarcodeDetector?: new (opts: { formats: string[] }) => Detector;
   }
 }
+
+type CameraProblem = { title: string; body: string };
 
 /** Camera QR scanner: native BarcodeDetector when present, jsQR on canvas frames otherwise. */
 export function QrScanner({
@@ -24,7 +28,8 @@ export function QrScanner({
   onRetry: () => void;
 }) {
   const video = useRef<HTMLVideoElement>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CameraProblem | null>(null);
+  const [live, setLive] = useState(false);
 
   useEffect(() => {
     let stopped = false;
@@ -33,7 +38,7 @@ export function QrScanner({
     (async () => {
       try {
         if (!navigator.mediaDevices?.getUserMedia)
-          throw new Error('This browser cannot use the camera.');
+          throw Object.assign(new Error('no camera api'), { name: 'NotSupportedError' });
         stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment' },
           audio: false,
@@ -46,6 +51,7 @@ export function QrScanner({
         }
         v.srcObject = stream;
         await v.play();
+        setLive(true);
         const detector = window.BarcodeDetector
           ? new window.BarcodeDetector({ formats: ['qr_code'] })
           : null;
@@ -84,10 +90,24 @@ export function QrScanner({
         const name = e instanceof Error ? e.name : '';
         setError(
           name === 'NotAllowedError' || name === 'SecurityError'
-            ? 'Decisions is not allowed to use the camera. Allow it in your browser settings, or paste the link instead.'
+            ? {
+                title: 'Camera access is blocked',
+                body: 'Allow the camera for this site in your browser’s settings, then try again. Or paste the pairing link instead.',
+              }
             : name === 'NotFoundError' || name === 'OverconstrainedError'
-              ? 'No camera was found on this device. Paste the pairing link instead.'
-              : 'The camera could not start. Paste the pairing link instead.',
+              ? {
+                  title: 'No camera found',
+                  body: 'This device has no camera Decisions can use. Paste the pairing link instead.',
+                }
+              : name === 'NotSupportedError'
+                ? {
+                    title: 'This browser can’t use the camera',
+                    body: 'Paste the pairing link instead.',
+                  }
+                : {
+                    title: 'The camera couldn’t start',
+                    body: 'Another app may be using it. Try again, or paste the pairing link instead.',
+                  },
         );
       }
     })();
@@ -99,34 +119,46 @@ export function QrScanner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <div className="scanner">
-      {error ? (
-        <p className="note warn" role="alert">
-          {error}
-        </p>
-      ) : (
-        <>
-          <video ref={video} playsInline muted aria-label="Camera preview" />
-          <p className="scanner-caption">Point the camera at the QR code on your computer.</p>
-        </>
-      )}
-      {error ? (
-        <div className="stack">
+  if (error) {
+    return (
+      <div className="scanner">
+        <Callout tone="warn" role="alert" title={error.title}>
+          {error.body}
+        </Callout>
+        <div className="onb-actions">
           <button type="button" className="btn primary big" onClick={onPaste}>
-            Paste the link instead
+            <LinkIcon size={18} />
+            Paste pairing link
           </button>
-          <button type="button" className="btn" onClick={onRetry}>
+          <button type="button" className="btn big" onClick={onRetry}>
+            <RefreshIcon size={18} />
             Try the camera again
           </button>
-        </div>
-      ) : (
-        <div>
-          <button type="button" className="btn" onClick={onCancel}>
+          <button type="button" className="btn ghost big" onClick={onCancel}>
             Cancel
           </button>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="scanner">
+      <div className={`scanner-frame${live ? ' live' : ''}`}>
+        <video ref={video} playsInline muted aria-label="Camera preview" />
+        <span className="scanner-target" aria-hidden="true" />
+        {!live && <span className="scanner-starting">Starting camera…</span>}
+      </div>
+      <p className="scanner-caption">Point the camera at the code on your computer’s screen.</p>
+      <div className="onb-actions">
+        <button type="button" className="btn big" onClick={onPaste}>
+          <LinkIcon size={18} />
+          Paste pairing link
+        </button>
+        <button type="button" className="btn ghost big" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

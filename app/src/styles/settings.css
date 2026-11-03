@@ -1,0 +1,944 @@
+/*
+ * Settings, Devices, Privacy and Install. Daintree's settings grammar at touch size: a section is a heading and a
+ * one-line lead, then groups (one panel surface each, rows split by hairlines). Nothing on a page body is accent at
+ * rest: "on" is text-primary, selection is a neutral lift with a text-secondary edge, Save is the contrast button.
+ */
+
+.s-page {
+  max-width: 680px;
+  margin: 0 auto;
+}
+.s-page-title {
+  margin: 4px 0 16px;
+}
+
+/* ---------- index ---------- */
+.s-index-list {
+  margin: 0 0 16px;
+}
+.s-index-list a {
+  min-height: 56px;
+  gap: 14px;
+  padding: 8px 14px 8px 12px;
+}
+.s-index-list .value {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.s-index-list a::after {
+  margin-left: 6px;
+}
+.s-index-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--subtle);
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  color: var(--text-2);
+}
+.s-index-label {
+  flex: none;
+  font-weight: 500;
+}
+.s-version {
+  margin: 20px 0 0;
+  text-align: center;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+/* Wide: the index is a sidebar beside the open section, marking the open page with the highlight fill alone. */
+.s-split {
+  max-width: 1120px;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 48px;
+  align-items: start;
+}
+.s-split .s-section {
+  max-width: 680px;
+}
+/* The sidebar's "Settings" and the open section's title share one baseline. */
+.s-split .s-page-title,
+.s-split .s-title {
+  font-size: 1.25rem;
+  line-height: 1.35;
+  margin-top: 0;
+}
+.s-split .s-page-title {
+  margin-bottom: 16px;
+}
+@media (min-width: 900px) {
+  .theme-art {
+    aspect-ratio: 16 / 9;
+  }
+}
+.s-aside {
+  position: sticky;
+  top: calc(var(--safe-t) + var(--header-h) + 16px);
+}
+.s-split .s-index-list {
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
+  margin: 0 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.s-split .s-index-list:last-child {
+  border-bottom: 0;
+}
+.s-split .s-index-list li + li {
+  border-top: 0;
+}
+.s-split .s-index-list a {
+  min-height: 44px;
+  padding: 6px 10px 6px 8px;
+  border-radius: var(--radius-md);
+  color: var(--text-2);
+}
+.s-split .s-index-list a::after {
+  display: none;
+}
+.s-split .s-index-list .s-index-icon {
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  box-shadow: none;
+}
+.s-split .s-index-list a.on {
+  background: var(--selected);
+  color: var(--text);
+}
+.s-split .s-index-list a.on .s-index-icon {
+  color: var(--text);
+}
+@media (prefers-contrast: more) {
+  .s-split .s-index-list a.on {
+    outline: 2px solid var(--text);
+    outline-offset: -2px;
+  }
+}
+@media (forced-colors: active) {
+  .s-split .s-index-list a.on {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* ---------- section ---------- */
+.s-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--tap-min);
+  margin: -4px 0 0 -10px;
+  padding: 0 10px 0 4px;
+  border-radius: var(--radius-md);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+@media (hover: hover) {
+  .s-back:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+}
+.s-title {
+  margin: 4px 0 6px;
+}
+.s-title:focus {
+  outline: none;
+}
+.s-lead {
+  margin: 0 0 20px;
+  max-width: 62ch;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.s-foot {
+  margin: -8px 0 24px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+/* ---------- groups and rows ---------- */
+.s-group-wrap {
+  margin: 0 0 24px;
+}
+.s-group-wrap > .s-group-label,
+h2.s-group-label {
+  margin: 0 0 8px 2px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.s-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  border: 1px solid var(--line-default);
+  overflow: hidden;
+}
+.s-group > * + *,
+.s-dependents > * + *,
+.s-flow > * + * {
+  border-top: 1px solid var(--line-subtle);
+}
+.s-group > .nav-list {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.s-flow {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.s-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  min-height: 56px;
+  padding: 12px 16px;
+}
+.s-row.stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.s-row-text {
+  flex: 1 1 7.5rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.s-row.stacked > .s-row-text {
+  flex: none;
+}
+.s-row-label {
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--text);
+}
+.s-row-desc {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  font-weight: 400;
+  color: var(--text-2);
+}
+.s-row-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  max-width: 100%;
+}
+.s-value {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  text-align: right;
+}
+.s-row-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  align-self: flex-start;
+  margin-top: 1px;
+  color: var(--text-2);
+}
+.s-flow .s-row {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 14px;
+}
+.s-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.s-row.stacked > .s-callout {
+  margin: 0;
+}
+.link-btn.inline {
+  min-height: 0;
+  padding: 0;
+  font-size: inherit;
+  color: var(--text);
+}
+
+/* A row whose control is a checkbox (explicit-save forms): the whole row is the label. */
+.s-check {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 14px;
+  cursor: pointer;
+}
+.s-check > input {
+  margin-top: 1px;
+}
+/* Rows that only matter while their parent is on sit under it, indented to the parent's text. */
+.s-dependents {
+  border-top: 1px solid var(--line-subtle);
+}
+.s-dependents .s-row {
+  padding-left: 52px;
+  min-height: 52px;
+}
+.s-row.stacked .s-select.wide {
+  width: 100%;
+  max-width: 320px;
+}
+.s-row-actions {
+  margin-top: 10px;
+}
+
+.s-select,
+.s-time {
+  width: auto;
+  min-height: 40px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.s-select {
+  min-width: 148px;
+  max-width: 100%;
+}
+.s-select.wide {
+  width: 220px;
+}
+.s-time {
+  width: 132px;
+  font-variant-numeric: tabular-nums;
+}
+input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.s-field-error {
+  margin: 0;
+  color: var(--danger-text);
+  font-size: var(--text-sm);
+}
+
+/* ---------- switch: on is text-primary (Daintree's rule), never accent ---------- */
+.s-switch-hit {
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 0;
+  cursor: pointer;
+}
+input.s-switch {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--line-input);
+  background: var(--surface-inset);
+  display: block;
+}
+input.s-switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text-2);
+  transform: none;
+  transition:
+    transform var(--dur) var(--ease-out),
+    background-color var(--dur) var(--ease-out);
+}
+input.s-switch:checked {
+  background: var(--text);
+  border-color: var(--text);
+}
+input.s-switch:checked::before {
+  transform: translateX(18px);
+  background: var(--text-inverse);
+}
+input.s-switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+@media (forced-colors: active) {
+  input.s-switch {
+    border-color: ButtonText;
+  }
+  input.s-switch::before {
+    background: ButtonText;
+  }
+  input.s-switch:checked {
+    background: Highlight;
+  }
+}
+
+/* ---------- segmented choice on the rail ---------- */
+.s-seg {
+  margin: 0;
+  flex-wrap: nowrap;
+}
+.s-seg button {
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+/* ---------- radio rows (descriptive choices) ---------- */
+.s-radios {
+  display: grid;
+  gap: 8px;
+}
+.s-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    border-color var(--dur) var(--ease-out);
+}
+.s-radio > input {
+  margin-top: 1px;
+}
+.s-radio > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.s-radio-label {
+  font-weight: 500;
+}
+@media (hover: hover) {
+  .s-radio:hover {
+    background: var(--subtle);
+    border-color: var(--line-strong);
+  }
+}
+.s-radio.on {
+  background: var(--selected);
+  border-color: var(--text-2);
+}
+
+/* ---------- appearance ---------- */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 6px 10px;
+  background: var(--surface-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    border-color var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .theme-card:hover {
+    background: var(--subtle);
+    border-color: var(--line-strong);
+  }
+}
+.theme-card.on {
+  background: var(--selected);
+  border-color: var(--text-2);
+  box-shadow: inset 0 0 0 1px var(--text-2);
+}
+.theme-card:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.theme-card:active {
+  transform: scale(0.98);
+}
+.theme-art {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+.theme-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* Match device: Bondi and Daintree meeting on the diagonal. */
+.theme-art.split img + img {
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+.theme-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--text-inverse);
+  box-shadow: var(--shadow-1);
+}
+.theme-name {
+  padding: 0 4px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.theme-detail {
+  padding: 0 4px;
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  color: var(--text-2);
+}
+
+/* ---------- dictation: microphone test ---------- */
+.mic-test {
+  display: grid;
+  gap: 8px;
+}
+.mic-test-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.mic-meter {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  overflow: hidden;
+}
+.mic-meter > span {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--text-3);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 80ms linear;
+}
+/* Live capture is the one place the accent belongs here, as on Daintree's recording ring. */
+.mic-meter.live > span {
+  background: var(--accent);
+}
+.mic-test-status {
+  margin: 0;
+}
+
+/* ---------- quiet hours: explicit save ---------- */
+.s-form > fieldset {
+  min-width: 0;
+}
+.s-form > .s-callout {
+  margin-bottom: 16px;
+}
+.s-savebar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 56px;
+  margin: 0 0 24px;
+  padding: 8px 10px 8px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  background: var(--surface-card);
+}
+.s-savebar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+/* While dirty the bar stays in view above the tab bar, lifted, with the modified marker. */
+.s-savebar.dirty {
+  position: sticky;
+  bottom: calc(var(--tabbar-h) + var(--safe-b) + 12px);
+  z-index: 5;
+  background: var(--surface-raised);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-2);
+}
+.s-savebar.dirty .s-savebar-status {
+  color: var(--text);
+  font-weight: 500;
+}
+.s-savebar.dirty .s-savebar-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--waiting);
+}
+.s-skeleton {
+  min-height: 220px;
+}
+
+/* ---------- callouts ---------- */
+.s-callout {
+  margin: 0 0 16px;
+  line-height: 1.45;
+}
+.s-callout.neutral {
+  background: var(--surface-card);
+}
+.s-callout-body {
+  min-width: 0;
+}
+.s-callout-body > p {
+  margin: 0;
+}
+.s-callout-title {
+  margin: 0 0 2px;
+  font-weight: 600;
+}
+.s-callout-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* ---------- devices ---------- */
+.s-device-list > li {
+  min-width: 0;
+}
+.s-device {
+  font: inherit;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 10px 14px 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .s-device:hover {
+    background: var(--hover);
+  }
+}
+.s-device .s-row-icon {
+  align-self: center;
+  margin: 0;
+}
+.s-device.revoked .s-row-label {
+  color: var(--text-2);
+}
+.s-chevron {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 4px 0 auto;
+  border-right: 1.75px solid var(--text-3);
+  border-bottom: 1.75px solid var(--text-3);
+  transform: rotate(-45deg);
+}
+.s-facts {
+  margin: 0 0 20px;
+}
+.s-facts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: var(--text-sm);
+}
+.s-facts dt {
+  color: var(--text-2);
+}
+.s-facts dd {
+  margin: 0;
+  text-align: right;
+  color: var(--text);
+}
+.fingerprint {
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  justify-content: start;
+  gap: 4px 16px;
+  min-height: 72px;
+  margin: 10px 0 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  user-select: all;
+}
+.fingerprint span {
+  white-space: nowrap;
+}
+
+/* ---------- sheets: a bottom sheet on phones, a centred panel from 720 px ---------- */
+.s-sheet {
+  width: 100%;
+  max-width: 100%;
+  max-height: 88dvh;
+  margin: auto 0 0;
+  padding: 0;
+  border: 1px solid var(--line-default);
+  border-bottom: 0;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  background: var(--surface-dialog);
+  color: var(--text);
+  box-shadow: var(--shadow-3);
+}
+.s-sheet[open] {
+  display: flex;
+  animation: s-sheet-in var(--dur-enter) var(--ease-enter);
+}
+.s-sheet::backdrop {
+  background: var(--scrim);
+  backdrop-filter: blur(var(--scrim-blur));
+  -webkit-backdrop-filter: blur(var(--scrim-blur));
+}
+@keyframes s-sheet-in {
+  from {
+    transform: translateY(32px);
+    opacity: 0;
+  }
+}
+.s-sheet-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+.s-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 8px 10px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.s-sheet-head h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.s-sheet-body {
+  overflow: auto;
+  padding: 12px 20px calc(24px + var(--safe-b));
+}
+.s-sheet-sub {
+  margin: 0 0 4px;
+  font-size: var(--text-md);
+}
+@media (min-width: 720px) {
+  .s-sheet {
+    width: min(520px, 92vw);
+    max-height: 80vh;
+    margin: auto;
+    border-bottom: 1px solid var(--line-default);
+    border-radius: var(--radius-xl);
+  }
+  .s-sheet-body {
+    padding-bottom: 24px;
+  }
+  @keyframes s-sheet-in {
+    from {
+      transform: scale(0.97);
+      opacity: 0;
+    }
+  }
+}
+
+/* ---------- keyboard shortcuts ---------- */
+.s-keys-group {
+  margin-top: 16px;
+}
+.s-keys-list {
+  margin: 0;
+}
+.s-keys-list > div {
+  display: grid;
+  grid-template-columns: 9.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: var(--text-sm);
+}
+.s-keys-list dd {
+  margin: 0;
+  color: var(--text);
+}
+.s-keys {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.s-keys kbd {
+  font-family: var(--font-ui);
+  min-width: 26px;
+  text-align: center;
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.s-nav-rows a,
+.s-nav-rows button {
+  min-height: 60px;
+  padding: 10px 14px 10px 16px;
+}
+.s-nav-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 500;
+}
+.s-nav-text .s-row-desc {
+  font-weight: 400;
+}
+
+/* ---------- unpair ---------- */
+.s-erase-list {
+  margin: 6px 0 14px;
+  padding-left: 1.2rem;
+}
+.s-erase-list li {
+  margin: 4px 0;
+}
+.dialog-body > .s-callout {
+  margin: 0 0 12px;
+}
+.dialog-body > .s-row-desc {
+  display: block;
+  margin: 8px 0 0;
+}
+
+/* Install, Privacy: standalone pages in the same grammar. */
+.s-standalone > .s-back {
+  margin-bottom: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-card:active {
+    transform: none;
+  }
+  .mic-meter > span {
+    transition: none;
+  }
+}
+.theme-art-wrap {
+  position: relative;
+  display: block;
+}
+
+/* Save / Discard / Keep editing: stacked full width on phones, Save on top; a row from 480 px. */
+.dialog-actions:has(> .s-dialog-actions) {
+  display: block;
+}
+.s-dialog-actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+}
+.s-dialog-actions .btn {
+  width: 100%;
+}
+@media (min-width: 480px) {
+  .s-dialog-actions {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+  .s-dialog-actions .btn {
+    width: auto;
+  }
+}
+
+/* A stacked row's control starts at the text edge; a row with actions keeps its value level with its label. */
+.s-row.stacked > .s-row-control {
+  margin-left: 0;
+}
+.s-row:has(.s-row-actions) > .s-row-control {
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+/* Descriptive choices are bare radio rows (Daintree's RadioChoice): the puck carries the choice, not a card. */
+.s-radios {
+  gap: 0;
+  margin: 0 -8px;
+}
+.s-radio {
+  border: 0;
+  padding: 10px 8px;
+  border-radius: var(--radius-md);
+}
+.s-radio.on {
+  background: transparent;
+}
+@media (hover: hover) {
+  .s-radio:hover {
+    background: var(--subtle);
+  }
+}
+.s-radio:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* A dialog taller than the screen (the dictation disclosure on a phone) keeps its answer in view. */
+.dialog .dialog-actions {
+  position: sticky;
+  bottom: -20px;
+  margin: 20px -20px -20px;
+  padding: 12px 20px 20px;
+  background: var(--surface-dialog);
+  border-top: 1px solid var(--line-subtle);
+}

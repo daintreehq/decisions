@@ -1,0 +1,812 @@
+/* ---------- files: inline gallery, viewer, comparison, All files (owned by the files work) ---------- */
+
+/*
+ * The stage is the darkest plane in both themes so screenshots read true; Bondi keeps a dark stage the way it keeps
+ * a dark terminal. Ink on the stage is therefore always light, whatever the theme.
+ */
+:root {
+  --fx-stage: var(--surface-stage);
+  --fx-stage-ink: var(--text);
+  --fx-stage-ink-2: var(--text-2);
+  --fx-stage-line: var(--line-default);
+  --fx-stage-focus: var(--focus);
+  --fx-stage-danger: var(--danger-text);
+  --fx-stage-warning: var(--warning-text);
+}
+:root[data-theme='bondi'] {
+  --fx-stage: var(--theme-text-primary);
+  --fx-stage-ink: var(--theme-text-inverse);
+  --fx-stage-ink-2: color-mix(in oklab, var(--theme-text-inverse) 74%, var(--theme-text-primary));
+  --fx-stage-line: color-mix(in oklab, var(--theme-text-inverse) 14%, var(--theme-text-primary));
+  --fx-stage-focus: var(--theme-text-inverse);
+  --fx-stage-danger: color-mix(in oklab, var(--theme-status-danger) 50%, var(--theme-text-inverse));
+  --fx-stage-warning: color-mix(
+    in oklab,
+    var(--theme-status-warning) 45%,
+    var(--theme-text-inverse)
+  );
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --fx-stage: var(--theme-text-primary);
+    --fx-stage-ink: var(--theme-text-inverse);
+    --fx-stage-ink-2: color-mix(in oklab, var(--theme-text-inverse) 74%, var(--theme-text-primary));
+    --fx-stage-line: color-mix(in oklab, var(--theme-text-inverse) 14%, var(--theme-text-primary));
+    --fx-stage-focus: var(--theme-text-inverse);
+    --fx-stage-danger: color-mix(
+      in oklab,
+      var(--theme-status-danger) 50%,
+      var(--theme-text-inverse)
+    );
+    --fx-stage-warning: color-mix(
+      in oklab,
+      var(--theme-status-warning) 45%,
+      var(--theme-text-inverse)
+    );
+  }
+}
+
+/* ---------- the stage and its track ---------- */
+.fs-stage {
+  --fs-gap: 0px;
+  position: relative;
+  overflow: hidden;
+  background: var(--fx-stage);
+  color: var(--fx-stage-ink);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Inline: the page keeps vertical scrolling and its own pinch zoom; only a horizontal swipe is ours. */
+.fs-stage.touch-inline {
+  touch-action: pan-y pinch-zoom;
+}
+/* Viewer and comparison own every touch: pan, pinch, double-tap. */
+.fs-stage.touch-zoom {
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+.fs-track {
+  position: absolute;
+  inset: 0;
+  transition: transform var(--dur-enter) var(--ease-enter);
+}
+.fs-track.is-dragging {
+  transition: none;
+}
+.fs-slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transition: transform var(--dur-enter) var(--ease-enter);
+}
+.fs-slide img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+.fs-slide img.is-sized {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  max-height: none;
+  transition:
+    width var(--dur) var(--ease-out),
+    height var(--dur) var(--ease-out),
+    transform var(--dur) var(--ease-out);
+}
+.fs-stage.is-gesturing .fs-slide img.is-sized {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fs-track,
+  .fs-slide,
+  .fs-slide img.is-sized {
+    transition: none;
+  }
+}
+
+/* ---------- placeholder states (same box as the image they stand in for) ---------- */
+.fx-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 32ch;
+  padding: 16px;
+  text-align: center;
+  color: var(--fx-stage-ink);
+}
+.fx-state-text {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.4;
+}
+.fx-state-sub {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--fx-stage-ink-2);
+}
+.fx-state.is-preparing {
+  flex-direction: row;
+  gap: 10px;
+  color: var(--fx-stage-ink-2);
+  /* Doherty gate: nothing for the first 400 ms. */
+  opacity: 0;
+  animation: appear 1ms 400ms forwards;
+}
+.fx-state-pulse {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--fx-stage-line);
+  border-top-color: var(--fx-stage-ink-2);
+  animation: spin 0.9s linear infinite;
+}
+.fx-state-glyph {
+  display: grid;
+  place-items: center;
+  color: var(--fx-stage-ink-2);
+}
+.fx-state-glyph.is-error,
+.fx-state-glyph.is-unverified {
+  color: var(--fx-stage-danger);
+}
+.fx-state-glyph.is-expired {
+  color: var(--fx-stage-warning);
+}
+.fx-retry {
+  margin-top: 4px;
+  min-height: var(--tap-min);
+}
+
+/* ---------- inline gallery ---------- */
+.fx-files {
+  margin: 16px 0 20px;
+}
+.fx-files-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--tap-min);
+  margin-bottom: 4px;
+}
+.fx-files-title {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.fx-files-n {
+  letter-spacing: 0.02em;
+}
+.fx-allfiles {
+  min-height: var(--tap-min);
+  margin-right: -10px;
+  color: var(--text);
+}
+.fx-inline-stage {
+  --fs-gap: 16px;
+  height: clamp(240px, 38svh, 320px);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px var(--fx-stage-line);
+}
+/* A little air inside the rounded well so the corners never clip the image. */
+.fx-inline-stage .fs-track {
+  inset: 8px;
+}
+.fx-inline-stage.is-ready {
+  cursor: zoom-in;
+}
+.fx-inline-stage:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (min-width: 720px) {
+  .fx-inline-stage {
+    height: clamp(280px, 40vh, 400px);
+  }
+}
+.fx-files-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--tap);
+  margin-top: 6px;
+}
+.fx-files-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.fx-files-count {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.fx-spacer {
+  flex: 1;
+}
+.fx-meta-btn {
+  flex: none;
+  min-height: var(--tap-min);
+  padding: 0 10px;
+}
+.fx-files-meta .btn.ghost {
+  color: var(--text);
+}
+.fx-files-meta .fx-meta-btn:last-child {
+  margin-right: -10px;
+}
+.fx-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  /* Room for the active ring, which sits outside the thumbnail. */
+  padding: 6px 4px;
+  margin: 2px -4px 0;
+  scrollbar-width: none;
+}
+.fx-strip::-webkit-scrollbar {
+  display: none;
+}
+.fx-thumb {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--fx-stage);
+  box-shadow: inset 0 0 0 1px var(--fx-stage-line);
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow var(--dur) var(--ease-out);
+}
+.fx-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+/* A hairline above the image, so light captures on a light page and dark ones on a dark page keep an edge. */
+.fx-thumb::after,
+.fx-tile-well::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  pointer-events: none;
+}
+/* The active file: a 2 px text-primary edge, separated from the image by a hairline of page. */
+.fx-thumb.is-active {
+  box-shadow:
+    0 0 0 2px var(--surface-page),
+    0 0 0 4px var(--text);
+}
+.fx-thumb:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 6px;
+}
+.fx-thumb-pulse {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--fx-stage-line);
+  border-top-color: var(--fx-stage-ink-2);
+  animation: spin 0.9s linear infinite;
+}
+@media (forced-colors: active) {
+  .fx-thumb.is-active {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
+}
+
+/* ---------- layers: viewer, sheets and menus share the workspace region ---------- */
+.fx-overlay {
+  pointer-events: auto;
+}
+.fx-overlay.in-workspace {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+}
+.fx-overlay.is-fixed {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.fx-overlay.fx-sheet-layer {
+  z-index: 11;
+}
+.fx-overlay.is-fixed.fx-sheet-layer {
+  z-index: 61;
+}
+.fx-overlay.fx-menu-layer {
+  z-index: 12;
+}
+.fx-overlay.is-fixed.fx-menu-layer {
+  z-index: 62;
+}
+
+/* ---------- viewer ---------- */
+.fx-viewer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--fx-stage);
+  color: var(--text);
+  animation: fx-fade-in var(--dur-enter) var(--ease-enter);
+}
+@keyframes fx-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.fx-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: calc(var(--safe-t) + 6px) max(8px, var(--safe-r)) 6px max(8px, var(--safe-l));
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--line);
+}
+.fx-bar .btn.ghost {
+  color: var(--text);
+}
+.fx-id {
+  flex: 1;
+  min-width: 0;
+  padding: 0 6px;
+}
+.fx-id-file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.fx-id-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fx-id-count {
+  flex: none;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-2);
+}
+.fx-id-q {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-2);
+}
+.fx-id-project {
+  font-weight: 500;
+}
+.fx-question-btn {
+  flex: none;
+  min-height: 36px;
+  padding: 0 12px;
+  margin: 0 4px;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+/* The visible chip is 36 px; the hit area still reaches 44. */
+.fx-question-btn::before {
+  content: '';
+  position: absolute;
+  inset: -4px 0;
+}
+.fx-viewer-stage {
+  flex: 1;
+  min-height: 0;
+}
+.fx-viewer-stage:focus-visible {
+  outline: 2px solid var(--fx-stage-focus);
+  outline-offset: -4px;
+}
+.fx-tools {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 8px;
+  min-height: 60px;
+  padding: 8px max(8px, var(--safe-r)) 8px max(8px, var(--safe-l));
+  background: var(--surface-chrome);
+  border-top: 1px solid var(--line);
+}
+.fx-overlay.is-fixed .fx-tools {
+  padding-bottom: calc(8px + var(--safe-b));
+}
+.fx-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.fx-tool {
+  width: var(--tap-min);
+  height: var(--tap-min);
+  color: var(--text);
+}
+.fx-tools .btn.ghost {
+  color: var(--text);
+}
+.fx-zoom-value {
+  width: auto;
+  min-width: 56px;
+  padding: 0 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.fx-done {
+  min-height: var(--tap-min);
+  margin-left: 8px;
+}
+.fx-rot180 {
+  display: inline-flex;
+  transform: rotate(180deg);
+}
+@media (min-width: 720px) {
+  .fx-tools {
+    gap: 4px 20px;
+  }
+}
+
+/* ---------- comparison ---------- */
+.fx-compare-bar {
+  flex: none;
+  padding: 8px 12px;
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--line);
+}
+.fx-compare-seg {
+  margin: 0;
+  flex-wrap: nowrap;
+}
+.fx-compare-seg button {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 40px;
+  font-size: var(--text-md);
+}
+.fx-compare-seg button:focus-visible {
+  z-index: 1;
+}
+.fx-panes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: var(--fx-stage-line);
+}
+.fx-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--fx-stage);
+}
+.fx-pane-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--line);
+}
+.fx-pane-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.fx-pane-dims {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.fx-link {
+  min-height: var(--tap-min);
+}
+/* Selection is neutral: a raised fill with a text-secondary edge, never accent. */
+.fx-link[aria-pressed='true'] {
+  background: var(--raised-select);
+  box-shadow: inset 0 0 0 1px var(--text-2);
+}
+
+/* ---------- sheets ---------- */
+.fx-sheet-layer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.fx-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  backdrop-filter: blur(var(--scrim-blur));
+  -webkit-backdrop-filter: blur(var(--scrim-blur));
+  animation: fx-fade-in var(--dur-enter) var(--ease-enter);
+}
+.fx-sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: min(88%, 720px);
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--line-default);
+  border-bottom: 0;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  box-shadow: var(--shadow-3);
+  animation: fx-sheet-in var(--dur-enter) var(--ease-enter);
+}
+.fx-sheet:focus {
+  outline: none;
+}
+@keyframes fx-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+.fx-sheet-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 56px;
+  padding: 6px 8px 0 20px;
+}
+.fx-sheet-head h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.fx-sheet-head .btn.ghost {
+  color: var(--text);
+}
+.fx-sheet-count {
+  color: var(--text-2);
+  font-weight: 500;
+}
+.fx-sheet-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 20px 16px;
+  overscroll-behavior: contain;
+}
+.fx-sheet-body > p {
+  margin: 4px 0 12px;
+  line-height: 1.5;
+}
+.fx-sheet-sub {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.fx-sheet-body > p.fx-sheet-hint {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.fx-sheet-foot {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--line);
+}
+.fx-overlay.is-fixed .fx-sheet-foot,
+.fx-overlay.is-fixed .fx-sheet:not(:has(.fx-sheet-foot)) .fx-sheet-body {
+  padding-bottom: calc(16px + var(--safe-b));
+}
+.fx-sheet-foot .btn {
+  min-height: var(--tap);
+}
+@media (max-width: 719px) {
+  .fx-sheet-foot .btn {
+    flex: 1;
+  }
+}
+@media (min-width: 720px) {
+  .fx-sheet-layer {
+    align-items: center;
+  }
+  .fx-sheet {
+    width: min(520px, calc(100% - 48px));
+    border-bottom: 1px solid var(--line-default);
+    border-radius: var(--radius-xl);
+  }
+  .fx-sheet.wide {
+    width: min(760px, calc(100% - 48px));
+  }
+}
+.fx-question {
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  max-width: 68ch;
+}
+.fx-question p {
+  margin: 0 0 0.6rem;
+}
+
+/* ---------- All files grid ---------- */
+.fx-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 12px;
+}
+.fx-tile {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 6px 10px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  background: var(--surface-card);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    border-color var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .fx-tile:hover {
+    background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 4%);
+  }
+}
+.fx-tile.is-current {
+  background: var(--raised-select);
+  border-color: var(--text-2);
+}
+.fx-tile-well {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-md);
+  background: var(--fx-stage);
+  overflow: hidden;
+}
+.fx-tile-well img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.fx-tile-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px;
+}
+.fx-tile-label {
+  padding: 0 4px;
+  font-size: var(--text-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.fx-tile-index {
+  flex: none;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+.fx-tile-state {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.fx-tile-state svg {
+  color: var(--text);
+}
+
+/* ---------- menu ---------- */
+.fx-menu-catch {
+  position: absolute;
+  inset: 0;
+}
+.fx-menu {
+  position: absolute;
+  min-width: 232px;
+  padding: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  animation: fx-fade-in var(--dur) var(--ease-out);
+}
+.fx-menu [role='menuitem'] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9375rem;
+  text-align: left;
+  cursor: pointer;
+}
+.fx-menu [role='menuitem'] svg {
+  color: var(--text-2);
+}
+.fx-menu [role='menuitem']:focus-visible {
+  outline-offset: -2px;
+  background: var(--hover);
+}
+@media (hover: hover) {
+  .fx-menu [role='menuitem']:not([aria-disabled='true']):hover {
+    background: var(--hover);
+  }
+}
+.fx-menu [role='menuitem'][aria-disabled='true'] {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.fx-menu [role='menuitem'][aria-disabled='true'] svg {
+  color: var(--text-3);
+}
+.fx-menu-note {
+  max-width: 28ch;
+  margin: 6px 12px 6px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+@media (prefers-contrast: more) {
+  .fx-thumb,
+  .fx-inline-stage {
+    box-shadow: inset 0 0 0 1px var(--fx-stage-ink-2);
+  }
+}

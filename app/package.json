@@ -10,7 +10,8 @@
     "build": "node scripts/make-icons.mjs --if-missing && vite build",
     "icons": "node scripts/make-icons.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.sw.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "theme": "node scripts/sync-theme.mjs"
   },
   "dependencies": {
     "@daintreehq/decisions-crypto": "workspace:*",

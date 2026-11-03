@@ -103,6 +103,39 @@ describe('image cache', () => {
     expect((await p).ok).toBe(false);
   });
 
+  it('a viewer that lets go and re-acquires in the same update keeps the download running', async () => {
+    const { c } = cache();
+    let signal!: AbortSignal;
+    const release = c.retain('k');
+    void c.load('k', ({ signal: s }) => {
+      signal = s;
+      return new Promise<ImageResult>(() => undefined);
+    });
+    release();
+    const again = c.retain('k');
+    await Promise.resolve();
+    expect(signal.aborted).toBe(false);
+    again();
+    await Promise.resolve();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('a release from before disposal does not touch the next pairing', async () => {
+    const { c } = cache();
+    const stale = c.retain('k');
+    c.dispose();
+    const fresh = c.retain('k');
+    let signal!: AbortSignal;
+    void c.load('k', ({ signal: s }) => {
+      signal = s;
+      return new Promise<ImageResult>(() => undefined);
+    });
+    stale();
+    await Promise.resolve();
+    expect(signal.aborted).toBe(false);
+    fresh();
+  });
+
   it('works again after disposal (a re-paired phone starts clean)', async () => {
     const { c } = cache();
     c.dispose();

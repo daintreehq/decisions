@@ -178,13 +178,20 @@ export class AppController {
         if (connection === 'live') void this.outbox?.flush();
       },
       onSynced: (at) => this.patch({ lastSyncedAt: at, syncing: false, lastError: null }),
-      onRevoked: () => this.patch({ phase: 'revoked' }),
+      onRevoked: () => this.lockRevoked(),
       onError: (e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) }),
     });
     this.patch({ phase: 'ready', config, syncing: true });
     this.bindPageEvents();
     void this.sync.start().then(() => this.outbox?.flush());
     void this.refreshDevices().catch(() => undefined);
+  }
+
+  /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
+  lockRevoked(): void {
+    this.teardown();
+    this.images.dispose();
+    this.patch({ phase: 'revoked' });
   }
 
   private bindPageEvents() {
@@ -220,9 +227,41 @@ export class AppController {
     await this.boot(config);
   }
 
+  /** What unpairing would erase, counted from this device's own stores (shown before the person confirms). */
+  async localDataSummary(): Promise<{ questions: number; unsent: number; drafts: number }> {
+    const drafts = this.db ? (await this.db.drafts()).length : 0;
+    return {
+      questions: this.store?.list().length ?? 0,
+      unsent: this.outbox?.list().length ?? 0,
+      drafts,
+    };
+  }
+
+  private teardowns = new Set<() => void>();
+
+  /**
+   * In-memory owners outside this controller (dictation) that must forget everything, synchronously, when the device
+   * is unpaired or revoked.
+   */
+  registerTeardown(fn: () => void): () => void {
+    this.teardowns.add(fn);
+    return () => this.teardowns.delete(fn);
+  }
+
+  private teardown() {
+    for (const fn of this.teardowns) {
+      try {
+        fn();
+      } catch {
+        /* one owner failing must not keep the others alive */
+      }
+    }
+  }
+
   async wipe(): Promise<void> {
     // Order matters: cut off everything that could still deliver or reveal data BEFORE touching storage, and
     // never wait on the network. A stalled download must not be able to delay or undo an erase.
+    this.teardown();
     this.sync?.stop();
     this.images.dispose();
     const db = this.db;
@@ -230,7 +269,14 @@ export class AppController {
     this.relay = this.store = this.outbox = this.drafts = this.sync = this.trust = null;
     this.keys = this.cacheKey = null;
     this.epochKeys.clear();
-    this.patch({ phase: 'unpaired', config: null, devices: null, connection: 'idle' });
+    applyTheme(DEFAULT_PREFS.theme);
+    this.patch({
+      phase: 'unpaired',
+      config: null,
+      devices: null,
+      connection: 'idle',
+      prefs: DEFAULT_PREFS,
+    });
     await db?.wipe();
     if (typeof caches !== 'undefined') for (const k of await caches.keys()) await caches.delete(k);
     this.db = await Db.open();
@@ -360,6 +406,11 @@ export class AppController {
       if (!epoch || !this.relay || !this.snap.config)
         return { ok: false, reason: 'error', message: 'Missing key for this attachment' };
       const cipher = await this.relay.bytes(`/attachments/${d.attachment_id}/content`, ctx.signal);
+      const unverified: ImageResult = {
+        ok: false,
+        reason: 'unverified',
+        message: 'This file could not be verified',
+      };
       const plain = await decryptAttachment(
         epoch,
         {
@@ -371,12 +422,16 @@ export class AppController {
         d.nonce,
         cipher,
         d.sha256,
-      );
+      ).catch(() => null);
+      if (!plain) return unverified;
       const mime = sniffImageMime(plain);
-      if (!mime || mime !== d.mime)
-        return { ok: false, reason: 'error', message: 'The file is not the image it claims to be' };
+      if (!mime || mime !== d.mime) return unverified;
       const blob = new Blob([plain as unknown as BlobPart], { type: mime });
-      if (typeof createImageBitmap === 'function') (await createImageBitmap(blob)).close();
+      if (typeof createImageBitmap === 'function') {
+        const bitmap = await createImageBitmap(blob).catch(() => null);
+        if (!bitmap) return unverified;
+        bitmap.close();
+      }
       return { ok: true, image: { url: ctx.makeUrl(blob), sha256: d.sha256, mime } };
     } catch (e) {
       if (e instanceof RelayError && (e.status === 404 || e.status === 410)) {
@@ -407,13 +462,34 @@ export class AppController {
     });
   }
 
-  applyUpdate(): void {
+  /** Ask the browser to look for a newer app now. A found update raises `updateAvailable` once it has installed. */
+  async checkForUpdate(): Promise<void> {
+    await this.swReg?.update();
+  }
+
+  private updateGuards = new Set<() => Promise<boolean>>();
+
+  /**
+   * Work that must settle before the app reloads into an update (an active dictation stops and its words are
+   * saved; drafts flush). A guard resolves false when it cannot make its work safe, and the update waits.
+   */
+  registerUpdateGuard(guard: () => Promise<boolean>): () => void {
+    this.updateGuards.add(guard);
+    return () => this.updateGuards.delete(guard);
+  }
+
+  /** Reload into the waiting version once every guard has made its work safe. Resolves false if one refused. */
+  async applyUpdate(): Promise<boolean> {
     const w = this.swReg?.waiting;
-    if (!w) return;
+    if (!w) return false;
+    for (const guard of this.updateGuards) {
+      if (!(await guard().catch(() => false))) return false;
+    }
     navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), {
       once: true,
     });
     w.postMessage({ type: 'SKIP_WAITING' });
+    return true;
   }
 
   /** Exposed for tests. */

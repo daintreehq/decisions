@@ -1,0 +1,125 @@
+/*
+ * The app's design tokens. Colour comes only from theme.generated.css (Daintree's engine: Daintree dark, Bondi
+ * light); this file names the roles Decisions uses and adds the non-colour scales. Components never use a raw hex.
+ */
+:root {
+  /* Surfaces, darkest to lightest on Daintree (Bondi mirrors the ladder in cream). */
+  --surface-chrome: var(--theme-surface-sidebar); /* tab bar, rail, header */
+  --surface-page: var(--theme-surface-canvas); /* the reading field */
+  --surface-card: var(--theme-surface-panel); /* rows, cards, option cards */
+  --surface-raised: var(--theme-surface-panel-elevated); /* sheets, popovers, the dock */
+  --surface-input: var(--theme-surface-input);
+  --surface-inset: var(--theme-surface-inset); /* recessed wells: segmented tracks, code */
+  --surface-dialog: var(--theme-surface-dialog);
+  /* The file stage is the darkest plane in both themes, so screenshots read true (Bondi keeps a dark stage as it
+     keeps a dark terminal). */
+  --surface-stage: var(--theme-surface-grid);
+
+  --text: var(--theme-text-primary);
+  --text-2: var(--theme-text-secondary);
+  --text-3: var(--theme-text-muted);
+  --text-placeholder: var(--theme-text-placeholder);
+  --text-inverse: var(--theme-text-inverse);
+  --text-link: var(--theme-text-link);
+
+  --line: var(--theme-border-divider);
+  --line-subtle: var(--theme-border-subtle);
+  --line-default: var(--theme-border-default);
+  --line-strong: var(--theme-border-strong);
+  --line-input: var(--theme-border-input);
+
+  --accent: var(--theme-accent-primary);
+  --accent-fg: var(--theme-accent-foreground);
+  --focus: var(--theme-focus-ring);
+
+  --success: var(--theme-status-success);
+  --success-text: var(--theme-status-success-text, var(--theme-status-success));
+  --success-surface: var(--theme-status-success-surface);
+  --warning: var(--theme-status-warning);
+  --warning-text: var(--theme-status-warning-text, var(--theme-status-warning));
+  --warning-surface: var(--theme-status-warning-surface);
+  --danger: var(--theme-status-danger);
+  --danger-text: var(--theme-status-danger-text, var(--theme-status-danger));
+  --danger-surface: var(--theme-status-danger-surface);
+  --info: var(--theme-status-info);
+  --info-surface: var(--theme-status-info-surface);
+  /* "Waiting on you" is Daintree's waiting signal: the amber ring. */
+  --waiting: var(--theme-activity-waiting);
+  /* Model provenance: Daintree's violet, always paired with the words "Model answer". */
+  --model: var(--theme-syntax-keyword);
+  --model-surface: color-mix(in oklab, var(--theme-syntax-keyword) 9%, transparent);
+
+  --hover: var(--theme-overlay-hover);
+  --pressed: var(--theme-overlay-active);
+  --selected: var(--theme-overlay-selected);
+  --subtle: var(--theme-overlay-subtle);
+  --raised-select: var(--sidebar-active-bg);
+
+  --shadow-1: var(--theme-shadow-ambient);
+  --shadow-2: var(--theme-shadow-floating);
+  --shadow-3: var(--theme-shadow-dialog);
+  --scrim: var(--theme-scrim-medium);
+  --scrim-blur: var(--theme-scrim-blur);
+  --material-blur: var(--theme-material-blur, 0px);
+
+  /* Radius: Daintree's scale on a 10px base. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-sheet: 16px;
+
+  /* Type. */
+  --font-ui:
+    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  --text-xs: 0.8125rem; /* 13px: chips, small labels */
+  --text-sm: 0.875rem; /* 14px: metadata, secondary */
+  --text-md: 1rem; /* 16px: body, inputs (iOS no-zoom floor) */
+  --text-lg: 1.125rem; /* 18px: section titles */
+  --text-question: 1.375rem; /* 22px */
+
+  /* Targets and geometry. */
+  --tap: 48px;
+  --tap-min: 44px;
+  --tabbar-h: 60px;
+  --header-h: 56px;
+  --gutter: 16px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+
+  /* Motion: Daintree's tiers. */
+  --dur-fast: 100ms;
+  --dur: 150ms;
+  --dur-enter: 200ms;
+  --dur-exit: 120ms;
+  --ease-out: ease-out;
+  --ease-enter: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.2, 0, 0.7, 0);
+}
+
+/* Bondi's chrome is opaque sand (its sidebar); Daintree's is translucent charcoal with blur. */
+:root {
+  --material-bg: color-mix(in oklab, var(--theme-surface-sidebar) 92%, transparent);
+}
+:root[data-theme='bondi'] {
+  --material-bg: var(--theme-surface-sidebar);
+  /* Bondi's grid is sand; its stage borrows the theme's ink so screenshots still sit on dark. */
+  --surface-stage: var(--theme-text-primary);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --material-bg: var(--theme-surface-sidebar);
+    --surface-stage: var(--theme-text-primary);
+  }
+}
+
+@media (max-width: 359px) {
+  :root {
+    --gutter: 12px;
+    --text-question: 1.25rem;
+  }
+}
