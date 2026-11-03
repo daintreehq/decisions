@@ -147,13 +147,14 @@ export async function verifyRelayBundle(
 }
 
 /**
- * Writes the verified bytes to `dest` (created; must be empty or absent) and sets the Worker name
- * and the R2 bucket in the Wrangler config. Nothing else in the config changes.
+ * Writes the verified bytes to `dest` (created; must be empty or absent) and sets the Worker name,
+ * the R2 bucket and any `vars` given (plain settings such as the cleanup model, never a secret) in
+ * the Wrangler config. Nothing else in the config changes.
  */
 export async function stageRelayBundle(
   bundle: VerifiedRelayBundle,
   dest: string,
-  o: { name: string; bucket: string },
+  o: { name: string; bucket: string; vars?: Record<string, string> },
 ): Promise<void> {
   await mkdir(dest, { recursive: true, mode: 0o700 });
   for (const [rel, bytes] of bundle.files) {
@@ -165,12 +166,14 @@ export async function stageRelayBundle(
   const config = JSON.parse(bundle.files.get(bundle.manifest.config)!.toString('utf8')) as {
     name?: string;
     r2_buckets?: { binding: string; bucket_name: string }[];
+    vars?: Record<string, unknown>;
   };
   if (!Array.isArray(config.r2_buckets) || config.r2_buckets.length !== 1) {
     throw new CliError('the relay bundle config does not declare exactly one R2 bucket');
   }
   config.name = o.name;
   config.r2_buckets = [{ ...config.r2_buckets[0]!, bucket_name: o.bucket }];
+  if (o.vars && Object.keys(o.vars).length) config.vars = { ...config.vars, ...o.vars };
   await writeFile(join(dest, 'wrangler.json'), JSON.stringify(config, null, 2) + '\n', {
     flag: 'wx',
   });

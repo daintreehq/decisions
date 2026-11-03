@@ -22,11 +22,13 @@ No clone is needed. The command:
 
 1. Checks Node 22+ and runs the exact Wrangler version the relay was built with (`npx wrangler@<version>`).
 2. Logs in with Wrangler's browser flow. With `--api-token` it asks for a Cloudflare API token instead (or uses `CLOUDFLARE_API_TOKEN` if it is already set); the token stays in memory and reaches Wrangler only through its environment. `--account-id` picks an account when you have several.
-3. Creates the private R2 bucket (`--bucket`, default `daintree-decisions`; an existing one is reused).
-4. Deploys the Worker (`--name`, default `daintree-decisions`), its Durable Object and the phone app from `@daintreehq/decisions-relay`, the prebuilt relay published with the same version as the CLI. Before anything runs, it checks the relay's manifest against the SHA-256 the CLI was built with and every file against the manifest, and refuses to deploy on any mismatch.
-5. Generates `CLAIM_SECRET` in memory and gives it to `wrangler secret put` on standard input. It is never written to disk, to a command line or to the environment. If the relay is already claimed (you are updating it), this step is skipped.
-6. Runs `decisions doctor` against the new Worker.
-7. Prints the Worker URL and the claim secret once, with the next step. Copy the secret then: it is not saved anywhere. If you lose it before claiming, run the deploy again to set a new one.
+3. At a terminal, asks the setup questions before it changes anything in your account: the account (when your login has several), the Worker and bucket names (the flags are the defaults), whether to use dictation transcription (xAI or OpenAI) and transcript cleanup (Anthropic or OpenAI, and which model), and each provider's API key, read with hidden input and checked with the provider straight away. It then shows a summary, with keys only as present or absent, and deploys only once you confirm it. Without a terminal it asks nothing and deploys without dictation, as before.
+4. Creates the private R2 bucket (`--bucket`, default `daintree-decisions`; an existing one is reused).
+5. Deploys the Worker (`--name`, default `daintree-decisions`), its Durable Object and the phone app from `@daintreehq/decisions-relay`, the prebuilt relay published with the same version as the CLI. Before anything runs, it checks the relay's manifest against the SHA-256 the CLI was built with and every file against the manifest, and refuses to deploy on any mismatch.
+6. Generates `CLAIM_SECRET` in memory and gives it to `wrangler secret put` on standard input. It is never written to disk, to a command line or to the environment. If the relay is already claimed (you are updating it), this step is skipped.
+7. Sets the provider keys you entered (`XAI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) the same way, on standard input only. The chosen cleanup model is deployed as `ANTHROPIC_CORRECTION_MODEL` or `OPENAI_CORRECTION_MODEL`. Keys already set on the Worker are left as they are.
+8. Runs `decisions doctor` against the new Worker.
+9. Prints the Worker URL and the claim secret once, with the next step. Copy the secret then: it is not saved anywhere. If you lose it before claiming, run the deploy again to set a new one.
 
 Add `--claim` to claim the relay from this computer straight away (as `decisions setup` does, creating this computer's keys); the secret is then used up and not shown. `--outdir <dir>` only verifies the relay and writes the deployable files and Wrangler config to `<dir>`, for inspection or to deploy them yourself.
 
@@ -55,7 +57,7 @@ The claim can happen exactly once; afterwards the endpoint is permanently closed
 
 ## Optional dictation
 
-Add provider keys as Worker secrets (Cloudflare dashboard → Workers → your Worker → Settings → Variables and Secrets, or `wrangler secret put NAME`): `XAI_API_KEY` (streaming transcription), `ANTHROPIC_API_KEY` (correction), `OPENAI_API_KEY` (single-provider mode, preview). Read [voice-privacy.md](voice-privacy.md) first. Model names are configuration: `ANTHROPIC_CORRECTION_MODEL` (`claude-haiku-5-5`, or `claude-sonnet-5-5`) and `OPENAI_CORRECTION_MODEL` (`gpt-6.1-terra`) in `wrangler.jsonc`, the same defaults Daintree desktop dictation uses.
+The guided deploy sets this up for you. Otherwise, add provider keys as Worker secrets (Cloudflare dashboard → Workers → your Worker → Settings → Variables and Secrets, or `wrangler secret put NAME`): `XAI_API_KEY` (streaming transcription), `ANTHROPIC_API_KEY` (correction), `OPENAI_API_KEY` (single-provider mode, preview). Read [voice-privacy.md](voice-privacy.md) first. Model names are configuration: `ANTHROPIC_CORRECTION_MODEL` (`claude-haiku-5-5`, or `claude-sonnet-5-5`) and `OPENAI_CORRECTION_MODEL` (`gpt-6.1-terra`) in `wrangler.jsonc`, the same defaults Daintree desktop dictation uses.
 
 ## Custom domain
 

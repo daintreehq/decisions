@@ -1,6 +1,6 @@
 import { spawn as spawnChild } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -12,6 +12,14 @@ import {
 } from '../relay-bundle.js';
 import { CliError, keyStoreFor, type Ctx, type GlobalOptions } from '../runtime.js';
 import { VERSION } from '../version.js';
+import {
+  KEY_SECRET,
+  MODEL_VAR,
+  askDeployQuestions,
+  type CloudflareAccount,
+  type DeployAnswers,
+  type KeyProvider,
+} from './deploy-questions.js';
 import { doctor } from './ops.js';
 import { setup } from './setup.js';
 
@@ -23,6 +31,11 @@ import { setup } from './setup.js';
  * shown once at the end. It is never written to a file, a command line or an environment variable.
  * A Cloudflare API token, if the user chooses one, stays in memory and reaches Wrangler only through
  * the environment of its child processes.
+ *
+ * Run at a terminal, it first logs in, then asks the setup questions (names, account, the optional
+ * dictation providers and their keys) and changes nothing in the account until the user confirms a
+ * summary. Provider keys follow the claim secret's path: hidden input, memory, Wrangler's stdin.
+ * Without a terminal it asks nothing and runs the default steps, as it always has.
  */
 
 export interface DeployOptions {
@@ -83,10 +96,13 @@ const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 export const wranglerCommands = {
   version: () => ['--version'],
   whoami: () => ['whoami'],
+  /** The guided run reads the accounts from this; it exits non-zero when not logged in. */
+  whoamiJson: () => ['whoami', '--json'],
   login: () => ['login'],
   bucket: (bucket: string) => ['r2', 'bucket', 'create', bucket],
   deploy: () => ['deploy', '--config', 'wrangler.json'],
-  secret: (name: string) => ['secret', 'put', 'CLAIM_SECRET', '--name', name],
+  secret: (name: string) => wranglerCommands.putSecret('CLAIM_SECRET', name),
+  putSecret: (secret: string, name: string) => ['secret', 'put', secret, '--name', name],
 };
 
 const npxArgs = (wrangler: string, args: string[]) => ['--yes', `wrangler@${wrangler}`, ...args];
@@ -94,7 +110,11 @@ const shown = (wrangler: string, args: string[]) => ['npx', ...npxArgs(wrangler,
 
 export type AuthMode = 'browser' | 'token-env' | 'token-prompt';
 
+export type PlanStepId =
+  'tools' | 'login' | 'bucket' | 'deploy' | 'claim-secret' | 'keys' | 'check' | 'claim';
+
 export interface PlanStep {
+  id: PlanStepId;
   title: string;
   commands: string[];
   notes: string[];
@@ -106,15 +126,19 @@ export function buildDeployPlan(p: {
   wrangler: string;
   auth: AuthMode;
   claim: boolean;
+  /** Worker secrets holding provider keys (XAI_API_KEY, ...), set after the claim secret. */
+  keySecrets?: string[];
 }): PlanStep[] {
   const w = (args: string[]) => shown(p.wrangler, args);
   const steps: PlanStep[] = [
     {
+      id: 'tools',
       title: 'Check Node and Wrangler',
       commands: [w(wranglerCommands.version())],
       notes: [`Node 22 or newer; Wrangler ${p.wrangler} exactly (npx downloads it once)`],
     },
     {
+      id: 'login',
       title: 'Log in to Cloudflare',
       commands:
         p.auth === 'browser'
@@ -133,16 +157,19 @@ export function buildDeployPlan(p: {
             : ['uses the API token already in CLOUDFLARE_API_TOKEN'],
     },
     {
+      id: 'bucket',
       title: `Create the private R2 bucket "${p.bucket}"`,
       commands: [w(wranglerCommands.bucket(p.bucket))],
       notes: ['an existing bucket with this name is reused'],
     },
     {
+      id: 'deploy',
       title: `Deploy the Worker "${p.name}", its Durable Object and the phone app`,
       commands: [w(wranglerCommands.deploy())],
       notes: ['from a verified copy of the relay bundle in a temporary directory'],
     },
     {
+      id: 'claim-secret',
       title: 'Set the one-time claim secret',
       commands: [w(wranglerCommands.secret(p.name))],
       notes: [
@@ -150,7 +177,18 @@ export function buildDeployPlan(p: {
         'skipped when the relay is already claimed',
       ],
     },
+    ...(p.keySecrets?.length
+      ? [
+          {
+            id: 'keys' as const,
+            title: 'Set the dictation provider keys',
+            commands: p.keySecrets.map((s) => w(wranglerCommands.putSecret(s, p.name))),
+            notes: ['each key is sent to Wrangler on standard input; never saved or shown'],
+          },
+        ]
+      : []),
     {
+      id: 'check',
       title: 'Check the deployment',
       commands: [`decisions doctor --url <the Worker URL>`],
       notes: [],
@@ -158,6 +196,7 @@ export function buildDeployPlan(p: {
   ];
   if (p.claim) {
     steps.push({
+      id: 'claim',
       title: 'Claim the relay from this computer',
       commands: [`decisions setup --url <the Worker URL>   (with the claim secret, in memory)`],
       notes: ["creates this computer's keys and makes it the owner"],
@@ -224,8 +263,8 @@ export async function deploy(
   o: DeployOptions,
   deps: DeployDeps = {},
 ): Promise<void> {
-  const name = o.name ?? DEFAULT_NAME;
-  const bucket = o.bucket ?? DEFAULT_NAME;
+  let name = o.name ?? DEFAULT_NAME;
+  let bucket = o.bucket ?? DEFAULT_NAME;
   if (!WORKER_NAME.test(name)) {
     throw new CliError(
       `--name "${name}" is not a valid Worker name (lowercase letters, digits and dashes, up to 63)`,
@@ -271,7 +310,9 @@ export async function deploy(
     : ctx.env.CLOUDFLARE_API_TOKEN
       ? 'token-env'
       : 'browser';
-  const plan = buildDeployPlan({ name, bucket, wrangler, auth, claim: o.claim === true });
+  let plan = buildDeployPlan({ name, bucket, wrangler, auth, claim: o.claim === true });
+  // A person at the terminal is asked the setup questions before anything is created.
+  const guided = ctx.interactive === true;
 
   if (o.dryRun) {
     say('\nPlan (dry run: nothing is changed, nothing is run):');
@@ -303,12 +344,19 @@ export async function deploy(
 
   /** Values that must never be echoed back, even inside Wrangler's own error output. */
   const secrets: string[] = [];
-  const redact = (t: string) => secrets.reduce((acc, v) => acc.split(v).join('[redacted]'), t);
+  const redact = (t: string) => redactSecrets(t, secrets);
 
   const staging = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-deploy-'));
   try {
-    await stageRelayBundle(bundle, join(staging, 'relay'), { name, bucket });
-    const cwd = join(staging, 'relay');
+    // A guided run stages the bundle once the names are confirmed; until then Wrangler runs in the
+    // empty staging directory, so no config of the user's own can steer the login.
+    let cwd = staging;
+    if (!guided) {
+      await stageRelayBundle(bundle, join(staging, 'relay'), { name, bucket });
+      cwd = join(staging, 'relay');
+    }
+    const at = (id: PlanStepId) => plan.findIndex((s) => s.id === id);
+    const heading = (id: PlanStepId) => `\n[${at(id) + 1}] ${plan[at(id)]!.title}`;
     const step = (i: number) => say(`\n[${i + 1}] ${plan[i]!.title}`);
     const wr = (
       args: string[],
@@ -353,7 +401,8 @@ export async function deploy(
     } else if (auth === 'token-env') {
       secrets.push(ctx.env.CLOUDFLARE_API_TOKEN!);
     }
-    const who = await wr(wranglerCommands.whoami());
+    const whoArgs = guided ? wranglerCommands.whoamiJson() : wranglerCommands.whoami();
+    let who = await wr(whoArgs);
     const loggedIn = who.status === 0 && !/not authenticated|not logged in/i.test(output(who));
     if (auth !== 'browser') {
       if (!loggedIn) throw new CliError(`Cloudflare refused the API token:\n${output(who)}`);
@@ -364,9 +413,75 @@ export async function deploy(
       say('    a browser window opens to log in to Cloudflare');
       const login = await wr(wranglerCommands.login(), { capture: false });
       if (login.status !== 0) throw new CliError('Cloudflare login failed');
+      if (guided) who = await wr(whoArgs);
     }
 
-    step(2);
+    let answers: DeployAnswers | null = null;
+    if (guided) {
+      const accounts = accountsFromWhoami(who.stdout);
+      const fixed = o.accountId ?? ctx.env.CLOUDFLARE_ACCOUNT_ID;
+      const account: CloudflareAccount | null = fixed
+        ? (accounts.find((a) => a.id.toLowerCase() === fixed.toLowerCase()) ?? {
+            id: fixed,
+            name: '',
+          })
+        : accounts.length === 1
+          ? accounts[0]!
+          : null;
+      answers = await askDeployQuestions(
+        ctx,
+        { name, bucket, account, accounts },
+        {
+          name: { pattern: WORKER_NAME, hint: 'lowercase letters, digits and dashes, up to 63' },
+          bucket: { pattern: BUCKET_NAME, hint: 'lowercase letters, digits and dashes, 3 to 63' },
+        },
+        (v) => secrets.push(v),
+      );
+      if (!answers) {
+        say('\nCancelled: nothing in your Cloudflare account was changed.');
+        return;
+      }
+      name = answers.name;
+      bucket = answers.bucket;
+      if (answers.account) env.CLOUDFLARE_ACCOUNT_ID = answers.account.id;
+      plan = buildDeployPlan({
+        name,
+        bucket,
+        wrangler,
+        auth,
+        claim: o.claim === true,
+        keySecrets: keySecretsOf(answers).map((k) => k.secret),
+      });
+      const cleanup = answers.cleanup;
+      await stageRelayBundle(bundle, join(staging, 'relay'), {
+        name,
+        bucket,
+        ...(cleanup ? { vars: { [MODEL_VAR[cleanup.provider]]: cleanup.model } } : {}),
+      });
+      cwd = join(staging, 'relay');
+    }
+    const keySecrets = answers ? keySecretsOf(answers) : [];
+
+    /** Sets each chosen provider key as a Worker secret, the value on stdin only. */
+    const setKeys = async (): Promise<CliError | null> => {
+      if (!keySecrets.length) return null;
+      say(heading('keys'));
+      for (const k of keySecrets) {
+        const r = await wr(wranglerCommands.putSecret(k.secret, name), {
+          input: k.value + '\n',
+          env: { WRANGLER_WRITE_LOGS: 'false' },
+        });
+        if (r.status !== 0) {
+          return new CliError(
+            `Wrangler reported an error while setting ${k.secret}; run the deploy again to set it.\n${output(r)}`,
+          );
+        }
+        say(`    ${k.secret} set`);
+      }
+      return null;
+    };
+
+    step(at('bucket'));
     const b = await wr(wranglerCommands.bucket(bucket));
     if (b.status === 0) say('    created');
     else if (/already exists|already own/i.test(output(b))) say('    already exists, reusing it');
@@ -376,18 +491,26 @@ export async function deploy(
       );
     }
 
-    step(3);
+    step(at('deploy'));
     const dep = await wr(wranglerCommands.deploy(), { echo: true });
     if (dep.status !== 0) throw new CliError(`deploy failed:\n${output(dep)}`);
     const url = output(dep).match(WORKERS_DEV_URL)?.[0];
     say(url ? `    deployed: ${url}` : '    deployed (no workers.dev URL in the output)');
 
-    step(4);
+    step(at('claim-secret'));
     const state = url ? await claimState(ctx, url, sleep) : 'unknown';
     if (state === 'claimed') {
       say('    the relay is already claimed: this was an update, the claim secret is unchanged');
-      const healthy = await check(ctx, g, url!, sleep, `\n[6] ${plan[5]!.title}`);
-      summary(ctx, { url, claimSecret: null, claimedHere: false, state, problems: !healthy });
+      const keyFailure = await setKeys();
+      const healthy = await check(ctx, g, url!, sleep, heading('check'));
+      summary(ctx, {
+        url,
+        claimSecret: null,
+        claimedHere: false,
+        state,
+        problems: !healthy || keyFailure !== null,
+      });
+      if (keyFailure) throw keyFailure;
       if (!healthy) throw new CliError('deployed, but the health check found problems');
       return;
     }
@@ -410,6 +533,8 @@ export async function deploy(
         );
       }
       say('    set (the value is shown once at the end)');
+      const keyFailure = await setKeys();
+      if (keyFailure) return keyFailure;
       if (!url) {
         return o.claim
           ? new CliError(
@@ -417,9 +542,9 @@ export async function deploy(
             )
           : null;
       }
-      const healthy = await check(ctx, g, url, sleep, `\n[6] ${plan[5]!.title}`);
+      const healthy = await check(ctx, g, url, sleep, heading('check'));
       if (o.claim) {
-        say(`\n[${plan.length}] ${plan[plan.length - 1]!.title}`);
+        say(heading('claim'));
         try {
           await setup({ ...ctx, env: { ...ctx.env, DECISIONS_CLAIM_SECRET: claimSecret } }, g, {
             url,
@@ -450,6 +575,61 @@ export async function deploy(
     if (failure) throw failure;
   } finally {
     await rm(staging, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Replaces every occurrence of every value in `secrets` with `[redacted]`. Matches are found in the
+ * original text and merged where they overlap, so one value (a rejected key that shares a prefix
+ * or a suffix with the accepted one) can never break up another and leave part of it showing.
+ */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  const ranges: [number, number][] = [];
+  for (const v of secrets) {
+    if (!v) continue;
+    for (let i = text.indexOf(v); i >= 0; i = text.indexOf(v, i + 1))
+      ranges.push([i, i + v.length]);
+  }
+  if (!ranges.length) return text;
+  ranges.sort((x, y) => x[0] - y[0]);
+  let out = '';
+  let at = 0;
+  let [start, end] = ranges[0]!;
+  for (const [s, e] of ranges.slice(1)) {
+    if (s <= end) end = Math.max(end, e);
+    else {
+      out += text.slice(at, start) + '[redacted]';
+      at = end;
+      [start, end] = [s, e];
+    }
+  }
+  return out + text.slice(at, start) + '[redacted]' + text.slice(end);
+}
+
+/** The Worker secrets for the answers' provider keys, one per provider however many features use it. */
+function keySecretsOf(a: DeployAnswers): { secret: string; value: string }[] {
+  return (Object.keys(KEY_SECRET) as KeyProvider[]).flatMap((p) => {
+    const value = a.keys[p];
+    return value ? [{ secret: KEY_SECRET[p], value }] : [];
+  });
+}
+
+/** The accounts in `wrangler whoami --json` output; empty when it cannot be read. */
+export function accountsFromWhoami(stdout: string): CloudflareAccount[] {
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start < 0 || end < start) return [];
+  try {
+    const parsed = JSON.parse(stdout.slice(start, end + 1)) as { accounts?: unknown };
+    if (!Array.isArray(parsed.accounts)) return [];
+    return parsed.accounts.flatMap((a: unknown) => {
+      const { id, name } = (a ?? {}) as { id?: unknown; name?: unknown };
+      return typeof id === 'string' && ACCOUNT_ID.test(id)
+        ? [{ id, name: typeof name === 'string' ? name : '' }]
+        : [];
+    });
+  } catch {
+    return [];
   }
 }
 

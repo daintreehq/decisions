@@ -14,8 +14,10 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { buildProgram } from '../src/bin.js';
 import { CliError, type Ctx } from '../src/runtime.js';
 import {
+  accountsFromWhoami,
   buildDeployPlan,
   deploy,
+  redactSecrets,
   nodeSpawner,
   wranglerCommands,
   type DeployDeps,
@@ -92,6 +94,8 @@ function walk(dir: string): string[] {
 
 interface FakeWrangler {
   loggedIn?: boolean;
+  /** The accounts `whoami --json` lists. */
+  accounts?: { id: string; name: string }[];
   bucketExists?: boolean;
   deployOutput?: string;
   failOn?: string;
@@ -122,6 +126,11 @@ function fakeSpawner(f: FakeWrangler = {}) {
         ? ok('You are logged in with an OAuth Token')
         : no('You are not authenticated.');
     }
+    if (sub === 'whoami --json') {
+      if (!req.env.CLOUDFLARE_API_TOKEN && !loggedIn) return no('{"loggedIn":false}');
+      const accounts = f.accounts ?? [{ id: ACCOUNT, name: 'Someone' }];
+      return ok(JSON.stringify({ loggedIn: true, authType: 'OAuth Token', accounts }, null, 2));
+    }
     if (sub === 'login') {
       loggedIn = true;
       return ok();
@@ -132,15 +141,61 @@ function fakeSpawner(f: FakeWrangler = {}) {
       call.configAtCall = JSON.parse(readFileSync(join(req.cwd, 'wrangler.json'), 'utf8'));
       return ok(f.deployOutput ?? `Uploaded daintree-decisions\nDeployed triggers\n  ${URL_}\n`);
     }
-    if (sub.startsWith('secret put')) return ok('Success! Uploaded secret CLAIM_SECRET');
+    if (sub.startsWith('secret put')) return ok(`Success! Uploaded secret ${req.args[4]}`);
     return no(`unexpected: ${sub}`);
   };
   return { spawn, calls };
 }
 
-function relayFetch(over: { claimed?: boolean; claimCalls?: unknown[] } = {}) {
+const PROVIDER_MODELS: Record<string, string[]> = {
+  'api.x.ai': ['grok-4'],
+  'api.openai.com': ['gpt-6.1-terra', 'gpt-6-luna'],
+  'api.anthropic.com': ['claude-haiku-5-5', 'claude-sonnet-5-5'],
+};
+
+interface FakeProviders {
+  /** Keys every provider accepts; anything else gets a 401. */
+  goodKeys?: string[];
+  /** Keys every provider answers with 403. */
+  deniedKeys?: string[];
+  /** Every provider request fails at the network. */
+  down?: boolean;
+  /** Each provider lists only these models. */
+  models?: string[];
+  calls?: { host: string; headers: Record<string, string>; redirect?: string; timed: boolean }[];
+}
+
+function relayFetch(
+  over: { claimed?: boolean; claimCalls?: unknown[]; providers?: FakeProviders } = {},
+) {
   return (async (u: unknown, init?: RequestInit) => {
     const url = new URL(String(u));
+    const models = PROVIDER_MODELS[url.host];
+    if (models) {
+      const p = over.providers ?? {};
+      const headers = { ...(init?.headers as Record<string, string>) };
+      p.calls?.push({
+        host: url.host,
+        headers,
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+        timed: init?.signal instanceof AbortSignal,
+      });
+      if (p.down) throw new TypeError('fetch failed: getaddrinfo ENOTFOUND');
+      if ((init?.method ?? 'GET') !== 'GET' || url.pathname !== '/v1/models')
+        return new Response('not found', { status: 404 });
+      // Each provider authenticates its own way; the other way is a missing key.
+      const key =
+        url.host === 'api.anthropic.com'
+          ? headers['anthropic-version'] === '2026-10-21'
+            ? headers['x-api-key']
+            : undefined
+          : headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+      if (key && (p.deniedKeys ?? []).includes(key))
+        return new Response(JSON.stringify({ error: `denied ${key}` }), { status: 403 });
+      if (!key || !(p.goodKeys ?? []).includes(key))
+        return new Response(JSON.stringify({ error: `bad key ${key}` }), { status: 401 });
+      return new Response(JSON.stringify({ data: (p.models ?? models).map((id) => ({ id })) }));
+    }
     const key = `${init?.method ?? 'GET'} ${url.pathname}`;
     if (key === 'GET /health') return new Response(JSON.stringify({ ok: true, version: VERSION }));
     if (key === 'GET /api/v1/info')
@@ -180,9 +235,12 @@ function setupDeploy(
     bundle?: ReturnType<typeof makeBundle>;
     pinned?: string | undefined;
     nodeVersion?: string;
+    interactive?: boolean;
+    providers?: FakeProviders;
   } = {},
 ) {
   const out: string[] = [];
+  const secretPrompts: string[] = [];
   const err: string[] = [];
   const claimCalls: unknown[] = [];
   const answers = [...(over.answers ?? [])];
@@ -193,14 +251,20 @@ function setupDeploy(
     json: false,
     out: (l) => void out.push(l),
     err: (l) => void err.push(l),
-    prompt: async (q) => {
+    prompt: async (q, opts) => {
       prompts.push(q);
+      if (opts?.secret) secretPrompts.push(q);
       return answers.shift() ?? '';
     },
     env: over.env ?? { PATH: '/usr/bin' },
     now: Date.now,
     readStdin: async () => '',
-    fetch: relayFetch({ claimed: over.claimed ?? false, claimCalls }),
+    fetch: relayFetch({
+      claimed: over.claimed ?? false,
+      claimCalls,
+      ...(over.providers ? { providers: over.providers } : {}),
+    }),
+    ...(over.interactive !== undefined ? { interactive: over.interactive } : {}),
   };
   const bundle = over.bundle ?? makeBundle();
   const tmpRoot = fresh('tmp');
@@ -215,7 +279,19 @@ function setupDeploy(
     sleep: async () => {},
     nodeVersion: over.nodeVersion ?? '22.12.0',
   };
-  return { ctx, out, err, deps, calls: fake.calls, claimCalls, prompts, home, tmpRoot, bundle };
+  return {
+    ctx,
+    out,
+    err,
+    deps,
+    calls: fake.calls,
+    claimCalls,
+    prompts,
+    secretPrompts,
+    home,
+    tmpRoot,
+    bundle,
+  };
 }
 
 const text = (lines: string[]) => lines.join('\n');
@@ -710,5 +786,369 @@ describe('the real spawner', () => {
         'win32',
       ),
     ).rejects.toThrow(/unsafe/);
+  });
+});
+
+describe('decisions deploy, guided at a terminal', () => {
+  const XAI = 'xai-' + 'k'.repeat(40);
+  const OPENAI = 'sk-' + 'o'.repeat(40);
+  const ANTHROPIC = 'sk-ant-' + 'a'.repeat(40);
+  const BAD = 'sk-wrong-' + 'w'.repeat(30);
+  const KEYS = [XAI, OPENAI, ANTHROPIC];
+  const MUTATING = /^(r2 |deploy|secret )/;
+  const subs = (t: { calls: SpawnRequest[] }) => t.calls.map((c) => c.args.slice(2).join(' '));
+
+  /** Every value in `values` stays out of argv, env, files, output and errors. */
+  function expectNowhere(
+    t: ReturnType<typeof setupDeploy>,
+    values: string[],
+    opts: { input?: boolean } = {},
+  ) {
+    for (const v of values) {
+      for (const c of t.calls) {
+        expect(c.args.join(' ')).not.toContain(v);
+        expect(JSON.stringify(c.env)).not.toContain(v);
+        if (!opts.input) expect(c.input ?? '').not.toContain(v);
+      }
+      for (const f of [...walk(root), ...walk(t.home)]) {
+        expect(readFileSync(f).includes(v), f).toBe(false);
+      }
+      expect(text(t.out) + text(t.err)).not.toContain(v);
+    }
+  }
+
+  it('asks everything first, then deploys with exactly the chosen keys and model', async () => {
+    const providers: FakeProviders = { goodKeys: KEYS, calls: [] };
+    const t = setupDeploy({
+      interactive: true,
+      providers,
+      // name, bucket, dictation?, provider, key, cleanup?, provider, model, key, confirm
+      answers: ['', '', 'y', '1', XAI, 'y', '1', '2', ANTHROPIC, 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(subs(t)).toEqual([
+      '--version',
+      'whoami --json',
+      'login',
+      'whoami --json',
+      'r2 bucket create daintree-decisions',
+      'deploy --config wrangler.json',
+      'secret put CLAIM_SECRET --name daintree-decisions',
+      'secret put XAI_API_KEY --name daintree-decisions',
+      'secret put ANTHROPIC_API_KEY --name daintree-decisions',
+    ]);
+    // Keys are asked for with hidden input and reach Wrangler only on stdin.
+    expect(t.secretPrompts).toEqual([
+      expect.stringMatching(/xAI .*API key/),
+      expect.stringMatching(/Anthropic API key/),
+    ]);
+    const put = (s: string) => t.calls.find((c) => c.args.includes(s))!;
+    expect(put('XAI_API_KEY').input).toBe(XAI + '\n');
+    expect(put('ANTHROPIC_API_KEY').input).toBe(ANTHROPIC + '\n');
+    for (const s of ['XAI_API_KEY', 'ANTHROPIC_API_KEY']) {
+      expect(put(s).env.WRANGLER_WRITE_LOGS).toBe('false');
+      expect(put(s).env.WRANGLER_LOG_SANITIZE).toBe('true');
+    }
+    expectNowhere(t, [XAI, ANTHROPIC], { input: true });
+    for (const c of t.calls.filter((c) => !c.args.includes('secret')))
+      for (const k of KEYS) expect(c.input ?? '').not.toContain(k);
+    // The chosen model is deployed; the other provider's stays as the bundle has it.
+    const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
+    expect(deployed.configAtCall).toMatchObject({
+      vars: { ANTHROPIC_CORRECTION_MODEL: 'claude-sonnet-5-5' },
+    });
+    expect((deployed.configAtCall as { vars: object }).vars).not.toHaveProperty(
+      'OPENAI_CORRECTION_MODEL',
+    );
+    // Each key was checked with its provider at its own step, never following a redirect.
+    expect(providers.calls!.map((c) => c.host)).toEqual(['api.x.ai', 'api.anthropic.com']);
+    expect(providers.calls!.every((c) => c.redirect === 'manual' && c.timed)).toBe(true);
+    const o = text(t.out);
+    expect(o).toMatch(/Cloudflare account: Someone \(a1b2c3d4/);
+    expect(o).toMatch(/Cost:/);
+    expect(count(o, "isn't end-to-end encrypted")).toBe(2);
+    expect(o).toMatch(/Dictation +xAI \(Grok\)/);
+    expect(o).toMatch(/Transcript cleanup +Anthropic, claude-sonnet-5-5/);
+    expect(o).toMatch(/xAI key +present/);
+    expect(o).toMatch(/OpenAI key +absent/);
+    expect(count(o, SECRET)).toBe(1);
+    expect(walk(t.tmpRoot)).toEqual([]);
+  });
+
+  it('changes nothing in the account when the summary is not confirmed', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS },
+      answers: ['', '', 'y', '2', OPENAI, 'n', 'n'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+    expect(text(t.out)).toMatch(/Cancelled: nothing in your Cloudflare account was changed/);
+    expect(text(t.out)).not.toContain(SECRET);
+    expectNowhere(t, [OPENAI]);
+    expect(walk(t.tmpRoot)).toEqual([]);
+  });
+
+  it('is cancelled by default: an empty answer to the summary deploys nothing', async () => {
+    const t = setupDeploy({ interactive: true, answers: [] });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.prompts).toEqual([
+      expect.stringMatching(/^Worker name/),
+      expect.stringMatching(/^R2 bucket name/),
+      expect.stringMatching(/^Use dictation\? \[y\/N\]/),
+      expect.stringMatching(/^Use transcript cleanup\? \[y\/N\]/),
+      expect.stringMatching(/^Deploy with these settings\? \[y\/N\]/),
+    ]);
+    expect(t.secretPrompts).toEqual([]);
+    expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+    expect(text(t.out)).toMatch(/Dictation +off/);
+    expect(text(t.out)).toMatch(/Cancelled/);
+  });
+
+  it('a Ctrl-C at any question leaves the account untouched and cleans up', async () => {
+    const t = setupDeploy({ interactive: true, answers: ['', ''] });
+    let asked = 0;
+    const prompt = t.ctx.prompt;
+    t.ctx.prompt = async (q, opts) => {
+      if (++asked === 3) throw new CliError('cancelled', 130);
+      return prompt(q, opts);
+    };
+    await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toMatchObject({ exitCode: 130 });
+    expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+    expect(walk(t.tmpRoot)).toEqual([]);
+  });
+
+  it('reports a key the provider rejects at that step, and takes a corrected one', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS },
+      answers: ['', '', 'y', 'xai', BAD, XAI, 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    const o = text(t.out);
+    const rejected = o.indexOf('rejected that key (HTTP 401)');
+    expect(rejected).toBeGreaterThan(-1);
+    expect(rejected).toBeLessThan(o.indexOf('Summary'));
+    expect(t.calls.find((c) => c.args.includes('XAI_API_KEY'))!.input).toBe(XAI + '\n');
+    expectNowhere(t, [BAD]);
+  });
+
+  it('leaves a feature off when no key is entered after a rejection', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS },
+      answers: ['', '', 'y', '1', BAD, '', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(text(t.out)).toMatch(/Dictation +off/);
+    expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
+      'secret put CLAIM_SECRET --name daintree-decisions',
+    ]);
+  });
+
+  it('keeps a key it could not check only when the user says so', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { down: true },
+      answers: ['', '', 'y', '1', XAI, 'y', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    const o = text(t.out);
+    expect(o).toMatch(/Could not check the key with xAI \(Grok\) \(network error\)/);
+    expect(o).not.toMatch(/ENOTFOUND/);
+    expect(o).toMatch(/xAI key +present \(not checked\)/);
+    expect(subs(t)).toContain('secret put XAI_API_KEY --name daintree-decisions');
+  });
+
+  it('uses one OpenAI key for both features and sets the OpenAI cleanup model', async () => {
+    const providers: FakeProviders = { goodKeys: KEYS, calls: [] };
+    const t = setupDeploy({
+      interactive: true,
+      providers,
+      // OpenAI is the default cleanup provider once dictation uses it; the key is not asked again.
+      answers: ['', '', 'y', '2', OPENAI, 'y', '', '2', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.secretPrompts).toHaveLength(1);
+    expect(providers.calls).toHaveLength(1);
+    expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
+      'secret put CLAIM_SECRET --name daintree-decisions',
+      'secret put OPENAI_API_KEY --name daintree-decisions',
+    ]);
+    const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
+    expect(deployed.configAtCall).toMatchObject({
+      vars: { OPENAI_CORRECTION_MODEL: 'gpt-6-luna' },
+    });
+    expect(text(t.out)).toMatch(/Using the OpenAI key entered for dictation/);
+  });
+
+  it('lets the user change the names, asking again for an invalid one', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      answers: ['Bad Name', 'my-relay', 'my-files', 'n', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(text(t.out)).toMatch(/"Bad Name" is not valid/);
+    expect(subs(t)).toEqual(
+      expect.arrayContaining([
+        'r2 bucket create my-files',
+        'secret put CLAIM_SECRET --name my-relay',
+      ]),
+    );
+    expect(t.calls.find((c) => c.args.includes('deploy'))!.configAtCall).toMatchObject({
+      name: 'my-relay',
+      r2_buckets: [{ binding: 'ATTACHMENTS', bucket_name: 'my-files' }],
+    });
+  });
+
+  it('asks which account to use when the login has several, and deploys there', async () => {
+    const other = 'f0e1d2c3'.repeat(4);
+    const t = setupDeploy({
+      interactive: true,
+      wrangler: {
+        loggedIn: true,
+        accounts: [
+          { id: ACCOUNT, name: 'Personal' },
+          { id: other, name: 'Work' },
+        ],
+      },
+      answers: ['2', '', '', 'n', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(text(t.out)).toMatch(/Cloudflare account +Work \(f0e1d2c3/);
+    const after = t.calls.filter((c) => MUTATING.test(c.args.slice(2).join(' ')));
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.every((c) => c.env.CLOUDFLARE_ACCOUNT_ID === other)).toBe(true);
+  });
+
+  it('takes the account from --account-id without asking', async () => {
+    const other = 'f0e1d2c3'.repeat(4);
+    const t = setupDeploy({
+      interactive: true,
+      wrangler: {
+        loggedIn: true,
+        accounts: [
+          { id: ACCOUNT, name: 'Personal' },
+          { id: other, name: 'Work' },
+        ],
+      },
+      answers: ['', '', 'n', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, { accountId: other }, t.deps);
+    expect(t.prompts.some((q) => /Account/.test(q))).toBe(false);
+    expect(text(t.out)).toMatch(/Cloudflare account: Work/);
+  });
+
+  it('sets the chosen keys on an already claimed relay without touching its claim secret', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      claimed: true,
+      providers: { goodKeys: KEYS },
+      answers: ['', '', 'y', '1', XAI, 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
+      'secret put XAI_API_KEY --name daintree-decisions',
+    ]);
+    expect(text(t.out)).not.toContain(SECRET);
+  });
+
+  it('still shows the claim secret when setting a key fails', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS },
+      wrangler: { failOn: 'secret put XAI_API_KEY', echoInputOnFail: true },
+      answers: ['', '', 'y', '1', XAI, 'n', 'y'],
+    });
+    const e = (await deploy(t.ctx, {}, {}, t.deps).catch((x: unknown) => x)) as Error;
+    expect(e).toBeInstanceOf(CliError);
+    expect(e.message).toMatch(/XAI_API_KEY/);
+    expect(e.message).toContain('[redacted]');
+    expect(e.message).not.toContain(XAI);
+    expect(count(text(t.out), SECRET)).toBe(1);
+    expect(text(t.out)).toMatch(/with problems/);
+    expectNowhere(t, [XAI], { input: true });
+  });
+
+  it('asks nothing for --dry-run, even at a terminal', async () => {
+    const t = setupDeploy({ interactive: true });
+    await deploy(t.ctx, {}, { dryRun: true }, t.deps);
+    expect(t.prompts).toEqual([]);
+    expect(t.calls).toEqual([]);
+  });
+
+  it('asks nothing without a terminal, and runs the steps as before', async () => {
+    const t = setupDeploy({ interactive: false });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.prompts).toEqual([]);
+    expect(subs(t)[1]).toBe('whoami');
+  });
+
+  it('asks for the key again when the user will not use one that could not be checked', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { down: true },
+      answers: ['', '', 'y', '1', XAI, 'n', '', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.secretPrompts).toHaveLength(2);
+    expect(text(t.out)).toMatch(/Dictation +off/);
+    expect(subs(t)).not.toContain('secret put XAI_API_KEY --name daintree-decisions');
+  });
+
+  it('reports a key the provider denies (403) as denied, not as unchecked', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS, deniedKeys: [BAD] },
+      answers: ['', '', 'y', '1', BAD, '', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    const o = text(t.out);
+    expect(o).toMatch(/denied access with that key \(HTTP 403\)/);
+    expect(o).not.toMatch(/without checking/);
+    expect(o).toMatch(/Dictation +off/);
+    expectNowhere(t, [BAD]);
+  });
+
+  it('notes a cleanup model the shared OpenAI key cannot see', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS, models: ['gpt-6.1-terra'] },
+      answers: ['', '', 'y', 'openai', OPENAI, 'y', 'openai', '2', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(text(t.out)).toMatch(/Dictation +OpenAI/);
+    expect(text(t.out)).toMatch(/OpenAI does not list gpt-6-luna for this key/);
+  });
+
+  it('gives up after repeated invalid answers without changing anything', async () => {
+    const t = setupDeploy({ interactive: true, answers: Array(5).fill('Bad Name') });
+    await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toThrow(/nothing was changed/);
+    expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+    expect(walk(t.tmpRoot)).toEqual([]);
+  });
+
+  it('redacts every secret, even where two of them overlap', () => {
+    const R = '[redacted]';
+    expect(redactSecrets('key=abcdefgh;', ['abcdef', 'defgh'])).toBe(`key=${R};`);
+    expect(redactSecrets('abcdef abcdefgh', ['abc', 'abcdefgh'])).toBe(`${R}def ${R}`);
+    expect(redactSecrets('x aaaa y aa', ['aa'])).toBe(`x ${R} y ${R}`);
+    expect(redactSecrets('nothing here', ['secret', ''])).toBe('nothing here');
+    // A value equal to the marker is not reintroduced by the marker itself.
+    expect(redactSecrets('a s3cret b', ['s3cret', R])).toBe(`a ${R} b`);
+  });
+
+  it('reads accounts from `wrangler whoami --json`, ignoring anything malformed', () => {
+    expect(
+      accountsFromWhoami(
+        'warning banner\n' +
+          JSON.stringify({
+            loggedIn: true,
+            accounts: [{ id: ACCOUNT, name: 'A' }, { id: 'nope', name: 'B' }, null, { id: 7 }],
+          }),
+      ),
+    ).toEqual([{ id: ACCOUNT, name: 'A' }]);
+    expect(accountsFromWhoami('not json')).toEqual([]);
+    expect(accountsFromWhoami('{"loggedIn":false}')).toEqual([]);
   });
 });
