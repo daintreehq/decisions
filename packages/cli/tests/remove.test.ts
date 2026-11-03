@@ -36,6 +36,8 @@ interface FakeAccount {
   /** Keyed `${jurisdiction}:${name}`. */
   buckets: Map<string, Set<string>>;
   domains: { hostname: string; service: string }[];
+  /** What the Worker answers on /api/v1/info (default: an unclaimed relay). */
+  info?: unknown;
 }
 
 const relayBindings = (bucket = 'daintree-decisions', extra: Record<string, unknown> = {}) => [
@@ -64,16 +66,21 @@ function account(
     buckets:
       over.buckets ?? new Map([[`default:${bucket}`, new Set(over.keys ?? ['att/1', 'att/2'])]]),
     domains: over.domains ?? [],
+    ...(over.info !== undefined ? { info: over.info } : {}),
   };
 }
 
 interface Faults {
-  /** Respond to matching `${method} ${path}` with this status (once per call while it holds). */
-  fail?: (method: string, path: string) => { status: number; message: string } | null;
+  /** Respond to matching `${method} ${path}` with this error, or this raw response. */
+  fail?: (method: string, path: string) => { status: number; message: string } | Response | null;
 }
+
+/** Cloudflare pages lists; the fake uses tiny pages so every list has to be followed. */
+const PAGE = 2;
 
 function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
   const requests: { method: string; path: string; auth: string; headers: Headers }[] = [];
+  const probes: { url: string; headers: Headers }[] = [];
   const ok = (result: unknown, info?: unknown) =>
     new Response(JSON.stringify({ success: true, errors: [], result, result_info: info }));
   const no = (status: number, message: string) =>
@@ -87,11 +94,19 @@ function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
     const url = new URL(String(u));
     const method = init?.method ?? 'GET';
     const headers = new Headers(init?.headers);
-    if (url.hostname.endsWith('.workers.dev')) {
+    if (url.hostname !== 'api.cloudflare.com') {
+      // The relay itself: it must never see a Cloudflare credential.
+      probes.push({ url: url.toString(), headers });
+      expect(JSON.stringify([...headers])).not.toContain(TOKEN);
+      expect(headers.get('authorization')).toBeNull();
       const [worker, sub] = url.hostname.split('.');
-      const a = accounts.find((x) => x.subdomain === sub && x.workers[worker!]);
+      const a = accounts.find(
+        (x) =>
+          (x.subdomain === sub && x.workers[worker!]) ||
+          x.domains.some((d) => d.hostname === url.hostname && x.workers[d.service]),
+      );
       if (!a || url.pathname !== '/api/v1/info') return new Response('nope', { status: 404 });
-      return new Response(JSON.stringify({ name: 'daintree-decisions', claimed: false }));
+      return new Response(JSON.stringify(a.info ?? { name: 'daintree-decisions', claimed: false }));
     }
     expect(url.origin).toBe('https://api.cloudflare.com');
     expect(init?.redirect).toBe('error');
@@ -99,11 +114,11 @@ function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
     requests.push({ method, path, auth: headers.get('authorization') ?? '', headers });
     if (headers.get('authorization') !== `Bearer ${TOKEN}`) return no(401, 'bad token');
     const f = faults.fail?.(method, path);
-    if (f) return no(f.status, f.message);
+    if (f) return f instanceof Response ? f : no(f.status, f.message);
 
     if (method === 'GET' && path === '/accounts') {
       const page = Number(url.searchParams.get('page') ?? '1');
-      const per = Number(url.searchParams.get('per_page') ?? '20');
+      const per = Math.min(Number(url.searchParams.get('per_page') ?? '20'), PAGE);
       const slice = accounts
         .slice((page - 1) * per, page * per)
         .map((a) => ({ id: a.id, name: a.name }));
@@ -127,7 +142,13 @@ function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
         : no(404, 'This Worker does not exist on your account.');
     }
     if (method === 'GET' && rest === '/workers/durable_objects/namespaces') {
-      return ok(a.namespaces, { page: 1, total_pages: 1 });
+      const page = Number(url.searchParams.get('page') ?? '1');
+      const per = Math.min(Number(url.searchParams.get('per_page') ?? '20'), PAGE);
+      return ok(a.namespaces.slice((page - 1) * per, page * per), {
+        page,
+        per_page: per,
+        total_pages: Math.ceil(a.namespaces.length / per) || 1,
+      });
     }
     if ((r = rest.match(/^\/workers\/services\/([^/]+)$/)) && method === 'DELETE') {
       const name = r[1]!;
@@ -168,7 +189,7 @@ function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
     }
     return no(404, `unexpected ${method} ${path}`);
   }) as typeof fetch;
-  return { fetchFn, requests };
+  return { fetchFn, requests, probes };
 }
 
 function setup(
@@ -183,15 +204,26 @@ function setup(
 ) {
   const out: string[] = [];
   const prompts: string[] = [];
+  const promptOpts: ({ secret?: boolean } | undefined)[] = [];
+  /** The state of things at each prompt: what had been said and whether anything had changed. */
+  const atPrompt: { output: string; deletes: number; record: boolean }[] = [];
   const answers = [...(over.answers ?? [])];
   const cf = fakeCloudflare(accounts, over.faults);
+  const home = over.home ?? join(root, `home${n++}`);
   const ctx: Ctx = {
-    home: over.home ?? join(root, `home${n++}`),
+    home,
     json: false,
     out: (l) => void out.push(l),
     err: (l) => void out.push(l),
-    prompt: async (q) => {
+    prompt: async (q, opts) => {
       prompts.push(q);
+      promptOpts.push(opts);
+      atPrompt.push({
+        output: out.join('\n'),
+        deletes: cf.requests.filter((r) => r.method === 'DELETE').length,
+        record:
+          existsSync(join(home, 'removals')) && readdirSync(join(home, 'removals')).length > 0,
+      });
       return answers.shift() ?? '';
     },
     env: over.env ?? { CLOUDFLARE_API_TOKEN: TOKEN },
@@ -203,7 +235,18 @@ function setup(
   const deps: RemoveDeps = { sleep: async () => {}, tmpRoot: mkdtempSync(join(root, 'tmp-')) };
   const run = (target: string, o: RemoveOptions = {}) => remove(ctx, {}, target, o, deps);
   const deletes = () => cf.requests.filter((r) => r.method === 'DELETE');
-  return { ctx, out, prompts, run, requests: cf.requests, deletes, deps };
+  return {
+    ctx,
+    out,
+    prompts,
+    promptOpts,
+    atPrompt,
+    run,
+    requests: cf.requests,
+    probes: cf.probes,
+    deletes,
+    deps,
+  };
 }
 
 const text = (lines: string[]) => lines.join('\n');
@@ -248,12 +291,19 @@ describe('parseTokenOutput', () => {
 });
 
 describe('decisions remove', () => {
-  it('is a command of the CLI', () => {
+  it('is a command of the CLI that runs with its target and options', async () => {
     const cmd = buildProgram().commands.find((c) => c.name() === 'remove')!;
     expect(cmd).toBeDefined();
     expect(cmd.options.map((o) => o.long).sort()).toEqual(
       ['--account-id', '--api-token', '--bucket', '--dry-run'].sort(),
     );
+    // Rejected by the command's own validation, before anything touches the network.
+    await expect(
+      buildProgram().parseAsync(['node', 'decisions', 'remove', 'relay', '--bucket', 'B!']),
+    ).rejects.toThrow(/--bucket "B!" is not a valid R2 bucket name/);
+    await expect(
+      buildProgram().parseAsync(['node', 'decisions', 'remove', 'http://x.y.workers.dev']),
+    ).rejects.toThrow(/https/);
   });
 
   it('lists every resource in a dry run and deletes nothing', async () => {
@@ -279,10 +329,14 @@ describe('decisions remove', () => {
     const t = setup([acct], { answers: ['daintree-decisions', 'y'] });
     await t.run('daintree-decisions');
     const o = text(t.out);
-    // The consequences come before the first confirmation.
-    expect(o).toContain('every question, answer and attachment stored on this relay');
-    expect(o).toContain('phones and tablets paired with it stop working');
-    expect(o).toContain('This cannot be undone');
+    // The consequences come before the first confirmation, and nothing changes before the last.
+    expect(t.atPrompt[0]!.output).toContain(
+      'every question, answer and attachment stored on this relay',
+    );
+    expect(t.atPrompt[0]!.output).toContain('phones and tablets paired with it stop working');
+    expect(t.atPrompt[0]!.output).toContain('This cannot be undone');
+    expect(t.atPrompt).toHaveLength(2);
+    for (const p of t.atPrompt) expect(p).toMatchObject({ deletes: 0, record: false });
     expect(t.prompts[0]).toContain('Type the Worker name (daintree-decisions)');
     expect(t.prompts[1]).toMatch(/\[y\/N\]/);
     const order = t.deletes().map((r) => r.path.replace(`/accounts/${A1}`, ''));
@@ -503,41 +557,85 @@ describe('decisions remove', () => {
     expect(t.deletes()).toEqual([]);
   });
 
-  it('gets the token from Wrangler after a browser login and never prints it', async () => {
+  function wranglerFake(o: { loggedIn: boolean; token?: SpawnResult }) {
     const calls: SpawnRequest[] = [];
+    let loggedIn = o.loggedIn;
     const spawn = async (req: SpawnRequest): Promise<SpawnResult> => {
-      calls.push(req);
+      calls.push({ ...req, env: { ...req.env } });
+      expect(existsSync(req.cwd)).toBe(true);
       const sub = req.args.slice(2).join(' ');
       if (sub === '--version') return { status: 0, stdout: WRANGLER, stderr: '' };
       if (sub === 'whoami')
-        return { status: 0, stdout: 'You are logged in with an OAuth Token', stderr: '' };
+        return loggedIn
+          ? { status: 0, stdout: 'You are logged in with an OAuth Token', stderr: '' }
+          : { status: 1, stdout: '', stderr: 'You are not authenticated.' };
+      if (sub === 'login') {
+        loggedIn = true;
+        return { status: 0, stdout: '', stderr: '' };
+      }
       if (sub === 'auth token --json')
-        return { status: 0, stdout: JSON.stringify({ type: 'oauth', token: TOKEN }), stderr: '' };
+        return (
+          o.token ?? {
+            status: 0,
+            stdout: JSON.stringify({ type: 'oauth', token: TOKEN }),
+            stderr: '',
+          }
+        );
       return { status: 1, stdout: '', stderr: `unexpected ${sub}` };
     };
+    return { spawn, calls };
+  }
+
+  function withWrangler(t: ReturnType<typeof setup>, spawn: RemoveDeps['spawn']) {
     const bundle = makeBundle();
-    const acct = account();
-    const t = setup([acct], { env: { PATH: '/usr/bin' }, answers: ['daintree-decisions', 'y'] });
     Object.assign(t.deps, {
       spawn,
       bundleDir: bundle.dir,
       pinnedManifestSha256: bundle.digest,
       version: '9.9.9',
     });
+  }
+
+  it('gets the token from Wrangler after a browser login and never prints it', async () => {
+    const w = wranglerFake({ loggedIn: false });
+    const acct = account();
+    const t = setup([acct], {
+      env: { PATH: '/usr/bin', CLOUDFLARE_API_BASE_URL: 'http://evil.example' },
+      answers: ['daintree-decisions', 'y'],
+    });
+    withWrangler(t, w.spawn);
     await t.run('daintree-decisions');
-    expect(calls.map((c) => c.args.join(' '))).toEqual([
-      `--yes wrangler@${WRANGLER} --version`,
-      `--yes wrangler@${WRANGLER} whoami`,
-      `--yes wrangler@${WRANGLER} auth token --json`,
+    expect(w.calls.map((c) => [c.args.join(' '), c.capture])).toEqual([
+      [`--yes wrangler@${WRANGLER} --version`, true],
+      [`--yes wrangler@${WRANGLER} whoami`, true],
+      // The browser login gets the terminal; everything else is captured.
+      [`--yes wrangler@${WRANGLER} login`, false],
+      [`--yes wrangler@${WRANGLER} auth token --json`, true],
     ]);
-    for (const c of calls) {
+    for (const c of w.calls) {
       expect(c.env.WRANGLER_LOG_SANITIZE).toBe('true');
       expect(c.env.WRANGLER_WRITE_LOGS).toBe('false');
+      expect(c.env.CLOUDFLARE_API_BASE_URL).toBeUndefined();
       expect(existsSync(c.cwd)).toBe(false); // the empty working directory is cleaned up
     }
     expect(text(t.out)).not.toContain(TOKEN);
     expect(t.requests.every((r) => r.auth === `Bearer ${TOKEN}`)).toBe(true);
+    expect(t.probes.length).toBeGreaterThan(0);
     expect(acct.workers).toEqual({});
+  });
+
+  it('shows nothing of a failed token command and cleans up', async () => {
+    const w = wranglerFake({
+      loggedIn: true,
+      token: { status: 1, stdout: `{"type":"oauth","token":"${TOKEN}"`, stderr: TOKEN },
+    });
+    const t = setup([account()], { env: { PATH: '/usr/bin' }, interactive: false });
+    withWrangler(t, w.spawn);
+    const e = await t.run('daintree-decisions', { dryRun: true }).catch((x: Error) => x);
+    expect((e as Error).message).toMatch(/did not hand over a Cloudflare token/);
+    expect((e as Error).message + text(t.out)).not.toContain(TOKEN);
+    expect(t.requests).toEqual([]);
+    for (const c of w.calls) expect(existsSync(c.cwd)).toBe(false);
   });
 
   it('asks for an API token with --api-token and redacts it from errors', async () => {
@@ -554,6 +652,115 @@ describe('decisions remove', () => {
     expect((e as Error).message).toContain('[redacted]');
     expect((e as Error).message).not.toContain(TOKEN);
     expect(t.prompts[0]).toContain('API token');
+    expect(t.promptOpts[0]).toEqual({ secret: true });
+  });
+
+  it('warns when a Worker with the relay bindings answers as something else', async () => {
+    const acct = account({ info: { name: 'my-other-app', claimed: false } });
+    const t = setup([acct], { answers: ['daintree-decisions', 'y'] });
+    await expect(t.run('daintree-decisions')).rejects.toThrow(/cancelled/);
+    expect(text(t.out)).toContain(
+      'https://daintree-decisions.someone.workers.dev answers, but not as a Decisions relay',
+    );
+    expect(t.deletes()).toEqual([]);
+  });
+
+  it('keeps the warning on a rerun of a removal that was never confirmed', async () => {
+    const acct = account({
+      relay: null,
+      workers: {
+        'my-api': { bindings: [{ type: 'r2_bucket', name: 'ATTACHMENTS', bucket_name: 'b-1' }] },
+      },
+      buckets: new Map([['default:b-1', new Set(['k'])]]),
+    });
+    let broken = true;
+    const faults: Faults = {
+      fail: (m, p) =>
+        broken && m === 'DELETE' && p.endsWith('/r2/buckets/b-1')
+          ? { status: 403, message: 'locked' }
+          : null,
+    };
+    const first = setup([acct], { answers: ['remove anyway', 'my-api', 'y'], faults });
+    await expect(first.run('my-api')).rejects.toThrow(/only partly removed/);
+    broken = false;
+    const again = setup([acct], { answers: ['my-api', 'y'], home: first.ctx.home, faults });
+    await expect(again.run('my-api')).rejects.toThrow(/cancelled/);
+    expect(text(again.out)).toContain('could not confirm it as a relay either');
+    expect(again.deletes()).toEqual([]);
+  });
+
+  it('finds the relay and its storage on later pages of every list', async () => {
+    const filler = (i: number) =>
+      account({ id: String(i).padStart(32, 'c'), name: `F${i}`, relay: null, buckets: new Map() });
+    const acct = account({ id: A2, name: 'Last' });
+    acct.namespaces = [
+      ...Array.from({ length: 3 }, (_, i) => ({
+        id: `other-${i}`,
+        name: 'x',
+        script: 'other',
+        class: 'X',
+      })),
+      ...acct.namespaces,
+    ];
+    const t = setup([filler(1), filler(2), filler(3), acct], {
+      answers: ['daintree-decisions', 'y'],
+    });
+    await t.run('daintree-decisions');
+    expect(text(t.out)).toContain(`"Last" (${A2})`);
+    expect(text(t.out)).toContain('✓ Durable Object storage DecisionRoom removed');
+    expect(acct.namespaces.map((x) => x.id)).toEqual(['other-0', 'other-1', 'other-2']);
+  });
+
+  it('keeps the bucket and reports everything when the Worker removal cannot be checked', async () => {
+    const acct = account();
+    let deleted = false;
+    const t = setup([acct], {
+      answers: ['daintree-decisions', 'y'],
+      faults: {
+        fail: (m, p) => {
+          if (m === 'DELETE' && p.includes('/workers/services/')) deleted = true;
+          return deleted && m === 'GET' && p.endsWith('/settings')
+            ? { status: 403, message: 'denied' }
+            : null;
+        },
+      },
+    });
+    await expect(t.run('daintree-decisions')).rejects.toThrow(/only partly removed/);
+    const o = text(t.out);
+    expect(o).toContain('✗ it is not known whether the Worker was removed');
+    expect(o).toContain('the R2 bucket "daintree-decisions"');
+    expect(o).toContain('decisions remove daintree-decisions --account-id');
+    expect(t.deletes().filter((r) => r.path.includes('/r2/'))).toEqual([]);
+  });
+
+  it('treats an unreadable answer as a failure, never as a missing Worker', async () => {
+    const acct = account();
+    const t = setup([acct], {
+      answers: ['daintree-decisions', 'y'],
+      faults: {
+        fail: (m, p) => (m === 'GET' && p.endsWith('/settings') ? new Response('<html>') : null),
+      },
+    });
+    await expect(t.run('daintree-decisions')).rejects.toThrow(/could not be read/);
+    expect(t.deletes()).toEqual([]);
+  });
+
+  it('names the Worker in the rerun command when it was found by its custom domain', async () => {
+    const acct = account({
+      domains: [{ hostname: 'relay.example.com', service: 'daintree-decisions' }],
+    });
+    const t = setup([acct], {
+      answers: ['daintree-decisions', 'y'],
+      faults: {
+        fail: (m, p) =>
+          m === 'DELETE' && p.endsWith('/r2/buckets/daintree-decisions')
+            ? { status: 403, message: 'locked' }
+            : null,
+      },
+    });
+    await expect(t.run('https://relay.example.com')).rejects.toThrow(/only partly removed/);
+    expect(text(t.out)).toContain(`decisions remove daintree-decisions --account-id ${A1}`);
+    expect(t.probes.map((p) => p.url)).toEqual(['https://relay.example.com/api/v1/info']);
   });
 });
 

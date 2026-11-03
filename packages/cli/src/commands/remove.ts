@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PINNED_MANIFEST_SHA256, locateRelayBundle, verifyRelayBundle } from '../relay-bundle.js';
@@ -148,16 +148,19 @@ class Cloudflare {
         result_info?: CfResult<T>['info'];
         errors?: { code?: unknown; message?: unknown }[];
       } = {};
+      let readable = true;
       try {
         body = (await res.json()) as typeof body;
       } catch {
-        /* not JSON; the status decides */
+        readable = false;
       }
-      const ok = res.ok && body.success !== false;
+      // A read whose answer could not be read is a failure, never an empty (or absent) result.
+      const ok = res.ok && (readable ? body.success !== false : method === 'DELETE');
       const message = this.redact(
         (Array.isArray(body.errors) ? body.errors : [])
           .map((e) => `${String(e.code ?? '')} ${String(e.message ?? '')}`.trim())
-          .join('; ') || `HTTP ${res.status}`,
+          .join('; ') ||
+          (res.ok && !readable ? 'the response could not be read' : `HTTP ${res.status}`),
       );
       return {
         status: res.status,
@@ -229,6 +232,8 @@ interface RemovalRecord {
   account_id: string;
   worker: string;
   buckets: Bucket[];
+  /** Whether the run that wrote it confirmed the Worker as a Decisions relay. */
+  confirmed: boolean;
 }
 
 interface Inventory {
@@ -243,8 +248,10 @@ interface Inventory {
   confirmed: boolean;
   /** Why the Worker could not be confirmed as a Decisions relay. */
   doubts: string[];
-  claimed: boolean | undefined;
+  /** What the relay said on /api/v1/info (never sent any credential). */
+  answer: ProbeAnswer;
   record: RemovalRecord | null;
+  customOrigin: string | undefined;
 }
 
 const bucketHeaders = (b: Bucket): Record<string, string> =>
@@ -274,6 +281,7 @@ async function readRecord(path: string): Promise<RemovalRecord | null> {
     r.schema !== 1 ||
     typeof r.account_id !== 'string' ||
     typeof r.worker !== 'string' ||
+    typeof r.confirmed !== 'boolean' ||
     !Array.isArray(r.buckets) ||
     !r.buckets.every((b) => b && typeof b.name === 'string' && BUCKET_NAME.test(b.name))
   ) {
@@ -297,8 +305,11 @@ async function recordsFor(home: string, worker: string): Promise<RemovalRecord[]
 async function saveRecord(home: string, r: RemovalRecord): Promise<void> {
   await mkdir(recordDir(home), { recursive: true, mode: 0o700 });
   const path = recordPath(home, r.account_id, r.worker);
-  await writeFile(path, JSON.stringify(r, null, 2) + '\n', { mode: 0o600 });
-  await chmod(path, 0o600);
+  // Written aside and renamed, so an earlier record survives an interrupted write.
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(r, null, 2) + '\n', { mode: 0o600 });
+  await chmod(tmp, 0o600);
+  await rename(tmp, path);
 }
 
 /** Runs `fn` over `items`, at most `limit` at a time. */
@@ -384,6 +395,7 @@ export async function remove(
     buckets: inv.buckets.map(({ name, jurisdiction }) =>
       jurisdiction ? { name, jurisdiction } : { name },
     ),
+    confirmed: inv.confirmed,
   };
   try {
     await saveRecord(ctx.home, record);
@@ -399,13 +411,13 @@ export async function remove(
     say('\nNot finished. Still in Cloudflare:');
     for (const l of left) say(`  - ${l}`);
     say('\nRun the same command again to finish:');
-    say(`  decisions remove ${rerunArgs(targetInput, inv.account.id, o)}`);
+    say(`  decisions remove ${rerunArgs(inv, o)}`);
     throw new CliError('the relay was only partly removed');
   }
   await rm(recordPath(ctx.home, inv.account.id, inv.worker), { force: true });
   say(`\nRemoved. Nothing of "${inv.worker}" is left in Cloudflare.`);
   say('A fresh `decisions deploy` sets up a new relay from nothing.');
-  await localIdentityHint(ctx, g, inv.origin);
+  await localIdentityHint(ctx, g, [inv.origin, inv.customOrigin]);
 }
 
 /** The Cloudflare API token: from the prompt, the environment, or Wrangler's browser login. */
@@ -447,6 +459,9 @@ async function cloudflareToken(
   delete env.npm_config_call;
   env.WRANGLER_LOG_SANITIZE = 'true';
   env.WRANGLER_WRITE_LOGS = 'false';
+  // The token Wrangler holds goes only to Cloudflare's own API, the one the REST calls use.
+  delete env.CLOUDFLARE_API_BASE_URL;
+  delete env.CF_API_BASE_URL;
   // An empty directory, so Wrangler never picks up a wrangler.json from wherever the user is.
   const cwd = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-remove-'));
   try {
@@ -514,6 +529,8 @@ interface Located {
   account: Account;
   worker: string;
   subdomain: string | undefined;
+  /** The custom domain the relay was named by, if it was. */
+  customOrigin: string | undefined;
   record: RemovalRecord | null;
 }
 
@@ -609,7 +626,8 @@ async function locate(
       ? target.subdomain
       : await subdomainOf(hit.account).catch(() => undefined);
   const record = await readRecord(recordPath(ctx.home, hit.account.id, hit.worker));
-  return { account: hit.account, worker: hit.worker, subdomain, record };
+  const customOrigin = target.kind === 'domain' ? `https://${target.hostname}` : undefined;
+  return { account: hit.account, worker: hit.worker, subdomain, customOrigin, record };
 }
 
 const targetText = (t: RemoveTarget) =>
@@ -671,6 +689,9 @@ async function inventory(
       doubts.push(`it does not implement a ${RELAY_DO_CLASS} Durable Object`);
   } else if (l.record) {
     buckets = l.record.buckets;
+    if (!l.record.confirmed) {
+      doubts.push('the earlier run that removed the Worker could not confirm it as a relay either');
+    }
   } else if (o.bucket) {
     buckets = [{ name: o.bucket }];
     doubts.push(
@@ -698,7 +719,9 @@ async function inventory(
   }
 
   const origin = l.subdomain ? `https://${l.worker}.${l.subdomain}.workers.dev` : undefined;
-  const claimed = workerExists && origin ? await probeInfo(ctx, origin) : undefined;
+  const probed = l.customOrigin ?? origin;
+  const answer = workerExists && probed ? await probeInfo(ctx, probed) : 'unreachable';
+  if (answer === 'other') doubts.push(`${probed} answers, but not as a Decisions relay`);
   return {
     account: l.account,
     worker: l.worker,
@@ -709,26 +732,38 @@ async function inventory(
     leftInPlace,
     confirmed: doubts.length === 0,
     doubts,
-    claimed,
+    answer,
     record: l.record,
+    customOrigin: l.customOrigin,
   };
 }
 
-/** Whether the relay says it is claimed; undefined when it does not answer as a Decisions relay. */
-async function probeInfo(ctx: Ctx, origin: string): Promise<boolean | undefined> {
+type ProbeAnswer = 'claimed' | 'unclaimed' | 'other' | 'unreachable';
+
+/**
+ * What the Worker says it is. 'other' is a successful answer that is not a Decisions relay's;
+ * anything that fails to answer (a disabled workers.dev route, a crash) is only 'unreachable'.
+ */
+async function probeInfo(ctx: Ctx, origin: string): Promise<ProbeAnswer> {
+  let r: Response;
   try {
-    const r = await ctx.fetch(`${origin}/api/v1/info`, {
+    r = await ctx.fetch(`${origin}/api/v1/info`, {
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     });
-    if (!r.ok) return undefined;
-    const j = (await r.json()) as { name?: unknown; claimed?: unknown };
-    return j.name === 'daintree-decisions' && typeof j.claimed === 'boolean'
-      ? j.claimed
-      : undefined;
   } catch {
-    return undefined;
+    return 'unreachable';
   }
+  if (!r.ok) return 'unreachable';
+  try {
+    const j = (await r.json()) as { name?: unknown; claimed?: unknown };
+    if (j.name === 'daintree-decisions' && typeof j.claimed === 'boolean') {
+      return j.claimed ? 'claimed' : 'unclaimed';
+    }
+  } catch {
+    /* not JSON */
+  }
+  return 'other';
 }
 
 function showInventory(ctx: Ctx, inv: Inventory, o: RemoveOptions): void {
@@ -738,9 +773,9 @@ function showInventory(ctx: Ctx, inv: Inventory, o: RemoveOptions): void {
   if (inv.origin) say(`  URL              ${inv.origin}`);
   if (inv.workerExists) {
     const state =
-      inv.claimed === true
+      inv.answer === 'claimed'
         ? 'answers as a Decisions relay, claimed'
-        : inv.claimed === false
+        : inv.answer === 'unclaimed'
           ? 'answers as a Decisions relay, never claimed'
           : 'did not answer as a Decisions relay';
     say(`  Worker           ${inv.worker}  (${state})`);
@@ -781,53 +816,68 @@ async function execute(
   const say = (l: string) => ctx.out(l);
   const a = inv.account.id;
   const left: string[] = [];
+  const everything = () => [
+    ...(inv.workerExists ? [`the Worker "${inv.worker}"`] : []),
+    ...inv.namespaces.map((n) => `the Durable Object namespace ${n.id}`),
+    ...inv.buckets.filter((b) => b.exists).map((b) => `the R2 bucket "${b.name}"`),
+  ];
   say('');
 
   if (inv.workerExists) {
     say(`Removing the Worker "${inv.worker}" and its Durable Object storage`);
-    const r = await cf.call('DELETE', `/accounts/${a}/workers/services/${inv.worker}`, {
-      query: { force: 'true' },
-    });
-    if (!r.ok && r.status !== 404) {
-      say(`  ✗ the Worker was not removed: ${r.message}`);
-      left.push(`the Worker "${inv.worker}"`);
-      for (const n of inv.namespaces) left.push(`the Durable Object namespace ${n.id}`);
-      for (const b of inv.buckets) if (b.exists) left.push(`the R2 bucket "${b.name}"`);
-      // The bucket stays while the Worker that writes to it is still running.
-      return left;
-    }
-    const still = await cf.get(
-      `/accounts/${a}/workers/scripts/${inv.worker}/settings`,
-      `the Worker "${inv.worker}"`,
-      { missing: true },
-    );
-    if (still) {
-      say('  ✗ Cloudflare still lists the Worker after deleting it');
-      left.push(`the Worker "${inv.worker}"`);
-      return left;
+    // Until the Worker is known to be gone, its bucket stays: the relay may still write to it.
+    try {
+      const r = await cf.call('DELETE', `/accounts/${a}/workers/services/${inv.worker}`, {
+        query: { force: 'true' },
+      });
+      if (!r.ok && r.status !== 404) {
+        say(`  ✗ the Worker was not removed: ${r.message}`);
+        return everything();
+      }
+      const still = await cf.get(
+        `/accounts/${a}/workers/scripts/${inv.worker}/settings`,
+        `the Worker "${inv.worker}"`,
+        { missing: true },
+      );
+      if (still) {
+        say('  ✗ Cloudflare still lists the Worker after deleting it');
+        return everything();
+      }
+    } catch (e) {
+      say(`  ✗ it is not known whether the Worker was removed: ${(e as Error).message}`);
+      return everything();
     }
     say(`  ✓ Worker "${inv.worker}" removed`);
   }
 
   if (inv.namespaces.length) {
     let remaining = inv.namespaces;
+    let failure: string | null = null;
     for (let i = 0; i < 6; i++) {
-      const listed = await cf.list<Namespace>(
-        `/accounts/${a}/workers/durable_objects/namespaces`,
-        'Durable Object namespaces',
-        1000,
-      );
-      const ids = new Set(listed.filter((n) => n.script === inv.worker).map((n) => n.id));
-      remaining = inv.namespaces.filter((n) => ids.has(n.id));
-      if (!remaining.length) break;
+      try {
+        const listed = await cf.list<Namespace>(
+          `/accounts/${a}/workers/durable_objects/namespaces`,
+          'Durable Object namespaces',
+          1000,
+        );
+        failure = null;
+        const ids = new Set(listed.filter((n) => n.script === inv.worker).map((n) => n.id));
+        remaining = inv.namespaces.filter((n) => ids.has(n.id));
+        if (!remaining.length) break;
+      } catch (e) {
+        failure = (e as Error).message;
+      }
       await sleep(2000);
     }
     for (const n of inv.namespaces) {
-      if (remaining.includes(n)) {
+      if (!remaining.includes(n)) {
+        say(`  ✓ Durable Object storage ${n.class ?? n.id} removed`);
+      } else if (failure) {
+        say(`  ✗ could not check the Durable Object namespace ${n.id}: ${failure}`);
+        left.push(`the Durable Object namespace ${n.id} (not confirmed removed)`);
+      } else {
         say(`  ✗ Durable Object namespace ${n.id} is still listed`);
         left.push(`the Durable Object namespace ${n.id} (Cloudflare may still be deleting it)`);
-      } else {
-        say(`  ✓ Durable Object storage ${n.class ?? n.id} removed`);
       }
     }
   }
@@ -890,8 +940,9 @@ async function emptyAndDeleteBucket(ctx: Ctx, cf: Cloudflare, a: string, b: Buck
   }
 }
 
-function rerunArgs(targetInput: string, accountId: string, o: RemoveOptions): string {
-  const parts = [targetInput.trim(), `--account-id ${accountId}`];
+/** The Worker name, not the URL: a custom domain may be gone once the Worker is. */
+function rerunArgs(inv: Inventory, o: RemoveOptions): string {
+  const parts = [inv.worker, `--account-id ${inv.account.id}`];
   if (o.apiToken) parts.push('--api-token');
   if (o.bucket) parts.push(`--bucket ${o.bucket}`);
   return parts.join(' ');
@@ -901,12 +952,11 @@ function rerunArgs(targetInput: string, accountId: string, o: RemoveOptions): st
 async function localIdentityHint(
   ctx: Ctx,
   g: GlobalOptions,
-  origin: string | undefined,
+  origins: (string | undefined)[],
 ): Promise<void> {
-  if (!origin) return;
   try {
     const id = await keyStoreFor(ctx, g.passphraseEnv).load();
-    if (id?.config.relayOrigin !== origin) return;
+    if (!id || !origins.includes(id.config.relayOrigin)) return;
   } catch {
     return;
   }

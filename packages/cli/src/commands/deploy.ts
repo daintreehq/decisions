@@ -89,8 +89,13 @@ export const wranglerCommands = {
   secret: (name: string) => ['secret', 'put', 'CLAIM_SECRET', '--name', name],
 };
 
-export const npxArgs = (wrangler: string, args: string[]) => ['--yes', `wrangler@${wrangler}`, ...args];
-export const shown = (wrangler: string, args: string[]) => ['npx', ...npxArgs(wrangler, args)].join(' ');
+export const npxArgs = (wrangler: string, args: string[]) => [
+  '--yes',
+  `wrangler@${wrangler}`,
+  ...args,
+];
+export const shown = (wrangler: string, args: string[]) =>
+  ['npx', ...npxArgs(wrangler, args)].join(' ');
 
 export type AuthMode = 'browser' | 'token-env' | 'token-prompt';
 
