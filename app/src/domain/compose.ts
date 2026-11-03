@@ -113,7 +113,8 @@ export function verdict(i: ComposeInput): ComposeVerdict {
   const hasText = shape.textAllowed && text.length > 0;
   const hasAnswer = shape.hasOptions ? hasChoice || (shape.mixed && hasText) : hasText;
   const hasContent = hasChoice || hasText || (i.mode === 'correction' && !!i.reason.trim());
-  const needsEvidence = shape.approval && i.attachments > 0 && i.mode === 'answer';
+  // A correction to an approval is a decision on the same files, so it needs the same evidence.
+  const needsEvidence = shape.approval && i.attachments > 0;
   const seen = evidenceSeen(i.evidence);
   const remainingFiles = needsEvidence ? Math.max(0, i.evidence.total - seen) : 0;
   const evidenceOk = !needsEvidence || (i.evidence.total > 0 && seen >= i.evidence.total);
