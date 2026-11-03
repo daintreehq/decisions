@@ -266,7 +266,7 @@ export async function askDeployQuestions(
 ): Promise<DeployAnswers | null> {
   const say = (l = '') => ctx.out(l);
 
-  const pre = d.prefill ?? { keys: {} };
+  const pre: HostPrefill = d.prefill ?? { keys: {} };
   say('\nWhat will be created');
   let account = d.account;
   if (d.accounts && d.accounts.length > 1 && !account) {

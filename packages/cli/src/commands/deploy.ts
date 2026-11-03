@@ -427,7 +427,7 @@ export async function deploy(
   let failure: unknown = null;
   // Ctrl-C is caught until the result has been handed over, so the first one never loses it.
   const stop = (deps.onInterrupt ?? defaultOnInterrupt)(() => (interrupted = true));
-  let delivered: boolean;
+  let delivered = false;
   const { outcome } = host;
   try {
     try {
