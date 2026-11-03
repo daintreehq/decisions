@@ -3,11 +3,11 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 /**
  * Back closes the topmost workspace layer (file viewer, sheet, expanded editor, navigator) before it leaves the
  * page. Each open layer owns one history entry that carries only a depth marker (never content, never a path
- * change). Browser Back pops it and closes the layer; closing from a button goes through history too, so history
- * never accumulates dead entries and there is one way a layer closes.
+ * change). Browser Back pops it and closes the layer; a layer closed any other way (its Close button, Escape, its
+ * own state) has its entry unwound silently, so history never accumulates dead entries.
  *
  * `history.go` is asynchronous. While one of our own traversals is in flight, every other history change (a layer's
- * push, another release, a route navigation) waits for its popstate and then runs in order, against the entry the
+ * push, another unwind, a route navigation) waits for its popstate and then runs in order, against the entry the
  * traversal actually landed on. Nothing reads a stale `history.state` or races a traversal it cannot see.
  */
 interface Layer {
@@ -19,21 +19,76 @@ interface Layer {
 
 const stack: Layer[] = [];
 let seq = 0;
-/** popstate events we caused ourselves (silent unwinds) and must not treat as Back. */
-let ownPops = 0;
 /** Work that changes history, waiting for our traversal in flight to land. Runs in order. */
 const waiting: Array<() => void> = [];
 /** History entries of layers that have closed and are still to be unwound (they sit above the open ones). */
 let stale = 0;
+
+/**
+ * A `history.go` of ours whose popstate has not arrived. The browser performs traversals in the order they were
+ * asked for, so popstates are matched to them oldest first.
+ */
+interface Traversal {
+  delta: number;
+  /** Whether history stands where this traversal was going. */
+  lands: () => boolean;
+  /** Route Back: once it lands, close the layers above the entry, as Back would. */
+  closes: boolean;
+  /** Given up on: if its popstate still comes, history moved on without it, and the move is undone. */
+  late: boolean;
+  /** Issued from where an undone late traversal left history: the traversal undoing it settles instead. */
+  displaced: boolean;
+  /** For a late traversal: after this (`Date.now()`), it is taken as never coming. */
+  expires: number;
+}
+const traversals: Traversal[] = [];
 let watchdog: ReturnType<typeof setTimeout> | null = null;
 /** A traversal whose popstate never arrives (the browser refused it) must not stall navigation for good. */
 const TRAVERSAL_TIMEOUT_MS = 1000;
+/** How long a traversal given up on may still arrive and be undone; past it, a popstate is the person's own. */
+const LATE_WINDOW_MS = 2000;
 
 function depthOf(state: unknown): number {
   return (state as { layerDepth?: number } | null)?.layerDepth ?? 0;
 }
 
-const busy = () => ownPops > 0;
+/** Dead entries under (and including) the current one, left by an unwind the browser never performed. */
+function skipOf(state: unknown): number {
+  return (state as { layerSkip?: number } | null)?.layerSkip ?? 0;
+}
+
+const busy = () => traversals.some((t) => !t.late);
+
+function closeAbove(depth: number): void {
+  while (stack.length > depth) stack.pop()!.close();
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('popstate', (e) => {
+    while (traversals[0]?.late && traversals[0].expires < Date.now()) traversals.shift();
+    const t = traversals.shift();
+    if (!t) {
+      closeAbove(depthOf(e.state));
+      return;
+    }
+    if (t.late) {
+      // The browser performed a traversal we gave up on, after history moved on without it: step back. Traversals
+      // still to come were issued from where it left, so they are intermediate steps; the return settles them.
+      const rest = traversals.filter((r) => !r.late);
+      for (const r of rest) r.displaced = true;
+      traverse(
+        -t.delta,
+        rest.at(-1)?.lands ?? (() => true),
+        rest.some((r) => r.closes),
+      );
+      return;
+    }
+    if (t.displaced) return;
+    // Verify where it landed: layers above the entry history stands on have lost their entries, whatever we expected.
+    if (t.closes || !t.lands()) closeAbove(depthOf(e.state));
+    if (!busy()) landed();
+  });
+}
 
 function landed(): void {
   if (watchdog) clearTimeout(watchdog);
@@ -41,27 +96,56 @@ function landed(): void {
   reconcile();
 }
 
-if (typeof window !== 'undefined') {
-  window.addEventListener('popstate', (e) => {
-    if (ownPops > 0) {
-      ownPops--;
-      if (ownPops === 0) landed();
-      return;
+/** Our popstate did not come in time: establish where history stands before anything else changes it. */
+function timedOut(): void {
+  watchdog = null;
+  const pending = traversals.filter((t) => !t.late);
+  const last = pending.at(-1);
+  if (!last) return;
+  if (last.lands()) {
+    // It happened; only its popstate was lost.
+    traversals.length = 0;
+    if (last.closes) closeAbove(depthOf(history.state));
+  } else {
+    const expires = Date.now() + LATE_WINDOW_MS;
+    for (const t of pending) Object.assign(t, { late: true, displaced: false, expires });
+    const unwound = depthOf(history.state) - stack.filter((l) => l.pushed).length;
+    if (unwound > 0) {
+      // Still standing on entries a silent unwind was to remove: this one now stands for the page under them, and
+      // the next entry (a navigation, a layer) takes its place instead of stacking on it.
+      history.replaceState(
+        {
+          ...(history.state as object | null),
+          layerDepth: depthOf(history.state) - unwound,
+          layerSkip: unwound,
+        },
+        '',
+      );
     }
-    const depth = depthOf(e.state);
-    while (stack.length > depth) stack.pop()!.close();
-  });
+  }
+  reconcile();
 }
 
-/** Go back `n` entries without treating the popstate as Back. Everything else waits until it lands. */
-function unwindSilently(n: number): void {
-  ownPops++;
+/** Start a traversal of ours. Everything else that changes history waits until it lands. */
+function traverse(delta: number, lands: () => boolean, closes = false): void {
+  traversals.push({ delta, lands, closes, late: false, displaced: false, expires: 0 });
   if (watchdog) clearTimeout(watchdog);
-  watchdog = setTimeout(() => {
-    ownPops = 0;
-    landed();
-  }, TRAVERSAL_TIMEOUT_MS);
-  history.go(-n);
+  watchdog = setTimeout(timedOut, TRAVERSAL_TIMEOUT_MS);
+  history.go(delta);
+}
+
+/** Go back `n` entries without treating the popstate as Back. */
+function unwindSilently(n: number): void {
+  const expect = depthOf(history.state) - n;
+  traverse(-n, () => depthOf(history.state) === expect);
+}
+
+/**
+ * Add a history entry. An entry left by an unwind the browser never performed is taken over (replaced) instead, so
+ * Back does not meet it.
+ */
+export function addEntry(state: unknown, url?: string, replace = false): void {
+  history[replace || skipOf(history.state) > 0 ? 'replaceState' : 'pushState'](state, '', url);
 }
 
 /**
@@ -87,7 +171,7 @@ function reconcile(): void {
     }
     if (pushed === stack.length) return;
     stack[pushed]!.pushed = true;
-    history.pushState({ layerDepth: pushed + 1 }, '');
+    addEntry({ layerDepth: pushed + 1 });
   }
 }
 
@@ -95,6 +179,20 @@ function reconcile(): void {
 export function afterHistorySettles(fn: () => void): void {
   waiting.push(fn);
   reconcile();
+}
+
+/**
+ * Leave the page for the history entry `back` entries below it (layer entries above it not counted), once any
+ * traversal in flight has landed. Open layers close when it lands, as Back closes them, and history work asked for
+ * meanwhile waits for it.
+ */
+export function goBackPast(back: number): void {
+  afterHistorySettles(() => {
+    const from = location.href;
+    const fromDepth = depthOf(history.state);
+    const n = fromDepth + skipOf(history.state) + back;
+    traverse(-n, () => location.href !== from || depthOf(history.state) !== fromDepth, true);
+  });
 }
 
 /** Take layers `from` and above off the stack; the entries they had become stale, to be unwound. */
@@ -119,17 +217,15 @@ function release(id: number): void {
   reconcile();
 }
 
-/** Close a layer the way Back would: through history, so the popstate handler runs its close. */
+/**
+ * Close a layer from its own UI (a Close button, Escape): close it and any above it now, and unwind their entries
+ * as one tracked traversal. A second Close before that lands finds nothing left to unwind.
+ */
 function dismiss(id: number): void {
   const i = stack.findIndex((l) => l.id === id);
   if (i < 0) return;
-  if (busy() || !stack[i]!.pushed) {
-    // History is mid-traversal or holds no entry for it yet: close it directly and unwind once it is safe.
-    for (const l of drop(i).reverse()) l.close();
-    reconcile();
-    return;
-  }
-  history.go(-(stack.length - i));
+  for (const l of drop(i).reverse()) l.close();
+  reconcile();
 }
 
 /** Whether any layer is open. */
@@ -158,8 +254,8 @@ export function abandonLayers(): void {
 
 /**
  * Tie a layer's visibility to history. Returns `dismiss`, which buttons and Escape should call to close the layer
- * (it goes through history, exactly like Back). If the component closes the layer by state instead, its history
- * entry is unwound silently.
+ * (it closes the layer and any above it at once, then unwinds their entries; calling it again is harmless). If the
+ * component closes the layer by state instead, its history entry is unwound silently too.
  */
 export function useLayer(open: boolean, onClose: () => void): () => void {
   const closeRef = useRef(onClose);

@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { leaveLayers } from './layers.js';
+import { addEntry, leaveLayers } from './layers.js';
 
 const EVT = 'decisions:navigate';
 
@@ -36,7 +36,7 @@ export function navigate(to: string, replace = false, state: object | null = nul
       if (state) history.replaceState({ ...(history.state as object | null), ...state }, '');
       return;
     }
-    history[replace ? 'replaceState' : 'pushState'](state, '', to);
+    addEntry(state, to, replace);
     window.dispatchEvent(new Event(EVT));
     window.scrollTo(0, 0);
   });
