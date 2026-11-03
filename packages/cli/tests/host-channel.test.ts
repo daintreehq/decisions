@@ -23,8 +23,14 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
 });
 
-/** A host that answers the CLI's hello with `onHello` and records every message it gets. */
-async function host(onHello: (sock: Socket, hello: Record<string, unknown>) => void) {
+/**
+ * A host that answers the CLI's hello with `onHello`, acknowledges a result with `ack`, and records
+ * every message it gets.
+ */
+async function host(
+  onHello: (sock: Socket, hello: Record<string, unknown>) => void,
+  ack = '{"v":1,"type":"received"}\n',
+) {
   const path = socketPath();
   const got: Record<string, unknown>[] = [];
   let sockRef: Socket | null = null;
@@ -40,7 +46,7 @@ async function host(onHello: (sock: Socket, hello: Record<string, unknown>) => v
         buf = buf.slice(i + 1);
         got.push(msg);
         if (msg.type === 'hello') onHello(sock, msg);
-        if (msg.type === 'result' && sock.writable) sock.write('{"v":1,"type":"received"}\n');
+        if (msg.type === 'result' && sock.writable) sock.write(ack);
       }
     });
   });
@@ -69,8 +75,9 @@ describe('the host channel', () => {
     const h = await host((sock) => {
       // Delivered in pieces, split inside a multi-byte character, as a stream may.
       const bytes = Buffer.from(prefillLine({ ...answers, bucket: 'bücket' }));
-      sock.write(bytes.subarray(0, 40));
-      setTimeout(() => sock.write(bytes.subarray(40)), 5);
+      const mid = bytes.indexOf(Buffer.from('ü')) + 1;
+      sock.write(bytes.subarray(0, mid));
+      setTimeout(() => sock.write(bytes.subarray(mid)), 5);
     });
     const ch = await openHostChannel(h.path, { cliVersion: '9.9.9' });
     expect(h.got[0]).toEqual({ v: 1, type: 'hello', cli: '9.9.9', versions: [1] });
@@ -111,8 +118,17 @@ describe('the host channel', () => {
       /invalid prefill: transcription.provider must be one of xai, openai/,
     );
     const r = h.got.find((m) => m.type === 'result')!;
-    expect(r).toMatchObject({ status: 'failed', url: null, claim_secret: null });
+    expect(r).toEqual({
+      v: 1,
+      type: 'result',
+      status: 'failed',
+      url: null,
+      claim_secret: null,
+      claim_state: 'unknown',
+      error: expect.stringMatching(/transcription.provider must be one of/),
+    });
     expect(JSON.stringify(r)).not.toContain('deepgram');
+    expect(JSON.stringify(r)).not.toContain('k1');
   });
 
   it('refuses a contract version it does not speak, and says which it speaks', async () => {
@@ -121,6 +137,15 @@ describe('the host channel', () => {
       /contract version 2; this CLI speaks 1/,
     );
     expect(h.got.find((m) => m.type === 'result')).toMatchObject({ status: 'failed' });
+  });
+
+  it('never repeats a malformed version, which could hold anything', async () => {
+    const h = await host((sock) =>
+      sock.write('{"v":{"key":"sk-hidden"},"type":"prefill","answers":{}}\n'),
+    );
+    const e = (await openHostChannel(h.path, { cliVersion: '1.0.0' }).catch((x) => x)) as Error;
+    expect(e.message).toMatch(/contract version \(not a number\)/);
+    expect(e.message + JSON.stringify(h.got)).not.toContain('sk-hidden');
   });
 
   it('fails clearly when nothing listens at the path', async () => {
@@ -137,6 +162,7 @@ describe('the host channel', () => {
   });
 
   it('refuses a message over the size limit before parsing it, terminated or not', async () => {
+    expect(MAX_MESSAGE_BYTES).toBe(64 * 1024);
     const big = 'x'.repeat(MAX_MESSAGE_BYTES + 10);
     for (const line of [`"${big}"\n`, `"${big}`]) {
       const h = await host((sock) => sock.write(line));
@@ -161,10 +187,22 @@ describe('the host channel', () => {
     expect(await ch.sendResult(RESULT)).toBe(false);
   });
 
+  it.each([
+    ['a receipt for another version', '{"v":2,"type":"received"}\n'],
+    ['a receipt with no version', '{"type":"received"}\n'],
+    ['some other message', '{"v":1,"type":"prefill"}\n'],
+    ['something that is not JSON', 'ok\n'],
+  ])('does not take %s as the receipt', async (_what, ack) => {
+    const h = await host((sock) => sock.write(prefillLine({})), ack);
+    const ch = await openHostChannel(h.path, { cliVersion: '1.0.0' });
+    expect(await ch.sendResult(RESULT)).toBe(false);
+    expect(h.got.map((m) => m.type)).toEqual(['hello', 'result']);
+  });
+
   it('notices when the host closes the connection or speaks out of turn', async () => {
     const h = await host((sock) => sock.write(prefillLine({})));
     const ch = await openHostChannel(h.path, { cliVersion: '1.0.0' });
-    h.sock()!.write('{"v":1,"type":"received"}\n');
+    // A receipt sent early is not a receipt for a result sent later.
     h.sock()!.write('{"v":1,"type":"received"}\n');
     await new Promise((r) => setTimeout(r, 50));
     expect(ch.isOpen()).toBe(false);
@@ -214,11 +252,14 @@ describe('prefill validation', () => {
   });
 
   it('never puts a value in its error', () => {
+    const bad = { keys: { anthropic: 'sk-ant-secret\u0007' } };
+    expect(() => parsePrefill(bad)).toThrow(/keys.anthropic must be a single-line string/);
+    let message = '';
     try {
-      parsePrefill({ keys: { anthropic: 'sk-ant-secret\u0007' } });
-      expect.unreachable();
+      parsePrefill(bad);
     } catch (e) {
-      expect((e as Error).message).not.toContain('sk-ant-secret');
+      message = (e as Error).message;
     }
+    expect(message).not.toContain('sk-ant-secret');
   });
 });

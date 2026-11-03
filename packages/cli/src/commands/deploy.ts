@@ -425,29 +425,33 @@ export async function deploy(
     channelOpen: () => channel.isOpen(),
   };
   let failure: unknown = null;
+  // Ctrl-C is caught until the result has been handed over, so the first one never loses it.
   const stop = (deps.onInterrupt ?? defaultOnInterrupt)(() => (interrupted = true));
+  let delivered: boolean;
+  const { outcome } = host;
   try {
-    await runDeploy(ctx, g, o, deps, host);
-  } catch (e) {
-    failure = e;
+    try {
+      await runDeploy(ctx, g, o, deps, host);
+    } catch (e) {
+      failure = e;
+    }
+    // A Ctrl-C counts even when the step it came during went on to finish.
+    const cancelled =
+      outcome.declined || interrupted || (failure instanceof CliError && failure.exitCode === 130);
+    const status = cancelled ? 'cancelled' : failure !== null ? 'failed' : 'completed';
+    delivered = await channel.sendResult({
+      status,
+      url: outcome.url,
+      claimSecret: outcome.claimSecret,
+      claimState: outcome.claimState,
+      ...(status === 'failed'
+        ? { error: redactSecrets((failure as Error).message ?? String(failure), host.secrets) }
+        : {}),
+    });
   } finally {
     stop();
+    channel.close();
   }
-  const { outcome } = host;
-  const cancelled =
-    outcome.declined ||
-    (failure !== null &&
-      (interrupted || (failure instanceof CliError && failure.exitCode === 130)));
-  const status = cancelled ? 'cancelled' : failure !== null ? 'failed' : 'completed';
-  const delivered = await channel.sendResult({
-    status,
-    url: outcome.url,
-    claimSecret: outcome.claimSecret,
-    claimState: outcome.claimState,
-    ...(status === 'failed'
-      ? { error: redactSecrets((failure as Error).message ?? String(failure), host.secrets) }
-      : {}),
-  });
   if (delivered) {
     ctx.out(
       outcome.claimSecret
@@ -492,7 +496,13 @@ async function runDeploy(
   if (o.accountId !== undefined && !ACCOUNT_ID.test(o.accountId)) {
     throw new CliError('--account-id must be a 32-character Cloudflare account ID');
   }
-  if (pre?.accountId !== undefined && !ACCOUNT_ID.test(pre.accountId)) {
+  // The host's account matters only when no flag or environment variable gives one.
+  if (
+    o.accountId === undefined &&
+    !ctx.env.CLOUDFLARE_ACCOUNT_ID &&
+    pre?.accountId !== undefined &&
+    !ACCOUNT_ID.test(pre.accountId)
+  ) {
     throw new CliError(`the account from ${HOST} is not a 32-character Cloudflare account ID`);
   }
   const say = (l = '') => ctx.out(l);
@@ -561,8 +571,12 @@ async function runDeploy(
     }
     const at = (id: PlanStepId) => plan.findIndex((s) => s.id === id);
     const heading = (id: PlanStepId) => `\n[${at(id) + 1}] ${plan[at(id)]!.title}`;
-    const step = (i: number) => {
+    /** Stops a host-channel run that was interrupted, before its next step or change. */
+    const checkpoint = () => {
       if (host?.interrupted()) throw new CliError('cancelled', 130);
+    };
+    const step = (i: number) => {
+      checkpoint();
       say(`\n[${i + 1}] ${plan[i]!.title}`);
     };
     const wr: WranglerRun = (args, x = {}) => {
@@ -662,6 +676,7 @@ async function runDeploy(
     /** Sets each chosen provider key as a Worker secret, the value on stdin only. */
     const setKeys = async (): Promise<CliError | null> => {
       if (!keySecrets.length) return null;
+      checkpoint();
       say(heading('keys'));
       for (const k of keySecrets) {
         const r = await wr(wranglerCommands.putSecret(k.secret, name), {
@@ -690,10 +705,11 @@ async function runDeploy(
 
     step(at('deploy'));
     const dep = await wr(wranglerCommands.deploy(), { echo: true });
-    if (dep.status !== 0) throw new CliError(`deploy failed:\n${output(dep)}`);
     const url = output(dep).match(WORKERS_DEV_URL)?.[0];
-    say(url ? `    deployed: ${url}` : '    deployed (no workers.dev URL in the output)');
+    // Wrangler may print the URL and still fail; the host learns it either way.
     if (host && url) host.outcome.url = url;
+    if (dep.status !== 0) throw new CliError(`deploy failed:\n${output(dep)}`);
+    say(url ? `    deployed: ${url}` : '    deployed (no workers.dev URL in the output)');
 
     step(at('claim-secret'));
     const state = url ? await claimState(ctx, url, sleep) : 'unknown';
@@ -701,6 +717,7 @@ async function runDeploy(
     if (state === 'claimed') {
       say('    the relay is already claimed: this was an update, the claim secret is unchanged');
       const keyFailure = await setKeys();
+      checkpoint();
       const healthy = await check(ctx, g, url!, sleep, heading('check'));
       summary(ctx, {
         url,
@@ -714,7 +731,8 @@ async function runDeploy(
       if (!healthy) throw new CliError('deployed, but the health check found problems');
       return;
     }
-    // A claim secret nobody could receive is never set.
+    // A claim secret nobody could receive, or after a Ctrl-C, is never set.
+    checkpoint();
     if (host && !host.channelOpen()) {
       throw new CliError(
         `${HOST} closed its channel, so the claim secret could not reach it; stopping before setting one`,
@@ -753,6 +771,7 @@ async function runDeploy(
               )
             : null;
       }
+      checkpoint();
       const healthy = await check(ctx, g, url, sleep, heading('check'));
       if (o.claim) {
         say(heading('claim'));

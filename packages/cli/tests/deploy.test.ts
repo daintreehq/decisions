@@ -462,9 +462,13 @@ describe('decisions deploy', () => {
       '--account-id',
       '--claim',
       '--outdir',
+      '--host-channel',
     ])
       expect(flags).toContain(f);
     expect(flags).not.toContain('--claim-secret');
+    // No built-in default for the names, so a host's default is not mistaken for a flag.
+    for (const f of ['--name', '--bucket'])
+      expect(cmd!.options.find((o) => o.long === f)!.defaultValue).toBeUndefined();
   });
 
   it('--dry-run verifies the bundle, prints the plan and touches nothing', async () => {
@@ -1228,6 +1232,9 @@ describe('decisions deploy, guided at a terminal', () => {
         'secret put XAI_API_KEY --name daintree-decisions',
         'secret put ANTHROPIC_API_KEY --name daintree-decisions',
       ]);
+      const put = (k: string) => t.calls.find((c) => c.args.includes(k))!.input;
+      expect(put('XAI_API_KEY')).toBe(XAI + '\n');
+      expect(put('ANTHROPIC_API_KEY')).toBe(ANTHROPIC + '\n');
       expectNowhere(t, [XAI, ANTHROPIC], { input: true });
       expectNowhere(t, [OPENAI]);
       // The claim secret goes to the host, never to the screen, and nothing claims the relay here.
@@ -1243,16 +1250,21 @@ describe('decisions deploy, guided at a terminal', () => {
     });
 
     it('lets the person change every default', async () => {
+      const OWN = 'sk-own-' + 'p'.repeat(40);
       const t = hosted(FULL, {
-        // name, bucket, dictation? provider, cleanup? provider, model, own key, confirm
-        answers: ['mine', 'mine-bucket', 'n', 'y', '2', '1', 'n', OPENAI, 'y'],
+        providers: { goodKeys: [...KEYS, OWN] },
+        // name, bucket, dictation? cleanup? provider, model, use the host key? own key, confirm
+        answers: ['mine', 'mine-bucket', 'n', 'y', '2', '1', 'n', OWN, 'y'],
       });
       await t.run();
       expect(t.secretPrompts).toEqual([expect.stringMatching(/OpenAI API key/)]);
+      expect(subs(t)).toContain('r2 bucket create mine-bucket');
       expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
         'secret put CLAIM_SECRET --name mine',
         'secret put OPENAI_API_KEY --name mine',
       ]);
+      expect(t.calls.find((c) => c.args.includes('OPENAI_API_KEY'))!.input).toBe(OWN + '\n');
+      expectNowhere(t, [OPENAI]);
       const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
       expect(deployed.configAtCall).toMatchObject({
         vars: { OPENAI_CORRECTION_MODEL: 'gpt-6.1-terra' },
@@ -1271,6 +1283,27 @@ describe('decisions deploy, guided at a terminal', () => {
       await t.run({ name: 'from-flag' });
       expect(subs(t)).toContain('r2 bucket create from-host');
       expect(subs(t)).toContain('secret put CLAIM_SECRET --name from-flag');
+
+      const t2 = hosted(
+        { name: 'host-name', bucket: 'host-bucket', keys: {} },
+        {
+          answers: ['', '', '', '', 'y'],
+        },
+      );
+      await t2.run({ bucket: 'flag-bucket' });
+      expect(subs(t2)).toContain('r2 bucket create flag-bucket');
+      expect(subs(t2)).toContain('secret put CLAIM_SECRET --name host-name');
+    });
+
+    it('ignores a bad host account when a flag gives the account', async () => {
+      const t = hosted(
+        { accountId: 'not-an-account', keys: {} },
+        {
+          answers: ['', '', '', '', 'y'],
+        },
+      );
+      await t.run({ accountId: ACCOUNT });
+      expect(t.results[0]).toMatchObject({ status: 'completed' });
     });
 
     it('starts the account choice on the host account', async () => {
@@ -1291,6 +1324,9 @@ describe('decisions deploy, guided at a terminal', () => {
       await t.run();
       expect(t.prompts[0]).toMatch(/^Account to deploy to: \[2\]/);
       expect(text(t.out)).toMatch(/Cloudflare account +Work/);
+      const after = t.calls.filter((c) => MUTATING.test(c.args.slice(2).join(' ')));
+      expect(after.length).toBeGreaterThan(0);
+      expect(after.every((c) => c.env.CLOUDFLARE_ACCOUNT_ID === other)).toBe(true);
     });
 
     it('asks for another key when the provider rejects the prefilled one', async () => {
@@ -1303,6 +1339,46 @@ describe('decisions deploy, guided at a terminal', () => {
       expect(t.secretPrompts).toEqual([expect.stringMatching(/xAI .*API key/)]);
       expect(t.calls.find((c) => c.args.includes('XAI_API_KEY'))!.input).toBe(XAI + '\n');
       expectNowhere(t, [BAD]);
+    });
+
+    it('keeps a prefilled key it could not check only when the person says so', async () => {
+      const t = hosted(
+        { transcription: { provider: 'xai' }, keys: { xai: XAI } },
+        // ... use this key? use it without checking? cleanup? confirm
+        { providers: { down: true }, answers: ['', '', '', '', '', 'y', '', 'y'] },
+      );
+      await t.run();
+      expect(t.prompts).toContainEqual(
+        expect.stringMatching(/^Use it without checking\? \[y\/N\]/),
+      );
+      expect(text(t.out)).toMatch(/xAI key +present \(not checked\)/);
+      expect(t.calls.find((c) => c.args.includes('XAI_API_KEY'))!.input).toBe(XAI + '\n');
+
+      const t2 = hosted(
+        { transcription: { provider: 'xai' }, keys: { xai: XAI } },
+        // ... use this key? not without checking; no other key: dictation off
+        { providers: { down: true }, answers: ['', '', '', '', '', 'n', '', '', 'y'] },
+      );
+      await t2.run();
+      expect(subs(t2).some((x) => x.includes('XAI_API_KEY'))).toBe(false);
+      expect(text(t2.out)).toMatch(/Dictation +off/);
+    });
+
+    it('redacts a prefilled key it never used from everything it reports', async () => {
+      const t = hosted(FULL, { answers: ['', '', 'n', 'n', 'y'] });
+      const spawn = t.deps.spawn!;
+      t.deps.spawn = async (req) =>
+        req.args.includes('bucket')
+          ? { status: 1, stdout: '', stderr: `refused ${OPENAI} and ${XAI}` }
+          : spawn(req);
+      const e = (await t.run().catch((x: unknown) => x)) as Error;
+      expect(e.message).toContain('[redacted]');
+      expect(t.results[0]!.error).toContain('[redacted]');
+      for (const k of [OPENAI, XAI, ANTHROPIC]) {
+        expect(e.message).not.toContain(k);
+        expect(t.results[0]!.error).not.toContain(k);
+      }
+      expectNowhere(t, [OPENAI, XAI, ANTHROPIC]);
     });
 
     it('never deploys a cleanup model it does not offer', async () => {
@@ -1354,7 +1430,7 @@ describe('decisions deploy, guided at a terminal', () => {
       expect(t.results[0]).toMatchObject({ status: 'cancelled' });
     });
 
-    it('hands over the claim secret, with the failure, when a step after it fails', async () => {
+    it('hands over the claim secret, with the failure, when its upload may have failed', async () => {
       const t = hosted(
         { keys: {} },
         {
@@ -1369,6 +1445,63 @@ describe('decisions deploy, guided at a terminal', () => {
       expect(r.error).toMatch(/may or may not have been set/);
       expect(r.error).not.toContain(SECRET);
       expect(text(t.out) + text(t.err)).not.toContain(SECRET);
+    });
+
+    it('hands over the claim secret, with the failure, when a later step fails', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] });
+      const base = t.ctx.fetch;
+      t.ctx.fetch = (async (u: unknown, init?: RequestInit) =>
+        new URL(String(u)).pathname === '/health'
+          ? new Response('down', { status: 503 })
+          : base(u as string, init)) as typeof fetch;
+      await expect(t.run()).rejects.toThrow(/health check/);
+      expect(t.results[0]).toMatchObject({
+        status: 'failed',
+        url: URL_,
+        claimSecret: SECRET,
+        claimState: 'unclaimed',
+        error: expect.stringMatching(/health check/),
+      });
+      expect(text(t.out) + text(t.err)).not.toContain(SECRET);
+    });
+
+    it('keeps a Worker URL Wrangler printed before failing', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] });
+      const spawn = t.deps.spawn!;
+      t.deps.spawn = async (req) =>
+        req.args.includes('deploy')
+          ? { status: 1, stdout: `Uploaded\n  ${URL_}\n`, stderr: 'then it broke' }
+          : spawn(req);
+      await expect(t.run()).rejects.toThrow(/deploy failed/);
+      expect(t.results[0]).toMatchObject({ status: 'failed', url: URL_, claimSecret: null });
+    });
+
+    it('sets no claim secret after a Ctrl-C while it checks the relay', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] });
+      const base = t.ctx.fetch;
+      t.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+        if (new URL(String(u)).pathname === '/api/v1/info') t.interrupt();
+        return base(u as string, init);
+      }) as typeof fetch;
+      await expect(t.run()).rejects.toMatchObject({ exitCode: 130 });
+      expect(subs(t).some((x) => x.startsWith('secret put'))).toBe(false);
+      expect(t.results[0]).toMatchObject({ status: 'cancelled', url: URL_, claimSecret: null });
+    });
+
+    it('reports a Ctrl-C during the last step as cancelled, still with the claim secret', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] });
+      const base = t.ctx.fetch;
+      t.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+        if (new URL(String(u)).pathname === '/health') t.interrupt();
+        return base(u as string, init);
+      }) as typeof fetch;
+      await t.run();
+      expect(t.results[0]).toMatchObject({
+        status: 'cancelled',
+        url: URL_,
+        claimSecret: SECRET,
+      });
+      expect(t.unsubscribed()).toBe(true);
     });
 
     it('reports a failure before the claim secret without one', async () => {

@@ -22,9 +22,14 @@ import type {
 export const HOST_CONTRACT_VERSIONS = [1] as const;
 export const HOST_CONTRACT_VERSION = 1;
 
-/** No message in this contract comes close; a longer one is refused before it is parsed. */
+/**
+ * No message in this contract comes close; a longer one (not counting its newline) is refused
+ * before it is parsed.
+ */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_FIELD = 1024;
+/** Keeps a result's error message, and so the result, well inside MAX_MESSAGE_BYTES. */
+const MAX_ERROR = 4096;
 
 export interface HostPrefill {
   name?: string;
@@ -149,10 +154,14 @@ export function parsePrefill(answers: unknown): HostPrefill {
   return out;
 }
 
-/** Reads newline-terminated JSON messages from `sock`, one at a time. */
+/**
+ * Reads newline-terminated JSON messages from `sock`, one at a time. The host speaks only when
+ * asked: one message after `expect()`, and anything else ends the channel.
+ */
 function messageReader(sock: Socket) {
   let buf = Buffer.alloc(0);
   let ended: CliError | null = null;
+  let expecting = false;
   const queue: unknown[] = [];
   let waiter: { resolve: (v: unknown) => void; reject: (e: Error) => void } | null = null;
   const fail = (e: CliError) => {
@@ -178,13 +187,12 @@ function messageReader(sock: Socket) {
       } catch {
         return fail(new CliError('the host app sent a message that is not JSON'));
       }
+      if (!expecting) return fail(new CliError('the host app sent a message it was not asked for'));
+      expecting = false;
       if (waiter) {
         waiter.resolve(msg);
         waiter = null;
-      } else if (queue.push(msg) > 1) {
-        // The host speaks only when asked: one message per request, nothing in between.
-        return fail(new CliError('the host app sent a message it was not asked for'));
-      }
+      } else queue.push(msg);
     }
     if (buf.length > MAX_MESSAGE_BYTES)
       fail(new CliError('the host app sent a message that is too long'));
@@ -193,6 +201,10 @@ function messageReader(sock: Socket) {
   sock.on('close', () => fail(new CliError('the host app closed the connection')));
   return {
     isOpen: () => ended === null,
+    /** Allows the host's next message; call it before sending what it answers. */
+    expect: () => {
+      expecting = true;
+    },
     /** The next message, rejecting at `deadline` (an absolute time) or when the channel ends. */
     next(deadline: number, what: string): Promise<unknown> {
       if (queue.length) return Promise.resolve(queue.shift());
@@ -242,7 +254,7 @@ function resultMessage(r: HostResult): Record<string, unknown> {
     url: r.url,
     claim_secret: r.claimSecret,
     claim_state: r.claimState,
-    ...(r.error !== undefined ? { error: r.error } : {}),
+    ...(r.error !== undefined ? { error: r.error.slice(0, MAX_ERROR) } : {}),
   };
 }
 
@@ -265,6 +277,7 @@ export async function openHostChannel(path: string, o: HostChannelOptions): Prom
     if (closed || !reader.isOpen()) return false;
     const deadline = Date.now() + resultTimeoutMs;
     try {
+      reader.expect();
       await send(sock, resultMessage(r), deadline);
       const ack = await reader.next(deadline, 'a receipt for the result');
       return isObject(ack) && ack.type === 'received' && ack.v === HOST_CONTRACT_VERSION;
@@ -288,6 +301,7 @@ export async function openHostChannel(path: string, o: HostChannelOptions): Prom
         reject(new CliError(`could not connect to the host app at ${path} (${e.code ?? 'error'})`));
       });
     });
+    reader.expect();
     await send(
       sock,
       { type: 'hello', cli: o.cliVersion, versions: [...HOST_CONTRACT_VERSIONS] },
@@ -300,7 +314,7 @@ export async function openHostChannel(path: string, o: HostChannelOptions): Prom
         throw new CliError('the host app did not answer with a prefill message');
       if (msg.v !== HOST_CONTRACT_VERSION)
         throw new CliError(
-          `the host app speaks contract version ${JSON.stringify(msg.v)}; this CLI speaks ${HOST_CONTRACT_VERSIONS.join(', ')}`,
+          `the host app speaks contract version ${Number.isSafeInteger(msg.v) ? String(msg.v) : '(not a number)'}; this CLI speaks ${HOST_CONTRACT_VERSIONS.join(', ')}`,
         );
       only(msg, ['v', 'type', 'answers'], '');
       prefill = parsePrefill(msg.answers);
