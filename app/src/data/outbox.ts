@@ -178,11 +178,51 @@ export class Outbox {
   }
 }
 
-/** Per-question drafts, sealed at rest. */
+/**
+ * A draft, sealed at rest. Version 2 binds it to the question revision it was written against and to its mode, and
+ * carries the correction reason, the caret and what dictation needs to put back "Use original wording".
+ */
 export interface Draft {
   selected: string[];
   text: string;
   reason: string;
+  /** Absent on version 1 rows (written before drafts knew their revision). */
+  v?: 2;
+  mode?: 'answer' | 'correction';
+  /** The question revision this draft was reviewed against; null when unknown (a version 1 row). */
+  revision?: number | null;
+  caret?: { field: 'text' | 'reason'; start: number; end: number } | null;
+  /** The last dictated passage, while "Use original wording" can still apply to it. */
+  passage?: {
+    field: 'text' | 'reason';
+    start: number;
+    before: string;
+    raw: string;
+    cleaned: string;
+  } | null;
+}
+
+/**
+ * The row a draft lives in. An answer draft keeps the question id as its key, so version 1 rows are read in place;
+ * a correction draft sits beside it. Revision is inside the sealed draft, never in the key, so a draft written
+ * against an earlier revision is still found (and flagged) rather than orphaned.
+ */
+export function draftRowId(questionId: string, mode: 'answer' | 'correction' = 'answer'): string {
+  return mode === 'answer' ? questionId : `${questionId}#correction`;
+}
+
+/** Normalises any stored version to the current shape, conservatively: a version 1 row knows no revision. */
+export function upgradeDraft(d: Draft): Draft & { v: 2; revision: number | null } {
+  return {
+    selected: Array.isArray(d.selected) ? d.selected.filter((s) => typeof s === 'string') : [],
+    text: typeof d.text === 'string' ? d.text : '',
+    reason: typeof d.reason === 'string' ? d.reason : '',
+    v: 2,
+    mode: d.mode === 'correction' ? 'correction' : 'answer',
+    revision: typeof d.revision === 'number' ? d.revision : null,
+    caret: d.caret ?? null,
+    passage: d.passage ?? null,
+  };
 }
 
 export class Drafts {
@@ -190,23 +230,29 @@ export class Drafts {
     private readonly db: Db,
     private readonly cacheKey: CryptoKey,
   ) {}
-  async save(questionId: string, d: Draft): Promise<void> {
+  /** `key` is a row id from `draftRowId` (a bare question id is the answer draft). */
+  async save(key: string, d: Draft): Promise<void> {
     await this.db.putDraft({
-      questionId,
+      questionId: key,
       updatedAt: Date.now(),
-      sealed: await seal(this.cacheKey, d, `draft:${questionId}`),
+      sealed: await seal(this.cacheKey, { ...d, v: 2 }, `draft:${key}`),
     });
   }
-  async load(questionId: string): Promise<Draft | null> {
-    const row = await this.db.getDraft(questionId);
+  async load(key: string): Promise<(Draft & { v: 2; revision: number | null }) | null> {
+    const row = await this.db.getDraft(key);
     if (!row) return null;
     try {
-      return await open<Draft>(this.cacheKey, row.sealed, `draft:${questionId}`);
+      // The seal is bound to the row id, so a draft moved to another question or mode will not open.
+      return upgradeDraft(await open<Draft>(this.cacheKey, row.sealed, `draft:${key}`));
     } catch {
       return null;
     }
   }
-  delete(questionId: string) {
-    return this.db.deleteDraft(questionId);
+  delete(key: string) {
+    return this.db.deleteDraft(key);
+  }
+  /** Row ids of every stored draft (no contents are opened). */
+  async keys(): Promise<string[]> {
+    return (await this.db.drafts()).map((r) => r.questionId);
   }
 }

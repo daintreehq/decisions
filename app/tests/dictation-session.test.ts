@@ -6,6 +6,13 @@ import {
   type VoiceLike,
 } from '../src/features/voice/session.js';
 
+/** A 100 ms PCM16 frame at a constant sample value (0 is digital silence). */
+function pcm(value: number, samples = 1600): ArrayBuffer {
+  const a = new Int16Array(samples);
+  a.fill(value);
+  return a.buffer;
+}
+
 function deferred<T = void>() {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
@@ -13,7 +20,9 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-function rig(opts: { readyImmediately?: boolean; readyTimeoutMs?: number } = {}) {
+function rig(
+  opts: { readyImmediately?: boolean; readyTimeoutMs?: number; maxQueuedFrames?: number } = {},
+) {
   const startGate = deferred();
   const micGate = deferred<Capture>();
   const log: string[] = [];
@@ -48,6 +57,8 @@ function rig(opts: { readyImmediately?: boolean; readyTimeoutMs?: number } = {})
       },
       startMic,
       ...(opts.readyTimeoutMs ? { readyTimeoutMs: opts.readyTimeoutMs } : {}),
+      ...(opts.maxQueuedFrames ? { maxQueuedFrames: opts.maxQueuedFrames } : {}),
+      onMicLive: () => log.push('micLive'),
     },
     (p) => phases.push(p),
   );
@@ -75,18 +86,31 @@ describe('dictation session startup races', () => {
     t.micGate.resolve(t.mic);
     await expect(p).resolves.toBe('listening');
     expect(t.phases).toEqual(['starting', 'listening']);
+    await t.flush();
     t.feed(new ArrayBuffer(8));
     expect(t.frames).toHaveLength(1);
   });
 
-  it('release while the provider handshake is pending: the microphone is never requested', async () => {
+  it('opens the microphone in parallel with the provider handshake (Daintree parity)', async () => {
+    const t = rig();
+    void t.session.start();
+    // The ticket and socket have not answered yet, and the microphone is already being opened.
+    await vi.waitFor(() => expect(t.startMic).toHaveBeenCalled());
+    t.session.cancel();
+  });
+
+  it('release while the provider handshake is pending: the late microphone is stopped and nothing streams', async () => {
     const t = rig();
     const p = t.session.start();
     t.session.cancel(); // hold-to-talk released / pointercancel
     t.startGate.resolve();
+    t.micGate.resolve(t.mic);
     await expect(p).resolves.toBe('cancelled');
-    expect(t.startMic).not.toHaveBeenCalled();
+    await t.flush();
     expect(t.log).toContain('client.cancel');
+    expect(t.log.filter((l) => l === 'mic.stop')).toHaveLength(1);
+    t.feed(pcm(1000));
+    expect(t.frames).toHaveLength(0);
     expect(t.session.phase).toBe('idle');
   });
 
@@ -104,24 +128,26 @@ describe('dictation session startup races', () => {
     expect(t.session.phase).toBe('idle');
   });
 
-  it('release while waiting for the provider to be ready cancels without touching the microphone', async () => {
+  it('release while waiting for the provider to be ready cancels and stops the microphone', async () => {
     const t = rig({ readyImmediately: false });
     const p = t.session.start();
     t.startGate.resolve();
-    await t.flush();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
     t.session.cancel();
-    await expect(p).resolves.toBe('cancelled');
-    expect(t.startMic).not.toHaveBeenCalled();
+    expect(t.log).toEqual(expect.arrayContaining(['mic.stop', 'client.cancel']));
+    expect(t.frames).toHaveLength(0);
   });
 
-  it('finish() during startup is a cancel that returns nothing', async () => {
+  it('finish() before the microphone opened is a cancel that returns nothing', async () => {
     const t = rig();
     const p = t.session.start();
     await expect(t.session.finish()).resolves.toBe('');
     t.startGate.resolve();
+    t.micGate.resolve(t.mic);
     await expect(p).resolves.toBe('cancelled');
     expect(t.log).not.toContain('client.stop');
-    expect(t.startMic).not.toHaveBeenCalled();
+    expect(t.log).toContain('mic.stop');
   });
 
   it('a failed start cleans up fully and reports the error', async () => {
@@ -135,12 +161,14 @@ describe('dictation session startup races', () => {
     expect(t.session.phase).toBe('idle');
   });
 
-  it('times out if the provider never becomes ready', async () => {
+  it('times out if the provider never becomes ready, releasing the microphone', async () => {
     const t = rig({ readyImmediately: false, readyTimeoutMs: 20 });
     const p = t.session.start();
     t.startGate.resolve();
     await expect(p).rejects.toThrow(/did not respond/);
-    expect(t.startMic).not.toHaveBeenCalled();
+    t.micGate.resolve(t.mic);
+    await t.flush();
+    expect(t.log).toContain('mic.stop');
     expect(t.session.phase).toBe('idle');
   });
 
@@ -177,5 +205,80 @@ describe('stopping a live capture', () => {
     expect(t.session.phase).toBe('idle');
     t.feed(new ArrayBuffer(8));
     expect(t.frames).toHaveLength(0);
+  });
+});
+
+describe('early capture', () => {
+  it('queues what the microphone hears before the provider is ready, then sends it in order', async () => {
+    const t = rig({ readyImmediately: false });
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const a = pcm(100);
+    const b = pcm(200);
+    t.feed(a);
+    t.feed(b);
+    expect(t.frames).toHaveLength(0); // held, not dropped, while "Starting microphone…"
+    t.startGate.resolve();
+    await t.flush();
+    // The handshake resolved but readiness (transcript.created) has not come: still held.
+    expect(t.frames).toHaveLength(0);
+  });
+
+  it('flushes the queue the moment the provider is ready and streams live after', async () => {
+    const t = rig();
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const a = pcm(100);
+    const b = pcm(200);
+    t.feed(a);
+    t.feed(b);
+    expect(t.frames).toHaveLength(0);
+    t.startGate.resolve();
+    await vi.waitFor(() => expect(t.frames).toEqual([a, b]));
+    const c = pcm(300);
+    t.feed(c);
+    expect(t.frames).toEqual([a, b, c]);
+  });
+
+  it('keeps about 15 s at most, dropping the oldest audio rather than failing', async () => {
+    const t = rig({ maxQueuedFrames: 3 });
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const f = [1, 2, 3, 4, 5].map((v) => pcm(v * 10));
+    f.forEach((x) => t.feed(x));
+    t.startGate.resolve();
+    await vi.waitFor(() => expect(t.frames).toEqual(f.slice(2)));
+    expect(t.session.droppedFrames).toBe(2);
+  });
+
+  it('reports the microphone live only once real audio arrives, never for digital silence', async () => {
+    const t = rig();
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    t.startGate.resolve();
+    await p;
+    t.feed(pcm(0));
+    t.feed(pcm(2)); // warm-up dither
+    expect(t.log).not.toContain('micLive');
+    t.feed(pcm(40));
+    expect(t.log.filter((l) => l === 'micLive')).toHaveLength(1);
+  });
+
+  it('a Stop before the provider is ready still delivers the queued words', async () => {
+    const t = rig();
+    const p = t.session.start();
+    t.micGate.resolve(t.mic);
+    await expect(p).resolves.toBe('listening');
+    const a = pcm(500);
+    t.feed(a);
+    const raw = t.session.finish();
+    expect(t.log).toContain('mic.stop'); // the microphone is released at once
+    t.startGate.resolve();
+    await expect(raw).resolves.toBe('what was said');
+    expect(t.frames).toEqual([a]);
+    expect(t.log.indexOf('sendAudio')).toBeLessThan(t.log.indexOf('client.stop'));
   });
 });

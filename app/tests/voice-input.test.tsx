@@ -1,297 +1,496 @@
 // @vitest-environment happy-dom
-import { act, createElement, useState } from 'react';
+import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const h = vi.hoisted(() => {
-  const state = {
-    startGate: null as null | { resolve: () => void },
-    micGate: null as null | { resolve: (c: { stop: () => void }) => void },
-    clients: [] as { opts: Record<string, (...a: unknown[]) => void>; cancelled: boolean }[],
-    micStops: 0,
-    startMicCalls: 0,
-    onChange: [] as string[],
-    /** Answers POST /voice/correct; a 502 (clean-up unavailable) unless a test sets it. */
-    correct: null as null | ((body: unknown) => Promise<Response>),
-    setValue: null as null | ((v: string) => void),
-  };
-  return state;
-});
-
-vi.mock('../src/app/hooks.js', () => ({
-  useApp: () => ({
-    prefs: {
-      voice: {
-        consent: true,
-        transcription: 'xai',
-        correction: 'anthropic',
-        mode: (globalThis as { __mode?: string }).__mode ?? 'hold',
-      },
-    },
-    info: { voice: { xai: true, anthropic: true, openai: false } },
-    config: { relayOrigin: 'https://relay.example' },
-  }),
+/** The app the dictation owner and the draft store talk to, with drafts kept in memory. */
+const h = vi.hoisted(() => ({
+  stored: new Map<string, unknown>(),
+  prefs: {
+    theme: 'system',
+    dismissedInstall: false,
+    voice: { consent: true, transcription: 'xai', correction: 'anthropic', mode: 'tap' },
+  },
 }));
 vi.mock('../src/app/controller.js', () => ({
   app: {
-    getRelay: () => ({
-      json: async () => ({}),
-      raw: async (_m: string, _p: string, body: unknown) =>
-        h.correct ? h.correct(body) : new Response('{}', { status: 502 }),
-    }),
-    setPrefs: async () => undefined,
-  },
-}));
-vi.mock('../src/features/voice/capture.js', () => ({
-  MicUnavailableError: class MicUnavailableError extends Error {},
-  startMic: () => {
-    h.startMicCalls++;
-    return new Promise((res) => {
-      h.micGate = { resolve: res as (c: { stop: () => void }) => void };
-    });
-  },
-}));
-vi.mock('../src/features/voice/client.js', () => ({
-  VoiceClient: class {
-    cancelled = false;
-    constructor(public opts: Record<string, (...a: unknown[]) => void>) {
-      h.clients.push(this as never);
-    }
-    start() {
-      return new Promise<void>((res) => {
-        h.startGate = {
-          resolve: () => {
-            res();
-            this.opts.onState?.('ready');
-          },
-        };
-      });
-    }
-    sendAudio() {}
-    async stop() {
-      return 'hello world';
-    }
-    cancel() {
-      this.cancelled = true;
-    }
-  },
-}));
-
-import { VoiceInput } from '../src/features/voice/VoiceInput.js';
-
-const view = {
-  createdAt: '2026-11-02T10:00:00.000Z',
-  content: { question: 'Ship it?', options: [{ id: 'yes', label: 'Yes' }] },
-} as never;
-let root: Root;
-let host: HTMLElement;
-
-const render = (disabled = false) =>
-  act(async () => {
-    root.render(
-      createElement(VoiceInput, {
-        value: '',
-        onChange: (v: string) => h.onChange.push(v),
-        view,
-        disabled,
-      }),
-    );
-  });
-/** A parent that keeps the answer text, as the answer editor does. */
-function Host() {
-  const [value, setValue] = useState('');
-  h.setValue = setValue;
-  return createElement(VoiceInput, {
-    value,
-    onChange: (v: string) => {
-      h.onChange.push(v);
-      setValue(v);
+    subscribe: () => () => undefined,
+    getSnapshot: () => ({ phase: 'ready', prefs: h.prefs, online: true, info: null, config: null }),
+    getRelay: () => null,
+    registerUpdateGuard: () => () => undefined,
+    drafts: {
+      save: async (k: string, d: unknown) => void h.stored.set(k, structuredClone(d)),
+      load: async (k: string) => (h.stored.get(k) as never) ?? null,
+      delete: async (k: string) => void h.stored.delete(k),
     },
-    view,
-  });
+  },
+}));
+
+import { drafts } from '../src/features/compose/draftStore.js';
+import {
+  DictationController,
+  MESSAGES,
+  type Binding,
+  type DictationDeps,
+} from '../src/features/voice/dictation.js';
+import type { CorrectionOutcome } from '../src/features/voice/correction.js';
+import { composeShape, verdict } from '../src/domain/compose.js';
+import { DictateButton } from '../src/components/workspace/AnswerDock.js';
+
+interface FakeClient {
+  opts: Record<string, (...a: unknown[]) => void>;
+  cancelled: boolean;
+  stopped: boolean;
+  timedOut: boolean;
+  interim: string;
 }
-const renderHost = () => act(async () => root.render(createElement(Host)));
-const button = (name: string) =>
-  [...host.querySelectorAll('button')].find((b) => b.textContent === name) as
-    HTMLButtonElement | undefined;
-const cleaned = (corrected: string) =>
-  new Response(
-    JSON.stringify({
-      model: 'claude-haiku-5-5',
-      result: {
-        corrected_text: corrected,
-        uncertain_spans: [],
-        applied_commands: [],
-        warnings: [],
-      },
-    }),
-  );
-/** Tap to start, let the provider and microphone come up, tap to finish: "hello world" is dictated. */
-async function dictate() {
-  await act(async () => mic().click());
-  await act(async () => h.startGate!.resolve());
-  await flush();
-  await act(async () => h.micGate!.resolve({ stop: () => void h.micStops++ }));
-  await flush();
-  await act(async () => mic().click());
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
 }
-const mic = () => host.querySelector('button.mic') as HTMLButtonElement;
-const pointer = (type: string) =>
-  act(async () => {
-    mic().dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0 }));
-  });
 const flush = () => act(async () => void (await new Promise((r) => setTimeout(r, 0))));
 
+/** A dictation owner wired to fakes: a client the test speaks through, a microphone gate and a cleanup gate. */
+function rig(over: Partial<DictationDeps> = {}) {
+  const clients: FakeClient[] = [];
+  const mic = { gate: deferred<{ stop: () => void }>(), stops: 0, calls: 0 };
+  const cleanup = { gate: null as null | ReturnType<typeof deferred<CorrectionOutcome>>, calls: 0 };
+  const deps: DictationDeps = {
+    makeClient: (o) => {
+      const c: FakeClient = {
+        opts: o as never,
+        cancelled: false,
+        stopped: false,
+        timedOut: false,
+        interim: '',
+      };
+      clients.push(c);
+      return {
+        start: async () => void queueMicrotask(() => c.opts.onState?.('ready')),
+        sendAudio: () => undefined,
+        stop: async () => {
+          c.stopped = true;
+          return '';
+        },
+        cancel: () => void (c.cancelled = true),
+        get timedOut() {
+          return c.timedOut;
+        },
+        pendingInterim: () => c.interim,
+      };
+    },
+    startMic: () => {
+      mic.calls++;
+      return mic.gate.promise;
+    },
+    prefs: () => h.prefs as never,
+    info: () => ({ xai: true, openai: false, anthropic: true }),
+    relayOrigin: () => 'https://relay.example',
+    relay: () => ({ json: async () => ({}) as never, raw: async () => new Response('{}') }),
+    online: () => true,
+    setConsent: async () => void (h.prefs.voice.consent = true),
+    correct: async () => {
+      cleanup.calls++;
+      cleanup.gate = deferred<CorrectionOutcome>();
+      return cleanup.gate.promise;
+    },
+    ...over,
+  };
+  const d = new DictationController(deps);
+  return {
+    d,
+    clients,
+    mic,
+    cleanup,
+    say: (text: string) => act(async () => clients.at(-1)!.opts.onFinal?.(text)),
+    async listen() {
+      mic.gate.resolve({ stop: () => void mic.stops++ });
+      await flush();
+      await flush();
+    },
+  };
+}
+
+let seq = 0;
+function bindingFor(text = '', caret?: number): Binding {
+  const questionId = `q_test_${++seq}`;
+  const draft = drafts.ensure(questionId, 'answer', 0);
+  if (text) drafts.edit(draft.key, { text });
+  if (caret !== undefined) drafts.setCaret(draft.key, { field: 'text', start: caret, end: caret });
+  const now = drafts.get(draft.key)!;
+  return {
+    questionId,
+    revision: 0,
+    mode: 'answer',
+    field: 'text',
+    key: now.key,
+    epoch: now.epoch,
+    question: 'Which version should the guide describe?',
+    options: [],
+  };
+}
+const text = (b: Binding) => drafts.get(b.key)!.text;
+const cleaned = (corrected: string): CorrectionOutcome => ({
+  kind: 'applied',
+  result: { corrected_text: corrected, uncertain_spans: [], applied_commands: [], warnings: [] },
+  model: 'claude-haiku',
+  spans: [],
+  changed: true,
+  lowConfidence: false,
+});
+
 beforeEach(() => {
-  h.startGate = h.micGate = null;
-  h.clients.length = 0;
-  h.micStops = h.startMicCalls = 0;
-  h.onChange.length = 0;
-  h.correct = null;
-  h.setValue = null;
-  (globalThis as { __mode?: string }).__mode = 'hold';
-  host = document.createElement('div');
-  document.body.appendChild(host);
-  root = createRoot(host);
-});
-afterEach(() => {
-  act(() => root.unmount());
-  host.remove();
+  h.stored.clear();
+  h.prefs.voice = { consent: true, transcription: 'xai', correction: 'anthropic', mode: 'tap' };
 });
 
-describe('hold-to-talk', () => {
-  it('release during the provider handshake never reaches the microphone', async () => {
-    await render();
-    await pointer('pointerdown');
-    expect(h.clients).toHaveLength(1);
-    await pointer('pointerup'); // let go before the session is even ready
-    await act(async () => h.startGate!.resolve());
-    await flush();
-    expect(h.startMicCalls).toBe(0);
-    expect(h.clients[0]!.cancelled).toBe(true);
-    expect(mic().textContent).toMatch(/Hold to dictate/);
+describe('words land live, at the caret, and only finalized words', () => {
+  it('writes each finalized chunk into the draft at the caret captured when recording started', async () => {
+    const t = rig();
+    const b = bindingFor('Use v3. Thanks', 7);
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    expect(t.d.getState().phase).toBe('recording');
+    await t.say('and move v2 to an appendix');
+    // Live: in the draft before Stop.
+    expect(text(b)).toBe('Use v3. and move v2 to an appendix Thanks');
+    // Interim words are shown, never written.
+    await act(async () => t.clients[0]!.opts.onText?.({ final: 'x', interim: 'at the' }));
+    expect(text(b)).toBe('Use v3. and move v2 to an appendix Thanks');
+    expect(t.d.getState().interim).toBe('at the');
   });
 
-  it('pointercancel during microphone permission stops the capture that arrives late', async () => {
-    await render();
-    await pointer('pointerdown');
-    await act(async () => h.startGate!.resolve());
-    await flush();
-    expect(h.startMicCalls).toBe(1);
-    await pointer('pointercancel');
-    await act(async () => h.micGate!.resolve({ stop: () => void h.micStops++ }));
-    await flush();
-    expect(h.micStops).toBe(1);
-    expect(mic().textContent).toMatch(/Hold to dictate/);
-    expect(h.onChange).toEqual([]); // nothing was dictated, nothing was inserted
-  });
-
-  it('the button stays pressable while connecting so the release can reach it', async () => {
-    await render();
-    await pointer('pointerdown');
-    expect(mic().disabled).toBe(false);
-    await pointer('pointerup');
+  it('turns a spoken "new line" and "new paragraph" into breaks, and nothing else', async () => {
+    const t = rig({ correct: undefined });
+    h.prefs.voice.correction = 'off';
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first point new line');
+    await t.say('second point. New paragraph.');
+    await t.say('send it');
+    expect(text(b)).toBe('first point\nsecond point.\n\nsend it');
   });
 });
 
-describe('disabling the editor', () => {
-  it('stops capture and keeps the words so far when the editor locks mid-dictation', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
-    await render();
-    await act(async () => mic().click());
-    await act(async () => h.startGate!.resolve());
+describe('the capture-versus-send gate', () => {
+  it('holds Send while starting, recording, finishing and cleaning, and releases it once settled', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const shape = composeShape(
+      {
+        content_version: 1,
+        question: 'Q',
+        kind: 'text',
+        options: [],
+        attachments: [],
+        allow_text: true,
+      },
+      'answer',
+    );
+    const can = () =>
+      verdict({
+        shape,
+        mode: 'answer',
+        selected: [],
+        text: text(b),
+        reason: '',
+        attachments: 0,
+        evidence: { total: 0, loaded: 0, expired: 0, failed: 0 },
+        stale: false,
+        capturing: t.d.busyFor(b.key),
+      }).canSend;
+    const starting = t.d.start(b);
+    expect(t.d.busyFor(b.key)).toBe('capturing');
+    await t.listen();
+    await starting;
+    await t.say('ship it');
+    expect(text(b)).toBe('ship it');
+    expect(can()).toBe(false); // words are there, but capture has not settled
+    const stopping = act(() => t.d.stop());
+    expect(t.d.busyFor(b.key)).toBe('capturing');
+    await stopping;
+    expect(t.d.busyFor(b.key)).toBe('cleaning');
+    expect(can()).toBe(false);
+    await act(async () => t.cleanup.gate!.resolve(cleaned('Ship it.')));
     await flush();
-    await act(async () => h.micGate!.resolve({ stop: () => void h.micStops++ }));
-    await flush();
-    expect(mic().textContent).toMatch(/Tap to finish/);
-    // Another device commits a newer revision: the editor becomes stale and passes disabled.
-    await render(true);
-    await flush();
-    await flush();
-    expect(h.micStops).toBe(1);
-    expect(h.onChange).toEqual(['hello world']);
+    expect(t.d.busyFor(b.key)).toBe(false);
+    expect(can()).toBe(true);
   });
 
-  it('an unmount mid-startup cancels instead of leaving the microphone to start later', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
-    await render();
-    await act(async () => mic().click());
-    await act(async () => h.startGate!.resolve());
-    await flush();
-    act(() => root.unmount());
-    root = createRoot(host);
-    await act(async () => h.micGate!.resolve({ stop: () => void h.micStops++ }));
-    await flush();
-    expect(h.micStops).toBe(1);
+  it('a draft sent mid-dictation refuses every later word and cancels capture', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first');
+    await act(() => drafts.sent(b.key));
+    await t.say('second');
+    expect(text(b)).toBe('');
+    expect(t.mic.stops).toBe(1);
+    expect(t.clients[0]!.cancelled).toBe(true);
   });
 });
 
-describe('clean-up lands as written, and the person stays in control', () => {
-  it('replaces the dictated words, sends the question as context, and goes back in one tap', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
+describe('cleanup lands only on its own untouched passage', () => {
+  async function dictated(t: ReturnType<typeof rig>, before = '') {
+    const b = bindingFor(before);
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('hello world');
+    await act(() => t.d.stop());
+    return b;
+  }
+
+  it('replaces the passage, sends the question as context, underlines what changed, and goes back in one tap', async () => {
     let sent: Record<string, unknown> = {};
-    h.correct = async (body) => {
-      sent = body as Record<string, unknown>;
-      return cleaned('Hello, world.');
-    };
-    await renderHost();
-    await dictate();
-    await flush();
-    expect(h.onChange).toEqual(['hello world', 'Hello, world.']);
-    expect(sent).toMatchObject({
-      raw_transcript: 'hello world',
-      question: 'Ship it?',
-      options: [{ label: 'Yes' }],
-      asked_at: '2026-11-02T10:00:00.000Z',
-      transcriber: 'xai',
+    const t = rig({
+      correct: async (req) => {
+        sent = req as never;
+        return cleaned('Hello, whole world.');
+      },
     });
-    expect(host.textContent).toMatch(/Cleaned up/);
-    await act(async () => button('Use what I said')!.click());
-    expect(h.onChange.at(-1)).toBe('hello world');
-    expect(button('Use what I said')).toBeUndefined();
+    const b = await dictated(t, 'Hi.');
+    await flush();
+    expect(sent).toMatchObject({
+      raw: 'hello world',
+      question: 'Which version should the guide describe?',
+      precedingText: 'Hi.',
+    });
+    expect(text(b)).toBe('Hi. Hello, whole world.');
+    // Punctuation and a sentence's capital land quietly; the new word is underlined, with what was heard.
+    const marks = t.d.getState().review!.marks;
+    expect(marks.map((m) => text(b).slice(m.from, m.to))).toEqual(['whole']);
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(true);
+    act(() => t.d.useOriginal(b.key));
+    expect(text(b)).toBe('Hi. hello world');
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(false);
   });
 
-  it('never overwrites text the person edited while the clean-up was running', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
-    let answer: (r: Response) => void = () => undefined;
-    h.correct = () => new Promise<Response>((res) => (answer = res));
-    await renderHost();
-    await dictate();
+  it('never overwrites text the person edited while the cleanup was running', async () => {
+    const t = rig();
+    const b = await dictated(t);
+    expect(t.d.getState().phase).toBe('cleaning');
+    act(() => drafts.edit(b.key, { text: 'hello world, and keep the old one' }));
+    await act(async () => t.cleanup.gate!.resolve(cleaned('Hello, world.')));
     await flush();
-    await act(async () => h.setValue!('hello world, and keep the old one'));
-    await act(async () => answer(cleaned('Hello, world.')));
-    await flush();
-    expect(h.onChange).toEqual(['hello world']);
-    expect(host.textContent).toMatch(/You edited the text/);
-    expect(button('Use what I said')).toBeUndefined();
+    expect(text(b)).toBe('hello world, and keep the old one');
+    expect(t.d.getState().message?.text).toBe(MESSAGES.edited);
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(false);
   });
 
-  it('offers no way back once the cleaned text was edited', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
-    h.correct = async () => cleaned('Hello, world.');
-    await renderHost();
-    await dictate();
+  it('"Use original wording" beats a cleanup that arrives later', async () => {
+    const t = rig();
+    const b = await dictated(t);
+    expect(t.d.busyFor(b.key)).toBe('cleaning');
+    act(() => t.d.useOriginal(b.key));
+    expect(t.d.busyFor(b.key)).toBe(false); // Send is free at once
+    await act(async () => t.cleanup.gate!.resolve(cleaned('Hello, world.')));
     await flush();
-    expect(button('Use what I said')).toBeDefined();
-    await act(async () => h.setValue!('Hello, world. Also ship it.'));
-    expect(button('Use what I said')).toBeDefined(); // the cleaned passage itself is untouched
-    await act(async () => h.setValue!('Hello world. Also ship it.'));
-    expect(button('Use what I said')).toBeUndefined();
+    expect(text(b)).toBe('hello world');
   });
 
-  it('offers no way back once the text ahead of the passage changed, even if its offsets still match', async () => {
-    (globalThis as { __mode?: string }).__mode = 'tap';
-    h.correct = async () => cleaned('Hello, world.');
-    await renderHost();
-    await act(async () => h.setValue!('Hi. '));
-    await dictate();
+  it('offers no way back once the cleaned passage, or the text ahead of it, changed', async () => {
+    const t = rig({ correct: async () => cleaned('Hello, world.') });
+    const b = await dictated(t, 'Hi.');
     await flush();
-    expect(h.onChange.at(-1)).toBe('Hi. Hello, world.');
-    expect(button('Use what I said')).toBeDefined();
-    // The same words now sit where the passage was, but they are the person's own: never rewrite those.
-    await act(async () => h.setValue!('Ok, Hello, world. Hello, world.'));
-    expect(button('Use what I said')).toBeUndefined();
+    expect(text(b)).toBe('Hi. Hello, world.');
+    act(() => drafts.edit(b.key, { text: 'Hi. Hello, world. Also ship it.' }));
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(true); // the passage itself is untouched
+    act(() => drafts.edit(b.key, { text: 'Ok, Hello, world. Also ship it.' }));
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(false);
+    act(() => drafts.edit(b.key, { text: 'Hi. Hello world. Also ship it.' }));
+    expect(t.d.canUseOriginal(drafts.get(b.key)!)).toBe(false);
+  });
+
+  it('keeps the raw words when the cleanup fails', async () => {
+    const t = rig({ correct: async () => ({ kind: 'kept-raw', reason: 'timeout' }) });
+    const b = await dictated(t);
+    await flush();
+    expect(text(b)).toBe('hello world');
+    expect(t.d.getState().message?.text).toBe(MESSAGES.cleanupFailed);
+  });
+});
+
+describe('navigation during dictation', () => {
+  it('Stop & questions leaves the words only in the original draft, late words and late cleanup included', async () => {
+    const t = rig();
+    const a = bindingFor();
+    const started = t.d.start(a);
+    await t.listen();
+    await started;
+    await t.say('for the first question');
+    // Stop & questions: stop at once; the person picks another question while the last words are finishing.
+    const stopping = t.d.stop();
+    const other = bindingFor();
+    act(() => drafts.edit(other.key, { text: 'typed in the second' }));
+    await t.say('and its last words');
+    await act(() => stopping);
+    await act(async () =>
+      t.cleanup.gate!.resolve(cleaned('For the first question and its last words.')),
+    );
+    await flush();
+    expect(text(a)).toBe('For the first question and its last words.');
+    expect(text(other)).toBe('typed in the second');
+    // The raw words were checkpointed to storage before the cleanup.
+    expect((h.stored.get(a.key) as { text: string }).text).toMatch(/first question/);
+    expect(h.stored.get(other.key) as { text: string } | undefined).not.toMatchObject({
+      text: expect.stringMatching(/first question/),
+    });
+  });
+
+  it('a release during microphone permission stops the capture that arrives late, and writes nothing', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const starting = t.d.start(b);
+    await flush();
+    expect(t.mic.calls).toBe(1);
+    await act(() => t.d.stop()); // hold-to-talk released before the permission resolved
+    t.mic.gate.resolve({ stop: () => void t.mic.stops++ });
+    await starting;
+    await flush();
+    expect(t.mic.stops).toBe(1);
+    expect(t.d.getState().phase).toBe('idle');
+    expect(text(b)).toBe('');
+  });
+
+  it('a connection drop stops recording and keeps the words, including ones not yet locked', async () => {
+    const t = rig({ correct: undefined });
+    h.prefs.voice.correction = 'off';
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('kept words');
+    t.clients[0]!.interim = 'and these';
+    await act(async () => t.clients[0]!.opts.onError?.('Dictation stopped unexpectedly'));
+    await flush();
+    expect(text(b)).toBe('kept words and these');
+    expect(t.d.getState().message?.text).toBe(MESSAGES.dropped);
+  });
+});
+
+describe('discard', () => {
+  it('Escape twice discards the passage, with Undo', async () => {
+    const t = rig();
+    const b = bindingFor('Already here.');
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('scratch that');
+    expect(text(b)).toBe('Already here. scratch that');
+    act(() => void t.d.escape());
+    expect(t.d.getState().escArmed).toBe(true);
+    expect(text(b)).toBe('Already here. scratch that');
+    act(() => void t.d.escape());
+    expect(text(b)).toBe('Already here.');
+    expect(t.mic.stops).toBe(1);
+    act(() => drafts.get(b.key)!.undo!.restore());
+    expect(text(b)).toBe('Already here. scratch that');
+  });
+});
+
+describe('first use', () => {
+  it('asks before the microphone, and consent comes only from "Enable and start dictation"', async () => {
+    h.prefs.voice.consent = false;
+    const t = rig();
+    const b = bindingFor();
+    act(() => t.d.request(b));
+    expect(t.d.getState().phase).toBe('consent');
+    expect(t.mic.calls).toBe(0);
+    act(() => t.d.declineConsent());
+    expect(h.prefs.voice.consent).toBe(false);
+    act(() => t.d.request(b));
+    void t.d.acceptConsent();
+    await flush();
+    expect(h.prefs.voice.consent).toBe(true);
+    expect(t.mic.calls).toBe(1);
+  });
+
+  it('says why when dictation is not set up or offline, without touching the microphone', () => {
+    const t = rig({ info: () => ({ xai: false, openai: false, anthropic: false }) });
+    act(() => t.d.request(bindingFor()));
+    expect(t.d.getState().message?.text).toBe(MESSAGES.unconfigured);
+    const u = rig({ online: () => false });
+    act(() => u.d.request(bindingFor()));
+    expect(u.d.getState().message?.text).toBe(MESSAGES.offline);
+    expect(t.mic.calls + u.mic.calls).toBe(0);
+  });
+});
+
+describe('the Dictate button', () => {
+  let root: Root;
+  let host: HTMLElement;
+  beforeEach(() => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    host.remove();
+  });
+  const idle = {
+    phase: 'idle',
+    binding: null,
+    micLive: false,
+    micSilent: false,
+    permission: false,
+    startedAt: null,
+    final: '',
+    interim: '',
+    capWarning: false,
+    message: null,
+    review: null,
+    unsure: null,
+    escArmed: false,
+  } as const;
+
+  it('stays pressable while starting so a hold-to-talk release can reach it', () => {
+    const onHoldEnd = vi.fn();
+    act(() =>
+      root.render(
+        createElement(DictateButton, {
+          dict: { ...idle, phase: 'starting' },
+          holdMode: true,
+          fieldLabel: 'answer',
+          onToggle: () => undefined,
+          onHoldStart: () => undefined,
+          onHoldEnd,
+        }),
+      ),
+    );
+    const btn = host.querySelector('button')!;
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('aria-label')).toBe('Cancel dictation');
+    act(() => void btn.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })));
+    expect(onHoldEnd).toHaveBeenCalled();
+  });
+
+  it('is Stop, not Send, while recording', () => {
+    act(() =>
+      root.render(
+        createElement(DictateButton, {
+          dict: { ...idle, phase: 'recording', micLive: true, startedAt: Date.now() },
+          holdMode: false,
+          fieldLabel: 'answer',
+          onToggle: () => undefined,
+          onHoldStart: () => undefined,
+          onHoldEnd: () => undefined,
+        }),
+      ),
+    );
+    const btn = host.querySelector('button')!;
+    expect(btn.getAttribute('aria-label')).toBe('Stop dictation');
+    expect(btn.getAttribute('aria-pressed')).toBe('true');
+    expect(host.textContent).not.toMatch(/Send/);
   });
 });

@@ -1,55 +1,130 @@
-/* ---------- dictation (owned by the workspace work) ---------- */
-.voice-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
+/* ---------- dictation (owned by the workspace work) ----------
+ * Dictate is a 56 px circle at the dock's right edge that never moves. Idle it is an outline plane with a mic;
+ * capture turns it into Stop (a stop square on the contrast fill) wrapped in Daintree's orbit ring.
+ */
+.dictate {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: none;
 }
-.btn.mic.recording {
+.dictate-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow:
+    inset 0 0 0 1px var(--line-strong),
+    var(--shadow-1);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    color var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .dictate-btn:hover {
+    background: color-mix(in oklab, var(--surface-raised) 100%, var(--text) 5%);
+  }
+}
+.dictate-btn:active {
+  transform: scale(0.96);
+  transition-duration: 1ms;
+}
+.dictate-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+.dictate.active .dictate-btn {
   background: var(--text);
   color: var(--text-inverse);
-  box-shadow:
-    0 0 0 2px var(--surface-page),
-    0 0 0 4px var(--accent);
+  box-shadow: var(--shadow-1);
 }
-.mic-dot {
-  width: 10px;
-  height: 10px;
+.dictate-btn[aria-disabled='true'] {
+  cursor: progress;
+}
+
+/* The orbit: a band on the circle's outer edge, drawn above the button so it reads while it holds focus. */
+.orbit {
+  position: absolute;
+  inset: -5px;
+  pointer-events: none;
+  z-index: 1;
+}
+.orbit-band {
+  position: absolute;
+  inset: 0;
   border-radius: 50%;
-  background: currentColor;
-  transition: transform var(--dur-fast);
+  padding: 3px;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
 }
-.live {
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  background: var(--surface-inset);
-  border: 1px solid var(--line-subtle);
-  font-weight: 400;
+.orbit-track {
+  background: var(--accent);
+  opacity: 0.12;
 }
+.orbit-spin {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+.orbit-dot {
+  position: absolute;
+  top: 1.5px;
+  left: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.orbit-halo {
+  width: 8px;
+  height: 8px;
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
+}
+.orbit-core {
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+}
+/* Waiting on the machine (microphone starting, last words finishing): a neutral arc. */
+.orbit-wait-track {
+  background: var(--text-2);
+  opacity: 0.18;
+}
+.orbit-wait {
+  background: conic-gradient(var(--text-2) 0deg 100deg, transparent 100deg);
+  animation: spin 1s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .orbit-wait {
+    animation: none;
+  }
+}
+@media (forced-colors: active) {
+  .dictate-btn {
+    border: 2px solid ButtonText;
+  }
+  .dictate.active .dictate-btn {
+    border-color: Highlight;
+  }
+}
+
 .interim {
   color: var(--text-2);
   font-style: italic;
-}
-.spans {
-  list-style: none;
-  padding: 0;
-  margin: 8px 0;
-  display: grid;
-  gap: 8px;
-  font-weight: 400;
-}
-.spans mark {
-  background: var(--warning-surface);
-  color: var(--text);
-  padding: 0 3px;
-  border-radius: 4px;
-}
-.chips {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.chip {
-  min-height: 40px;
-  font-size: var(--text-sm);
 }
