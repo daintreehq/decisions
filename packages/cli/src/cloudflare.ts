@@ -142,6 +142,7 @@ export class CloudflareApi {
         typeof d.hostname === 'string' &&
         d.hostname.toLowerCase() === hostname &&
         typeof d.service === 'string' &&
+        (d as { enabled?: unknown }).enabled !== false &&
         (d.environment === undefined || d.environment === 'production'),
     );
     return hit ? (hit.service as string) : null;

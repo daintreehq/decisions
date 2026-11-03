@@ -2,10 +2,17 @@ import { gzipSync } from 'node:zlib';
 
 /** A minimal ustar writer, enough to build npm-style tarballs for the reader. */
 export function tarball(
-  entries: { path: string; data?: string | Buffer; type?: string; pax?: string }[],
+  entries: {
+    path: string;
+    data?: string | Buffer;
+    type?: string;
+    pax?: string;
+    badChecksum?: boolean;
+  }[],
+  o: { eofBlocks?: number } = {},
 ): Buffer {
   const blocks: Buffer[] = [];
-  const header = (name: string, size: number, type: string) => {
+  const header = (name: string, size: number, type: string, badChecksum = false) => {
     const h = Buffer.alloc(512);
     h.write(name.slice(0, 100), 0, 'utf8');
     h.write('0000644\0', 100, 'ascii');
@@ -19,6 +26,7 @@ export function tarball(
     h.write('00', 263, 'ascii');
     let sum = 0;
     for (const b of h) sum += b;
+    if (badChecksum) sum += 1;
     h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 'ascii');
     return h;
   };
@@ -32,8 +40,16 @@ export function tarball(
       blocks.push(header('PaxHeader', body.length, 'x'), pad(body));
     }
     const data = Buffer.from(e.data ?? '');
-    blocks.push(header(e.path, data.length, e.type ?? '0'), pad(data));
+    blocks.push(header(e.path, data.length, e.type ?? '0', e.badChecksum), pad(data));
   }
-  blocks.push(Buffer.alloc(1024));
+  blocks.push(Buffer.alloc(512 * (o.eofBlocks ?? 2)));
   return gzipSync(Buffer.concat(blocks));
+}
+
+/** One pax extended-header record, `<len> <key>=<value>\n`, with its length computed. */
+export function paxRecord(key: string, value: string): string {
+  const rest = ` ${key}=${value}\n`;
+  let len = rest.length + 1;
+  while (String(len).length + rest.length !== len) len = String(len).length + rest.length;
+  return `${len}${rest}`;
 }

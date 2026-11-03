@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -71,7 +71,9 @@ function relayTarball(version: string, over: { protocol?: unknown; tamper?: bool
       ]),
     ),
   };
-  if (over.tamper) files['worker/index.js'] = 'export default { evil: true };\n';
+  // Same length, different bytes: only the SHA-256 comparison can catch it.
+  if (over.tamper)
+    files['worker/index.js'] = files['worker/index.js']!.replace('default', 'DEFAULT');
   return tarball([
     { path: 'package/package.json', data: JSON.stringify({ name: manifest.name, version }) },
     { path: 'package/dist/manifest.json', data: JSON.stringify(manifest, null, 2) + '\n' },
@@ -99,7 +101,8 @@ const LIVE_BINDINGS = [
 interface World {
   live: string;
   room: string;
-  published: Record<string, { protocol?: unknown; tamper?: boolean }>;
+  /** `protocol` goes in the manifest, `registryProtocol` (default: the same) in the packument. */
+  published: Record<string, { protocol?: unknown; registryProtocol?: unknown; tamper?: boolean }>;
   bindings: Record<string, unknown>[];
   workerName: string;
   subdomain: string;
@@ -110,6 +113,13 @@ interface World {
   roomLag: number;
   /** Change the bindings on the n-th settings read (to simulate a concurrent edit). */
   driftOnRead?: number;
+  /** Something else deploys this version on the n-th settings read. */
+  redeployOnRead?: { read: number; version: string };
+  /** Another account (OTHER) that also has a Worker with the same name. */
+  dupAccount?: boolean;
+  infoName?: string;
+  observability?: unknown;
+  placement?: unknown;
   deployFails?: boolean;
   infoClaimed: boolean;
   githubDown?: boolean;
@@ -166,7 +176,7 @@ function setup(
           if (w.roomLag-- <= 0) w.room = w.live;
         }
         return json({
-          name: 'daintree-decisions',
+          name: w.infoName ?? 'daintree-decisions',
           protocol_min: 1,
           protocol_max: 1,
           worker_version: w.room,
@@ -187,7 +197,11 @@ function setup(
                 version: v,
                 ...(o.protocol === undefined && v === '0.2.0'
                   ? {}
-                  : { decisions: { protocol: o.protocol ?? { min: 1, max: 1 } } }),
+                  : {
+                      decisions: {
+                        protocol: o.registryProtocol ?? o.protocol ?? { min: 1, max: 1 },
+                      },
+                    }),
                 dist: { tarball: `${REGISTRY}/t/${v}.tgz`, integrity: sri(tarballs.get(v)!) },
               },
             ]),
@@ -229,17 +243,28 @@ function setup(
       if (m)
         return json({
           success: true,
-          result: m[1] === ACCOUNT ? [{ id: w.workerName }, { id: 'something-else' }] : [],
+          result:
+            m[1] === ACCOUNT
+              ? [{ id: 'something-else' }, { id: w.workerName }]
+              : w.dupAccount
+                ? [{ id: w.workerName }]
+                : [],
           result_info: { total_pages: 1 },
         });
       m = /^\/accounts\/([^/]+)\/workers\/scripts\/([^/]+)\/(settings|subdomain)$/.exec(p);
       if (m) {
-        if (m[1] !== ACCOUNT || m[2] !== w.workerName) return cf(null, 404);
+        if ((m[1] !== ACCOUNT && !(w.dupAccount && m[1] === OTHER)) || m[2] !== w.workerName)
+          return cf(null, 404);
         if (m[3] === 'subdomain') return cf({ enabled: w.workersDev, previews_enabled: false });
         settingsReads++;
         if (w.driftOnRead === settingsReads)
           w.bindings.push({ type: 'plain_text', name: 'SNEAKY', text: 'x' });
-        return cf({ bindings: w.bindings, placement: { mode: 'smart' }, observability: null });
+        if (w.redeployOnRead?.read === settingsReads) w.live = w.redeployOnRead.version;
+        return cf({
+          bindings: w.bindings,
+          placement: 'placement' in w ? w.placement : { mode: 'smart' },
+          observability: w.observability ?? null,
+        });
       }
       return cf(null, 404);
     }
@@ -434,11 +459,11 @@ describe('decisions update', () => {
 
   it('asks which Worker to update when the URL is a domain it cannot match', async () => {
     // Served at a domain Cloudflare does not list as a custom domain of any Worker (a route, say).
-    const t2 = setup({ answers: ['1', 'y'], customDomains: { 'decisions.example.com': '' } });
+    const t2 = setup({ answers: ['2', 'y'], customDomains: { 'decisions.example.com': '' } });
     const res = await t2.run({ url: 'https://decisions.example.com' });
     expect(res).toBeUndefined();
     expect(t2.text()).toMatch(/Could not tell which Worker serves/);
-    expect(t2.text()).toMatch(/\[1\] relay-one/);
+    expect(t2.text()).toMatch(/\[2\] relay-one/);
     expect(t2.text()).toMatch(/chosen by name/);
     expect(t2.deploys()[0]!.config!.name).toBe('relay-one');
   });
@@ -509,9 +534,11 @@ describe('decisions update', () => {
 
   it('refuses anything that is not a Decisions relay', async () => {
     const t = setup();
-    await expect(
-      t.run({ url: 'https://example.org' }).catch((e: Error) => e),
-    ).resolves.toBeInstanceOf(Error);
+    const t2 = setup({ infoName: 'something-else' });
+    await expect(t2.run()).rejects.toThrow(/did not answer as a Decisions relay/);
+    expect(t2.calls).toHaveLength(0);
+    expect(t2.requests.every((r) => new URL(r.url).origin === ORIGIN)).toBe(true);
+    await expect(t.run({ url: 'https://example.org' })).rejects.toThrow(/Decisions relay/);
     expect(t.calls).toHaveLength(0);
   });
 
@@ -522,6 +549,106 @@ describe('decisions update', () => {
       /0\.4\.0\s+https:\/\/github\.com\/daintreehq\/decisions\/releases\/tag\/v0\.4\.0/,
     );
     expect(t.text()).toMatch(/Updated/);
+  });
+});
+
+describe('decisions update, after review', () => {
+  it('keeps observability that differs from the release default', async () => {
+    const t = setup({
+      answers: ['y'],
+      observability: { enabled: true, head_sampling_rate: 0.5 },
+      placement: { mode: 'targeted', target: [{ region: 'aws:eu-west-1' }] },
+    });
+    await t.run();
+    const c = t.deploys()[0]!.config!;
+    expect(c.observability).toEqual({ enabled: true, head_sampling_rate: 0.5 });
+    expect(c.placement).toEqual({ region: 'aws:eu-west-1' });
+  });
+
+  it('refuses a placement it cannot express in the Wrangler config', async () => {
+    const t = setup({
+      placement: { mode: 'targeted', target: [{ region: 'a' }, { region: 'b' }] },
+    });
+    await expect(t.run({ yes: true })).rejects.toThrow(/placement setting/);
+    expect(t.deploys()).toHaveLength(0);
+  });
+
+  it('refuses a relay in the middle of an update', async () => {
+    const t = setup({ live: '0.3.0', room: '0.2.0' });
+    await expect(t.run({ to: '0.3.0' })).rejects.toThrow(/middle of an update/);
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it('does not deploy over a version someone else deployed while waiting', async () => {
+    const t = setup({ answers: ['y'], redeployOnRead: { read: 2, version: '0.4.0' } });
+    await expect(t.run({ to: '0.3.0' })).rejects.toThrow(/something else deployed it/);
+    expect(t.deploys()).toHaveLength(0);
+  });
+
+  it('refuses a typed Worker name that several accounts have', async () => {
+    const t = setup({
+      answers: ['relay-one'],
+      dupAccount: true,
+      subdomain: 'not-this-one',
+      accounts: [
+        { id: ACCOUNT, name: 'Mine' },
+        { id: OTHER, name: 'Mine' },
+      ],
+    });
+    await expect(t.run()).rejects.toThrow(/several accounts have a Worker named "relay-one"/);
+    expect(t.text()).toContain(OTHER);
+    expect(t.deploys()).toHaveLength(0);
+  });
+
+  it('clears ambient overrides of the target, API host and credential, and does not stream output', async () => {
+    const t = setup({
+      answers: ['y'],
+      env: {
+        PATH: '/usr/bin',
+        CLOUDFLARE_ENV: 'staging',
+        CLOUDFLARE_API_BASE_URL: 'https://evil.example',
+        CF_API_BASE_URL: 'https://evil.example',
+        CLOUDFLARE_API_KEY: 'k',
+        CLOUDFLARE_EMAIL: 'e@x',
+      },
+    });
+    await t.run();
+    for (const c of t.calls) {
+      for (const k of [
+        'CLOUDFLARE_ENV',
+        'CLOUDFLARE_API_BASE_URL',
+        'CF_API_BASE_URL',
+        'CLOUDFLARE_API_KEY',
+        'CLOUDFLARE_EMAIL',
+      ])
+        expect(c.env[k]).toBeUndefined();
+      expect(c.echo).toBeUndefined();
+    }
+  });
+
+  it('skips the full check, not the update, when this CLI cannot speak the new protocol', async () => {
+    const t = setup({
+      answers: ['y'],
+      published: { '0.2.0': {}, '0.3.0': { protocol: { min: 2, max: 2 } } },
+    });
+    await t.run({ protocol: '1-2' });
+    expect(t.text()).toMatch(/full check is left to the app/);
+    expect(t.text()).toMatch(/Updated .* to relay 0\.3\.0/);
+  });
+
+  it('refuses a manifest whose protocol range differs in min or max alone', async () => {
+    // The registry lists 0.3.0 for protocol 1–2; the manifest differs only in min, then only in max.
+    for (const protocol of [
+      { min: 2, max: 2 },
+      { min: 1, max: 1 },
+    ]) {
+      const t = setup({
+        published: { '0.2.0': {}, '0.3.0': { protocol, registryProtocol: { min: 1, max: 2 } } },
+      });
+      await expect(t.run({ yes: true, protocol: '1-2' })).rejects.toThrow(
+        /different protocol range/,
+      );
+    }
   });
 });
 
@@ -541,6 +668,11 @@ describe('chooseRelease', () => {
       '0.2.0',
       one,
     );
+    expect('release' in r && r.release.version).toBe('0.3.0');
+  });
+
+  it('selects a release that only overlaps the caller range', () => {
+    const r = chooseRelease([rel('0.3.0', { min: 2, max: 3 })], '0.2.0', { min: 1, max: 2 });
     expect('release' in r && r.release.version).toBe('0.3.0');
   });
 
@@ -608,6 +740,8 @@ describe('relayOrigin', () => {
     for (const bad of [
       'http://a.example',
       'https://u:p@a.example',
+      'https://u@a.example',
+      'https://:p@a.example',
       'https://a.example/x',
       'https://a.example/?q',
       'nope',
@@ -622,6 +756,8 @@ describe('the relay package', () => {
       readFileSync(new URL('../../relay/package.json', import.meta.url), 'utf8'),
     ) as { decisions: { protocol: { min: number; max: number } } };
     expect(pkg.decisions.protocol).toEqual({ min: MIN_PROTOCOL_VERSION, max: PROTOCOL_VERSION });
-    expect(existsSync(new URL('../../relay/scripts/build.mjs', import.meta.url))).toBe(true);
+    // The relay build copies it into manifest.json, which `decisions update` checks on download.
+    const build = readFileSync(new URL('../../relay/scripts/build.mjs', import.meta.url), 'utf8');
+    expect(build).toMatch(/protocol: pkg\.decisions\.protocol,/);
   });
 });

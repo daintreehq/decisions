@@ -70,8 +70,9 @@ export function compareVersions(a: string, b: string): number {
     const na = /^\d+$/.test(ia);
     const nb = /^\d+$/.test(ib);
     if (na && nb) {
-      const d = Number(ia) - Number(ib);
-      if (d) return d;
+      // Numeric identifiers have no size limit, so compare them as integers of any length.
+      const d = BigInt(ia) - BigInt(ib);
+      if (d) return d < 0n ? -1 : 1;
     } else if (na !== nb) return na ? -1 : 1;
     else if (ia !== ib) return ia < ib ? -1 : 1;
   }
@@ -84,7 +85,8 @@ export function parseProtocolRange(s: string): ProtocolRange {
   if (!m) throw new CliError(`--protocol "${s}" must be a version or a range like 1-2`);
   const min = Number(m[1]);
   const max = Number(m[2] ?? m[1]);
-  if (min < 1 || max < min) throw new CliError(`--protocol "${s}" is not a valid range`);
+  if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min < 1 || max < min)
+    throw new CliError(`--protocol "${s}" is not a valid range`);
   return { min, max };
 }
 
@@ -154,11 +156,25 @@ export async function downloadRelease(fetchFn: typeof fetch, r: RelayRelease): P
     throw new CliError(`could not download relay ${r.version}: ${(e as Error).message}`);
   }
   if (!res.ok) throw new CliError(`downloading relay ${r.version} failed with HTTP ${res.status}`);
-  const declared = Number(res.headers.get('content-length'));
-  if (declared > MAX_TARBALL_BYTES)
-    throw new CliError(`relay ${r.version} is too large to download`);
-  const bytes = Buffer.from(await res.arrayBuffer());
-  if (bytes.length > MAX_TARBALL_BYTES) throw new CliError(`relay ${r.version} is too large`);
+  const tooLarge = () => new CliError(`relay ${r.version} is too large to download`);
+  if (Number(res.headers.get('content-length')) > MAX_TARBALL_BYTES) throw tooLarge();
+  // Read it in chunks and stop at the cap, whatever the server claims the size is.
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (res.body) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_TARBALL_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = Buffer.concat(chunks);
   const want = r.integrity
     .split(/\s+/)
     .filter((s) => s.startsWith('sha512-'))
@@ -191,27 +207,32 @@ const octal = (b: Buffer) => {
   return s ? parseInt(s, 8) : 0;
 };
 
-/** The `path` record of a pax extended header, if any. */
-function paxPath(data: Buffer): string | undefined {
-  let path: string | undefined;
+/** The records of a pax extended header. Anything malformed refuses the tarball. */
+function paxRecords(data: Buffer): Map<string, string> {
+  const bad = () => new CliError('the relay tarball is malformed (bad pax header)');
+  const out = new Map<string, string>();
   let i = 0;
   while (i < data.length) {
     const sp = data.indexOf(0x20, i);
-    if (sp === -1) break;
-    const len = Number(data.subarray(i, sp).toString('ascii'));
-    if (!Number.isSafeInteger(len) || len <= 0 || i + len > data.length) break;
+    if (sp === -1) throw bad();
+    const digits = data.subarray(i, sp).toString('ascii');
+    if (!/^[1-9]\d*$/.test(digits)) throw bad();
+    const len = Number(digits);
+    if (!Number.isSafeInteger(len) || i + len > data.length || sp + 1 >= i + len) throw bad();
+    if (data[i + len - 1] !== 0x0a) throw bad();
     const rec = data.subarray(sp + 1, i + len - 1).toString('utf8');
     const eq = rec.indexOf('=');
-    if (eq > 0 && rec.slice(0, eq) === 'path') path = rec.slice(eq + 1);
+    if (eq <= 0) throw bad();
+    out.set(rec.slice(0, eq), rec.slice(eq + 1));
     i += len;
   }
-  return path;
+  return out;
 }
 
 /**
  * The regular files of a gzipped npm tarball, keyed by their path inside the package (without the
- * leading `package/`). Directories and pax headers are understood; links and anything else, and
- * any path that would leave the package, refuse the tarball.
+ * leading `package/`). Directories and pax headers are understood; links and anything else, any
+ * path outside `package/`, malformed pax records and an archive without its end marker refuse it.
  */
 export function extractTarball(gz: Buffer): Map<string, Buffer> {
   let tar: Buffer;
@@ -222,12 +243,14 @@ export function extractTarball(gz: Buffer): Map<string, Buffer> {
   }
   const files = new Map<string, Buffer>();
   let off = 0;
-  let nextPath: string | undefined;
+  // Attributes of consecutive pax headers apply together to the next entry.
+  let pax = new Map<string, string>();
   let ended = false;
   while (off + 512 <= tar.length) {
     const h = tar.subarray(off, off + 512);
     if (h.every((b) => b === 0)) {
-      ended = true;
+      // The end is two zero blocks, then only zero padding; nothing may be left pending.
+      ended = off + 1024 <= tar.length && tar.subarray(off).every((b) => b === 0) && !pax.size;
       break;
     }
     let sum = 0;
@@ -247,12 +270,15 @@ export function extractTarball(gz: Buffer): Map<string, Buffer> {
     off = dataStart + Math.ceil(size / 512) * 512;
 
     if (type === 'x') {
-      nextPath = paxPath(data);
+      for (const [k, v] of paxRecords(data)) pax.set(k, v);
       continue;
     }
-    if (type === 'g') continue;
-    const full = nextPath ?? (prefix ? `${prefix}/${name}` : name);
-    nextPath = undefined;
+    if (type === 'g') {
+      paxRecords(data);
+      continue;
+    }
+    const full = pax.get('path') ?? (prefix ? `${prefix}/${name}` : name);
+    pax = new Map();
     if (type === '5') continue;
     if (type !== '0' && type !== '\0') {
       throw new CliError(`the relay tarball contains a non-file entry (${full}); refusing it`);
@@ -264,6 +290,6 @@ export function extractTarball(gz: Buffer): Map<string, Buffer> {
     if (files.has(rel)) throw new CliError(`the relay tarball lists ${rel} twice`);
     files.set(rel, Buffer.from(data));
   }
-  if (!ended) throw new CliError('the relay tarball is truncated');
+  if (!ended) throw new CliError('the relay tarball is truncated or has trailing data');
   return files;
 }

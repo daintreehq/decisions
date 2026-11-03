@@ -128,6 +128,18 @@ async function readInfo(ctx: Ctx, origin: string): Promise<RelayInfo> {
   };
 }
 
+/** The relay, refused while its Worker and its Durable Object run different versions. */
+async function readSettledInfo(ctx: Ctx, origin: string): Promise<RelayInfo> {
+  const info = await readInfo(ctx, origin);
+  const { worker } = await liveVersions(ctx, origin);
+  if (worker !== info.version) {
+    throw new CliError(
+      `${origin} is in the middle of an update (the Worker reports ${worker ?? 'nothing'}, its storage ${info.version}); try again in a few minutes. Nothing was changed.`,
+    );
+  }
+  return info;
+}
+
 /** The target release, or a reason there is nothing to do. */
 export function chooseRelease(
   releases: RelayRelease[],
@@ -303,7 +315,16 @@ export function planConfig(live: WorkerSnapshot, target: TargetConfig): ConfigPl
   const kept = Object.keys(defaults).filter((k) => liveVars.has(k));
   const added = Object.keys(defaults).filter((k) => !liveVars.has(k) && !secrets.includes(k));
   const extraVars = [...liveVars].filter((k) => !(k in defaults));
-  const carried = Object.keys(live.carried);
+  const carried = { ...live.carried };
+  if (carried.placement !== undefined) {
+    const placement = wranglerPlacement(carried.placement);
+    if (placement === 'unsupported')
+      blockers.push(
+        `the Worker's placement setting ${JSON.stringify(carried.placement)} cannot be carried into the deployment`,
+      );
+    else if (placement === null) delete carried.placement;
+    else carried.placement = placement;
+  }
   const edit = (config: Record<string, unknown>) => {
     // Wrangler would otherwise replace every variable with the release's defaults and delete the
     // rest. With keep_vars it leaves the Worker's variables alone, and only new ones are sent.
@@ -317,7 +338,7 @@ export function planConfig(live: WorkerSnapshot, target: TargetConfig): ConfigPl
     }
     config.workers_dev = live.workersDev;
     config.preview_urls = live.previewUrls;
-    for (const [k, v] of Object.entries(live.carried)) config[k] = v;
+    for (const [k, v] of Object.entries(carried)) config[k] = v;
   };
   return {
     bucket: bucket ?? '',
@@ -325,9 +346,42 @@ export function planConfig(live: WorkerSnapshot, target: TargetConfig): ConfigPl
     kept: [...kept, ...extraVars].sort(),
     added,
     secrets: secrets.sort(),
-    carried,
+    carried: Object.keys(carried),
     blockers,
   };
+}
+
+/**
+ * The settings API's placement in Wrangler's config shape: smart placement as it is, a single
+ * targeted region, host or hostname flattened, no placement as null.
+ */
+function wranglerPlacement(p: unknown): Record<string, unknown> | null | 'unsupported' {
+  if (!p || typeof p !== 'object') return null;
+  const o = p as {
+    mode?: unknown;
+    target?: unknown;
+    region?: unknown;
+    host?: unknown;
+    hostname?: unknown;
+  };
+  if (o.mode === undefined || o.mode === 'off') {
+    for (const k of ['region', 'host', 'hostname'] as const)
+      if (typeof o[k] === 'string') return { [k]: o[k] };
+    return null;
+  }
+  if (o.mode === 'smart') return { mode: 'smart' };
+  if (o.mode === 'targeted') {
+    const t =
+      Array.isArray(o.target) && o.target.length === 1
+        ? (o.target[0] as Record<string, unknown>)
+        : null;
+    const keys = t ? Object.keys(t).filter((k) => typeof t[k] === 'string') : [];
+    if (t && keys.length === 1 && ['region', 'host', 'hostname'].includes(keys[0]!))
+      return { [keys[0]!]: t[keys[0]!] };
+    for (const k of ['region', 'host', 'hostname'] as const)
+      if (typeof o[k] === 'string') return { [k]: o[k] };
+  }
+  return 'unsupported';
 }
 
 /* ---------- finding the Worker ---------- */
@@ -362,8 +416,11 @@ async function apiToken(
 
 interface Resolved {
   snapshot: WorkerSnapshot;
-  /** True when the URL itself proved which Worker it is; false when the user picked it. */
-  proven: boolean;
+  /**
+   * How the Worker was found: its workers.dev URL names it, a custom domain is attached to it (a
+   * Worker Route on the same host would take precedence), or the user named or picked it.
+   */
+  via: 'workers.dev' | 'custom domain' | 'name';
 }
 
 async function resolveWorker(
@@ -385,6 +442,7 @@ async function resolveWorker(
 
   const host = new URL(origin).hostname.toLowerCase();
   let proven: WorkerSnapshot | null = null;
+  let via: Resolved['via'] = 'workers.dev';
   const dev = WORKERS_DEV.exec(host);
   for (const account of accounts) {
     if (dev) {
@@ -392,7 +450,10 @@ async function resolveWorker(
       proven = await api.snapshot(account, dev[1]!);
     } else {
       const service = await api.customDomainService(account.id, host);
-      if (service) proven = await api.snapshot(account, service);
+      if (service) {
+        proven = await api.snapshot(account, service);
+        via = 'custom domain';
+      }
     }
     if (proven) break;
   }
@@ -402,7 +463,7 @@ async function resolveWorker(
         `${origin} is served by the Worker "${proven.name}", not "${o.name}"; drop --name or check the URL`,
       );
     }
-    return { snapshot: proven, proven: true };
+    return { snapshot: proven, via };
   }
 
   if (o.name) {
@@ -411,7 +472,7 @@ async function resolveWorker(
       const s = await api.snapshot(account, o.name);
       if (s) found.push(s);
     }
-    if (found.length === 1) return { snapshot: found[0]!, proven: false };
+    if (found.length === 1) return { snapshot: found[0]!, via: 'name' };
     if (found.length > 1) {
       throw new CliError(
         `several accounts have a Worker named "${o.name}" (${found.map((s) => s.account.id).join(', ')}); pass --account-id`,
@@ -438,17 +499,26 @@ async function resolveWorker(
   if (choices.length) {
     ctx.out('Pick the Worker to update, or type its name:');
     choices.forEach((c, i) =>
-      ctx.out(`  [${i + 1}] ${c.name}${accounts.length > 1 ? `  (${c.account.name})` : ''}`),
+      ctx.out(
+        `  [${i + 1}] ${c.name}${accounts.length > 1 ? `  (${c.account.name}, ${c.account.id})` : ''}`,
+      ),
     );
   }
   const answer = (await ctx.prompt('Worker: ')).trim();
   const pick = /^\d+$/.test(answer) ? choices[Number(answer) - 1] : undefined;
   const name = pick?.name ?? answer;
   if (!name || !WORKER_NAME.test(name)) throw new CliError('no Worker chosen; nothing was changed');
+  const found: WorkerSnapshot[] = [];
   for (const account of pick ? [pick.account] : accounts) {
     const s = await api.snapshot(account, name);
-    if (s) return { snapshot: s, proven: false };
+    if (s) found.push(s);
   }
+  if (found.length > 1) {
+    throw new CliError(
+      `several accounts have a Worker named "${name}" (${found.map((s) => s.account.id).join(', ')}); pick it by number or pass --account-id. Nothing was changed.`,
+    );
+  }
+  if (found.length === 1) return { snapshot: found[0]!, via: 'name' };
   throw new CliError(`no Worker named "${name}"; nothing was changed`);
 }
 
@@ -520,7 +590,7 @@ export async function update(
     : { min: MIN_PROTOCOL_VERSION, max: PROTOCOL_VERSION };
 
   // 1. The relay and the release to move it to. Nothing here needs Cloudflare.
-  const info = await readInfo(ctx, origin);
+  const info = await readSettledInfo(ctx, origin);
   say(
     `Relay ${origin}: version ${info.version}, protocol ${formatRange(info.protocol)}${info.claimed ? ', claimed' : ', not claimed yet'}`,
   );
@@ -560,7 +630,7 @@ export async function update(
 
   const spawn = deps.spawn ?? nodeSpawner;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const env = wranglerEnv(ctx, o.accountId);
+  const env = wranglerEnv(ctx, o.accountId, true);
   const secrets: string[] = [];
   const redact = (t: string) => secrets.reduce((acc, v) => acc.split(v).join('[redacted]'), t);
   const output = (r: SpawnResult) => redact(`${r.stdout}\n${r.stderr}`.trim());
@@ -597,7 +667,7 @@ export async function update(
       return;
     }
     const api = new CloudflareApi(ctx.fetch, await apiToken(wr, env, secrets));
-    const { snapshot, proven } = await resolveWorker(ctx, api, origin, o);
+    const { snapshot, via } = await resolveWorker(ctx, api, origin, o);
     const plan = planConfig(snapshot, targetConfig);
     if (plan.blockers.length) {
       throw new CliError(
@@ -608,7 +678,12 @@ export async function update(
     say(
       `\nUpdate the Worker "${snapshot.name}" in ${snapshot.account.name} from ${info.version} to ${target.version}`,
     );
-    if (!proven) say(`    chosen by name: it could not be matched to ${origin} through Cloudflare`);
+    if (via === 'name')
+      say(`    chosen by name: it could not be matched to ${origin} through Cloudflare`);
+    if (via === 'custom domain')
+      say(
+        `    found through its custom domain; a Worker Route on the same host would take precedence`,
+      );
     say(
       `    deploys      ${shown(wrangler, wranglerCommands.deploy())}  (exactly relay ${target.version})`,
     );
@@ -645,6 +720,12 @@ export async function update(
         `the Worker "${snapshot.name}" changed in Cloudflare while waiting for confirmation; nothing was changed. Run the update again.`,
       );
     }
+    const before = await liveVersions(ctx, origin);
+    if (before.worker !== info.version) {
+      throw new CliError(
+        `${origin} now reports ${before.worker ?? 'nothing'} instead of ${info.version}: something else deployed it while waiting for confirmation. Nothing was changed; run the update again.`,
+      );
+    }
     await stageRelayBundle(bundle, join(staging, 'relay'), {
       name: snapshot.name,
       bucket: plan.bucket,
@@ -653,7 +734,8 @@ export async function update(
     cwd = join(staging, 'relay');
     env.CLOUDFLARE_ACCOUNT_ID = snapshot.account.id;
     say(`\nDeploying relay ${target.version}`);
-    const dep = await wr(wranglerCommands.deploy(), { echo: true });
+    // Captured rather than streamed, so it is shown only after redaction.
+    const dep = await wr(wranglerCommands.deploy());
     if (dep.status !== 0) {
       const now = await liveVersions(ctx, origin);
       const state =
@@ -669,14 +751,16 @@ export async function update(
       );
     }
 
+    for (const l of output(dep).split('\n').slice(-15)) if (l.trim()) say(`    ${l}`);
+
     // 5. Check it.
     say('\nChecking the relay');
     const seen = await waitForVersion(ctx, origin, target.version, sleep);
     if (seen.worker !== target.version) {
       throw new CliError(
-        proven
-          ? `deployed relay ${target.version}, but ${origin} still reports ${seen.worker ?? 'nothing'}. Check again in a minute with: decisions doctor --url ${origin}`
-          : `deployed relay ${target.version} to "${snapshot.name}", but ${origin} still reports ${seen.worker ?? 'nothing'}: that Worker may not be the one behind this URL`,
+        via === 'workers.dev'
+          ? `Wrangler finished deploying relay ${target.version}, but ${origin} still reports ${seen.worker ?? 'nothing'}: the deploy may have been cancelled or not taken effect yet. Check with: decisions doctor --url ${origin}`
+          : `Wrangler finished deploying relay ${target.version} to "${snapshot.name}", but ${origin} still reports ${seen.worker ?? 'nothing'}: that Worker may not be the one behind this URL, or the deploy did not take effect`,
       );
     }
     if (seen.room !== target.version) {
@@ -690,13 +774,19 @@ export async function update(
         `relay ${target.version} is live but no longer reports being claimed; run decisions doctor --url ${origin}`,
       );
     }
-    try {
-      await doctor({ ...ctx, json: false }, g, { url: origin });
-    } catch (e) {
-      throw new CliError(
-        `relay ${target.version} is live, but the health check found problems: ${(e as Error).message}. Run: decisions doctor --url ${origin}`,
+    const own = { min: MIN_PROTOCOL_VERSION, max: PROTOCOL_VERSION };
+    if (!overlaps(target.protocol, own)) {
+      say(
+        `    relay ${target.version} speaks protocol ${formatRange(target.protocol)} and this CLI ${formatRange(own)}, so its full check is left to the app`,
       );
-    }
+    } else
+      try {
+        await doctor({ ...ctx, json: false }, g, { url: origin });
+      } catch (e) {
+        throw new CliError(
+          `relay ${target.version} is live, but the health check found problems: ${(e as Error).message}. Run: decisions doctor --url ${origin}`,
+        );
+      }
     say(
       `\nUpdated ${origin} to relay ${target.version}. Paired phones keep working and reload the new app on their own.`,
     );

@@ -113,21 +113,35 @@ export const npxArgs = (wrangler: string, args: string[]) => [
 export const shown = (wrangler: string, args: string[]) =>
   ['npx', ...npxArgs(wrangler, args)].join(' ');
 
-/** Ambient variables that would make Wrangler act on a different Worker or environment. */
-const TARGET_OVERRIDES = [
+/**
+ * Ambient variables `decisions update` clears, because they would make Wrangler act on a different
+ * Worker, environment or API host than the one the update read and showed, or authenticate with a
+ * different credential. `decisions deploy` leaves them as they are.
+ */
+const UPDATE_OVERRIDES = [
   'CLOUDFLARE_ENV',
   'WRANGLER_CI_OVERRIDE_NAME',
   'WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST',
+  'CLOUDFLARE_API_BASE_URL',
+  'CF_API_BASE_URL',
+  'CLOUDFLARE_API_KEY',
+  'CLOUDFLARE_EMAIL',
+  'CF_API_KEY',
+  'CF_EMAIL',
 ];
 
 /** The environment every Wrangler child process gets. */
-export function wranglerEnv(ctx: Ctx, accountId?: string): Record<string, string | undefined> {
+export function wranglerEnv(
+  ctx: Ctx,
+  accountId?: string,
+  forUpdate = false,
+): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...ctx.env };
   // Run as `npx -p @daintreehq/decisions-cli decisions deploy`, npm exports the package list to its
   // children, and the nested `npx wrangler@…` would then run the CLI's package instead of Wrangler.
   delete env.npm_config_package;
   delete env.npm_config_call;
-  for (const k of TARGET_OVERRIDES) delete env[k];
+  if (forUpdate) for (const k of UPDATE_OVERRIDES) delete env[k];
   // Wrangler's debug log (terminal and ~/.wrangler/logs) includes request bodies, such as the
   // secret upload, when sanitizing is turned off; keep it on whatever the user's shell says.
   env.WRANGLER_LOG_SANITIZE = 'true';
