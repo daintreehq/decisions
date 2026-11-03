@@ -49,7 +49,10 @@ export function useFileLoader(view: QuestionView, items: readonly FileItem[], ac
   }, []);
 
   // A new question or a changed set of files starts over; results for files that are still present survive.
+  // The files shown are held in the image cache while mounted; letting go aborts their downloads and lets the
+  // cache revoke their decrypted URLs.
   useEffect(() => {
+    const holds = items.map((it) => app.images.retain(it.d.attachment_id));
     gen.current++;
     inflight.current.clear();
     const keep: Record<string, ImageResult> = {};
@@ -63,6 +66,7 @@ export function useFileLoader(view: QuestionView, items: readonly FileItem[], ac
     return () => {
       gen.current++;
       inflight.current.clear();
+      holds.forEach((release) => release());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.id, itemKey, pump]);
