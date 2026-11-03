@@ -62,6 +62,28 @@ describe('correction drafts persist, reason included', () => {
     expect(back).toMatchObject({ text: 'ship it', selected: [], notice: 'earlier' });
   });
 
+  it('a restored draft stays bound to the revision it was reviewed against, so Send waits for Review update', async () => {
+    const d = await loaded('q_bound_aaaa', 'answer', 0);
+    store.edit(d.key, { text: 'ship it' });
+    await store.flush(d.key);
+    store.reset();
+    const back = await loaded('q_bound_aaaa', 'answer', 2);
+    // The Workspace's stale check is `draft.revision !== view.revision`.
+    expect(back).toMatchObject({ revision: 0, notice: 'earlier', text: 'ship it' });
+    store.rebind(back.key, 2);
+    expect(store.get(back.key)!.revision).toBe(2);
+  });
+
+  it('a version 1 row of unknown revision needs review before it can be sent', async () => {
+    await sealed.save('q_v1_cccc', { selected: ['yes'], text: 'old', reason: '' });
+    const back = await loaded('q_v1_cccc', 'answer', 0);
+    expect(back.revision).not.toBe(0);
+    // Saving it again does not invent a revision for it.
+    store.edit(back.key, { text: 'old, still' });
+    await store.flush(back.key);
+    expect((await sealed.load(back.key))!.revision).toBeNull();
+  });
+
   it('reads version 1 rows conservatively, as written against revision 0', async () => {
     await sealed.save('q_v1_aaaa', { selected: ['yes'], text: 'old', reason: '' });
     expect(await sealed.load('q_v1_aaaa')).toMatchObject({ v: 2, revision: null, mode: 'answer' });

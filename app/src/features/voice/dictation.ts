@@ -141,7 +141,11 @@ export interface DictationDeps {
   makeClient(
     opts: ConstructorParameters<typeof VoiceClient>[0],
   ): VoiceLike & { timedOut?: boolean; pendingInterim?: () => string };
-  startMic(onFrame: (pcm: ArrayBuffer) => void, onLevel?: (rms: number) => void): Promise<Capture>;
+  startMic(
+    onFrame: (pcm: ArrayBuffer) => void,
+    onLevel?: (rms: number) => void,
+    signal?: AbortSignal,
+  ): Promise<Capture>;
   prefs(): LocalPrefs;
   /** Which providers the relay has keys for. */
   info(): { xai: boolean; openai: boolean; anthropic: boolean } | null;
@@ -174,6 +178,12 @@ export class DictationController {
   private region: { start: number; end: number } | null = null;
   private preText = '';
   private preEditGen = 0;
+  /** A person's edit reached into the passage while it was being dictated: its cleanup is skipped. */
+  private touched = false;
+  /** Aborts the cleanup request in flight (unpair, revocation). */
+  private cleanAbort: AbortController | null = null;
+  /** Bumps when a consent prompt is answered, cancelled or abandoned, so a slow consent save starts nothing. */
+  private consentGen = 0;
   private timers: ReturnType<typeof setTimeout>[] = [];
   private reviewTimer: ReturnType<typeof setTimeout> | undefined;
   private escTimer: ReturnType<typeof setTimeout> | undefined;
@@ -244,15 +254,25 @@ export class DictationController {
   /** "Enable and start dictation": consent is recorded only by this. */
   async acceptConsent(): Promise<void> {
     const b = this.pendingConsent;
-    this.pendingConsent = null;
+    const g = ++this.consentGen;
     await this.deps.setConsent();
+    // "Keep typing", leaving the question, hiding the app or unpairing while consent was saving: nothing starts.
+    if (g !== this.consentGen) return;
+    this.pendingConsent = null;
     this.set({ phase: 'idle' });
     if (b) await this.start(b);
   }
 
   declineConsent(): void {
+    this.consentGen++;
     this.pendingConsent = null;
     if (this.state.phase === 'consent') this.set({ phase: 'idle', binding: null });
+  }
+
+  /** The app was hidden or the device locked: no prompt survives it, and capture stops. Never restarts on return. */
+  onHidden(): void {
+    if (this.pendingConsent || this.state.phase === 'consent') this.declineConsent();
+    if (this.isActive()) void this.stop(MESSAGES.hidden);
   }
 
   async start(binding: Binding): Promise<void> {
@@ -260,7 +280,7 @@ export class DictationController {
     // Dictating again during a cleanup keeps the original wording of the previous passage.
     if (this.state.phase === 'cleaning') this.cleanGen++;
     const d = drafts.get(binding.key);
-    if (!d || d.epoch !== binding.epoch) return;
+    if (!d || d.epoch !== binding.epoch || d.revision !== binding.revision) return;
     const gen = ++this.gen;
     const v = this.deps.prefs().voice;
     const text = fieldValue(d, binding.field);
@@ -272,6 +292,7 @@ export class DictationController {
     this.region = null;
     this.preText = text;
     this.preEditGen = d.editGen;
+    this.touched = false;
     this.level = 0;
     this.clearTimers();
     this.set({
@@ -385,25 +406,42 @@ export class DictationController {
     if (!b) return;
     const { words, breaks } = splitDictationCommands(chunk.trim());
     if (!words && !breaks) return;
-    const ok = drafts.write(b.key, { epoch: b.epoch }, (d) => this.plan(d, b.field, words, breaks));
-    // The draft was sent or cleared under us: nothing more may land in it.
-    if (!ok) this.cancelCapture();
+    const ok = drafts.write(b.key, { epoch: b.epoch, revision: b.revision }, (d) =>
+      this.plan(d, b.field, words, breaks),
+    );
+    // The draft was sent, cleared or rebound under us: nothing more may land in it.
+    if (!ok) {
+      this.cancelCapture();
+      this.set({ ...IDLE });
+    }
+  }
+
+  /**
+   * The person may have typed since this controller last wrote: carry the anchor and passage through their edit, and
+   * note whether it reached into the passage (then the passage holds their words too, and no cleanup may rewrite it).
+   */
+  private reconcile(text: string) {
+    const old = this.lastText;
+    if (text === old) return;
+    this.anchor = {
+      from: mapThroughEdit(old, text, this.anchor.from, -1),
+      to: mapThroughEdit(old, text, this.anchor.to, 1),
+    };
+    if (this.region) {
+      const next = {
+        start: mapThroughEdit(old, text, this.region.start, -1),
+        end: mapThroughEdit(old, text, this.region.end, 1),
+      };
+      if (text.slice(next.start, next.end) !== old.slice(this.region.start, this.region.end))
+        this.touched = true;
+      this.region = next;
+    }
+    this.lastText = text;
   }
 
   private plan(d: DraftModel, field: FieldId, words: string, breaks: number) {
-    let text = fieldValue(d, field);
-    // The person may have typed while dictating: carry the anchor and passage through their edit.
-    if (text !== this.lastText) {
-      this.anchor = {
-        from: mapThroughEdit(this.lastText, text, this.anchor.from, -1),
-        to: mapThroughEdit(this.lastText, text, this.anchor.to, 1),
-      };
-      if (this.region)
-        this.region = {
-          start: mapThroughEdit(this.lastText, text, this.region.start, -1),
-          end: mapThroughEdit(this.lastText, text, this.region.end, 1),
-        };
-    }
+    this.reconcile(fieldValue(d, field));
+    let text = this.lastText;
     if (words) {
       const p = planVoiceWords(text, this.anchor, words);
       text = p.next;
@@ -473,17 +511,23 @@ export class DictationController {
     // Words heard but never locked (the provider timed out, or the connection dropped) are still the person's.
     const tail = client?.pendingInterim?.() ?? '';
     if (tail) this.onFinal(gen, tail);
+    if (this.gen !== gen) return;
     if (client?.timedOut && !note) message = { text: MESSAGES.timedOut, tone: 'warn' };
     try {
       await drafts.flush(b.key);
     } catch {
       /* the draft shows its own save failure, with Retry and Copy */
     }
-    const region = this.region;
+    // Discarded, cancelled or superseded by a newer recording while storage answered: that attempt owns the state.
+    if (this.gen !== gen) return;
     const d = drafts.get(b.key);
+    const bound = !!d && d.epoch === b.epoch && d.revision === b.revision;
+    // Typing since the last chunk moved the passage: find it again in the text as it is now.
+    if (bound) this.reconcile(fieldValue(d, b.field));
+    const region = this.region;
     const text = d ? fieldValue(d, b.field) : '';
     const raw = region ? text.slice(region.start, region.end) : '';
-    if (!region || !raw.trim() || !d || d.epoch !== b.epoch) {
+    if (!region || !raw.trim() || !d || !bound) {
       this.set({
         ...IDLE,
         binding: b,
@@ -498,12 +542,17 @@ export class DictationController {
       raw,
       cleaned: raw,
     };
-    drafts.write(b.key, { epoch: b.epoch }, () => ({ passage }));
+    drafts.write(b.key, { epoch: b.epoch, revision: b.revision }, () => ({ passage }));
     if (opts.cleanup === false || !this.cleanupProvider()) {
       this.set({ ...IDLE, binding: b, message });
       return;
     }
-    void this.cleanup(b, passage, message);
+    // The person's own edit reached into the passage: their wording stands as it is.
+    if (this.touched) {
+      this.set({ ...IDLE, binding: b, message: { text: MESSAGES.edited, tone: 'info' } });
+      return;
+    }
+    void this.cleanup(b, passage, message, d.editGen);
   }
 
   private cleanupProvider(): 'anthropic' | 'openai' | null {
@@ -515,12 +564,18 @@ export class DictationController {
     return null;
   }
 
-  private async cleanup(b: Binding, passage: Passage, message: DictMessage | null) {
+  private async cleanup(
+    b: Binding,
+    passage: Passage,
+    message: DictMessage | null,
+    editGen: number,
+  ) {
     const provider = this.cleanupProvider()!;
     const relay = this.deps.relay()!;
     const cg = ++this.cleanGen;
+    const abort = new AbortController();
+    this.cleanAbort = abort;
     const d0 = drafts.get(b.key)!;
-    const editGen = d0.editGen;
     const at = fieldValue(d0, b.field);
     this.set({ ...IDLE, phase: 'cleaning', binding: b, message });
     const outcome = await (this.deps.correct ?? runCorrection)({
@@ -539,9 +594,10 @@ export class DictationController {
         const d = drafts.get(b.key);
         return d ? fieldValue(d, b.field) : '';
       },
-      post: (path, body, signal) => relay.raw('POST', path, body, signal),
+      post: (path, body, signal) => relay.raw('POST', path, body, anySignal(signal, abort.signal)),
     });
-    // "Use original wording", a new passage, a send or a clear got there first: the late result is dropped.
+    if (this.cleanAbort === abort) this.cleanAbort = null;
+    // "Use original wording", a new passage, a send, a clear or an unpair got there first: the late result is dropped.
     if (cg !== this.cleanGen) return;
     const settle = (m: DictMessage | null) => this.set({ ...IDLE, binding: b, message: m });
     if (outcome.kind === 'kept-raw') {
@@ -558,7 +614,7 @@ export class DictationController {
       return;
     }
     let landed: Passage | null = null;
-    const ok = drafts.write(b.key, { epoch: b.epoch, editGen }, (d) => {
+    const ok = drafts.write(b.key, { epoch: b.epoch, revision: b.revision, editGen }, (d) => {
       const text = fieldValue(d, b.field);
       const end = passage.start + passage.raw.length;
       // Edit wins: only the untouched passage, with untouched text ahead of it, is replaced.
@@ -660,6 +716,9 @@ export class DictationController {
   discard(): void {
     const b = this.state.binding;
     if (!b || !this.isActive()) return;
+    const d0 = drafts.get(b.key);
+    if (d0 && d0.epoch === b.epoch && d0.revision === b.revision)
+      this.reconcile(fieldValue(d0, b.field));
     const region = this.region;
     const pre = this.preText;
     const preGen = this.preEditGen;
@@ -705,6 +764,44 @@ export class DictationController {
     if (this.state.message) this.set({ message: null });
   }
 
+  /**
+   * Review update: bind the draft to a newer revision. Capture for it is stopped and its words saved first, so they
+   * land against the revision they were spoken for, never silently in the new one; a cleanup in flight is bypassed.
+   */
+  async rebind(key: string, revision: number): Promise<void> {
+    const b = this.state.binding;
+    if (b?.key === key) {
+      if (this.isActive()) await this.stop(undefined, { cleanup: false });
+      else if (this.state.phase === 'cleaning') {
+        this.cleanGen++;
+        this.set({ ...IDLE, binding: b });
+      }
+    }
+    drafts.rebind(key, revision);
+  }
+
+  /**
+   * Unpair or revocation: cancel capture, abort the cleanup request, invalidate every generation and forget every
+   * binding, synchronously. Nothing still in flight can repopulate this controller afterwards.
+   */
+  teardown(): void {
+    this.consentGen++;
+    this.pendingConsent = null;
+    this.cancelCapture();
+    this.cleanGen++;
+    this.cleanAbort?.abort();
+    this.cleanAbort = null;
+    clearTimeout(this.reviewTimer);
+    clearTimeout(this.escTimer);
+    this.anchor = { from: 0, to: 0 };
+    this.lastText = '';
+    this.region = null;
+    this.preText = '';
+    this.preEditGen = 0;
+    this.touched = false;
+    this.set({ ...IDLE });
+  }
+
   /** The draft this controller is bound to was sent or cleared: drop everything still in flight for it. */
   release(key: string): void {
     if (this.state.binding?.key !== key) return;
@@ -715,6 +812,8 @@ export class DictationController {
 
   private cancelCapture() {
     this.gen++;
+    // A Stop still waiting belongs to the attempt being retired; the next attempt's Stop must run on its own.
+    this.stopping = null;
     this.session?.cancel();
     this.session = null;
     this.client = null;
@@ -730,6 +829,17 @@ export class DictationController {
   private now() {
     return this.deps.now?.() ?? Date.now();
   }
+}
+
+/** Aborts when either signal does. */
+function anySignal(a: AbortSignal, b: AbortSignal): AbortSignal {
+  if (a.aborted) return a;
+  if (b.aborted) return b;
+  const c = new AbortController();
+  const abort = () => c.abort();
+  a.addEventListener('abort', abort, { once: true });
+  b.addEventListener('abort', abort, { once: true });
+  return c.signal;
 }
 
 /* ---------- the app's controller ---------- */
@@ -756,11 +866,13 @@ export const dictation = new DictationController({
   },
 });
 
+// Unpairing erases everything and a revoked device keeps nothing: no binding, passage or request survives either.
+app.registerTeardown(() => dictation.teardown());
+
 if (typeof document !== 'undefined') {
   // Never keep recording while the app is hidden or the device locks; never restart on return.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && dictation.isActive())
-      void dictation.stop(MESSAGES.hidden);
+    if (document.visibilityState === 'hidden') dictation.onHidden();
   });
   // Opening a file outside Decisions first stops capture and saves its words (the files work asks for a fresh tap).
   registerHandoffGuard({

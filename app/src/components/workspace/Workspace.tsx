@@ -174,11 +174,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const excerpt = content ? previewText(content.question, 90) : '';
 
   // A draft emptied by a revision change simply follows the question; one with words in it waits for Review update.
+  // Capture for it settles first: words still arriving belong to the revision they were spoken for.
+  const settling = dictation.busyFor(draft.key);
   useEffect(() => {
-    if (!composing || !draft.loaded || draft.revision === view.revision) return;
+    if (!composing || !draft.loaded || draft.revision === view.revision || settling) return;
     const empty = !draft.text.trim() && !draft.reason.trim() && !draft.selected.length;
     if (empty) drafts.rebind(draft.key, view.revision);
-  }, [composing, draft, view.revision]);
+  }, [composing, draft, view.revision, settling]);
 
   // The question changed or closed under a running dictation: stop, keep the words, lock Send.
   useEffect(() => {
@@ -191,6 +193,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   useEffect(
     () => () => {
       const b = dictation.getState().binding;
+      // A consent still being saved for this question starts nothing once the person has left it.
+      if (b?.questionId === id && dictation.getState().phase === 'consent')
+        dictation.declineConsent();
       if (b?.questionId === id && dictation.isActive()) void dictation.stop();
       void drafts.flushAll().catch(() => undefined);
     },
@@ -559,7 +564,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       onSend: send,
       onChoose: openChoice,
       onReviewUpdate: () => {
-        drafts.rebind(draft.key, view.revision);
+        void dictation.rebind(draft.key, view.revision);
         setError(null);
         announce('Updated. Your choice was cleared; review the question before sending.');
       },
@@ -916,7 +921,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                               <button
                                 type="button"
                                 className="btn small"
-                                onClick={() => drafts.rebind(draft.key, view.revision)}
+                                onClick={() => void dictation.rebind(draft.key, view.revision)}
                               >
                                 Review update
                               </button>

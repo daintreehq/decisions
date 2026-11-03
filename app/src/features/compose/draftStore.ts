@@ -62,6 +62,9 @@ const SAVE_DEBOUNCE_MS = 400;
 /** "Saving…" appears only when a write takes long enough to notice. */
 const SAVING_VISIBLE_MS = 300;
 
+/** The revision of a restored draft that never recorded one: it matches no question revision, so it needs review. */
+export const UNKNOWN_REVISION = -1;
+
 const isEmpty = (d: Pick<DraftModel, 'selected' | 'text' | 'reason'>) =>
   d.selected.length === 0 && !d.text.trim() && !d.reason.trim();
 
@@ -150,18 +153,21 @@ class DraftStore {
       return;
     }
     // A version 1 row knows no revision: it was written against the question before any answer, so revision 0.
-    const storedRev = stored.revision ?? 0;
-    const same = storedRev === revision;
+    const same = (stored.revision ?? 0) === revision;
+    // The draft stays bound to the revision it was reviewed against, so a newer question needs Review update before
+    // Send. A row that never recorded one needs that review too.
+    const reviewed = stored.revision ?? UNKNOWN_REVISION;
     this.put({
       ...d,
       loaded: true,
+      revision: reviewed,
       // A choice made against other wording is never carried over: the text is kept, the choice made again.
       selected: same ? stored.selected : [],
       text: stored.text,
       reason: stored.reason,
       caret: stored.caret ?? null,
       passage: same && stored.passage ? { ...stored.passage } : null,
-      notice: isEmpty(stored) ? null : same ? 'restored' : 'earlier',
+      notice: isEmpty(stored) ? null : reviewed === revision ? 'restored' : 'earlier',
     });
   }
 
@@ -184,15 +190,18 @@ class DraftStore {
 
   /**
    * A write from outside the person's hands (dictated words, a cleanup). Refused when the draft was sent or cleared
-   * since `epoch`, or (with `editGen`) when the person edited since the write was planned. Never counts as an edit.
+   * since `epoch`, (with `revision`) when it was rebound to another revision, or (with `editGen`) when the person
+   * edited since the write was planned. Never counts as an edit.
    */
   write(
     key: string,
-    guard: { epoch: number; editGen?: number },
+    guard: { epoch: number; revision?: number; editGen?: number },
     fn: (d: DraftModel) => Patch | null,
   ): boolean {
     const d = this.drafts.get(key);
     if (!d || d.epoch !== guard.epoch) return false;
+    // Words planned against one revision never land in a draft since bound to another.
+    if (guard.revision !== undefined && d.revision !== guard.revision) return false;
     if (guard.editGen !== undefined && d.editGen !== guard.editGen) return false;
     const patch = fn(d);
     if (!patch) return false;
@@ -320,7 +329,7 @@ class DraftStore {
         const draft: Draft = {
           v: 2,
           mode: d.mode,
-          revision: d.revision,
+          revision: d.revision === UNKNOWN_REVISION ? null : d.revision,
           selected: d.selected,
           text: d.text,
           reason: d.reason,
