@@ -203,12 +203,18 @@ export async function verifyRelayRelease(
 /**
  * Writes the verified bytes to `dest` (created; must be empty or absent) and sets the Worker name,
  * the R2 bucket and any `vars` given (plain settings such as the cleanup model, never a secret) in
- * the Wrangler config. Nothing else in the config changes.
+ * the Wrangler config. Nothing else in the config changes, except what `edit` changes
+ * (`decisions update` uses it to keep the live Worker's settings).
  */
 export async function stageRelayBundle(
   bundle: VerifiedRelayBundle,
   dest: string,
-  o: { name: string; bucket: string; vars?: Record<string, string> },
+  o: {
+    name: string;
+    bucket: string;
+    vars?: Record<string, string>;
+    edit?: (config: Record<string, unknown>) => void;
+  },
 ): Promise<void> {
   await mkdir(dest, { recursive: true, mode: 0o700 });
   for (const [rel, bytes] of bundle.files) {
@@ -228,6 +234,7 @@ export async function stageRelayBundle(
   config.name = o.name;
   config.r2_buckets = [{ ...config.r2_buckets[0]!, bucket_name: o.bucket }];
   if (o.vars && Object.keys(o.vars).length) config.vars = { ...config.vars, ...o.vars };
+  o.edit?.(config as Record<string, unknown>);
   await writeFile(join(dest, 'wrangler.json'), JSON.stringify(config, null, 2) + '\n', {
     flag: 'wx',
   });
