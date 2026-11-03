@@ -29,7 +29,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 
 ## How it works
 
-<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: the inbox, with questions from several projects and machines. Three: a design approval with before and after screenshots, Approve selected and a note. Four: the answered question with its delivery steps all ticked, ending in 'Typed into the agent's terminal'." width="100%">
+<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: the inbox, with questions from several projects and machines. Three: a design approval with before and after screenshots, Approve selected and a note. Four: the answered question, delivered to the agent's terminal, with Next question ready." width="100%">
 
 1. **Your agent asks.** `ask_human` returns at once with an id, and the agent ends its turn (or carries on with unrelated work). Nothing holds a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks stuck.
 2. **Your phone buzzes.** The notification says only that a question is waiting. The question itself is encrypted on your computer and decrypted on your phone.
@@ -38,7 +38,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 
 ## More than yes or no
 
-<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question with a description under each option; a free-text question with a typed answer; an answer from the decision model, labelled with its model, confidence and the earlier decisions it drew on, with Confirm and Overrule buttons; and a correction to an earlier answer, which requires a reason." width="100%">
+<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question with a description under each option; a free-text question with a typed answer; an answer from the decision model, labelled with its model, confidence and the earlier decisions it drew on, with Confirm answer and Change answer; and a correction to an earlier answer, which requires a reason." width="100%">
 
 |                                      |                                                                                                                                                                                                                                           |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -58,7 +58,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 - An expired question never authorizes anything.
 - Push notifications say only "a question needs your input". Never the question.
 
-<img src="docs/readme/pairing.png" alt="Pairing and devices: the phone's pairing screen; a six-digit code to check against the same code on the computer; the Devices screen listing the computer and the phone, with the computer's identity fingerprint; and Settings, with theme, notifications that never contain the question, and quiet hours." width="100%">
+<img src="docs/readme/pairing.png" alt="Pairing and devices: the phone's pairing screen; a six-digit code to check against the same code on the computer; the Devices screen listing the computer and the phone, with the computer's identity fingerprint; and the Settings index: appearance, dictation, notifications, quiet hours, devices, privacy and help." width="100%">
 
 Pairing is a QR code and a six-digit code you check on both screens. Every device is listed with a fingerprint you can compare against your computer. Revoking a device rotates the content key, so it cannot read anything new.
 
@@ -66,7 +66,7 @@ Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and 
 
 ## On your phone, or anywhere else
 
-<img src="docs/readme/everywhere.png" alt="The same app in a desktop browser, with the inbox beside an open question, and on a phone in dark mode." width="100%">
+<img src="docs/readme/everywhere.png" alt="The same app on a desktop, with the questions rail beside an open question and its answer dock, and on a phone in the dark Daintree theme." width="100%">
 
 The app is an installable PWA served by your own Worker: no app store, push notifications, an offline outbox that sends when you are back in signal, and light and dark themes. On a wide screen the inbox and the question sit side by side.
 
