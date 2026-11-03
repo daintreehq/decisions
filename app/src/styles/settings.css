@@ -63,11 +63,16 @@
 }
 .s-split .s-section {
   max-width: 680px;
-  padding-top: 4px;
 }
+/* The sidebar's "Settings" and the open section's title share one baseline. */
+.s-split .s-page-title,
 .s-split .s-title {
   font-size: 1.25rem;
-  margin-top: 6px;
+  line-height: 1.35;
+  margin-top: 0;
+}
+.s-split .s-page-title {
+  margin-bottom: 16px;
 }
 @media (min-width: 900px) {
   .theme-art {
