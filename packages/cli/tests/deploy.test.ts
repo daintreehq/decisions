@@ -25,6 +25,7 @@ import {
   type SpawnResult,
 } from '../src/commands/deploy.js';
 import { stageRelayBundle, verifyRelayBundle } from '../src/relay-bundle.js';
+import type { HostChannel, HostPrefill, HostResult } from '../src/host-channel.js';
 
 const root = mkdtempSync(join(tmpdir(), 'decisions-deploy-test-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -1153,5 +1154,269 @@ describe('decisions deploy, guided at a terminal', () => {
     ).toEqual([{ id: ACCOUNT, name: 'A' }]);
     expect(accountsFromWhoami('not json')).toEqual([]);
     expect(accountsFromWhoami('{"loggedIn":false}')).toEqual([]);
+  });
+
+  describe('started by a host app (--host-channel)', () => {
+    const FULL: HostPrefill = {
+      transcription: { provider: 'xai' },
+      cleanup: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
+      keys: { xai: XAI, anthropic: ANTHROPIC, openai: OPENAI },
+    };
+
+    /** A deploy with a fake host on the other end of the channel. */
+    function hosted(
+      prefill: HostPrefill,
+      over: Parameters<typeof setupDeploy>[0] = {},
+      ch: { deliver?: boolean; open?: () => boolean } = {},
+    ) {
+      const t = setupDeploy({ interactive: true, providers: { goodKeys: KEYS }, ...over });
+      const results: HostResult[] = [];
+      const paths: string[] = [];
+      let interrupt: (() => void) | null = null;
+      let unsubscribed = false;
+      t.deps.openHostChannel = async (path) => {
+        paths.push(path);
+        return {
+          prefill,
+          isOpen: ch.open ?? (() => true),
+          sendResult: async (r) => {
+            results.push(r);
+            return ch.deliver ?? true;
+          },
+          close: () => {},
+        } satisfies HostChannel;
+      };
+      t.deps.onInterrupt = (fn) => {
+        interrupt = fn;
+        return () => void (unsubscribed = true);
+      };
+      return {
+        ...t,
+        results,
+        paths,
+        interrupt: () => interrupt!(),
+        unsubscribed: () => unsubscribed,
+        run: (o: Parameters<typeof deploy>[2] = {}) =>
+          deploy(t.ctx, {}, { hostChannel: '/run/host.sock', ...o }, t.deps),
+      };
+    }
+
+    it('offers the host defaults, keys shown only as present, and hands the result back', async () => {
+      // Enter at every question accepts the host default; only the summary needs a yes.
+      const t = hosted(FULL, { answers: [...Array(9).fill(''), 'y'] });
+      await t.run();
+      expect(t.paths).toEqual(['/run/host.sock']);
+      expect(t.prompts).toEqual([
+        expect.stringMatching(/^Worker name/),
+        expect.stringMatching(/^R2 bucket name/),
+        expect.stringMatching(/^Use dictation\? \[Y\/n\]/),
+        expect.stringMatching(/^Transcription provider: \[1\]/),
+        expect.stringMatching(/^Use this key\? \[Y\/n\]/),
+        expect.stringMatching(/^Use transcript cleanup\? \[Y\/n\]/),
+        expect.stringMatching(/^Cleanup provider: \[1\]/),
+        expect.stringMatching(/^Cleanup model: \[2\]/),
+        expect.stringMatching(/^Use this key\? \[Y\/n\]/),
+        expect.stringMatching(/^Deploy with these settings\?/),
+      ]);
+      expect(t.secretPrompts).toEqual([]);
+      const o = text(t.out);
+      expect(count(o, 'key: present (from the app that started this deploy)')).toBe(2);
+      expect(o).toMatch(/Transcript cleanup +Anthropic, claude-sonnet-5-5/);
+      // Only the keys in use reach the Worker; the unused OpenAI key goes nowhere.
+      expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
+        'secret put CLAIM_SECRET --name daintree-decisions',
+        'secret put XAI_API_KEY --name daintree-decisions',
+        'secret put ANTHROPIC_API_KEY --name daintree-decisions',
+      ]);
+      expectNowhere(t, [XAI, ANTHROPIC], { input: true });
+      expectNowhere(t, [OPENAI]);
+      // The claim secret goes to the host, never to the screen, and nothing claims the relay here.
+      expect(t.results).toEqual([
+        { status: 'completed', url: URL_, claimSecret: SECRET, claimState: 'unclaimed' },
+      ]);
+      expect(o + text(t.err)).not.toContain(SECRET);
+      expect(o).toMatch(/Claim secret +\(not shown/);
+      expect(o).toMatch(/went to the app that started this deploy/);
+      expect(t.claimCalls).toEqual([]);
+      expect(t.unsubscribed()).toBe(true);
+      expect(walk(t.tmpRoot)).toEqual([]);
+    });
+
+    it('lets the person change every default', async () => {
+      const t = hosted(FULL, {
+        // name, bucket, dictation? provider, cleanup? provider, model, own key, confirm
+        answers: ['mine', 'mine-bucket', 'n', 'y', '2', '1', 'n', OPENAI, 'y'],
+      });
+      await t.run();
+      expect(t.secretPrompts).toEqual([expect.stringMatching(/OpenAI API key/)]);
+      expect(subs(t).filter((s) => s.startsWith('secret put'))).toEqual([
+        'secret put CLAIM_SECRET --name mine',
+        'secret put OPENAI_API_KEY --name mine',
+      ]);
+      const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
+      expect(deployed.configAtCall).toMatchObject({
+        vars: { OPENAI_CORRECTION_MODEL: 'gpt-6.1-terra' },
+      });
+      expectNowhere(t, [XAI, ANTHROPIC]);
+      expect(t.results[0]).toMatchObject({ status: 'completed' });
+    });
+
+    it('takes names from the host unless a flag gives them', async () => {
+      const t = hosted({ name: 'from-host', bucket: 'from-host', keys: {} }, {
+        answers: ['', '', '', '', 'y'],
+      });
+      await t.run({ name: 'from-flag' });
+      expect(subs(t)).toContain('r2 bucket create from-host');
+      expect(subs(t)).toContain('secret put CLAIM_SECRET --name from-flag');
+    });
+
+    it('starts the account choice on the host account', async () => {
+      const other = 'f0e1d2c3'.repeat(4);
+      const t = hosted({ accountId: other, keys: {} }, {
+        wrangler: {
+          loggedIn: true,
+          accounts: [
+            { id: ACCOUNT, name: 'Personal' },
+            { id: other, name: 'Work' },
+          ],
+        },
+        answers: ['', '', '', '', '', 'y'],
+      });
+      await t.run();
+      expect(t.prompts[0]).toMatch(/^Account to deploy to: \[2\]/);
+      expect(text(t.out)).toMatch(/Cloudflare account +Work/);
+    });
+
+    it('asks for another key when the provider rejects the prefilled one', async () => {
+      const t = hosted(
+        { transcription: { provider: 'xai' }, keys: { xai: BAD } },
+        { answers: ['', '', '', '', '', XAI, 'n', 'y'] },
+      );
+      await t.run();
+      expect(text(t.out)).toMatch(/rejected that key \(HTTP 401\)/);
+      expect(t.secretPrompts).toEqual([expect.stringMatching(/xAI .*API key/)]);
+      expect(t.calls.find((c) => c.args.includes('XAI_API_KEY'))!.input).toBe(XAI + '\n');
+      expectNowhere(t, [BAD]);
+    });
+
+    it('never deploys a cleanup model it does not offer', async () => {
+      const t = hosted(
+        { cleanup: { provider: 'openai', model: 'gpt-5-mini' }, keys: { openai: OPENAI } },
+        { answers: ['', '', '', '', '', '', '', 'y'] },
+      );
+      await t.run();
+      expect(text(t.out)).toMatch(/gpt-5-mini is not offered for cleanup; the default is gpt-6.1-terra/);
+      const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
+      expect(deployed.configAtCall).toMatchObject({
+        vars: { OPENAI_CORRECTION_MODEL: 'gpt-6.1-terra' },
+      });
+    });
+
+    it('reports a declined summary as cancelled, having changed nothing', async () => {
+      const t = hosted(FULL, { answers: [...Array(9).fill(''), 'n'] });
+      await t.run();
+      expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+      expect(t.results).toEqual([
+        { status: 'cancelled', url: null, claimSecret: null, claimState: 'unknown' },
+      ]);
+    });
+
+    it('reports a Ctrl-C at a question as cancelled, and still exits 130', async () => {
+      const t = hosted(FULL, { answers: ['', ''] });
+      const prompt = t.ctx.prompt;
+      let asked = 0;
+      t.ctx.prompt = async (q, opts) => {
+        if (++asked === 3) throw new CliError('cancelled', 130);
+        return prompt(q, opts);
+      };
+      await expect(t.run()).rejects.toMatchObject({ exitCode: 130 });
+      expect(t.results[0]).toMatchObject({ status: 'cancelled', claimSecret: null });
+    });
+
+    it('stops at the next step after a Ctrl-C while Wrangler runs, and reports it cancelled', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] });
+      const spawn = t.deps.spawn!;
+      t.deps.spawn = async (req) => {
+        const r = await spawn(req);
+        if (req.args.includes('bucket')) t.interrupt();
+        return r;
+      };
+      await expect(t.run()).rejects.toMatchObject({ exitCode: 130 });
+      expect(subs(t).some((s) => s.startsWith('deploy'))).toBe(false);
+      expect(t.results[0]).toMatchObject({ status: 'cancelled' });
+    });
+
+    it('hands over the claim secret, with the failure, when a step after it fails', async () => {
+      const t = hosted(
+        { keys: {} },
+        {
+          answers: ['', '', '', '', 'y'],
+          wrangler: { failOn: 'secret put CLAIM_SECRET', echoInputOnFail: true },
+        },
+      );
+      const e = (await t.run().catch((x: unknown) => x)) as Error;
+      expect(e.message).toMatch(/may or may not have been set/);
+      const r = t.results[0]!;
+      expect(r).toMatchObject({ status: 'failed', url: URL_, claimSecret: SECRET });
+      expect(r.error).toMatch(/may or may not have been set/);
+      expect(r.error).not.toContain(SECRET);
+      expect(text(t.out) + text(t.err)).not.toContain(SECRET);
+    });
+
+    it('reports a failure before the claim secret without one', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'], wrangler: { failOn: 'r2' } });
+      await expect(t.run()).rejects.toThrow(/R2 bucket/);
+      expect(t.results[0]).toMatchObject({ status: 'failed', url: null, claimSecret: null });
+    });
+
+    it('fails without a Worker URL, since the host could not connect the relay', async () => {
+      const t = hosted(
+        { keys: {} },
+        { answers: ['', '', '', '', 'y'], wrangler: { deployOutput: 'custom routes only' } },
+      );
+      await expect(t.run()).rejects.toThrow(/cannot connect the relay/);
+      expect(t.results[0]).toMatchObject({ status: 'failed', url: null, claimSecret: SECRET });
+      expect(text(t.out)).not.toContain(SECRET);
+    });
+
+    it('reports an already claimed relay as completed with no claim secret', async () => {
+      const t = hosted({ keys: {} }, { claimed: true, answers: ['', '', '', '', 'y'] });
+      await t.run();
+      expect(t.results).toEqual([
+        { status: 'completed', url: URL_, claimSecret: null, claimState: 'claimed' },
+      ]);
+      expect(subs(t)).not.toContain('secret put CLAIM_SECRET --name daintree-decisions');
+    });
+
+    it('sets no claim secret once the host has gone', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] }, { open: () => false });
+      await expect(t.run()).rejects.toThrow(/closed its channel/);
+      expect(subs(t).some((s) => s.startsWith('secret put'))).toBe(false);
+    });
+
+    it('fails, without showing the secret, when the host does not confirm the result', async () => {
+      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'] }, { deliver: false });
+      await expect(t.run()).rejects.toThrow(/could not be handed/);
+      expect(text(t.err)).toMatch(/did not confirm it received the claim secret/);
+      expect(text(t.out) + text(t.err)).not.toContain(SECRET);
+    });
+
+    it('refuses --claim, --dry-run, --outdir and a missing terminal, before connecting', async () => {
+      for (const o of [{ claim: true }, { dryRun: true }, { outdir: '/x' }]) {
+        const t = hosted({ keys: {} });
+        await expect(t.run(o)).rejects.toThrow(/cannot be combined/);
+        expect(t.paths).toEqual([]);
+      }
+      const t = hosted({ keys: {} }, { interactive: false });
+      await expect(t.run()).rejects.toThrow(/needs a terminal/);
+      expect(t.paths).toEqual([]);
+    });
+
+    it('reports a host name Cloudflare would refuse as a failure', async () => {
+      const t = hosted({ name: 'Not Valid', keys: {} });
+      await expect(t.run()).rejects.toThrow(/the name from the app that started this deploy/);
+      expect(t.results[0]).toMatchObject({ status: 'failed' });
+      expect(t.calls).toEqual([]);
+    });
   });
 });
