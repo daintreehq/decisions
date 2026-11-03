@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { app } from '../app/controller.js';
-import { useApp } from '../app/hooks.js';
+import { useApp, useNow } from '../app/hooks.js';
 import {
   clearPendingInvite,
   parseInviteText,
@@ -8,7 +8,10 @@ import {
   setPendingInvite,
 } from '../app/invite.js';
 import { Link, navigate } from '../app/router.js';
+import { LinkIcon, ScanIcon } from '../components/Icons.js';
 import { QrScanner } from '../components/QrScanner.js';
+import { codeGroups, pairingProblem, spokenCode } from '../components/settings/pairingErrors.js';
+import { Callout } from '../components/settings/ui.js';
 import { PairingError, type PairingPhase } from '../data/pairing.js';
 import { isIos } from '../features/push.js';
 import { BackLink } from './Install.js';
@@ -17,8 +20,39 @@ function defaultLabel(): string {
   const ua = navigator.userAgent;
   if (/iPad/.test(ua)) return 'iPad';
   if (/iPhone/.test(ua)) return 'iPhone';
-  if (/Android/.test(ua)) return 'Android phone';
-  return isIos() ? 'iPhone' : 'This device';
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Android phone' : 'Android tablet';
+  if (isIos()) return 'iPad';
+  if (/Macintosh/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'Windows PC';
+  return 'This device';
+}
+
+/** How the welcome screen asked to start, so the camera opens only because the person tapped Scan. */
+let startWith: 'scan' | 'paste' | null = null;
+export function startPairing(mode: 'scan' | 'paste'): void {
+  startWith = mode;
+  navigate('/pair');
+}
+
+function relayHost(origin: string): string {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return origin;
+  }
+}
+
+function Countdown({ until }: { until: string }) {
+  const now = useNow(1000);
+  const s = Math.max(0, Math.floor((Date.parse(until) - now) / 1000));
+  if (!Number.isFinite(s)) return null;
+  return (
+    <span className="tabular">
+      {s === 0
+        ? 'Code expired'
+        : `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}
+    </span>
+  );
 }
 
 export function PairPage() {
@@ -26,9 +60,9 @@ export function PairPage() {
   const [, force] = useState(0);
   const [label, setLabel] = useState(defaultLabel);
   const [phase, setPhase] = useState<PairingPhase | null>(null);
-  const [scanning, setScanning] = useState(false);
+  const [scanning, setScanning] = useState(() => startWith === 'scan');
   const [scanKey, setScanKey] = useState(0);
-  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(() => startWith === 'paste');
   const pasteInput = useRef<HTMLInputElement>(null);
   const [paste, setPaste] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -36,19 +70,27 @@ export function PairPage() {
   const pending = peekPendingInvite();
   const invite = pending?.invite;
 
-  useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => {
+    startWith = null;
+    return () => abort.current?.abort();
+  }, []);
   useEffect(() => {
     if (pasteOpen && !scanning) pasteInput.current?.focus();
   }, [pasteOpen, scanning]);
 
   if (snap.phase === 'ready') {
     return (
-      <div className="page center-page">
-        <h1>This phone is already paired</h1>
-        <p>To pair it with a different computer, erase this phone first in Settings.</p>
-        <Link to="/" className="btn primary">
-          Go to inbox
-        </Link>
+      <div className="page onb">
+        <div className="onb-body">
+          <h1>This device is already paired</h1>
+          <p className="onb-lead">
+            To pair it with a different computer, unpair it first in Settings › Privacy &amp;
+            security.
+          </p>
+          <Link to="/" className="btn primary big">
+            Go to questions
+          </Link>
+        </div>
       </div>
     );
   }
@@ -58,10 +100,12 @@ export function PairPage() {
       setPendingInvite(parseInviteText(text, location.origin));
       setProblem(null);
       setScanning(false);
+      setPasteOpen(false);
       force((n) => n + 1);
     } catch (e) {
       setScanning(false);
-      setProblem(e instanceof Error ? e.message : 'That is not a Decisions pairing code.');
+      const msg = e instanceof Error ? e.message : '';
+      setProblem(/different relay/.test(msg) ? msg : 'This pairing link is not valid.');
     }
   };
 
@@ -85,78 +129,80 @@ export function PairPage() {
 
   const code = phase?.phase === 'awaiting-approval' ? phase.shortCode : null;
   const busy = !!phase && phase.phase !== 'error';
+  const shown = problem ?? (!busy ? pending?.error : null) ?? null;
+  const issue = shown ? pairingProblem(shown) : null;
 
-  return (
-    <div className="page center-page">
-      {!busy && (
-        <p className="left">
-          <BackLink top />
+  let body;
+  if (code && phase?.phase === 'awaiting-approval') {
+    body = (
+      <section className="pair-code" aria-labelledby="code-h">
+        <h1 id="code-h">Compare the code</h1>
+        <p className="onb-lead">Check that this matches your computer.</p>
+        <p className="pair-digits" aria-hidden="true">
+          {codeGroups(code).map((g, i) => (
+            <span key={i}>{g}</span>
+          ))}
         </p>
-      )}
-      <h1>{code ? 'Check the code' : 'Pair this phone'}</h1>
-      {problem && (
-        <p className="note error" role="alert">
-          {problem}
+        <p className="sr-only">Code: {spokenCode(code)}</p>
+        <p className="onb-note">
+          If the six digits match, choose <strong>Approve</strong> in Daintree. If they don’t,
+          choose <strong>Decline</strong>.
         </p>
-      )}
-      {pending?.error && !problem && (
-        <p className="note error" role="alert">
-          {pending.error}
-        </p>
-      )}
-
-      {code ? (
-        <section className="code-card" aria-labelledby="code-h">
-          <p id="code-h">Confirm this code on your computer:</p>
-          <p className="big-code" aria-hidden="true">
-            {code}
-          </p>
-          <p className="muted">
-            In Daintree, check the same six digits and choose <strong>Approve</strong>. If they
-            differ, choose Decline and start again.
-          </p>
-          <p className="waiting">
-            <span className="spinner" aria-hidden="true" />
-            Waiting for your computer…
-          </p>
-          <div>
-            <button type="button" className="btn" onClick={() => abort.current?.abort()}>
-              Cancel pairing
-            </button>
-          </div>
-        </section>
-      ) : phase && phase.phase !== 'error' ? (
-        <p className="waiting">
+        <p className="pair-wait">
           <span className="spinner" aria-hidden="true" />
-          {phase.phase === 'registering'
+          <span>Waiting for your computer</span>
+          <span aria-hidden="true">·</span>
+          <Countdown until={phase.expiresAt} />
+        </p>
+        <button type="button" className="btn" onClick={() => abort.current?.abort()}>
+          Cancel
+        </button>
+      </section>
+    );
+  } else if (busy) {
+    body = (
+      <section className="pair-progress">
+        <h1>Pairing</h1>
+        <p className="pair-wait">
+          <span className="spinner" aria-hidden="true" />
+          {phase?.phase === 'registering'
             ? 'Contacting your relay…'
-            : phase.phase === 'finalizing'
-              ? 'Securing this phone…'
+            : phase?.phase === 'finalizing'
+              ? 'Securing this device…'
               : 'Done'}
         </p>
-      ) : invite ? (
-        <>
-          <p>
-            This will let this phone read and answer your Daintree questions. Only continue if you
-            started pairing on your own computer just now.
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void start();
-            }}
-          >
-            <label className="field">
-              Name this device
-              <input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
-            </label>
-            <button type="submit" className="btn primary big">
-              Pair this phone
-            </button>
-          </form>
+      </section>
+    );
+  } else if (invite) {
+    body = (
+      <section>
+        <h1>Pair with your computer?</h1>
+        <p className="onb-lead">
+          This device will be able to read and answer your Daintree questions. Only continue if you
+          started pairing on your own computer just now.
+        </p>
+        <p className="pair-relay">
+          <span className="eyebrow">Relay</span>
+          <span className="mono">{relayHost(invite.o)}</span>
+        </p>
+        <form
+          className="pair-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void start();
+          }}
+        >
+          <label className="field">
+            Name this device
+            <input value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
+            <span className="hint">Your computer shows this name in its device list</span>
+          </label>
+          <button type="submit" className="btn primary big">
+            Pair this device
+          </button>
           <button
             type="button"
-            className="link-btn"
+            className="btn ghost big"
             onClick={() => {
               clearPendingInvite();
               navigate('/', true);
@@ -164,8 +210,13 @@ export function PairPage() {
           >
             Not now
           </button>
-        </>
-      ) : scanning ? (
+        </form>
+      </section>
+    );
+  } else if (scanning) {
+    body = (
+      <section>
+        <h1>Scan the pairing code</h1>
         <QrScanner
           key={scanKey}
           onResult={accept}
@@ -176,72 +227,112 @@ export function PairPage() {
           }}
           onRetry={() => setScanKey((k) => k + 1)}
         />
-      ) : (
-        <>
-          <p>
-            On your computer open <strong>Daintree → Settings → Decisions → Pair a phone</strong> to
-            show a QR code.
-          </p>
-          <button type="button" className="btn primary big" onClick={() => setScanning(true)}>
-            Scan QR code
-          </button>
-          <details
-            className="paste"
-            open={pasteOpen}
-            onToggle={(e) => setPasteOpen((e.currentTarget as HTMLDetailsElement).open)}
+      </section>
+    );
+  } else {
+    body = (
+      <section>
+        <h1>Pair this device</h1>
+        <p className="onb-lead">
+          On your computer, open <strong>Daintree › Settings › Decisions</strong> and choose{' '}
+          <strong>Pair a phone</strong> to show a pairing code.
+        </p>
+        <div className="onb-actions">
+          <button
+            type="button"
+            className="btn primary big"
+            onClick={() => {
+              setProblem(null);
+              setScanning(true);
+            }}
           >
-            <summary>Paste the link instead</summary>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (paste.trim()) accept(paste);
-              }}
-            >
-              <label className="field">
-                Pairing link
-                <input
-                  ref={pasteInput}
-                  value={paste}
-                  onChange={(e) => setPaste(e.target.value)}
-                  placeholder="https://…/pair#…"
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  inputMode="url"
-                />
-              </label>
-              <button type="submit" className="btn" disabled={!paste.trim()}>
+            <ScanIcon size={20} />
+            Scan pairing code
+          </button>
+          {!pasteOpen && (
+            <button type="button" className="btn big" onClick={() => setPasteOpen(true)}>
+              <LinkIcon size={18} />
+              Paste pairing link
+            </button>
+          )}
+        </div>
+        {pasteOpen && (
+          <form
+            className="pair-paste"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (paste.trim()) accept(paste);
+            }}
+          >
+            <label className="field">
+              Pairing link
+              <input
+                ref={pasteInput}
+                value={paste}
+                onChange={(e) => setPaste(e.target.value)}
+                placeholder="https://…/pair#…"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                inputMode="url"
+              />
+              <span className="hint">
+                The link that comes with the pairing code on your computer
+              </span>
+            </label>
+            <div className="pair-paste-actions">
+              <button type="button" className="btn" onClick={() => setPasteOpen(false)}>
+                Cancel
+              </button>
+              <button type="submit" className="btn primary" disabled={!paste.trim()}>
                 Continue
               </button>
-            </form>
-          </details>
-          {isIos() && (
-            <p className="note">
-              Tip: on iPhone, pair in Safari first, then add Decisions to your Home Screen.{' '}
-              <Link to="/install" className="text-link">
-                Installation help
-              </Link>
-            </p>
-          )}
-        </>
-      )}
+            </div>
+          </form>
+        )}
+        {isIos() && (
+          <p className="onb-note">
+            On iPhone, pair here in Safari first, then add Decisions to your Home Screen.{' '}
+            <Link to="/install">How to install</Link>
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <div className="page onb">
+      {/* Leaving this page cancels a pairing in progress, so the way out is offered only before one starts. */}
+      {!busy && <BackLink />}
+      <div className="onb-body">
+        {issue && (
+          <Callout
+            tone={issue.tone}
+            role="alert"
+            title={issue.title}
+            action={
+              issue.action === 'reload' ? (
+                <button type="button" className="btn small" onClick={() => location.reload()}>
+                  Reload
+                </button>
+              ) : undefined
+            }
+          >
+            {issue.body}
+          </Callout>
+        )}
+        {body}
+      </div>
       {/* One live region for the whole page: screen readers announce changes to it, not regions that appear. */}
       <p className="sr-only" role="status">
         {code
-          ? `Your code is ${code.replace(/\s/g, '').split('').join(' ')}. Check that your computer shows the same code, then approve it there.`
+          ? `Your code is ${spokenCode(code)}. Check that your computer shows the same code, then approve it there.`
           : phase?.phase === 'registering'
             ? 'Contacting your relay.'
             : phase?.phase === 'finalizing'
-              ? 'Securing this phone.'
+              ? 'Securing this device.'
               : ''}
       </p>
-      {/* Leaving this page cancels a pairing in progress, so the link is offered only before one starts. */}
-      {!busy && (
-        <nav className="links" aria-label="More">
-          <Link to="/privacy" className="text-link">
-            Who sees what
-          </Link>
-        </nav>
-      )}
     </div>
   );
 }

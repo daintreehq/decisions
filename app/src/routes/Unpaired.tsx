@@ -1,48 +1,74 @@
+import { useState } from 'react';
 import { app } from '../app/controller.js';
-import { Link, navigate } from '../app/router.js';
 import type { Phase } from '../app/controller.js';
+import { Link, navigate } from '../app/router.js';
+import { LinkIcon, LockIcon, ScanIcon } from '../components/Icons.js';
+import { forgetServerSettings } from '../components/settings/QuietHoursSection.js';
+import { startPairing } from './Pair.js';
 
-/** Shown when no keys exist (or this phone was revoked). Deliberately renders no cached content. */
+/**
+ * Shown when no keys exist, or this device was revoked. Renders nothing decrypted: the app only reaches here with no
+ * pairing or a revoked one, and the revoked screen offers only the way back to a clean start.
+ */
 export function LockedPage({ phase }: { phase: Extract<Phase, 'unpaired' | 'revoked'> }) {
+  const [clearing, setClearing] = useState(false);
   if (phase === 'revoked') {
     return (
-      <div className="page center-page welcome">
-        <h1>This phone was removed</h1>
-        <p>Your computer removed this phone, so it will not receive or answer any new questions.</p>
-        <p className="muted">
-          Clearing it deletes the Decisions data saved here (nothing else on the phone). Then you
-          can pair it again.
-        </p>
-        <button
-          type="button"
-          className="btn primary big"
-          onClick={() => {
-            void app.wipe().then(() => navigate('/pair', true));
-          }}
-        >
-          Clear and pair again
-        </button>
+      <div className="page onb onb-center">
+        <div className="onb-body">
+          <span className="onb-lock" aria-hidden="true">
+            <LockIcon size={28} />
+          </span>
+          <h1>This device is no longer paired</h1>
+          <p className="onb-lead">
+            Your computer revoked it, so it can’t receive or answer questions. Nothing saved here is
+            shown.
+          </p>
+          <div className="onb-actions">
+            <button
+              type="button"
+              className="btn primary big"
+              disabled={clearing}
+              onClick={() => {
+                setClearing(true);
+                forgetServerSettings();
+                void app.wipe().then(() => navigate('/pair', true));
+              }}
+            >
+              {clearing ? 'Erasing…' : 'Pair again'}
+            </button>
+          </div>
+          <p className="onb-note">
+            Pairing again first erases the Decisions data saved on this device. Nothing else on it
+            is touched.
+          </p>
+        </div>
       </div>
     );
   }
   return (
-    <div className="page center-page welcome">
-      <img src="/icons/icon-192.png" width="96" height="96" alt="" className="logo" />
-      <h1>Daintree Decisions</h1>
-      <p>
-        Answer the questions your coding agents are waiting on, from your phone, whenever you get to
-        it.
-      </p>
-      <Link to="/pair" className="btn primary big">
-        Pair this phone
-      </Link>
-      <nav className="links" aria-label="More">
-        <Link to="/install" className="text-link">
-          Install on your Home Screen
-        </Link>
-        <Link to="/privacy" className="text-link">
-          Who sees what
-        </Link>
+    <div className="page onb onb-center welcome">
+      <div className="onb-body">
+        <img src="/icons/icon-192.png" width="72" height="72" alt="" className="onb-mark" />
+        <h1>Daintree Decisions</h1>
+        <p className="onb-lead">
+          Answer the questions your coding agents are waiting on, wherever you are.
+        </p>
+        <div className="onb-actions">
+          <button type="button" className="btn primary big" onClick={() => startPairing('scan')}>
+            <ScanIcon size={20} />
+            Scan pairing code
+          </button>
+          <button type="button" className="btn big" onClick={() => startPairing('paste')}>
+            <LinkIcon size={18} />
+            Paste pairing link
+          </button>
+        </div>
+      </div>
+      <nav className="onb-links" aria-label="More">
+        <Link to="/install">Install the app</Link>
+        <span aria-hidden="true">·</span>
+        <Link to="/privacy">Who sees what</Link>
       </nav>
     </div>
   );

@@ -220,6 +220,16 @@ export class AppController {
     await this.boot(config);
   }
 
+  /** What unpairing would erase, counted from this device's own stores (shown before the person confirms). */
+  async localDataSummary(): Promise<{ questions: number; unsent: number; drafts: number }> {
+    const drafts = this.db ? (await this.db.drafts()).length : 0;
+    return {
+      questions: this.store?.list().length ?? 0,
+      unsent: this.outbox?.list().length ?? 0,
+      drafts,
+    };
+  }
+
   async wipe(): Promise<void> {
     // Order matters: cut off everything that could still deliver or reveal data BEFORE touching storage, and
     // never wait on the network. A stalled download must not be able to delay or undo an erase.
@@ -230,7 +240,14 @@ export class AppController {
     this.relay = this.store = this.outbox = this.drafts = this.sync = this.trust = null;
     this.keys = this.cacheKey = null;
     this.epochKeys.clear();
-    this.patch({ phase: 'unpaired', config: null, devices: null, connection: 'idle' });
+    applyTheme(DEFAULT_PREFS.theme);
+    this.patch({
+      phase: 'unpaired',
+      config: null,
+      devices: null,
+      connection: 'idle',
+      prefs: DEFAULT_PREFS,
+    });
     await db?.wipe();
     if (typeof caches !== 'undefined') for (const k of await caches.keys()) await caches.delete(k);
     this.db = await Db.open();
@@ -405,6 +422,11 @@ export class AppController {
     reg.addEventListener('updatefound', () => {
       reg.installing?.addEventListener('statechange', check);
     });
+  }
+
+  /** Ask the browser to look for a newer app now. A found update raises `updateAvailable` once it has installed. */
+  async checkForUpdate(): Promise<void> {
+    await this.swReg?.update();
   }
 
   private updateGuards = new Set<() => Promise<boolean>>();

@@ -9,7 +9,23 @@ import { dropLayers, hasLayers } from './layers.js';
 
 const EVT = 'decisions:navigate';
 
+/**
+ * A screen holding unsaved work (relay settings with a pending Save) can stop in-app navigation. The guard gets the
+ * destination and returns false to stay; it then asks the person and calls `navigate` again itself once answered.
+ */
+export type NavigationGuard = (to: string) => boolean;
+let navGuard: NavigationGuard | null = null;
+
+/** Install a guard; returns its removal. Only one screen can hold unsaved work at a time. */
+export function setNavigationGuard(guard: NavigationGuard): () => void {
+  navGuard = guard;
+  return () => {
+    if (navGuard === guard) navGuard = null;
+  };
+}
+
 export function navigate(to: string, replace = false): void {
+  if (navGuard && to !== location.pathname + location.search && !navGuard(to)) return;
   // Leaving through an open layer (the navigator, say) replaces its history entry instead of stacking on it.
   if (hasLayers()) {
     dropLayers();
