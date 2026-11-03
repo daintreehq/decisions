@@ -37,6 +37,8 @@ export class VoiceClient {
   droppedFrames = 0;
   /** The provider did not confirm the end of the passage in time; the words received so far stand. */
   timedOut = false;
+  /** Bumped by `cancel()`, so a ticket that answers after it opens no socket. */
+  private generation = 0;
 
   constructor(private readonly o: VoiceClientOptions) {}
 
@@ -46,16 +48,18 @@ export class VoiceClient {
   }
 
   async start(): Promise<void> {
+    const gen = ++this.generation;
     this.set('connecting');
-    const session = VoiceSessionResponse.parse(
-      await this.o.postJson('/voice/session', {
-        protocol_version: PROTOCOL_VERSION,
-        provider: this.o.provider,
-        consent: true,
-        keyterms: this.o.keyterms,
-        language: this.o.language,
-      }),
-    );
+    const answer = await this.o.postJson('/voice/session', {
+      protocol_version: PROTOCOL_VERSION,
+      provider: this.o.provider,
+      consent: true,
+      keyterms: this.o.keyterms,
+      language: this.o.language,
+    });
+    // Cancelled (or restarted) while the ticket was on its way: nothing owns a socket opened now.
+    if (gen !== this.generation) throw new Error('cancelled');
+    const session = VoiceSessionResponse.parse(answer);
     const base = this.o.origin.replace(/^http/, 'ws');
     const path = session.ws_path.includes('ticket=')
       ? session.ws_path
@@ -179,6 +183,7 @@ export class VoiceClient {
   }
 
   cancel(): void {
+    this.generation++;
     this.close();
     this.set('idle');
   }
