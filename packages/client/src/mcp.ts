@@ -5,7 +5,7 @@ import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
