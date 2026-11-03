@@ -5,6 +5,7 @@
 @import './styles/primitives.css';
 @import './styles/shell.css';
 @import './styles/inbox.css';
+@import './styles/workspace.css';
 @import './styles/detail.css';
 @import './styles/files.css';
 @import './styles/voice.css';

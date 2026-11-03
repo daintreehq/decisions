@@ -1,5 +1,4 @@
-/* ---------- question workspace (owned by the workspace work) ---------- */
-.detail-head .back,
+/* ---------- question workspace body (owned by the workspace work) ---------- */
 .page-back {
   display: inline-flex;
   align-items: center;
@@ -12,63 +11,146 @@
   font-size: var(--text-sm);
   font-weight: 500;
 }
-.detail-head .back:hover,
 .page-back:hover {
   color: var(--text);
 }
-.detail-head .origin {
-  font-size: var(--text-sm);
-}
-.detail-head .meta-line {
-  margin: 2px 0 8px;
-  font-size: var(--text-xs);
-  color: var(--text-2);
-}
-.detail-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 12px;
+
+/* The question is the page's h1: 22/30, 600, slightly tight. */
+#q-title {
+  outline: none;
+  scroll-margin-top: 16px;
 }
 .question {
   font-size: var(--text-question);
   font-weight: 600;
-  line-height: 1.36;
+  line-height: 30px;
   letter-spacing: -0.01em;
-  margin: 4px 0 12px;
   color: var(--text);
+  margin: 0;
+  max-width: 68ch;
 }
 .question p {
   margin: 0 0 0.5rem;
 }
-.context {
-  margin: 12px 0 16px;
+.question p:last-child {
+  margin-bottom: 0;
+}
+.question code {
+  font-size: 0.8em;
+}
+@media (max-width: 359px) {
+  .question {
+    line-height: 28px;
+  }
+}
+
+/* One principal status plus only useful extras. Colour sits on the glyph, never the words. */
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  /* Every item carries its separator; the one that starts a line is clipped away by the negative margin. */
+  margin: 8px 0 16px -20px;
+  clip-path: inset(0 0 0 20px);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+}
+.status-line > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status-line > span::before {
+  content: '·';
+  flex: none;
+  width: 20px;
+  margin-right: -6px;
+  text-align: center;
+  color: var(--text-3);
+}
+.principal {
+  color: var(--text);
+  font-weight: 500;
+}
+.principal svg {
+  color: var(--text-2);
+}
+.principal.proxy-answered svg {
+  color: var(--model);
+}
+.principal.human-answered svg {
+  color: var(--success-text);
+}
+.principal.unverified svg {
+  color: var(--danger-text);
+}
+.due.soon {
+  color: var(--text);
+  font-weight: 500;
+}
+.due.soon svg {
+  color: var(--warning-text);
+}
+
+/* Disclosures: context, delivery, question details. One hairline card each, a literal preview when closed. */
+.disclosure {
+  margin: 12px 0;
   padding: 0 14px;
   border: 1px solid var(--line-default);
   border-radius: var(--radius-lg);
   background: var(--surface-card);
 }
-.context > summary {
+.disclosure > summary {
+  min-height: 48px;
+  gap: 10px;
+}
+.summary-title {
+  flex: none;
   font-size: var(--text-sm);
+  font-weight: 600;
 }
-.context[open] {
-  padding-bottom: 8px;
+.summary-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.context .safe-text {
+.disclosure[open] .summary-preview {
+  display: none;
+}
+.disclosure[open] {
+  padding-bottom: 12px;
+}
+.disclosure .safe-text {
   font-size: 0.9375rem;
   color: var(--text);
 }
-.card.proxy details > summary {
-  color: var(--text);
-  font-size: var(--text-sm);
+.disclosure .safe-text p:first-child {
+  margin-top: 0;
 }
-.proxy-rationale {
-  margin: 4px 0;
+
+.decision {
+  margin: 16px 0 8px;
 }
+.decision > * + * {
+  margin-top: 12px;
+}
+
+/* Options: full-width radio cards. Selected is a neutral lift with a text-secondary edge, never an accent wash. */
 .options {
   display: grid;
   gap: 8px;
-  margin: 12px 0;
+  margin: 0;
+}
+.options > legend {
+  margin-bottom: 8px;
+  padding: 0;
 }
 .option {
   display: flex;
@@ -82,12 +164,17 @@
   cursor: pointer;
   transition:
     background-color var(--dur) var(--ease-out),
-    border-color var(--dur) var(--ease-out);
+    border-color var(--dur) var(--ease-out),
+    box-shadow var(--dur) var(--ease-out);
 }
 @media (hover: hover) {
   .option:hover {
     background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 3%);
   }
+}
+.option:active {
+  transform: scale(0.99);
+  transition-duration: 1ms;
 }
 .option:has(.option-desc) {
   align-items: flex-start;
@@ -95,7 +182,6 @@
 .option:has(.option-desc) input {
   margin-top: 1px;
 }
-/* Selected: Daintree's choice card. Neutral lift and a text-secondary edge, never an accent wash. */
 .option.on {
   background: var(--surface-raised);
   border-color: var(--text-2);
@@ -103,146 +189,291 @@
     inset 0 0 0 1px var(--text-2),
     var(--shadow-1);
 }
+.options:disabled .option {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 .option-body {
   min-width: 0;
 }
 .option-label {
   font-weight: 500;
+  font-size: var(--text-md);
+  line-height: 24px;
+}
+.option-current {
+  font-weight: 400;
+  color: var(--text-2);
+  font-size: var(--text-sm);
 }
 .option-desc p {
   margin: 2px 0 0;
   color: var(--text-2);
   font-size: var(--text-sm);
+  line-height: 20px;
   font-weight: 400;
 }
-.closed-options {
-  margin: 4px 0 12px;
+
+/* Answers: a read-only card with author and time. */
+.answer-card {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-1);
+  scroll-margin: 16px;
+}
+.answer-card > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.answer-card h2 {
+  margin: 0;
+}
+.answer-when {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.answer-choice {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: 26px;
+}
+.answer-text {
+  font-size: var(--text-md);
+}
+.answer-text p {
+  margin: 4px 0 0;
+}
+.answer-reason {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.eyebrow-inline {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-right: 4px;
+}
+/* Model provenance: the violet diamond and the words "Model answer", always together. */
+.answer-card.model {
+  border-color: color-mix(in oklab, var(--model) 32%, var(--line-default));
+  background: color-mix(in oklab, var(--surface-card) 100%, var(--model) 4%);
+}
+.model-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.model-label svg {
+  color: var(--model);
+  fill: color-mix(in oklab, var(--model) 30%, transparent);
+}
+.model-meta {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.model-note {
+  margin: 10px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.answer-card .disclosure {
+  margin: 10px 0 0;
+  background: transparent;
+}
+
+/* Correction mode. */
+.correction {
+  display: grid;
+  gap: 12px;
+  scroll-margin-top: 12px;
+}
+.correction-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.correction-head h2 {
+  margin: 0;
+}
+.correction-tools {
+  display: inline-flex;
+  gap: 6px;
+}
+.current-answer {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-subtle);
+}
+.current-answer .answer-choice {
+  font-size: var(--text-md);
+}
+.field-button {
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-input);
+  background: var(--surface-input);
+  color: var(--text);
+  text-align: left;
+  cursor: text;
+}
+.field-button-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.field-button-empty {
+  color: var(--text-placeholder);
+}
+.field-button-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Conflict: what is in force, and what this device tried to send. */
+.conflict {
+  display: grid;
+  gap: 10px;
+  scroll-margin-top: 12px;
+}
+.conflict-pane {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-default);
+  background: var(--surface-card);
+}
+.conflict-pane.mine {
+  border-style: dashed;
+}
+.conflict-pane h3 {
+  margin: 0 0 4px;
+}
+.callout-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin: 0;
+}
+.callout-text {
+  margin: 2px 0 0;
+}
+.callout > div {
+  min-width: 0;
+}
+.callout .btn {
+  margin-top: 8px;
+}
+
+/* Closed questions. */
+.closed {
+  display: grid;
+  gap: 12px;
+}
+.closed-options ul {
+  margin: 4px 0 0;
   padding-left: 1.2rem;
   color: var(--text-2);
 }
-/* Delivery stepper: done steps carry a check, the live step a ring, steps not reached an empty ring. */
-.delivery {
-  margin: 16px 0;
+.closed-draft {
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--line-default);
 }
-.delivery h2 {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-weight: 600;
-  color: var(--text-2);
-  margin: 0 0 8px;
+
+/* The record: delivery and question details. */
+.record {
+  margin-top: 20px;
 }
-.progress {
-  list-style: none;
-  padding: 0;
+.details-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
   margin: 0;
+  font-size: var(--text-sm);
+}
+.details-list dt {
+  color: var(--text-2);
+}
+.details-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Delivery stepper: done steps carry a check and words, the live step a filled ring. */
+.stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: grid;
   gap: 2px;
-  font-size: var(--text-sm);
   position: relative;
+  font-size: var(--text-sm);
 }
-.progress::before {
+.stepper::before {
   content: '';
   position: absolute;
-  left: 8px;
+  left: 8.25px;
   top: 14px;
   bottom: 14px;
   width: 1.5px;
   background: var(--line-strong);
 }
-.progress li {
-  color: var(--text-2);
-  padding: 4px 0 4px 30px;
+.stepper li {
   position: relative;
-  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 30px;
+  color: var(--text-2);
 }
-.progress li::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
+.step-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
   width: 18px;
   height: 18px;
   border-radius: 50%;
   border: 1.5px solid var(--line-input);
-  background: var(--surface-page);
+  background: var(--surface-card);
 }
-.progress li.done {
+.stepper li.done {
   color: var(--text);
 }
-.progress li.done::before {
+.stepper li.done .step-mark {
   border-color: var(--success);
-  background: color-mix(in oklab, var(--success) 14%, var(--surface-page));
+  background: color-mix(in oklab, var(--success) 14%, var(--surface-card));
+  color: var(--success-text);
 }
-.progress li.done::after {
-  content: '';
-  position: absolute;
-  left: 6.5px;
-  top: 10px;
-  width: 4px;
-  height: 8px;
-  border-right: 1.75px solid var(--success-text);
-  border-bottom: 1.75px solid var(--success-text);
-  transform: rotate(45deg);
-}
-.progress li.current {
-  font-weight: 600;
+.stepper li.current {
   color: var(--text);
-}
-.progress li.current:not(.done)::before {
-  border-color: var(--text);
-  box-shadow: inset 0 0 0 4px var(--surface-page);
-  background: var(--text);
-}
-.meta {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 14px;
-  font-size: var(--text-sm);
-  margin: 10px 0;
-}
-.meta dt {
-  color: var(--text-2);
-}
-.meta dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.choice {
   font-weight: 600;
-  font-size: var(--text-lg);
-  margin: 6px 0 2px;
 }
-/* Sticky action bar: the commit stays in thumb reach above the tab bar; content scrolls under it. */
-.actions-bar {
-  position: sticky;
-  bottom: calc(var(--tabbar-h) + var(--safe-b));
-  z-index: 4;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-  margin: 12px calc(-1 * var(--gutter)) 0;
-  padding: 12px var(--gutter) 8px;
-  background: var(--material-bg);
-  backdrop-filter: blur(var(--material-blur));
-  -webkit-backdrop-filter: blur(var(--material-blur));
-  border-top: 1px solid var(--line);
+.stepper li.current:not(.done) .step-mark {
+  border-color: var(--text);
+  background: var(--text);
+  box-shadow: inset 0 0 0 3.5px var(--surface-card);
 }
-.actions-bar .btn.primary {
-  flex: 1 1 auto;
-}
-.actions-bar .btn.big {
-  width: auto;
-}
-.actions-bar .hint {
-  width: 100%;
-  min-height: 1.3em;
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--text-2);
-  text-align: center;
-}
-.editor {
-  scroll-margin-top: calc(var(--safe-t) + var(--header-h) + 16px);
+.dock-stepper .step-mark {
+  background: var(--surface-raised);
 }

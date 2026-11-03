@@ -107,11 +107,11 @@ export interface DeliveryProgress {
 }
 
 export const DELIVERY_LABELS: Record<DeliveryStep, string> = {
-  queued: 'Queued on this phone',
+  queued: 'Queued on this device',
   sending: 'Sending…',
   confirmed: 'Saved on your relay',
-  desktop: 'Received by Daintree',
-  terminal: 'Typed into the agent’s terminal',
+  desktop: 'Received by your computer',
+  terminal: 'Delivered to the agent’s terminal',
   attention: 'Needs attention on your computer',
 };
 
@@ -143,8 +143,11 @@ export function deliveryProgress(
   if (d?.status === 'needs-attention' || d?.status === 'delivery-uncertain') {
     return {
       step: 'attention',
-      label: DELIVERY_LABELS.attention,
-      detail: d.status === 'delivery-uncertain' ? 'Delivery could not be confirmed' : d.errorCode,
+      label:
+        d.status === 'delivery-uncertain'
+          ? 'Delivery couldn’t be confirmed'
+          : DELIVERY_LABELS.attention,
+      detail: d.status === 'delivery-uncertain' ? undefined : d.errorCode,
     };
   }
   if (store.desktopAckSeq >= a.seq) return { step: 'desktop', label: DELIVERY_LABELS.desktop };

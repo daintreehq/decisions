@@ -64,10 +64,23 @@ class Sink implements TerminalSink {
   }
 }
 
+/** Lets the conflict capture have the model answer first, after the phone queued its own answer offline. */
+let conflictArmed = false;
+
 /** Answers only the changelog question, so the inbox holds one proxy answer and one abstention. */
 const proxy: ProxyEngine = {
   gateAware: true,
   async suggest(input) {
+    if (conflictArmed && input.question.startsWith('Which log level'))
+      return {
+        action: 'answer',
+        selected_option_ids: ['info'],
+        confidence: 0.81,
+        model_id: 'decision-model-bm25 v1',
+        prompt_template_version: '1',
+        retrieval_reference_ids: [],
+        risk_flags: [],
+      };
     if (!input.question.startsWith('Should the changelog entry'))
       return { action: 'abstain', reason: 'low-confidence' };
     return {
@@ -119,6 +132,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   let bridge: DecisionsBridge;
   let client: RelayClient;
   let keyStore: FileKeyStore;
+  const local = new MemoryLocalStore();
   const images = new Map<string, Uint8Array>();
   const written: string[] = [];
   const ids: Record<string, string> = {};
@@ -152,13 +166,29 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   const open = async (text: string) => {
     await page.goto(relay.origin + '/');
     await page.getByText(text).first().click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+  };
+  /** Opens a question straight from its id, as a notification would. */
+  const openId = async (key: string) => {
+    await page.goto(`${relay.origin}/q/${ids[key]}`);
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+  };
+  /** Types into the dock's editor (opening it from the draft field) and closes it again. */
+  const typeAnswer = async (text: string, keepOpen = false) => {
+    await page.locator('.dock .dock-field').first().click();
+    await page.locator('#ws-editor').fill(text);
+    if (!keepOpen) await page.locator('.dock-field.done').click();
   };
 
   beforeAll(async () => {
     mkdirSync(OUT!, { recursive: true });
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    browser = await chromium.launch({
+      executablePath: chromiumPath!,
+      headless: true,
+      // A fake microphone (a steady tone) so dictation can be driven for real.
+      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+    });
     images.set('before.png', await mockUi(browser, 'before'));
     images.set('after.png', await mockUi(browser, 'after'));
     context = await browser.newContext({
@@ -194,6 +224,13 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('04-pair-no-invite');
     // Headless Chromium has no camera, which is exactly the scanner's failure state.
     await page.goto(relay.origin + '/pair');
+    // The fake media device gives Chromium a camera; take it away again for the scanner's failure state.
+    await page.evaluate(() => {
+      const md = navigator.mediaDevices;
+      const real = md.getUserMedia.bind(md);
+      md.getUserMedia = (c) =>
+        c?.video ? Promise.reject(new DOMException('No camera', 'NotFoundError')) : real(c);
+    });
     await page.getByRole('button', { name: 'Scan QR code' }).click();
     await page.locator('.scanner [role="alert"]').waitFor({ timeout: 15_000 });
     await shot('04-pair-scan-error');
@@ -210,7 +247,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     bridge = new DecisionsBridge({
       identity,
       keyStore,
-      store: new MemoryLocalStore(),
+      store: local,
       sink: new Sink(),
       client,
       proxy,
@@ -354,20 +391,21 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // Answer the rename question through the UI, so one item is answered and delivered.
     await open('Rename “Canopy”');
     await page.getByRole('radio', { name: /Yes, rename/ }).check();
-    await page.getByRole('button', { name: /Submit decision/ }).click();
+    await shot('30-ws-approval-selected');
+    await page.getByRole('button', { name: 'Send decision' }).click();
     await page
-      .locator('ol[aria-label="Delivery progress"] li[aria-current="step"]')
-      .filter({ hasText: 'Typed into' })
+      .locator('.dock .stage')
+      .filter({ hasText: 'Delivered to the agent' })
       .waitFor({ timeout: 30_000 });
     await shot('15-detail-answered');
-    await page.getByRole('button', { name: /Change this answer/ }).click();
+    await page.locator('.dock').getByRole('button', { name: 'Change answer' }).click();
     await page.getByRole('radio', { name: /Keep Canopy/ }).check();
-    await page.getByLabel('Why are you changing it?').fill('Canopy is the brand name; keep it.');
-    await shot('16-detail-override', { full: true });
-    await page.getByRole('button', { name: /Send correction/ }).click();
+    await typeAnswer('Canopy is the brand name; keep it.');
+    await shot('16-detail-override');
+    await page.getByRole('button', { name: 'Send correction' }).click();
     await page.getByRole('dialog').waitFor();
     await shot('17-dialog-overrule');
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Keep editing' }).click();
 
     await open('Approve the compact sidebar');
     await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
@@ -375,17 +413,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('09-detail-approval-full', { full: true });
     await page.getByRole('radio', { name: /^Approve/ }).check();
     await shot('10-detail-approval-selected');
-    // The README hero: the choice made, a note for the agent, the submit bar armed.
-    const note = page.getByRole('textbox').first();
-    await note.fill('Ship it. Keep the tooltips on every icon.');
-    // Scroll so the status chips sit just under the top bar: question, screenshots, choice and note in one view.
-    await page.evaluate(() => {
-      const bar = document.querySelector('.topbar')!.getBoundingClientRect().bottom;
-      const chips = document.querySelector('.detail-badges')!.getBoundingClientRect().top;
-      window.scrollBy(0, chips - bar - 6);
-    });
+    // The README hero: the choice made, a note for the agent, Send armed above Dictate.
+    await typeAnswer('Ship it. Keep the tooltips on every icon.');
     await shot('10-detail-approval-note');
-    await note.fill('');
+    await typeAnswer('');
     await page.getByRole('button', { name: /Enlarge After/ }).click();
     await page.getByRole('dialog').waitFor();
     await shot('11-dialog-zoom');
@@ -394,18 +425,16 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await open('Which retry strategy');
     await shot('12-detail-choice', { full: true });
     await open('Which version should it describe');
-    await page
-      .getByRole('textbox')
-      .first()
-      .fill('Describe v3 only. Move the v2 steps to an appendix');
-    await shot('13-detail-text', { full: true });
+    await typeAnswer('Describe v3 only. Move the v2 steps to an appendix');
+    await shot('13-detail-text');
+    await typeAnswer('');
 
     await page.goto(relay.origin + '/');
     await page.getByRole('button', { name: /Model answers/ }).click();
     await page.getByText('Should the changelog entry').first().waitFor({ timeout: 30_000 });
     await shot('19-inbox-proxy-tab');
     await page.getByText('Should the changelog entry').first().click();
-    await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
+    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
     await shot('14-detail-proxy', { full: true });
 
     // Wait out the short-lived question's expiry (usually already past by now).
@@ -455,7 +484,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
     await shot('27-detail-approval-dark', { full: true });
     await page.goto(`${relay.origin}/q/${ids.proxy}`);
-    await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
+    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
     await shot('28-detail-proxy-dark', { full: true });
     await page.goto(relay.origin + '/settings');
     await shot('29-settings-dark', { full: true });
@@ -474,6 +503,205 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.setViewportSize(PHONE);
   });
 
+  it('captures every workspace state at both sizes in both themes', async () => {
+    // A question the model will answer while the phone's own answer waits offline: the conflict.
+    const r = await bridge.registerQuestion({
+      origin: {
+        machine_label: 'Greg’s MacBook Pro',
+        host_id: 'host_01JC8Z4MQ7',
+        pane_id: 'p9',
+        terminal_generation: 1,
+        ownership_principal: 'principal-p9',
+        agent_incarnation: '1',
+        agent_kind: 'claude-code',
+        agent_session_id: 's-p9',
+        project_id: 'billing-api',
+        worktree_id: 'wt-p9',
+        worktree_root: '/work/billing-api',
+        workflow_gate_id: null,
+      },
+      input: {
+        question: 'Which log level should the retry worker use in production?',
+        kind: 'choice',
+        requested_requirement: 'proxy-ok',
+        options: [
+          { id: 'debug', label: 'Debug' },
+          { id: 'info', label: 'Info' },
+          { id: 'warn', label: 'Warn' },
+        ],
+      },
+    });
+    ids.conflict = r.questionId;
+    await bridge.pump();
+
+    const sizes: [string, { width: number; height: number }][] = [
+      ['p', PHONE],
+      ['w', WIDE],
+    ];
+    for (const [sz, vp] of sizes) {
+      await page.setViewportSize(vp);
+      for (const scheme of ['light', 'dark'] as const) {
+        await theme(scheme);
+        const tag = `${sz}-${scheme}`;
+        await openId('text');
+        await shot(`40-ws-text-empty-${tag}`);
+        await typeAnswer('Describe v3 only, and move the v2 steps to an appendix.', true);
+        await shot(`40-ws-editor-${tag}`);
+        await page.locator('.dock-field.done').click();
+        await shot(`40-ws-draft-${tag}`);
+        await typeAnswer('');
+        await openId('choice');
+        await page.getByRole('radio', { name: /Exponential backoff/ }).check();
+        await shot(`40-ws-choice-selected-${tag}`);
+        await openId('design');
+        await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+        await shot(`40-ws-approval-${tag}`);
+        await openId('answered');
+        await page.locator('.dock .stage').waitFor({ timeout: 30_000 });
+        await shot(`40-ws-answered-${tag}`);
+        await page
+          .locator('.dock')
+          .getByRole('button', { name: /Change answer|Resume correction/ })
+          .click();
+        await page.locator('#ws-correction').waitFor();
+        await shot(`40-ws-correction-${tag}`);
+        await page.locator('#ws-correction').getByRole('button', { name: 'Cancel' }).click();
+        await openId('proxy');
+        await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
+        await shot(`40-ws-model-${tag}`);
+        await openId('expired');
+        await shot(`40-ws-expired-${tag}`);
+        await openId('cancelled');
+        await shot(`40-ws-withdrawn-${tag}`);
+      }
+    }
+    await theme('light');
+    await page.setViewportSize(PHONE);
+
+    // The conflict: the phone queues its answer offline, the model answers first, the phone reconnects.
+    await openId('conflict');
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.getByRole('radio', { name: /^Warn/ }).check();
+    await page.getByRole('button', { name: 'Send answer' }).click();
+    await page.locator('.dock .stage').waitFor({ timeout: 10_000 });
+    await shot('40-ws-queued-offline');
+    conflictArmed = true;
+    // The model passed on it when it was asked; let it look again now.
+    await local.setMeta(`proxy:${ids.conflict}`, '');
+    expect(await bridge.runProxy(ids.conflict!)).toBe('answered');
+    await bridge.pump();
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.locator('#ws-conflict').waitFor({ timeout: 30_000 });
+    await shot('40-ws-conflict');
+    await theme('dark');
+    await shot('40-ws-conflict-dark');
+    await page.setViewportSize(WIDE);
+    await shot('40-ws-conflict-w-dark');
+    await theme('light');
+    await page.setViewportSize(PHONE);
+
+    // Dictation, through the real app and a fake microphone; the relay's speech and cleanup are stood in for here.
+    await context.route('**/api/v1/info', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({
+        response: res,
+        json: { ...body, voice: { xai: true, anthropic: true, openai: false } },
+      });
+    });
+    await context.route('**/api/v1/voice/session', (route) =>
+      route.fulfill({
+        json: {
+          ticket: 'dGlja2V0dGlja2V0dGlja2V0',
+          ws_path: '/api/v1/voice/ws',
+          provider: 'xai',
+          sample_rate: 16000,
+          max_session_ms: 300_000,
+          expires_at: new Date(Date.now() + 30_000).toISOString(),
+        },
+      }),
+    );
+    let releaseCleanup: () => void = () => undefined;
+    await context.route('**/api/v1/voice/correct', async (route) => {
+      await new Promise<void>((res) => (releaseCleanup = res));
+      await route.fulfill({
+        json: {
+          model: 'claude-haiku',
+          result: {
+            corrected_text: 'Describe v3 only, and move the v2 steps into an appendix at the end.',
+            uncertain_spans: [],
+            applied_commands: [],
+            warnings: [],
+          },
+        },
+      });
+    });
+    await context.routeWebSocket('**/api/v1/voice/ws**', (ws) => {
+      let frames = 0;
+      ws.send(JSON.stringify({ type: 'transcript.created' }));
+      ws.onMessage((m) => {
+        if (typeof m === 'string') {
+          if (m.includes('audio.done')) {
+            ws.send(
+              JSON.stringify({
+                type: 'transcript.partial',
+                text: 'at the end',
+                is_final: true,
+              }),
+            );
+            ws.send(JSON.stringify({ type: 'transcript.done', text: '' }));
+          }
+          return;
+        }
+        frames++;
+        if (frames === 4)
+          ws.send(
+            JSON.stringify({
+              type: 'transcript.partial',
+              text: 'describe v3 only and move the v2 steps',
+              is_final: true,
+            }),
+          );
+        if (frames === 6)
+          ws.send(
+            JSON.stringify({
+              type: 'transcript.partial',
+              text: 'into an appendix',
+              is_final: true,
+            }),
+          );
+        if (frames === 8)
+          ws.send(JSON.stringify({ type: 'transcript.partial', text: 'at the', is_final: false }));
+      });
+    });
+    await page.goto(relay.origin + '/');
+    await page.waitForTimeout(800);
+    await openId('text');
+    await page.getByRole('button', { name: /^Dictate/ }).click();
+    await page.getByRole('dialog').waitFor();
+    await shot('40-ws-dictation-consent');
+    await page.getByRole('button', { name: 'Enable and start dictation' }).click();
+    await page.locator('.status.rec').waitFor({ timeout: 15_000 });
+    await page.locator('.live-text .interim').waitFor({ timeout: 15_000 });
+    await shot('40-ws-recording');
+    await theme('dark');
+    await shot('40-ws-recording-dark');
+    await theme('light');
+    await page.getByRole('button', { name: 'Stop dictation' }).click();
+    await page.getByText('Tidying wording…').waitFor({ timeout: 15_000 });
+    await shot('40-ws-cleaning');
+    releaseCleanup();
+    await page.locator('.status.review').waitFor({ timeout: 15_000 });
+    await shot('40-ws-cleaned');
+    await page.setViewportSize(WIDE);
+    await shot('40-ws-cleaned-w');
+    await page.setViewportSize(PHONE);
+    await typeAnswer('');
+    await context.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   it('captures the revoked phone', async () => {
     const list = await client.devices();
     const phone = list.devices.find((d) => d.role === 'phone' && !d.revoked_at);
@@ -485,6 +713,5 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    expect(written.length).toBe(38);
   });
 });

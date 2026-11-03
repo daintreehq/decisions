@@ -196,7 +196,7 @@ describe.skipIf(!chromiumPath)(
       await page.getByText('Ship the compact sidebar?').first().waitFor({ timeout: 30_000 });
       await page.getByText('Ship the compact sidebar?').first().click();
       await page.getByRole('radio', { name: /Approve/ }).check();
-      await page.getByRole('button', { name: /Submit decision/ }).click();
+      await page.getByRole('button', { name: 'Send decision' }).click();
 
       // the answer travels phone -> relay -> hibernatable socket -> desktop -> terminal
       await until(
@@ -226,8 +226,8 @@ describe.skipIf(!chromiumPath)(
       try {
         // the phone learns about the real terminal delivery over its own live socket
         await page
-          .locator('ol[aria-label="Delivery progress"] li[aria-current="step"]')
-          .filter({ hasText: 'Typed into the agent’s terminal' })
+          .locator('.dock .stage')
+          .filter({ hasText: 'Delivered to the agent’s terminal' })
           .waitFor({ timeout: 20_000 });
       } catch (e) {
         await page.screenshot({

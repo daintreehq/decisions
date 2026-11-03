@@ -14,6 +14,8 @@ export interface VoiceClientOptions {
   onState?: (s: VoiceState) => void;
   /** Live text: `final` is committed so far, `interim` may still change. */
   onText?: (t: { final: string; interim: string }) => void;
+  /** One newly locked chunk of words, in order, as it is finalized (for writing into the draft live). */
+  onFinal?: (text: string) => void;
   onError?: (message: string) => void;
   doneTimeoutMs?: number;
 }
@@ -31,8 +33,10 @@ export class VoiceClient {
   private doneText: string | null = null;
   private doneWaiter: ((raw: string) => void) | null = null;
   private doneTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Frames offered before the provider said it was ready are dropped, never queued. */
+  /** Frames offered before the provider said it was ready are dropped here; the session queues them instead. */
   droppedFrames = 0;
+  /** The provider did not confirm the end of the passage in time; the words received so far stand. */
+  timedOut = false;
 
   constructor(private readonly o: VoiceClientOptions) {}
 
@@ -85,7 +89,10 @@ export class VoiceClient {
         const text = typeof m.text === 'string' ? m.text : '';
         if (m.is_final) {
           // Providers can repeat a locked chunk; ignore an exact consecutive duplicate.
-          if (text && this.finals.at(-1) !== text) this.finals.push(text);
+          if (text && this.finals.at(-1) !== text) {
+            this.finals.push(text);
+            this.o.onFinal?.(text);
+          }
           this.interim = '';
         } else {
           this.interim = text;
@@ -132,8 +139,16 @@ export class VoiceClient {
     this.ws.send(JSON.stringify({ type: 'audio.done' }));
     return new Promise<string>((resolve) => {
       this.doneWaiter = resolve;
-      this.doneTimer = setTimeout(() => this.finish(), this.o.doneTimeoutMs ?? 5000);
+      this.doneTimer = setTimeout(() => {
+        this.timedOut = true;
+        this.finish();
+      }, this.o.doneTimeoutMs ?? 5000);
     });
+  }
+
+  /** Words heard but not yet locked by the provider. */
+  pendingInterim(): string {
+    return this.interim.trim();
   }
 
   rawText(): string {
