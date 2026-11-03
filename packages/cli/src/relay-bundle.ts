@@ -26,6 +26,8 @@ export interface RelayManifest {
   schema: 1;
   name: string;
   version: string;
+  /** The wire protocol range the relay speaks. Releases before 0.3.0 do not declare it. */
+  protocol?: { min: number; max: number };
   /** The exact Wrangler version the bundle was built with, used to deploy it. */
   wrangler: string;
   /** The Wrangler config file, relative to the bundle. */
@@ -41,6 +43,7 @@ export interface VerifiedRelayBundle {
   files: Map<string, Buffer>;
 }
 
+const RELAY_PACKAGE_NAME = '@daintreehq/decisions-relay';
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
 /** Where the installed `@daintreehq/decisions-relay` keeps its files. */
@@ -81,6 +84,17 @@ function parseManifest(text: string): RelayManifest {
     throw bad('the Wrangler version is not an exact version');
   // Staging writes the config next to worker/ and app/, which its relative paths point at.
   if (r.config !== 'wrangler.json') throw bad('the config must be wrangler.json');
+  if (r.protocol !== undefined) {
+    const p = r.protocol as { min?: unknown; max?: unknown } | null;
+    if (
+      !p ||
+      !Number.isSafeInteger(p.min) ||
+      !Number.isSafeInteger(p.max) ||
+      (p.min as number) < 1 ||
+      (p.max as number) < (p.min as number)
+    )
+      throw bad('the protocol range is invalid');
+  }
   if (!r.files || typeof r.files !== 'object' || Array.isArray(r.files)) throw bad('no file list');
   for (const [p, e] of Object.entries(r.files)) {
     if (!safeRelative(p)) throw bad(`unsafe path ${JSON.stringify(p)}`);
@@ -122,13 +136,23 @@ export async function verifyRelayBundle(
       `the relay bundle is version ${manifest.version} but this CLI is ${opts.version}; refusing to deploy`,
     );
   }
+  const files = await checkFiles(manifest, dir, (rel) =>
+    readFile(join(dir, ...rel.split('/'))).catch(() => undefined),
+  );
+  return { dir, manifest, manifestSha256, files };
+}
+
+/** Every file the manifest lists, with its listed size and SHA-256, or the reasons it is not. */
+async function checkFiles(
+  manifest: RelayManifest,
+  where: string,
+  read: (rel: string) => Promise<Buffer | undefined>,
+): Promise<Map<string, Buffer>> {
   const files = new Map<string, Buffer>();
   const problems: string[] = [];
   for (const [rel, want] of Object.entries(manifest.files).sort(([a], [b]) => a.localeCompare(b))) {
-    let bytes: Buffer;
-    try {
-      bytes = await readFile(join(dir, ...rel.split('/')));
-    } catch {
+    const bytes = await read(rel);
+    if (!bytes) {
       problems.push(`${rel} is missing`);
       continue;
     }
@@ -140,10 +164,40 @@ export async function verifyRelayBundle(
   }
   if (problems.length) {
     throw new CliError(
-      `the relay bundle in ${dir} has been modified or is incomplete; refusing to deploy:\n  ${problems.join('\n  ')}`,
+      `the relay bundle in ${where} has been modified or is incomplete; refusing to deploy:\n  ${problems.join('\n  ')}`,
     );
   }
-  return { dir, manifest, manifestSha256, files };
+  return files;
+}
+
+/**
+ * A relay release downloaded from the registry (its tarball already checked against the registry's
+ * integrity digest): the `dist/` files of the package, verified against the manifest inside it,
+ * which must name the expected package, version and protocol range.
+ */
+export async function verifyRelayRelease(
+  pkgFiles: Map<string, Buffer>,
+  expect: { version: string; protocol: { min: number; max: number } },
+): Promise<VerifiedRelayBundle> {
+  const where = `relay ${expect.version}`;
+  const raw = pkgFiles.get('dist/manifest.json');
+  if (!raw) throw new CliError(`${where} has no dist/manifest.json; refusing to deploy`);
+  const manifest = parseManifest(raw.toString('utf8'));
+  if (manifest.name !== RELAY_PACKAGE_NAME || manifest.version !== expect.version) {
+    throw new CliError(
+      `${where} carries the manifest of ${manifest.name} ${manifest.version}; refusing to deploy`,
+    );
+  }
+  if (
+    manifest.protocol?.min !== expect.protocol.min ||
+    manifest.protocol?.max !== expect.protocol.max
+  ) {
+    throw new CliError(
+      `${where} declares a different protocol range in its manifest than in its package; refusing to deploy`,
+    );
+  }
+  const files = await checkFiles(manifest, where, async (rel) => pkgFiles.get(`dist/${rel}`));
+  return { dir: where, manifest, manifestSha256: sha256(raw), files };
 }
 
 /**
