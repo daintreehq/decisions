@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useApp } from './app/hooks.js';
 import { Link, useRoute } from './app/router.js';
-import { Shell } from './components/Shell.js';
+import { Mark, Shell } from './components/Shell.js';
 import { DevicesPage } from './routes/Devices.js';
 import { HistoryPage } from './routes/History.js';
 import { InboxLayout } from './routes/Inbox.js';
@@ -15,15 +15,22 @@ export function App() {
   const snap = useApp();
   const route = useRoute();
 
-  // Move focus to the page when the route changes so screen-reader users land on new content.
+  // Move focus to the page when the route changes so screen-reader users land on new content, unless the page
+  // already put it somewhere on purpose (a restored list row, a heading).
   useEffect(() => {
-    document.getElementById('main')?.focus({ preventScroll: true });
+    const main = document.getElementById('main');
+    const active = document.activeElement;
+    if (main && active && active !== main && main.contains(active)) return;
+    main?.focus({ preventScroll: true });
   }, [route.name, route.name === 'question' ? route.id : '']);
 
   if (snap.phase === 'loading') {
+    // The mark on Daintree's tile, centred on the app field. It fades in only if loading is slow enough to notice.
     return (
-      <div className="splash" role="status" aria-label="Loading">
-        <img src="/icons/icon-192.png" width="72" height="72" alt="" />
+      <div className="splash" role="status" aria-label="Loading Decisions">
+        <span className="splash-tile">
+          <Mark size={34} />
+        </span>
       </div>
     );
   }

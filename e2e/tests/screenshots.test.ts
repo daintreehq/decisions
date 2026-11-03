@@ -34,6 +34,8 @@ const chromiumPath = findChromium();
 const PORT = Number(process.env.SCREENSHOTS_PORT ?? 8801);
 const PHONE = { width: 390, height: 844 };
 const WIDE = { width: 1280, height: 820 };
+const WIDER = { width: 1440, height: 900 };
+const TABLET = { width: 834, height: 1194 };
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -237,7 +239,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing is waiting on you').waitFor({ timeout: 30_000 });
+    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
     await shot('07-inbox-empty');
   });
 
@@ -354,6 +356,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // Answer the rename question through the UI, so one item is answered and delivered.
     await open('Rename “Canopy”');
     await page.getByRole('radio', { name: /Yes, rename/ }).check();
+    await page.getByRole('textbox').first().fill('Inbox reads better in the sidebar.');
     await page.getByRole('button', { name: /Submit decision/ }).click();
     await page
       .locator('ol[aria-label="Delivery progress"] li[aria-current="step"]')
@@ -367,7 +370,9 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('button', { name: /Send correction/ }).click();
     await page.getByRole('dialog').waitFor();
     await shot('17-dialog-overrule');
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    // Send it, so History and the activity timeline have a correction to show.
+    await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 });
 
     await open('Approve the compact sidebar');
     await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
@@ -474,6 +479,150 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.setViewportSize(PHONE);
   });
 
+  it('captures the navigator, History records and the desktop rail', async () => {
+    const rows = () => page.locator('.navigator .qrow');
+    const waitRows = async () => {
+      await rows().first().waitFor({ timeout: 30_000 });
+    };
+
+    // Phone: the Questions page, search, filter chips and the filtered empty state.
+    await page.setViewportSize(PHONE);
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: /Needs you/ }).click();
+    await waitRows();
+    await shot('60-phone-questions');
+    await page.getByRole('searchbox', { name: 'Search questions' }).fill('retry');
+    await page.getByText('Which retry strategy').first().waitFor();
+    await page.waitForTimeout(300);
+    await shot('60-phone-search');
+    await page.getByRole('button', { name: 'Clear search' }).click();
+    await page.getByLabel('Filter by project').selectOption('billing-api');
+    await page.getByRole('button', { name: /Project: billing-api/ }).waitFor();
+    await shot('60-phone-filter-chip');
+    await page.getByRole('button', { name: /Project: billing-api/ }).click();
+    await page.getByLabel('Filter by project').selectOption('docs-site');
+    await page.getByText('No questions match these filters.').waitFor();
+    await shot('60-phone-filter-empty');
+    await page.getByRole('button', { name: 'Clear filters' }).first().click();
+    await waitRows();
+
+    // Phone: open a question from the list, open the navigator over it, then Back restores the list.
+    await page.getByText('Which retry strategy').first().click();
+    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-phone-navigator-sheet');
+    await page.keyboard.press('Escape');
+    await page
+      .locator('dialog.nav-sheet[open]')
+      .waitFor({ state: 'detached' })
+      .catch(() => undefined);
+    await page.goBack();
+    await waitRows();
+    await shot('60-phone-back-restored');
+
+    // Phone: History, grouped; a search that only an earlier answer satisfies; a record with its timeline.
+    await page.goto(relay.origin + '/history');
+    await page.getByText('Changed once').first().waitFor({ timeout: 30_000 });
+    await shot('60-phone-history', { full: true });
+    await page.getByRole('searchbox', { name: 'Search history' }).fill('reads better');
+    await page.getByText('Matched an earlier answer').first().waitFor();
+    await shot('60-phone-history-search');
+    await page.getByRole('button', { name: 'Clear search' }).click();
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('dialog.record-sheet[open] .timeline').waitFor();
+    await shot('60-phone-history-record');
+    await page.locator('dialog.record-sheet .tl-delivery summary').first().click();
+    await shot('60-phone-history-record-delivery');
+    await theme('dark');
+    await shot('60-phone-history-record-dark');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/');
+    await waitRows();
+    await shot('60-phone-questions-dark');
+    await page.getByRole('button', { name: /Model answers/ }).click();
+    await page.getByText('Should the changelog entry').first().click();
+    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-phone-navigator-sheet-dark');
+    await page.keyboard.press('Escape');
+    await page
+      .getByRole('button', { name: /Needs you/ })
+      .first()
+      .click()
+      .catch(() => undefined);
+    await theme('light');
+
+    // Tablet: one centred surface, top navigation, the navigator as a side sheet, the record from the right.
+    await page.setViewportSize(TABLET);
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: /Needs you/ }).click();
+    await waitRows();
+    await shot('60-tablet-questions');
+    await page.getByText('Approve the compact sidebar').first().click();
+    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.keyboard.press('Control+K');
+    await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
+    await page.locator('dialog.nav-sheet .sheet-title').focus();
+    await shot('60-tablet-navigator-sheet');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('dialog.record-sheet[open] .timeline').waitFor();
+    await shot('60-tablet-history-record');
+    await page.keyboard.press('Escape');
+
+    // Desktop: the rail beside a question, the calm Questions column, History with a record, search, offline.
+    for (const [vp, tag] of [
+      [WIDE, '1280'],
+      [WIDER, '1440'],
+    ] as const) {
+      await page.setViewportSize(vp);
+      await page.goto(relay.origin + '/');
+      await page.locator('.rail .qrow').first().waitFor({ timeout: 30_000 });
+      await shot(`60-desktop-${tag}-choose`);
+      await page.locator('.rail .qrow', { hasText: 'Approve the compact sidebar' }).click();
+      await page.locator('article.detail').waitFor({ timeout: 30_000 });
+      await page.waitForTimeout(600);
+      await shot(`60-desktop-${tag}-question`);
+      await page.goto(relay.origin + '/history');
+      await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+      await page.locator('.history-record .timeline').waitFor();
+      await shot(`60-desktop-${tag}-history`);
+    }
+    await page.setViewportSize(WIDE);
+    await page.keyboard.press('Control+K');
+    await page.keyboard.type('billing');
+    await page.waitForTimeout(400);
+    await shot('60-desktop-search');
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow').first().waitFor({ timeout: 30_000 });
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.waitForTimeout(500);
+    await shot('60-desktop-offline');
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await theme('dark');
+    await page.goto(relay.origin + '/');
+    await page.locator('.rail .qrow', { hasText: 'Which retry strategy' }).click();
+    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await shot('60-desktop-question-dark');
+    await page.goto(relay.origin + '/history');
+    await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
+    await page.locator('.history-record .timeline').waitFor();
+    await shot('60-desktop-history-dark');
+    // Close the record (a history layer) so nothing pops history under the next navigation.
+    await page.keyboard.press('Escape');
+    await page.goto(relay.origin + '/');
+    await theme('light');
+    await page.setViewportSize(PHONE);
+  });
+
   it('captures the revoked phone', async () => {
     const list = await client.devices();
     const phone = list.devices.find((d) => d.role === 'phone' && !d.revoked_at);
@@ -485,6 +634,6 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    expect(written.length).toBe(38);
+    expect(written.length).toBe(38 + 26);
   });
 });
