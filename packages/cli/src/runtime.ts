@@ -74,8 +74,18 @@ export function makeCtx(g: GlobalOptions): Ctx {
 }
 
 export function promptLine(question: string, opts: { secret?: boolean } = {}): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    // Ctrl-C or the end of input settles the prompt as an error, so the caller's cleanup runs
+    // instead of the process exiting with the question still pending.
+    let answered = false;
+    rl.on('SIGINT', () => {
+      process.stdout.write('\n');
+      rl.close();
+    });
+    rl.on('close', () => {
+      if (!answered) reject(new CliError('cancelled', 130));
+    });
     if (opts.secret) {
       const anyRl = rl as unknown as { _writeToOutput: (s: string) => void };
       let first = true;
@@ -87,6 +97,7 @@ export function promptLine(question: string, opts: { secret?: boolean } = {}): P
       };
     }
     rl.question(question, (a) => {
+      answered = true;
       rl.close();
       if (opts.secret) process.stdout.write('\n');
       resolve(a.trim());
