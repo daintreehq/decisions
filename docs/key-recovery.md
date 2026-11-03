@@ -19,4 +19,4 @@ Re-pair a new one. Phone keys are non-extractable and are not recoverable by des
 
 ## If you lose everything
 
-Deploy a new relay (or run `decisions delete-data --scope everything` on the old one), claim it, pair devices. Old encrypted data is unreadable; delete it from Cloudflare.
+Deploy a new relay (or run `decisions delete-data --scope everything` on the old one), claim it, pair devices. Old encrypted data is unreadable; take the old relay out of Cloudflare with `decisions remove <its URL>` (it needs no keys).

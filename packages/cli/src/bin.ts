@@ -15,6 +15,7 @@ import {
   status,
 } from './commands/ops.js';
 import { deploy } from './commands/deploy.js';
+import { remove } from './commands/remove.js';
 import { devices, pair, revoke, rotate, setup } from './commands/setup.js';
 import { hostAccept, hostEnroll, hostRequest } from './commands/host.js';
 import { VERSION } from './version.js';
@@ -69,6 +70,23 @@ export function buildProgram(): Command {
     .option('--label <name>', 'name for this computer when claiming', 'Daintree')
     .option('--outdir <dir>', 'only verify and write the deployable bundle to <dir>')
     .action((o) => run((c, g) => deploy(c, g, o))());
+
+  program
+    .command('remove <target>')
+    .description(
+      'Remove a deployed relay from Cloudflare: its Worker, Durable Object storage and R2 bucket (target: its URL or Worker name). Needs no relay keys.',
+    )
+    .option('--account-id <id>', 'Cloudflare account ID, if your login or token has several')
+    .option(
+      '--api-token',
+      "ask for a Cloudflare API token (kept in memory) instead of Wrangler's browser login",
+    )
+    .option(
+      '--bucket <name>',
+      'finish removing this R2 bucket when the Worker is already gone (only needed without a record of the earlier run)',
+    )
+    .option('--dry-run', 'list what would be removed without deleting anything')
+    .action((target, o) => run((c, g) => remove(c, g, target, o))());
 
   program
     .command('setup')

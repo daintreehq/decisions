@@ -44,6 +44,17 @@ openssl rand -hex 32 | npx wrangler secret put CLAIM_SECRET   # note the value f
 pnpm decisions:doctor --url https://<your-worker>.workers.dev
 ```
 
+## Removing a relay
+
+```bash
+npx @daintreehq/decisions-cli remove https://<your-worker>.workers.dev --dry-run   # list what it would remove
+npx @daintreehq/decisions-cli remove https://<your-worker>.workers.dev             # or the Worker name
+```
+
+`decisions remove` takes a relay out of your Cloudflare account. It needs no relay keys and no claim secret, so it also works on a relay that was never claimed or whose owner keys are lost. It logs in as `deploy` does (`--api-token` and `--account-id` work the same way), finds the account from the URL (a workers.dev URL or a custom domain attached to the Worker) or the Worker name, and lists the Worker, the Durable Object storage it implements and its R2 attachments bucket. Nothing is deleted until you type the Worker name and then answer yes. A Worker that does not look like a Decisions relay also needs `remove anyway` typed first.
+
+It removes the Worker first (which deletes its Durable Object storage with it), then empties and removes the bucket, and reports each. If a step fails it names what is left; run the same command again to finish. The bucket's name is saved in `~/.decisions/removals/` until the removal completes, so the rerun finds it even though the Worker is gone; without that record, pass `--bucket <name>`. Keys and history on this computer are not touched. Afterwards `decisions deploy` sets up a new relay from nothing; to claim it from a computer that still holds the old relay's keys, use a separate state directory: `decisions --home <dir> deploy --claim`.
+
 ## Claim and pair
 
 ```bash

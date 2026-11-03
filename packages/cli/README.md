@@ -10,6 +10,7 @@ decisions deploy    # deploy the matching relay to your Cloudflare account (--dr
 decisions setup --url https://<your-worker>.workers.dev   # asks for the claim secret
 decisions pair      # scan the QR code with your phone
 decisions mcp       # prints the line that adds the MCP to your agent
+decisions remove https://<your-worker>.workers.dev   # take the relay out of Cloudflare (--dry-run lists it)
 decisions --help
 ```
 
