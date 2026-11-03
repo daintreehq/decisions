@@ -228,7 +228,8 @@ export function NavigatorPanel({
 
   const loading =
     snap.phase === 'loading' || (snap.syncing && all.length === 0 && !snap.lastSyncedAt);
-  const offline = !snap.online || snap.connection === 'offline';
+  // Offline is the device's network; a socket between retries is reconnecting, not offline.
+  const offline = !snap.online;
   const connected = snap.connection === 'live' || snap.connection === 'polling';
   const filtered = !!(nav.project || nav.computer);
   const searching = query.trim().length > 0;

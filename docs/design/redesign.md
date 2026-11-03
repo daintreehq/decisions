@@ -127,7 +127,7 @@ Daintree's tiers, all under 300 ms: state changes 150 ms ease-out; panel and she
 
 - One icon set drawn as inline SVG (the CSP forbids external assets). Glyphs follow Lucide's geometry at 1.75 stroke so they match Daintree; one glyph per recurring action (copy, refresh, edit, close, chevrons, mic, stop square, send, files, expand, compare).
 - Severity glyphs are fixed: error `XCircle`, warning `AlertTriangle`, info `Info`, success `CheckCircle2`.
-- The Decisions mark (the diamond with a question mark) stays. It is recoloured to the Daintree accent on the Daintree grid tile, matching Daintree's own icon tile (`#151616` with the mint mark). Header branding is a small mark plus "Decisions"; never a large logo on a working screen.
+- Decisions wears Daintree's own mark (canopy, trunk and roots) on Daintree's icon tile (`#151616` with the mint mark), so the two apps read as one family. Header branding is a small mark plus "Decisions"; never a large logo on a working screen. See `docs/brand/README.md`.
 
 ## 3. Layout, navigation and platforms
 

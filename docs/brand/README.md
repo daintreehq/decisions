@@ -1,26 +1,26 @@
-# The Decisions mark
+# The mark
 
-A flowchart decision node holding the question your agent is asking: a rounded diamond with a question mark cut out of it. The diamond says "decision", the question mark says "waiting on you", which is the one thing the app ever asks of its user. It is one colour by construction (the question mark is a hole in a single `evenodd` path), so the same geometry works as an app icon, an alpha-only notification badge and a `currentColor` glyph.
+Decisions wears Daintree's own mark: the canopy, trunk and roots from Daintree's `DaintreeIcon`. It is Daintree's sister app, and on a home screen, a dock or a notification shade the two should read as one product rather than two that happen to look alike. Earlier versions used a separate mark of their own (a rounded decision diamond with a question mark cut out of it); it was retired so the family has one face.
 
-A check was tried first and dropped: it reads as "approved" or "done", the state after the interaction. A fork cut into the diamond read as a back arrow at small sizes, and a hand-drawn question mark was never as good as a real heavy-sans glyph.
+The mark is one colour by construction, so the same geometry works as an app icon, an alpha-only notification badge and a `currentColor` glyph.
 
 ## Source
 
-[`app/public/icons/mark.svg`](../../app/public/icons/mark.svg) is the only source. It was generated as a raster, traced to a single `evenodd` path with crisp-vector, normalised to a 512 grid, and then regularised by hand: the diamond is an exact construction (straight diagonal sides, equal 48-unit corners) and the question mark's terminals were squared off. It fills with `currentColor`, which makes it the monochrome variant too: inline it, or load it as a mask, and it takes the surrounding text colour. Daintree uses it as-is in its Settings tab and on the pane chip.
+[`app/public/icons/mark.svg`](../../app/public/icons/mark.svg) is the only source in this repository. Its four paths are Daintree's `DaintreeIcon` paths unchanged, on their native 177.31 × 132.85 grid, fitted to the full width of a 512 box and optically centred. It fills with `currentColor`, which makes it the monochrome variant too: inline it, or load it as a mask, and it takes the surrounding text colour. The header's inline glyph (`Mark` in `app/src/components/Shell.tsx`) uses the same paths. If Daintree's mark ever changes, copy its paths into both.
 
 Everything else is generated from it by [`app/scripts/make-icons.mjs`](../../app/scripts/make-icons.mjs) (`pnpm --filter @daintreehq/decisions-app icons`):
 
-| File                                             | Use                                                                                                                                     |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `icon.svg`                                       | Favicon. Bondi's deep-water `#004e6b` on light browser chrome, Daintree mint `#36ce94` on dark (`prefers-color-scheme` inside the SVG). |
-| `icon-192.png`, `icon-512.png`                   | Manifest `any`: the mark on the dark rounded tile. Also the notification `icon`.                                                        |
-| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark well inside the 80% safe-zone circle.                                                 |
-| `apple-touch-icon.png`                           | 180×180, opaque, square: iOS applies its own corners.                                                                                   |
-| `badge-96.png`                                   | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel.                                     |
+| File                                             | Use                                                                                                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `icon.svg`                                       | Favicon. Bondi's deep-water `#004e6b` on light browser chrome, Daintree mint `#36ce94` on dark (`prefers-color-scheme` inside the SVG).     |
+| `icon-192.png`, `icon-512.png`                   | Manifest `any`: the mark at 70% of the tile's width on the dark rounded tile, exactly as Daintree's app icon. Also the notification `icon`. |
+| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark at 60% width so its corners stay inside the 80% safe-zone circle.                         |
+| `apple-touch-icon.png`                           | 180×180, opaque, square: iOS applies its own corners.                                                                                       |
+| `badge-96.png`                                   | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel.                                         |
 
 ## Colours
 
-The icon wears Daintree's own app tile: mark `#36ce94` (Daintree's accent) on tile `#151616` (the tile in Daintree's `build/icon-design.svg`), so the two apps sit side by side on a home screen or dock as one family. The mark itself stays Decisions' own: it relates through colour, weight and simplicity and does not borrow Daintree's canopy, trunk or roots.
+The icon is Daintree's app tile: mark `#36ce94` (Daintree's accent) on tile `#151616` (the tile in Daintree's `build/icon-design.svg`).
 
 Inside the app every colour comes from Daintree's theme engine (the Daintree and Bondi themes, generated into `app/src/styles/theme.generated.css` by `pnpm --filter @daintreehq/decisions-app theme`); see [the redesign guide](../design/redesign.md#2-visual-system).
 

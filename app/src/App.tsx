@@ -29,7 +29,7 @@ export function App() {
     return (
       <div className="splash" role="status" aria-label="Loading Decisions">
         <span className="splash-tile">
-          <Mark size={34} />
+          <Mark size={50} />
         </span>
       </div>
     );

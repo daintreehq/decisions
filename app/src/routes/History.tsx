@@ -259,7 +259,8 @@ export function HistoryPage() {
   }, [wide, h.record, dismiss]);
 
   const searching = query.trim().length > 0;
-  const offline = !snap.online || snap.connection === 'offline';
+  // Offline is the device's network; a socket between retries is reconnecting, not offline.
+  const offline = !snap.online;
   const coverage = [
     searching ? 'Searching questions saved on this device' : 'Saved on this device',
     offline

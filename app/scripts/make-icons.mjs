@@ -33,8 +33,8 @@ export function iconSvg({ scale, color = MARK, tile = null, rx = 0, size = 512 }
 
 /** How large the mark sits on each surface (fraction of the canvas). */
 export const SCALE = {
-  tile: 0.6, // "any" icons and apple-touch-icon
-  maskable: 0.6, // same mark size as the iOS tile; its farthest point sits 56 units inside the 80% safe-zone circle
+  tile: 0.7, // "any" icons and apple-touch-icon: 70% of the tile's width, exactly as Daintree's own app icon
+  maskable: 0.6, // the mark's corners sit 13 units inside the 80% safe-zone circle
   badge: 0.9, // Android status-bar silhouette: as large as the 24dp box allows
 };
 
