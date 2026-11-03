@@ -48,7 +48,7 @@ The person at the terminal still sees and answers every question: the app's valu
 
 **Messages** are JSON objects, one per line (UTF-8, ending in `\n`, at most 64 KiB), each carrying the contract version `v`. This is version 1:
 
-1. The CLI connects and sends `{"v":1,"type":"hello","cli":"0.3.0","versions":[1]}`, naming its version and the contract versions it speaks. A CLI that does not know `--host-channel` exits with an unknown-option error instead; a host that hears no hello before the process exits should treat it as unsupported (or not started).
+1. The CLI connects and sends `{"v":1,"type":"hello","cli":"<CLI version>","versions":[1]}`, naming its version and the contract versions it speaks. A CLI that does not know `--host-channel` exits with an unknown-option error instead; a host that hears no hello before the process exits should treat it as unsupported (or not started).
 2. The app answers within 15 seconds with its defaults. Every field is optional; a field this version does not know, or one of the wrong shape, fails the deploy, and the CLI says why in a `failed` result:
 
    ```json

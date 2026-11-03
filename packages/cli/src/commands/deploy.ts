@@ -416,6 +416,7 @@ export async function deploy(
   const channel = await (deps.openHostChannel ?? openHostChannel)(o.hostChannel, {
     cliVersion: deps.version ?? VERSION,
   });
+  let interrupted = false;
   const host: HostRun = {
     prefill: channel.prefill,
     secrets: Object.values(channel.prefill.keys).filter((k): k is string => !!k),
@@ -423,7 +424,6 @@ export async function deploy(
     interrupted: () => interrupted,
     channelOpen: () => channel.isOpen(),
   };
-  let interrupted = false;
   let failure: unknown = null;
   const stop = (deps.onInterrupt ?? defaultOnInterrupt)(() => (interrupted = true));
   try {
