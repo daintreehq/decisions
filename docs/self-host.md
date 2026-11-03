@@ -46,7 +46,7 @@ The person at the terminal still sees and answers every question: the app's valu
 
 **The channel.** Only the socket's path is on the command line; keys and the claim secret travel only over the socket, so they are never in argv, the environment (which a host may save to restore a session), a file, a log or on screen. On macOS and Linux the app creates a Unix domain socket in a new directory only the user can open (mode `0700`, path under about 100 bytes). On Windows it is a named pipe (`\\.\pipe\<random name>`), whose access list the app restricts to the current user, refusing remote clients. Either way, this protects the channel from other users of the machine, not from other programs the same user runs. The app accepts one connection, stops listening once it has it, and removes the socket when the deploy ends.
 
-**Messages** are JSON objects, one per line (UTF-8, ending in `\n`, at most 64 KiB), each carrying the contract version `v`. This is version 1:
+**Messages** are JSON objects, one per line (UTF-8, ending in `\n`, at most 64 KiB), each carrying the contract version `v` (the examples below are spread over lines for reading). This is version 1:
 
 1. The CLI connects and sends `{"v":1,"type":"hello","cli":"<CLI version>","versions":[1]}`, naming its version and the contract versions it speaks. A CLI that does not know `--host-channel` exits with an unknown-option error instead; a host that hears no hello before the process exits should treat it as unsupported (or not started).
 2. The app answers within 15 seconds with its defaults. Every field is optional; a field this version does not know, or one of the wrong shape, fails the deploy, and the CLI says why in a `failed` result:
