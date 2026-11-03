@@ -1,0 +1,99 @@
+/* ---------- welcome, pairing, install, privacy (owned by the settings and onboarding work) ---------- */
+.center-page {
+  max-width: 440px;
+  margin: 0 auto;
+  text-align: center;
+  padding-top: 24px;
+}
+.center-page .field,
+.center-page .paste,
+.center-page .left {
+  text-align: left;
+}
+.center-page .left {
+  margin: 0 0 4px;
+}
+.center-page > .btn.big {
+  margin: 8px 0;
+}
+/* First launch: the content sits around the optical centre, in easy thumb reach. */
+.center-page.welcome {
+  min-height: calc(100dvh - var(--safe-t) - var(--safe-b) - 60px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 0 8vh;
+}
+.prose {
+  max-width: 68ch;
+}
+.logo {
+  border-radius: 22px;
+  align-self: center;
+  margin: 0 auto 12px;
+  box-shadow: var(--shadow-2);
+}
+.code-card {
+  margin: 16px 0;
+  padding: 20px 16px 16px;
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+.code-card > p:first-child {
+  margin-top: 0;
+}
+.big-code {
+  font-family: var(--font-mono);
+  font-size: 2.75rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin: 8px 0 12px;
+  color: var(--text);
+}
+.waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.scanner {
+  display: grid;
+  gap: 12px;
+}
+.scanner .stack {
+  display: grid;
+  gap: 10px;
+}
+.scanner-caption {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.scanner video {
+  width: 100%;
+  border-radius: var(--radius-lg);
+  background: #000;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+.steps {
+  padding-left: 1.3rem;
+  display: grid;
+  gap: 10px;
+}
+.fingerprint {
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  gap: 2px 14px;
+  margin: 8px 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+}
+.fingerprint span {
+  white-space: nowrap;
+}

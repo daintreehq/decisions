@@ -1,0 +1,248 @@
+/* ---------- question workspace (owned by the workspace work) ---------- */
+.detail-head .back,
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--tap-min);
+  margin-left: -6px;
+  padding-right: 8px;
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.detail-head .back:hover,
+.page-back:hover {
+  color: var(--text);
+}
+.detail-head .origin {
+  font-size: var(--text-sm);
+}
+.detail-head .meta-line {
+  margin: 2px 0 8px;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.question {
+  font-size: var(--text-question);
+  font-weight: 600;
+  line-height: 1.36;
+  letter-spacing: -0.01em;
+  margin: 4px 0 12px;
+  color: var(--text);
+}
+.question p {
+  margin: 0 0 0.5rem;
+}
+.context {
+  margin: 12px 0 16px;
+  padding: 0 14px;
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+.context > summary {
+  font-size: var(--text-sm);
+}
+.context[open] {
+  padding-bottom: 8px;
+}
+.context .safe-text {
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+.card.proxy details > summary {
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.proxy-rationale {
+  margin: 4px 0;
+}
+.options {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.option {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  min-height: 56px;
+  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-card);
+  cursor: pointer;
+  transition:
+    background-color var(--dur) var(--ease-out),
+    border-color var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .option:hover {
+    background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 3%);
+  }
+}
+.option:has(.option-desc) {
+  align-items: flex-start;
+}
+.option:has(.option-desc) input {
+  margin-top: 1px;
+}
+/* Selected: Daintree's choice card. Neutral lift and a text-secondary edge, never an accent wash. */
+.option.on {
+  background: var(--surface-raised);
+  border-color: var(--text-2);
+  box-shadow:
+    inset 0 0 0 1px var(--text-2),
+    var(--shadow-1);
+}
+.option-body {
+  min-width: 0;
+}
+.option-label {
+  font-weight: 500;
+}
+.option-desc p {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+.closed-options {
+  margin: 4px 0 12px;
+  padding-left: 1.2rem;
+  color: var(--text-2);
+}
+/* Delivery stepper: done steps carry a check, the live step a ring, steps not reached an empty ring. */
+.delivery {
+  margin: 16px 0;
+}
+.delivery h2 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--text-2);
+  margin: 0 0 8px;
+}
+.progress {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 2px;
+  font-size: var(--text-sm);
+  position: relative;
+}
+.progress::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 14px;
+  bottom: 14px;
+  width: 1.5px;
+  background: var(--line-strong);
+}
+.progress li {
+  color: var(--text-2);
+  padding: 4px 0 4px 30px;
+  position: relative;
+  min-height: 28px;
+}
+.progress li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-input);
+  background: var(--surface-page);
+}
+.progress li.done {
+  color: var(--text);
+}
+.progress li.done::before {
+  border-color: var(--success);
+  background: color-mix(in oklab, var(--success) 14%, var(--surface-page));
+}
+.progress li.done::after {
+  content: '';
+  position: absolute;
+  left: 6.5px;
+  top: 10px;
+  width: 4px;
+  height: 8px;
+  border-right: 1.75px solid var(--success-text);
+  border-bottom: 1.75px solid var(--success-text);
+  transform: rotate(45deg);
+}
+.progress li.current {
+  font-weight: 600;
+  color: var(--text);
+}
+.progress li.current:not(.done)::before {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 4px var(--surface-page);
+  background: var(--text);
+}
+.meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  font-size: var(--text-sm);
+  margin: 10px 0;
+}
+.meta dt {
+  color: var(--text-2);
+}
+.meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.choice {
+  font-weight: 600;
+  font-size: var(--text-lg);
+  margin: 6px 0 2px;
+}
+/* Sticky action bar: the commit stays in thumb reach above the tab bar; content scrolls under it. */
+.actions-bar {
+  position: sticky;
+  bottom: calc(var(--tabbar-h) + var(--safe-b));
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 12px calc(-1 * var(--gutter)) 0;
+  padding: 12px var(--gutter) 8px;
+  background: var(--material-bg);
+  backdrop-filter: blur(var(--material-blur));
+  -webkit-backdrop-filter: blur(var(--material-blur));
+  border-top: 1px solid var(--line);
+}
+.actions-bar .btn.primary {
+  flex: 1 1 auto;
+}
+.actions-bar .btn.big {
+  width: auto;
+}
+.actions-bar .hint {
+  width: 100%;
+  min-height: 1.3em;
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  text-align: center;
+}
+.editor {
+  scroll-margin-top: calc(var(--safe-t) + var(--header-h) + 16px);
+}

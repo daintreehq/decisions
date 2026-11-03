@@ -498,9 +498,9 @@ export function SettingsPage() {
               void app.setPrefs({ theme: e.target.value as 'system' | 'light' | 'dark' })
             }
           >
-            <option value="system">Match my phone</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+            <option value="system">Match device</option>
+            <option value="light">Bondi (light)</option>
+            <option value="dark">Daintree (dark)</option>
           </select>
         </label>
       </section>

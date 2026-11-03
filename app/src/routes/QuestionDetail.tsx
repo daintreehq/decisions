@@ -154,7 +154,7 @@ export function QuestionDetail({ id }: { id: string }) {
       <header className="detail-head">
         <Link to="/" className="back">
           <ChevronLeft />
-          Inbox
+          Questions
         </Link>
         <Origin v={view} as="p" />
         <p className="meta-line">

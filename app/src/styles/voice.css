@@ -1,0 +1,55 @@
+/* ---------- dictation (owned by the workspace work) ---------- */
+.voice-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.btn.mic.recording {
+  background: var(--text);
+  color: var(--text-inverse);
+  box-shadow:
+    0 0 0 2px var(--surface-page),
+    0 0 0 4px var(--accent);
+}
+.mic-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+  transition: transform var(--dur-fast);
+}
+.live {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-subtle);
+  font-weight: 400;
+}
+.interim {
+  color: var(--text-2);
+  font-style: italic;
+}
+.spans {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: grid;
+  gap: 8px;
+  font-weight: 400;
+}
+.spans mark {
+  background: var(--warning-surface);
+  color: var(--text);
+  padding: 0 3px;
+  border-radius: 4px;
+}
+.chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chip {
+  min-height: 40px;
+  font-size: var(--text-sm);
+}

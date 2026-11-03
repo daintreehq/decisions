@@ -31,7 +31,7 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
  */
 const OUT = process.env.DESIGN_CAPTURE_DIR ?? process.env.SCREENSHOTS_DIR;
 const chromiumPath = findChromium();
-const PORT = 8801;
+const PORT = Number(process.env.SCREENSHOTS_PORT ?? 8801);
 const PHONE = { width: 390, height: 844 };
 const WIDE = { width: 1280, height: 820 };
 

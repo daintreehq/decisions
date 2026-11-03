@@ -5,9 +5,16 @@ import {
   type ReactNode,
 } from 'react';
 
+import { dropLayers, hasLayers } from './layers.js';
+
 const EVT = 'decisions:navigate';
 
 export function navigate(to: string, replace = false): void {
+  // Leaving through an open layer (the navigator, say) replaces its history entry instead of stacking on it.
+  if (hasLayers()) {
+    dropLayers();
+    replace = true;
+  }
   if (to === location.pathname + location.search) return;
   history[replace ? 'replaceState' : 'pushState'](null, '', to);
   window.dispatchEvent(new Event(EVT));
@@ -32,7 +39,7 @@ export type Route =
   | { name: 'question'; id: string }
   | { name: 'history' }
   | { name: 'devices' }
-  | { name: 'settings' }
+  | { name: 'settings'; section?: string }
   | { name: 'pair' }
   | { name: 'install' }
   | { name: 'privacy' }
@@ -43,6 +50,8 @@ export function matchRoute(path: string): Route {
   if (p === '/') return { name: 'inbox' };
   const q = /^\/q\/([A-Za-z0-9_-]{1,64})$/.exec(p);
   if (q) return { name: 'question', id: q[1]! };
+  const st = /^\/settings\/([a-z-]{1,32})$/.exec(p);
+  if (st) return { name: 'settings', section: st[1]! };
   switch (p) {
     case '/history':
       return { name: 'history' };

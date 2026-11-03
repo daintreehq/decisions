@@ -192,7 +192,7 @@ export function QuestionList({ selectedId }: { selectedId?: string }) {
   return (
     <section className="pane-list" aria-labelledby="inbox-h">
       <h1 id="inbox-h" className="sr-only">
-        Inbox
+        Questions
       </h1>
       <div className="seg" role="group" aria-label="Show">
         {FILTERS.map(([id, label, n, unit]) => (

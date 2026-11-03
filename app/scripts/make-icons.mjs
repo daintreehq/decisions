@@ -8,10 +8,13 @@ import sharp from 'sharp';
 const here = dirname(fileURLToPath(import.meta.url));
 const dir = resolve(here, '../public/icons');
 
-/** Colours come from the app's own tokens (styles.css): dark surface and the dark-theme accent. */
-export const TILE = '#0b1411';
-export const MARK = '#3fbf86';
-export const MARK_LIGHT_THEME = '#0f7a4a';
+/**
+ * Daintree's own icon tile and mint (build/icon-design.svg in Daintree), so the two apps sit side by side as a
+ * family. The light-browser favicon takes Bondi's deep-water accent.
+ */
+export const TILE = '#151616';
+export const MARK = '#36ce94';
+export const MARK_LIGHT_THEME = '#004e6b';
 
 const source = readFileSync(resolve(dir, 'mark.svg'), 'utf8');
 /** The mark's geometry, without its <svg> wrapper. */
