@@ -1,6 +1,6 @@
 {
   "name": "@daintreehq/decisions-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The `decisions` command: set up, pair, listen and serve the Decisions HTTP MCP.",
   "license": "Apache-2.0",
   "type": "module",

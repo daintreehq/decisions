@@ -1,6 +1,6 @@
 {
   "name": "@daintreehq/decisions-client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Desktop-side reference implementation for Daintree Decisions: relay client, hibernatable socket, durable local store, delivery bridge and HTTP MCP server.",
   "license": "Apache-2.0",
   "type": "module",
