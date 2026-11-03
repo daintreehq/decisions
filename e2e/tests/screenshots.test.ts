@@ -158,7 +158,13 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   beforeAll(async () => {
     mkdirSync(OUT!, { recursive: true });
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    // A fake microphone (and camera) so Settings' microphone test shows a real level. Permission is never granted
+    // to the camera, so the scanner still shows its blocked state.
+    browser = await chromium.launch({
+      executablePath: chromiumPath!,
+      headless: true,
+      args: ['--use-fake-device-for-media-stream'],
+    });
     images.set('before.png', await mockUi(browser, 'before'));
     images.set('after.png', await mockUi(browser, 'after'));
     context = await browser.newContext({
@@ -190,11 +196,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.goto(relay.origin + '/privacy');
     await shot('03-privacy', { full: true });
     await page.goto(relay.origin + '/pair');
-    await page.getByText('Paste the link instead').click();
+    await shot('04-pair-start');
+    await page.getByRole('button', { name: 'Paste pairing link' }).click();
     await shot('04-pair-no-invite');
-    // Headless Chromium has no camera, which is exactly the scanner's failure state.
+    // The camera is never granted here, which is exactly the scanner's failure state.
     await page.goto(relay.origin + '/pair');
-    await page.getByRole('button', { name: 'Scan QR code' }).click();
+    await page.getByRole('button', { name: 'Scan pairing code' }).click();
     await page.locator('.scanner [role="alert"]').waitFor({ timeout: 15_000 });
     await shot('04-pair-scan-error');
 
@@ -224,10 +231,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // The invite is read from the fragment on load, so force a real load rather than a hash change.
     await page.goto('about:blank');
     await page.goto(invite.url);
-    await page.getByRole('button', { name: 'Pair this phone' }).waitFor();
+    await page.getByRole('button', { name: 'Pair this device' }).waitFor();
     await shot('05-pair-invite');
-    await page.getByRole('button', { name: 'Pair this phone' }).click();
-    await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Pair this device' }).click();
+    await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
     await shot('06-pair-code');
     const cand = await until(
       async () =>
@@ -428,16 +435,173 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Rename “Canopy”').first().waitFor({ timeout: 30_000 });
     await shot('21-history');
     await page.goto(relay.origin + '/devices');
-    await page.getByText('This phone', { exact: true }).waitFor({ timeout: 30_000 });
+    await page.getByRole('heading', { name: 'This device' }).waitFor({ timeout: 30_000 });
     await shot('22-devices');
     await page.goto(relay.origin + '/settings');
-    await page.getByRole('heading', { name: 'Quiet hours and reminders' }).waitFor();
-    await page.getByLabel('Quiet hours', { exact: true }).check();
-    await shot('23-settings', { full: true });
-    await page.getByRole('button', { name: /Unpair this phone/ }).click();
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
+    await page.locator('[data-section-row="quiet-hours"] .value:not(:empty)').waitFor();
+    await shot('23-settings');
+    await shot('70-settings-index', { full: true });
+
+    // Appearance: the three theme cards, applied immediately.
+    await page.getByRole('link', { name: /Appearance/ }).click();
+    await page.getByRole('heading', { name: 'Appearance' }).waitFor();
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('71-appearance');
+    // A choice is stored before it shows as selected, so waiting for the mark also waits for the write.
+    const pickTheme = async (name: string) => {
+      await page.getByText(name, { exact: true }).click();
+      await page.locator('.theme-card.on .theme-name', { hasText: name }).waitFor();
+    };
+    await pickTheme('Daintree');
+    await shot('71-appearance-daintree');
+    await pickTheme('Bondi');
+    await shot('71-appearance-bondi');
+    await pickTheme('Match device');
+
+    // Dictation, and the microphone test on Chromium's fake device.
+    await page.goto(relay.origin + '/settings/dictation');
+    await page.getByRole('heading', { name: 'Dictation' }).waitFor();
+    await shot('72-dictation', { full: true });
+    await context.grantPermissions(['microphone'], { origin: relay.origin });
+    await page.getByRole('button', { name: 'Test microphone' }).click();
+    await page.getByText(/Listening/).waitFor({ timeout: 15_000 });
+    await page.waitForTimeout(1200);
+    await shot('72-dictation-mic-test', { full: true });
+    await page.getByRole('button', { name: 'Stop' }).click();
+    await context.clearPermissions();
+    // This relay has no provider keys. To show the configured screen, its info answer reports keys for display
+    // only; nothing here starts dictation, so no provider is ever contacted.
+    await page.route('**/api/v1/info', async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response: res,
+        json: { ...body, voice: { xai: true, anthropic: true, openai: true } },
+      });
+    });
+    await page.goto(relay.origin + '/settings/dictation');
+    await page.getByRole('switch', { name: 'Dictation' }).click();
     await page.getByRole('dialog').waitFor();
+    await shot('72-dictation-consent');
+    await page.getByRole('button', { name: /turn on dictation/ }).click();
+    await page.getByText('Tap to start', { exact: true }).waitFor();
+    await shot('72-dictation-on', { full: true });
+    await page.getByRole('switch', { name: 'Dictation' }).click();
+    await page.getByText('Tap to start', { exact: true }).waitFor({ state: 'hidden' });
+    await page.unroute('**/api/v1/info');
+
+    await page.goto(relay.origin + '/settings/notifications');
+    await page.getByRole('heading', { name: 'Notifications' }).waitFor();
+    await shot('73-notifications');
+
+    // Quiet hours: loaded, dirty, invalid, the leave guard, then saved.
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await shot('74-quiet-hours', { full: true });
+    await page.getByLabel('Quiet hours', { exact: true }).check();
+    await page.getByText('Unsaved changes').waitFor();
+    await shot('74-quiet-hours-dirty');
+    await shot('74-quiet-hours-dirty-full', { full: true });
+    await page.getByLabel('Until').fill('22:00');
+    await page
+      .getByText(/can’t start and end at the same time/)
+      .first()
+      .waitFor();
+    await shot('74-quiet-hours-invalid', { full: true });
+    await page.getByLabel('Until').fill('07:00');
+    await page.locator('.s-back').click();
+    await page.getByRole('dialog', { name: 'Save your changes?' }).waitFor();
+    await shot('74-quiet-hours-leave');
+    await page.getByRole('button', { name: 'Keep editing' }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByText('Saved on your relay').waitFor({ timeout: 20_000 });
+    await shot('74-quiet-hours-saved');
+
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await shot('75-devices', { full: true });
+    await page.locator('.s-device').first().click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('75-device-details');
+    await page.keyboard.press('Escape');
+
+    await page.goto(relay.origin + '/settings/privacy');
+    await page.getByRole('heading', { name: 'Privacy & security' }).waitFor();
+    await shot('76-privacy', { full: true });
+    await page.getByRole('button', { name: 'Unpair…' }).click();
+    await page
+      .getByRole('dialog')
+      .getByText(/unsent answer/)
+      .waitFor();
     await shot('24-dialog-erase');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+
+    await page.goto(relay.origin + '/settings/about');
+    await page.getByRole('heading', { name: 'About & help' }).waitFor();
+    await shot('77-about');
+    await page.getByRole('button', { name: /Keyboard shortcuts/ }).click();
+    await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor();
+    await shot('77-shortcuts');
+    await page.keyboard.press('Escape');
+
+    await theme('dark');
+    await page.goto(relay.origin + '/settings');
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
+    await shot('70-settings-index-dark');
+    await page.goto(relay.origin + '/settings/appearance');
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('71-appearance-dark');
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await page.getByLabel('Remind me to review model answers').click();
+    await shot('74-quiet-hours-dirty-dark');
+    await page.getByRole('button', { name: 'Discard' }).click();
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await page.locator('.s-device').nth(1).click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('75-device-details-dark');
+    await page.keyboard.press('Escape');
+    await theme('light');
+
+    // Desktop: the index beside the open section, in both themes.
+    await page.setViewportSize(WIDE);
+    await page.goto(relay.origin + '/settings');
+    await page.getByRole('heading', { name: 'Appearance' }).waitFor();
+    await page.waitForFunction(() =>
+      Array.from(document.querySelectorAll<HTMLImageElement>('.theme-art img')).every(
+        (i) => i.complete,
+      ),
+    );
+    await shot('78-desktop-settings');
+    await page.goto(relay.origin + '/settings/quiet-hours');
+    await page.getByLabel('Quiet hours', { exact: true }).waitFor({ timeout: 30_000 });
+    await shot('78-desktop-quiet-hours');
+    await page.goto(relay.origin + '/settings/devices');
+    await page.getByRole('heading', { name: 'Computers' }).waitFor({ timeout: 30_000 });
+    await page.locator('.s-device').first().click();
+    await page.locator('.fingerprint span').first().waitFor();
+    await shot('78-desktop-device-details');
+    await page.keyboard.press('Escape');
+    await theme('dark');
+    await page.goto(relay.origin + '/settings/about');
+    await page.getByRole('heading', { name: 'About & help' }).waitFor();
+    await shot('78-desktop-about-dark');
+    await page.goto(relay.origin + '/install');
+    await shot('78-desktop-install-dark');
+    await theme('light');
+    await page.goto(relay.origin + '/install');
+    await shot('78-desktop-install');
+    await page.setViewportSize(PHONE);
 
     await page.goto(relay.origin + '/');
     await page.getByText('Approve the compact sidebar').first().waitFor({ timeout: 30_000 });
@@ -458,6 +622,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
     await shot('28-detail-proxy-dark', { full: true });
     await page.goto(relay.origin + '/settings');
+    await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
     await shot('29-settings-dark', { full: true });
     await theme('light');
 
@@ -480,11 +645,14 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     expect(phone).toBeTruthy();
     await revokeAndRotate(client, keyStore, phone!.device_id);
     await page.goto(relay.origin + '/');
-    await page.getByText('This phone was removed').waitFor({ timeout: 30_000 });
+    await page.getByText('This device is no longer paired').waitFor({ timeout: 30_000 });
     await shot('33-revoked');
+    await theme('dark');
+    await shot('33-revoked-dark');
+    await theme('light');
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    expect(written.length).toBe(38);
+    expect(written.length).toBe(70);
   });
 });
