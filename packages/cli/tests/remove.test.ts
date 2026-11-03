@@ -95,10 +95,9 @@ function fakeCloudflare(accounts: FakeAccount[], faults: Faults = {}) {
     const method = init?.method ?? 'GET';
     const headers = new Headers(init?.headers);
     if (url.hostname !== 'api.cloudflare.com') {
-      // The relay itself: it must never see a Cloudflare credential.
+      // The relay itself. Checked after each run (see setup): an assertion thrown in here would
+      // only be swallowed by the probe's own error handling.
       probes.push({ url: url.toString(), headers });
-      expect(JSON.stringify([...headers])).not.toContain(TOKEN);
-      expect(headers.get('authorization')).toBeNull();
       const [worker, sub] = url.hostname.split('.');
       const a = accounts.find(
         (x) =>
@@ -233,7 +232,17 @@ function setup(
     fetch: cf.fetchFn,
   };
   const deps: RemoveDeps = { sleep: async () => {}, tmpRoot: mkdtempSync(join(root, 'tmp-')) };
-  const run = (target: string, o: RemoveOptions = {}) => remove(ctx, {}, target, o, deps);
+  const run = async (target: string, o: RemoveOptions = {}) => {
+    try {
+      return await remove(ctx, {}, target, o, deps);
+    } finally {
+      // The relay must never see a Cloudflare credential, whatever the outcome.
+      for (const p of cf.probes) {
+        expect(p.headers.get('authorization')).toBeNull();
+        expect(JSON.stringify([...p.headers])).not.toContain(TOKEN);
+      }
+    }
+  };
   const deletes = () => cf.requests.filter((r) => r.method === 'DELETE');
   return {
     ctx,
