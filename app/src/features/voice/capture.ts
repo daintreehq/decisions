@@ -15,8 +15,8 @@ export class MicUnavailableError extends Error {
 
 /**
  * Microphone → 16 kHz mono PCM16 frames (~100 ms) via an AudioWorklet. Starts only from a user gesture. Once
- * permission is granted the tracks are always released on failure, and a `signal` aborted while permission or setup
- * is pending releases them before any further step.
+ * permission is granted the tracks are always released (once) on failure, and a `signal` aborted while permission or
+ * setup is pending releases them: at once during setup, or as soon as permission is granted.
  */
 export async function startMic(
   onFrame: (pcm: ArrayBuffer) => void,
@@ -44,13 +44,19 @@ export async function startMic(
     throw new MicUnavailableError("The microphone couldn't start.", 'failed');
   }
   let ctx: AudioContext | null = null;
+  let released = false;
   const release = () => {
+    signal?.removeEventListener('abort', release);
+    if (released) return;
+    released = true;
     stream.getTracks().forEach((t) => t.stop());
     if (ctx) void ctx.close().catch(() => undefined);
   };
   const cancelled = () => {
     if (signal?.aborted) throw new MicUnavailableError('Microphone start was cancelled.');
   };
+  // An abort while setup waits (addModule, resume) frees the microphone at once, not when that wait ends.
+  signal?.addEventListener('abort', release);
   try {
     cancelled();
     const Ctx =
@@ -78,6 +84,8 @@ export async function startMic(
     const mute = ctx.createGain();
     mute.gain.value = 0; // some engines only run a node that is connected to the destination
     source.connect(node).connect(mute).connect(ctx.destination);
+    // Started: from here the capture is the caller's to stop.
+    signal?.removeEventListener('abort', release);
     return {
       stop() {
         node.port.onmessage = null;

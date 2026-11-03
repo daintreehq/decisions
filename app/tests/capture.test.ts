@@ -11,6 +11,7 @@ function deferred<T>() {
 function browser(
   fail: { ctor?: boolean; resume?: boolean; node?: boolean } = {},
   grant?: Promise<void>,
+  stall: { addModule?: Promise<void>; resume?: Promise<void> } = {},
 ) {
   const released = { tracks: 0, closed: 0, contexts: 0 };
   const tracks = [{ stop: () => void released.tracks++ }, { stop: () => void released.tracks++ }];
@@ -18,12 +19,13 @@ function browser(
   class Ctx {
     state = 'suspended';
     destination = {};
-    audioWorklet = { addModule: async () => undefined };
+    audioWorklet = { addModule: async () => void (await stall.addModule) };
     constructor() {
       if (fail.ctor) throw new Error('AudioContext unavailable');
       released.contexts++;
     }
     resume = async () => {
+      await stall.resume;
       if (fail.resume) throw new Error('resume refused');
       this.state = 'running';
     };
@@ -95,4 +97,27 @@ describe('microphone setup releases the microphone on every failure after permis
     expect(r.tracks).toBe(2);
     expect(r.closed).toBe(1);
   });
+
+  for (const step of ['addModule', 'resume'] as const) {
+    it(`cancelling while ${step}() stalls releases the microphone at once, and only once`, async () => {
+      const hang = deferred<void>();
+      const r = browser({}, undefined, { [step]: hang.promise });
+      const ctl = new AbortController();
+      const p = startMic(() => undefined, undefined, ctl.signal);
+      p.catch(() => undefined);
+      // Let permission and the context come up, then setup waits on the stalled step.
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(r.contexts).toBe(1);
+      expect(r.tracks).toBe(0);
+      ctl.abort();
+      expect(r.tracks).toBe(2);
+      await Promise.resolve();
+      expect(r.closed).toBe(1);
+      // The step finally finishes: setup sees the abort, and nothing is released twice.
+      hang.resolve();
+      await expect(p).rejects.toBeInstanceOf(MicUnavailableError);
+      expect(r.tracks).toBe(2);
+      expect(r.closed).toBe(1);
+    });
+  }
 });
