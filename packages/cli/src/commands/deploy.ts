@@ -752,6 +752,7 @@ function summary(
     lines.push(
       '',
       'The relay was already claimed, so nothing else is needed. Paired phones keep working.',
+      `To update it later, keep its settings and pick a compatible release: decisions update --url ${url}`,
     );
   } else if (s.claimedHere) {
     lines.push(

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
   compareVersions,
@@ -10,44 +9,7 @@ import {
   parseProtocolRange,
   type RelayRelease,
 } from '../src/relay-release.js';
-
-/** A minimal ustar writer, enough to build npm-style tarballs for the reader. */
-export function tarball(
-  entries: { path: string; data?: string | Buffer; type?: string; pax?: string }[],
-): Buffer {
-  const blocks: Buffer[] = [];
-  const header = (name: string, size: number, type: string) => {
-    const h = Buffer.alloc(512);
-    h.write(name.slice(0, 100), 0, 'utf8');
-    h.write('0000644\0', 100, 'ascii');
-    h.write('0000000\0', 108, 'ascii');
-    h.write('0000000\0', 116, 'ascii');
-    h.write(size.toString(8).padStart(11, '0') + '\0', 124, 'ascii');
-    h.write('00000000000\0', 136, 'ascii');
-    h.write('        ', 148, 'ascii');
-    h.write(type, 156, 'ascii');
-    h.write('ustar\0', 257, 'ascii');
-    h.write('00', 263, 'ascii');
-    let sum = 0;
-    for (const b of h) sum += b;
-    h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 'ascii');
-    return h;
-  };
-  const pad = (b: Buffer) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
-  for (const e of entries) {
-    if (e.pax !== undefined) {
-      const rec = ` path=${e.pax}\n`;
-      let len = rec.length;
-      len += String(len + String(len).length).length;
-      const body = Buffer.from(`${len}${rec}`);
-      blocks.push(header('PaxHeader', body.length, 'x'), pad(body));
-    }
-    const data = Buffer.from(e.data ?? '');
-    blocks.push(header(e.path, data.length, e.type ?? '0'), pad(data));
-  }
-  blocks.push(Buffer.alloc(1024));
-  return gzipSync(Buffer.concat(blocks));
-}
+import { tarball } from './tar.js';
 
 const integrity = (b: Buffer) => `sha512-${createHash('sha512').update(b).digest('base64')}`;
 

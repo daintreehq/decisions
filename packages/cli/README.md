@@ -7,6 +7,7 @@ self-hosted relay, pair your phone, serve the HTTP MCP that gives agents `ask_hu
 npm install -g @daintreehq/decisions-cli
 
 decisions deploy    # deploy the matching relay to your Cloudflare account (--dry-run shows the plan)
+decisions update --url https://<your-worker>.workers.dev   # move it to the newest compatible release
 decisions setup --url https://<your-worker>.workers.dev   # asks for the claim secret
 decisions pair      # scan the QR code with your phone
 decisions mcp       # prints the line that adds the MCP to your agent
