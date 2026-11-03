@@ -32,6 +32,9 @@ interface Handle {
   setB: (v: boolean) => void;
   a: boolean;
   b: boolean;
+  /** The Close button / Escape of each layer. */
+  dismissA: () => void;
+  dismissB: () => void;
 }
 
 /** Two independent layers (the viewer and the navigator, say), each opened and closed by state. */
@@ -40,9 +43,9 @@ function mount(layers: Layers): { h: Handle; root: Root; host: HTMLElement } {
   function Two() {
     const [a, setA] = useState(false);
     const [b, setB] = useState(false);
-    layers.useLayer(a, () => setA(false));
-    layers.useLayer(b, () => setB(false));
-    Object.assign(h, { a, b, setA, setB });
+    const dismissA = layers.useLayer(a, () => setA(false));
+    const dismissB = layers.useLayer(b, () => setB(false));
+    Object.assign(h, { a, b, setA, setB, dismissA, dismissB });
     return null;
   }
   const host = document.createElement('div');
@@ -168,5 +171,95 @@ describe('layer history', () => {
     expect(h.b).toBe(false);
     expect(layers.hasLayers()).toBe(false);
     expect(go).not.toHaveBeenCalled();
+  });
+
+  it('a second Close before the first lands closes the sheet without leaving the question', async () => {
+    const { layers } = await fresh();
+    const h = setup(layers);
+    act(() => h.setA(true));
+    expect(depth()).toBe(1);
+    act(() => h.dismissA()); // Close
+    act(() => h.dismissA()); // Escape, before the popstate arrives
+    act(() => settle());
+    expect(h.a).toBe(false);
+    expect(layers.hasLayers()).toBe(false);
+    expect(location.pathname).toBe('/q/a');
+    expect(depth()).toBe(0);
+  });
+
+  it('route Back holds a later navigation until it lands', async () => {
+    const { layers, router } = await fresh();
+    const list = await import('../src/app/listState.js');
+    history.replaceState(null, '', '/history');
+    list.openQuestion('q1', 'history');
+    const h = setup(layers);
+    act(() => h.setA(true));
+    act(() => list.goBack()); // traversal in flight
+    act(() => router.navigate('/settings')); // tapped before it lands
+    act(() => settle());
+    expect(h.a).toBe(false);
+    expect(location.pathname).toBe('/settings');
+    // The question's origin is under the new page: the navigation waited for Back to land there.
+    history.back();
+    expect(location.pathname).toBe('/history');
+  });
+
+  describe('a traversal whose popstate does not arrive in time', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('does not leave an empty layer entry under the navigation it drains', async () => {
+      const { layers, router } = await fresh();
+      const h = setup(layers);
+      act(() => h.setA(true));
+      act(() => h.setA(false)); // its entry unwinds: held
+      act(() => router.navigate('/settings')); // waits for that unwind
+      held = []; // the browser never performs it
+      act(() => vi.advanceTimersByTime(1000));
+      expect(location.pathname).toBe('/settings');
+      vi.advanceTimersByTime(5000); // the person goes Back some time later
+      // Back meets the question itself, not the closed layer's entry, and then the list.
+      history.back();
+      expect(location.pathname).toBe('/q/a');
+      expect(depth()).toBe(0);
+      history.back();
+      expect(location.pathname).toBe('/');
+    });
+
+    it('a late traversal does not undo the navigation that followed the timeout', async () => {
+      const { layers, router } = await fresh();
+      const h = setup(layers);
+      act(() => h.setA(true));
+      act(() => h.setA(false));
+      act(() => router.navigate('/settings'));
+      act(() => vi.advanceTimersByTime(1000));
+      expect(location.pathname).toBe('/settings');
+      act(() => settle()); // the held unwind finally runs
+      expect(location.pathname).toBe('/settings');
+      expect(layers.hasLayers()).toBe(false);
+      history.back();
+      expect(location.pathname).toBe('/q/a');
+      expect(depth()).toBe(0);
+    });
+
+    it('a timed-out unwind is not mistaken for a later one landing', async () => {
+      const { layers } = await fresh();
+      const h = setup(layers);
+      act(() => h.setA(true));
+      act(() => h.setA(false)); // unwind of A held
+      act(() => vi.advanceTimersByTime(1000)); // timed out
+      act(() => h.setB(true)); // B gets an entry
+      act(() => h.setB(false)); // and its unwind starts
+      const go = vi.mocked(history.go);
+      go.mockClear();
+      act(() => settle()); // both traversals land, the late one first
+      expect(location.pathname).toBe('/q/a');
+      expect(depth()).toBe(0);
+      expect(layers.hasLayers()).toBe(false);
+    });
   });
 });

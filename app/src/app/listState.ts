@@ -1,6 +1,6 @@
 import { useLayoutEffect, useSyncExternalStore, type RefObject } from 'react';
 import type { HistoryMode, NeedsSort, Scope } from '../domain/lists.js';
-import { afterHistorySettles } from './layers.js';
+import { goBackPast } from './layers.js';
 import { matchRoute, navigate } from './router.js';
 
 /**
@@ -248,11 +248,8 @@ export function goBack(): void {
   const r = matchRoute(location.pathname);
   const info = currentBack();
   if (info?.prev) {
-    // Once any layer traversal has landed, so the depth read is the one we are standing on.
-    afterHistorySettles(() => {
-      const depth = (history.state as { layerDepth?: number } | null)?.layerDepth ?? 0;
-      history.go(-(depth + 1));
-    });
+    // A tracked traversal, once any in flight has landed: later navigation waits for this one to land.
+    goBackPast(1);
     return;
   }
   if (r.name === 'question' && !info) {
