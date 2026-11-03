@@ -49,6 +49,9 @@ function release(id: number): void {
   // Already closed by Back, or never pushed (still deferred): nothing to unwind.
   if (i < 0) return;
   const removed = stack.splice(i).length;
+  // Only unwind entries we are still standing on. If the page already moved on (a replace-navigation, a lock
+  // screen after revocation, an external navigation), going back would undo that move instead.
+  if (depthOf(history.state) < i + removed) return;
   ignorePops++;
   history.go(-removed);
 }
