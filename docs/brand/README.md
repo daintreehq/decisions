@@ -10,13 +10,13 @@ A check was tried first and dropped: it reads as "approved" or "done", the state
 
 Everything else is generated from it by [`app/scripts/make-icons.mjs`](../../app/scripts/make-icons.mjs) (`pnpm --filter @daintreehq/decisions-app icons`):
 
-| File | Use |
-| --- | --- |
-| `icon.svg` | Favicon. Bondi's deep-water `#004e6b` on light browser chrome, Daintree mint `#36ce94` on dark (`prefers-color-scheme` inside the SVG). |
-| `icon-192.png`, `icon-512.png` | Manifest `any`: the mark on the dark rounded tile. Also the notification `icon`. |
-| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark well inside the 80% safe-zone circle. |
-| `apple-touch-icon.png` | 180×180, opaque, square: iOS applies its own corners. |
-| `badge-96.png` | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel. |
+| File                                             | Use                                                                                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `icon.svg`                                       | Favicon. Bondi's deep-water `#004e6b` on light browser chrome, Daintree mint `#36ce94` on dark (`prefers-color-scheme` inside the SVG). |
+| `icon-192.png`, `icon-512.png`                   | Manifest `any`: the mark on the dark rounded tile. Also the notification `icon`.                                                        |
+| `icon-maskable-192.png`, `icon-maskable-512.png` | Manifest `maskable`: full-bleed opaque tile, mark well inside the 80% safe-zone circle.                                                 |
+| `apple-touch-icon.png`                           | 180×180, opaque, square: iOS applies its own corners.                                                                                   |
+| `badge-96.png`                                   | Notification `badge`: white silhouette on transparency, since Android draws only the alpha channel.                                     |
 
 ## Colours
 

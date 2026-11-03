@@ -6,19 +6,13 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "display_override": [
-    "window-controls-overlay",
-    "standalone"
-  ],
+  "display_override": ["window-controls-overlay", "standalone"],
   "launch_handler": {
     "client_mode": "focus-existing"
   },
   "background_color": "#1a1918",
   "theme_color": "#151211",
-  "categories": [
-    "productivity",
-    "developer"
-  ],
+  "categories": ["productivity", "developer"],
   "icons": [
     {
       "src": "/icons/icon-192.png",
