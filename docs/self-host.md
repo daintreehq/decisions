@@ -34,6 +34,42 @@ Add `--claim` to claim the relay from this computer straight away (as `decisions
 
 In a clone of this repository, `pnpm decisions:deploy` builds everything and runs the same command from the workspace.
 
+### Started by a host app
+
+An app that runs the guided deploy for its user, such as Daintree, can supply the answers it already knows and receive the result, so the user neither retypes their provider keys nor copies the Worker URL and claim secret back by hand. The app listens on a local socket and starts the deploy in a terminal the user watches:
+
+```bash
+npx @daintreehq/decisions-cli@<version> deploy --name <name> --bucket <name> --host-channel <socket path>
+```
+
+The person at the terminal still sees and answers every question: the app's values are only the defaults, a key it supplied shows as present and is checked with its provider like a typed one, and nothing is deployed until they confirm the summary. The claim secret is never shown: it goes to the app, which claims the relay with its own keys. `--host-channel` cannot be combined with `--claim`, `--dry-run` or `--outdir`, and needs a terminal.
+
+**The channel.** Only the socket's path is on the command line; keys and the claim secret travel only over the socket, so they are never in argv, the environment (which a host may save to restore a session), a file, a log or on screen. On macOS and Linux the app creates a Unix domain socket in a new directory only the user can open (mode `0700`, path under about 100 bytes). On Windows it is a named pipe (`\\.\pipe\<random name>`), whose access list the app restricts to the current user, refusing remote clients. Either way, this protects the channel from other users of the machine, not from other programs the same user runs. The app accepts one connection, stops listening once it has it, and removes the socket when the deploy ends.
+
+**Messages** are JSON objects, one per line (UTF-8, ending in `\n`, at most 64 KiB), each carrying the contract version `v`. This is version 1:
+
+1. The CLI connects and sends `{"v":1,"type":"hello","cli":"0.3.0","versions":[1]}`, naming its version and the contract versions it speaks. A CLI that does not know `--host-channel` exits with an unknown-option error instead; a host that hears no hello before the process exits should treat it as unsupported (or not started).
+2. The app answers within 15 seconds with its defaults. Every field is optional; a field this version does not know, or one of the wrong shape, fails the deploy, and the CLI says why in a `failed` result:
+
+   ```json
+   {"v":1,"type":"prefill","answers":{
+     "name":"daintree-decisions-1a2b","bucket":"daintree-decisions-1a2b",
+     "account_id":"<32 hex digits>",
+     "transcription":{"provider":"xai"},
+     "cleanup":{"provider":"anthropic","model":"claude-haiku-5-5"},
+     "keys":{"xai":"…","anthropic":"…","openai":"…"}}}
+   ```
+
+   `transcription.provider` is `xai` or `openai` (null turns the default off), `cleanup.provider` is `anthropic` or `openai`, and a cleanup model the CLI does not offer falls back to its default. `--name`, `--bucket` and `--account-id` on the command line win over `name`, `bucket` and `account_id`, and `account_id` only starts the account choice. Only the keys of the providers the person ends up choosing are set on the Worker.
+3. The app sends nothing else while the deploy runs; the person may take as long as they need.
+4. When the deploy ends, the CLI sends the outcome:
+
+   ```json
+   {"v":1,"type":"result","status":"completed","url":"https://….workers.dev","claim_secret":"…","claim_state":"unclaimed"}
+   ```
+
+   `status` is `completed`, `cancelled` (the person declined the summary or pressed Ctrl-C) or `failed` (with `error`, a message with every secret removed). `url` is the Worker URL once the deploy printed it, and `claim_secret` is set once its upload started, even when a later step failed, since it may then be live; both are null otherwise. A relay that was already claimed (`claim_state` `claimed`) gets no new claim secret. The app replies `{"v":1,"type":"received"}` within 10 seconds, then claims the relay with its own keys. Without that reply the CLI says the result may not have arrived and exits non-zero; it never prints the secret instead. If the connection closes with no result, the CLI stopped without one (a second Ctrl-C, or a crash): the app should check the relay's state (`GET /api/v1/info`) before running the deploy again, which sets a new claim secret on a relay nobody has claimed.
+
 ## Option 3: Manual
 
 ```bash
