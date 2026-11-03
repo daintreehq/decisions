@@ -17,6 +17,7 @@ import {
   accountsFromWhoami,
   buildDeployPlan,
   deploy,
+  redactSecrets,
   nodeSpawner,
   wranglerCommands,
   type DeployDeps,
@@ -188,7 +189,7 @@ function relayFetch(
           ? headers['anthropic-version'] === '2026-10-21'
             ? headers['x-api-key']
             : undefined
-          : headers.authorization?.replace(/^Bearer /, '');
+          : headers.authorization?.match(/^Bearer (.+)$/)?.[1];
       if (key && (p.deniedKeys ?? []).includes(key))
         return new Response(JSON.stringify({ error: `denied ${key}` }), { status: 403 });
       if (!key || !(p.goodKeys ?? []).includes(key))
@@ -1125,6 +1126,16 @@ describe('decisions deploy, guided at a terminal', () => {
     await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toThrow(/nothing was changed/);
     expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
     expect(walk(t.tmpRoot)).toEqual([]);
+  });
+
+  it('redacts every secret, even where two of them overlap', () => {
+    const R = '[redacted]';
+    expect(redactSecrets('key=abcdefgh;', ['abcdef', 'defgh'])).toBe(`key=${R};`);
+    expect(redactSecrets('abcdef abcdefgh', ['abc', 'abcdefgh'])).toBe(`${R}def ${R}`);
+    expect(redactSecrets('x aaaa y aa', ['aa'])).toBe(`x ${R} y ${R}`);
+    expect(redactSecrets('nothing here', ['secret', ''])).toBe('nothing here');
+    // A value equal to the marker is not reintroduced by the marker itself.
+    expect(redactSecrets('a s3cret b', ['s3cret', R])).toBe(`a ${R} b`);
   });
 
   it('reads accounts from `wrangler whoami --json`, ignoring anything malformed', () => {

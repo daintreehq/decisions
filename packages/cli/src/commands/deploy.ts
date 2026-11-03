@@ -344,12 +344,7 @@ export async function deploy(
 
   /** Values that must never be echoed back, even inside Wrangler's own error output. */
   const secrets: string[] = [];
-  // Longest first, so a shorter value (a rejected key that is a prefix of the accepted one) cannot
-  // break up a longer one before it is replaced.
-  const redact = (t: string) =>
-    [...secrets]
-      .sort((x, y) => y.length - x.length)
-      .reduce((acc, v) => acc.split(v).join('[redacted]'), t);
+  const redact = (t: string) => redactSecrets(t, secrets);
 
   const staging = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-deploy-'));
   try {
@@ -581,6 +576,34 @@ export async function deploy(
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Replaces every occurrence of every value in `secrets` with `[redacted]`. Matches are found in the
+ * original text and merged where they overlap, so one value (a rejected key that shares a prefix
+ * or a suffix with the accepted one) can never break up another and leave part of it showing.
+ */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  const ranges: [number, number][] = [];
+  for (const v of secrets) {
+    if (!v) continue;
+    for (let i = text.indexOf(v); i >= 0; i = text.indexOf(v, i + 1))
+      ranges.push([i, i + v.length]);
+  }
+  if (!ranges.length) return text;
+  ranges.sort((x, y) => x[0] - y[0]);
+  let out = '';
+  let at = 0;
+  let [start, end] = ranges[0]!;
+  for (const [s, e] of ranges.slice(1)) {
+    if (s <= end) end = Math.max(end, e);
+    else {
+      out += text.slice(at, start) + '[redacted]';
+      at = end;
+      [start, end] = [s, e];
+    }
+  }
+  return out + text.slice(at, start) + '[redacted]' + text.slice(end);
 }
 
 /** The Worker secrets for the answers' provider keys, one per provider however many features use it. */
