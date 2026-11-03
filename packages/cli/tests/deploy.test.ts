@@ -155,9 +155,13 @@ const PROVIDER_MODELS: Record<string, string[]> = {
 interface FakeProviders {
   /** Keys every provider accepts; anything else gets a 401. */
   goodKeys?: string[];
+  /** Keys every provider answers with 403. */
+  deniedKeys?: string[];
   /** Every provider request fails at the network. */
   down?: boolean;
-  calls?: { host: string; headers: Record<string, string>; redirect?: string }[];
+  /** Each provider lists only these models. */
+  models?: string[];
+  calls?: { host: string; headers: Record<string, string>; redirect?: string; timed: boolean }[];
 }
 
 function relayFetch(
@@ -173,12 +177,23 @@ function relayFetch(
         host: url.host,
         headers,
         ...(init?.redirect ? { redirect: init.redirect } : {}),
+        timed: init?.signal instanceof AbortSignal,
       });
       if (p.down) throw new TypeError('fetch failed: getaddrinfo ENOTFOUND');
-      const key = headers['x-api-key'] ?? headers.authorization?.replace(/^Bearer /, '');
+      if ((init?.method ?? 'GET') !== 'GET' || url.pathname !== '/v1/models')
+        return new Response('not found', { status: 404 });
+      // Each provider authenticates its own way; the other way is a missing key.
+      const key =
+        url.host === 'api.anthropic.com'
+          ? headers['anthropic-version'] === '2026-10-21'
+            ? headers['x-api-key']
+            : undefined
+          : headers.authorization?.replace(/^Bearer /, '');
+      if (key && (p.deniedKeys ?? []).includes(key))
+        return new Response(JSON.stringify({ error: `denied ${key}` }), { status: 403 });
       if (!key || !(p.goodKeys ?? []).includes(key))
         return new Response(JSON.stringify({ error: `bad key ${key}` }), { status: 401 });
-      return new Response(JSON.stringify({ data: models.map((id) => ({ id })) }));
+      return new Response(JSON.stringify({ data: (p.models ?? models).map((id) => ({ id })) }));
     }
     const key = `${init?.method ?? 'GET'} ${url.pathname}`;
     if (key === 'GET /health') return new Response(JSON.stringify({ ok: true, version: VERSION }));
@@ -846,7 +861,7 @@ describe('decisions deploy, guided at a terminal', () => {
     );
     // Each key was checked with its provider at its own step, never following a redirect.
     expect(providers.calls!.map((c) => c.host)).toEqual(['api.x.ai', 'api.anthropic.com']);
-    expect(providers.calls!.every((c) => c.redirect === 'manual')).toBe(true);
+    expect(providers.calls!.every((c) => c.redirect === 'manual' && c.timed)).toBe(true);
     const o = text(t.out);
     expect(o).toMatch(/Cloudflare account: Someone \(a1b2c3d4/);
     expect(o).toMatch(/Cost:/);
@@ -876,6 +891,14 @@ describe('decisions deploy, guided at a terminal', () => {
   it('is cancelled by default: an empty answer to the summary deploys nothing', async () => {
     const t = setupDeploy({ interactive: true, answers: [] });
     await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.prompts).toEqual([
+      expect.stringMatching(/^Worker name/),
+      expect.stringMatching(/^R2 bucket name/),
+      expect.stringMatching(/^Use dictation\? \[y\/N\]/),
+      expect.stringMatching(/^Use transcript cleanup\? \[y\/N\]/),
+      expect.stringMatching(/^Deploy with these settings\? \[y\/N\]/),
+    ]);
+    expect(t.secretPrompts).toEqual([]);
     expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
     expect(text(t.out)).toMatch(/Dictation +off/);
     expect(text(t.out)).toMatch(/Cancelled/);
@@ -1036,7 +1059,11 @@ describe('decisions deploy, guided at a terminal', () => {
       wrangler: { failOn: 'secret put XAI_API_KEY', echoInputOnFail: true },
       answers: ['', '', 'y', '1', XAI, 'n', 'y'],
     });
-    await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toThrow(/XAI_API_KEY/);
+    const e = (await deploy(t.ctx, {}, {}, t.deps).catch((x: unknown) => x)) as Error;
+    expect(e).toBeInstanceOf(CliError);
+    expect(e.message).toMatch(/XAI_API_KEY/);
+    expect(e.message).toContain('[redacted]');
+    expect(e.message).not.toContain(XAI);
     expect(count(text(t.out), SECRET)).toBe(1);
     expect(text(t.out)).toMatch(/with problems/);
     expectNowhere(t, [XAI], { input: true });
@@ -1054,6 +1081,50 @@ describe('decisions deploy, guided at a terminal', () => {
     await deploy(t.ctx, {}, {}, t.deps);
     expect(t.prompts).toEqual([]);
     expect(subs(t)[1]).toBe('whoami');
+  });
+
+  it('asks for the key again when the user will not use one that could not be checked', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { down: true },
+      answers: ['', '', 'y', '1', XAI, 'n', '', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(t.secretPrompts).toHaveLength(2);
+    expect(text(t.out)).toMatch(/Dictation +off/);
+    expect(subs(t)).not.toContain('secret put XAI_API_KEY --name daintree-decisions');
+  });
+
+  it('reports a key the provider denies (403) as denied, not as unchecked', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS, deniedKeys: [BAD] },
+      answers: ['', '', 'y', '1', BAD, '', 'n', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    const o = text(t.out);
+    expect(o).toMatch(/denied access with that key \(HTTP 403\)/);
+    expect(o).not.toMatch(/without checking/);
+    expect(o).toMatch(/Dictation +off/);
+    expectNowhere(t, [BAD]);
+  });
+
+  it('notes a cleanup model the shared OpenAI key cannot see', async () => {
+    const t = setupDeploy({
+      interactive: true,
+      providers: { goodKeys: KEYS, models: ['gpt-6.1-terra'] },
+      answers: ['', '', 'y', 'openai', OPENAI, 'y', 'openai', '2', 'y'],
+    });
+    await deploy(t.ctx, {}, {}, t.deps);
+    expect(text(t.out)).toMatch(/Dictation +OpenAI/);
+    expect(text(t.out)).toMatch(/OpenAI does not list gpt-6-luna for this key/);
+  });
+
+  it('gives up after repeated invalid answers without changing anything', async () => {
+    const t = setupDeploy({ interactive: true, answers: Array(5).fill('Bad Name') });
+    await expect(deploy(t.ctx, {}, {}, t.deps)).rejects.toThrow(/nothing was changed/);
+    expect(subs(t).filter((s) => MUTATING.test(s))).toEqual([]);
+    expect(walk(t.tmpRoot)).toEqual([]);
   });
 
   it('reads accounts from `wrangler whoami --json`, ignoring anything malformed', () => {

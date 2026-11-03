@@ -250,6 +250,8 @@ export async function askDeployQuestions(
 
   const keys: DeployAnswers['keys'] = {};
   const unchecked: KeyProvider[] = [];
+  /** The models each provider listed for the key it accepted. */
+  const listed: Partial<Record<KeyProvider, string[]>> = {};
 
   say('\nDictation transcription (optional)');
   say(
@@ -271,6 +273,7 @@ export async function askDeployQuestions(
     if (got) {
       keys[provider] = got.key;
       if (got.unchecked) unchecked.push(provider);
+      if (got.models) listed[provider] = got.models;
       transcription = { provider };
     }
   }
@@ -306,12 +309,15 @@ export async function askDeployQuestions(
       if (got) {
         keys[provider] = got.key;
         if (got.unchecked) unchecked.push(provider);
-        if (got.models && got.models.length && !got.models.includes(model)) {
-          say(
-            `    Note: ${PROVIDER_LABEL[provider]} does not list ${model} for this key; cleanup fails until the key can use it.`,
-          );
-        }
+        if (got.models) listed[provider] = got.models;
       } else ok = false;
+    }
+    // An empty list says nothing about the key, so only a list without the model is reported.
+    const seen = listed[provider];
+    if (ok && seen?.length && !seen.includes(model)) {
+      say(
+        `    Note: ${PROVIDER_LABEL[provider]} does not list ${model} for this key; cleanup fails until the key can use it.`,
+      );
     }
     if (ok) cleanup = { provider, model };
   }

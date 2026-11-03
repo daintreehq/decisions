@@ -344,7 +344,12 @@ export async function deploy(
 
   /** Values that must never be echoed back, even inside Wrangler's own error output. */
   const secrets: string[] = [];
-  const redact = (t: string) => secrets.reduce((acc, v) => acc.split(v).join('[redacted]'), t);
+  // Longest first, so a shorter value (a rejected key that is a prefix of the accepted one) cannot
+  // break up a longer one before it is replaced.
+  const redact = (t: string) =>
+    [...secrets]
+      .sort((x, y) => y.length - x.length)
+      .reduce((acc, v) => acc.split(v).join('[redacted]'), t);
 
   const staging = await mkdtemp(join(deps.tmpRoot ?? tmpdir(), 'decisions-deploy-'));
   try {
