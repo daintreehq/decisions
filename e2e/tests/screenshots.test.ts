@@ -630,7 +630,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
         json: {
           model: 'claude-haiku',
           result: {
-            corrected_text: 'Describe v3 only, and move the v2 steps into an appendix at the end.',
+            corrected_text:
+              'Describe v3 only, and move the v2 steps into an appendix at the very end.',
             uncertain_spans: [],
             applied_commands: [],
             warnings: [],

@@ -982,3 +982,10 @@ button.selection.choose {
     border: 1px solid CanvasText;
   }
 }
+
+/* With the rail layout the frame's own header carries the connection status; one indicator is enough. */
+@media (min-width: 1100px) {
+  .ws-head .conn {
+    display: none;
+  }
+}

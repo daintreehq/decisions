@@ -885,7 +885,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                       <CorrectionArea
                         view={view}
                         answerContent={answer?.content ?? null}
-                        showCurrent={answer?.provenance !== 'proxy' && (!shape.hasOptions || !!currentContent?.text)}
+                        showCurrent={
+                          answer?.provenance !== 'proxy' &&
+                          (!shape.hasOptions || !!currentContent?.text)
+                        }
                         draft={correctionDraft}
                         hasOptions={shape.hasOptions}
                         reasonInPage={shape.fields.length > 1}

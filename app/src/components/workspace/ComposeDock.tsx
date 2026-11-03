@@ -160,7 +160,12 @@ function ReviewMarks({ review, draft }: { review: Review; draft: DraftModel }) {
   if (text.slice(review.start, review.start + review.cleaned.length) !== review.cleaned)
     return null;
   const parts: ReactNode[] = [];
-  let at = review.start;
+  // Start a few words before the first change, so the underline is on screen within two lines.
+  const first = review.marks[0]?.from ?? review.start;
+  const lead = text.slice(review.start, first);
+  const keep = lead.length > 28 ? lead.slice(-28).replace(/^\S*\s/, '') : lead;
+  let at = first - keep.length;
+  if (at > review.start) parts.push('…');
   review.marks.forEach((m, k) => {
     if (m.from > at) parts.push(text.slice(at, m.from));
     parts.push(

@@ -160,7 +160,10 @@ export function RecordingClock({ since }: { since: number | null }) {
 /** The live passage while recording: the end of the locked words, then the words still being recognised. */
 export function LiveTranscript({ final, interim }: { final: string; interim: string }) {
   if (!final && !interim) return <span className="dock-hint">Listening…</span>;
-  const tail = final.length > 160 ? '…' + final.slice(-160) : final;
+  // The newest words matter while speaking: show the end of the passage, never its start.
+  const room = Math.max(20, 44 - interim.length);
+  const cut = final.length > room ? final.slice(-room) : final;
+  const tail = cut === final ? final : '…' + cut.replace(/^\S*\s/, '');
   return (
     <span className="live-text" aria-hidden="true">
       {tail}
