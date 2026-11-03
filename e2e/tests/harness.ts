@@ -28,6 +28,9 @@ export async function startRelay(port: number): Promise<RunningRelay> {
       String(port),
       '--ip',
       '127.0.0.1',
+      // Each relay gets its own inspector port so several suites can run side by side.
+      '--inspector-port',
+      String(port + 1000),
       '--var',
       `CLAIM_SECRET:${CLAIM_SECRET}`,
       '--persist-to',
