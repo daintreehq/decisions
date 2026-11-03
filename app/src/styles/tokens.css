@@ -107,10 +107,13 @@
 }
 :root[data-theme='bondi'] {
   --material-bg: var(--theme-surface-sidebar);
+  /* Bondi's grid is sand; its stage borrows the theme's ink so screenshots still sit on dark. */
+  --surface-stage: var(--theme-text-primary);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     --material-bg: var(--theme-surface-sidebar);
+    --surface-stage: var(--theme-text-primary);
   }
 }
 
