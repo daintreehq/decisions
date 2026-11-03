@@ -360,6 +360,11 @@ export class AppController {
       if (!epoch || !this.relay || !this.snap.config)
         return { ok: false, reason: 'error', message: 'Missing key for this attachment' };
       const cipher = await this.relay.bytes(`/attachments/${d.attachment_id}/content`, ctx.signal);
+      const unverified: ImageResult = {
+        ok: false,
+        reason: 'unverified',
+        message: 'This file could not be verified',
+      };
       const plain = await decryptAttachment(
         epoch,
         {
@@ -371,12 +376,16 @@ export class AppController {
         d.nonce,
         cipher,
         d.sha256,
-      );
+      ).catch(() => null);
+      if (!plain) return unverified;
       const mime = sniffImageMime(plain);
-      if (!mime || mime !== d.mime)
-        return { ok: false, reason: 'error', message: 'The file is not the image it claims to be' };
+      if (!mime || mime !== d.mime) return unverified;
       const blob = new Blob([plain as unknown as BlobPart], { type: mime });
-      if (typeof createImageBitmap === 'function') (await createImageBitmap(blob)).close();
+      if (typeof createImageBitmap === 'function') {
+        const bitmap = await createImageBitmap(blob).catch(() => null);
+        if (!bitmap) return unverified;
+        bitmap.close();
+      }
       return { ok: true, image: { url: ctx.makeUrl(blob), sha256: d.sha256, mime } };
     } catch (e) {
       if (e instanceof RelayError && (e.status === 404 || e.status === 410)) {

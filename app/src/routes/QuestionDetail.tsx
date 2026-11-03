@@ -22,7 +22,14 @@ import { announce } from '../lib/announce.js';
 import { absoluteLabel, ageLabel, untilLabel } from '../lib/time.js';
 import type { OutboxEntry } from '../data/outbox.js';
 
-const NO_REVIEW: ReviewState = { digests: [], total: 0, loaded: 0, expired: 0, failed: 0 };
+const NO_REVIEW: ReviewState = {
+  digests: [],
+  total: 0,
+  loaded: 0,
+  presented: 0,
+  expired: 0,
+  failed: 0,
+};
 
 function Conflict({
   entry,
