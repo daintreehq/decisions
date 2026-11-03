@@ -41,7 +41,7 @@ export function Mark({ size = 18 }: { size?: number }) {
   );
 }
 
-function ConnectionPill() {
+export function ConnectionPill() {
   const { connection, online, syncing, lastSyncedAt } = useApp();
   const label = !online
     ? 'Offline'
