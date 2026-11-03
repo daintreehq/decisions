@@ -178,16 +178,20 @@ export class AppController {
         if (connection === 'live') void this.outbox?.flush();
       },
       onSynced: (at) => this.patch({ lastSyncedAt: at, syncing: false, lastError: null }),
-      onRevoked: () => {
-        this.teardown();
-        this.patch({ phase: 'revoked' });
-      },
+      onRevoked: () => this.lockRevoked(),
       onError: (e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) }),
     });
     this.patch({ phase: 'ready', config, syncing: true });
     this.bindPageEvents();
     void this.sync.start().then(() => this.outbox?.flush());
     void this.refreshDevices().catch(() => undefined);
+  }
+
+  /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
+  lockRevoked(): void {
+    this.teardown();
+    this.images.dispose();
+    this.patch({ phase: 'revoked' });
   }
 
   private bindPageEvents() {
