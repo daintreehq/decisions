@@ -123,6 +123,7 @@ describe('program surface', () => {
       'import',
       'recovery',
       'delete-data',
+      'remove',
     ])
       expect(names).toContain(c);
     const rec = buildProgram().commands.find((c) => c.name() === 'recovery')!;

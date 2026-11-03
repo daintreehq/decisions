@@ -87,10 +87,10 @@ export interface DeployDeps {
 export const DEFAULT_NAME = 'daintree-decisions';
 
 /** Worker names: lowercase letters, digits and dashes, 1–63 characters, no leading/trailing dash. */
-const WORKER_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export const WORKER_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 /** R2 bucket names: lowercase letters, digits and dashes, 3–63 characters. */
-const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
-const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
+export const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+export const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 
 /** The Wrangler argv for each step, shared by the plan and the run so what is shown is what runs. */
 export const wranglerCommands = {
@@ -105,8 +105,13 @@ export const wranglerCommands = {
   putSecret: (secret: string, name: string) => ['secret', 'put', secret, '--name', name],
 };
 
-const npxArgs = (wrangler: string, args: string[]) => ['--yes', `wrangler@${wrangler}`, ...args];
-const shown = (wrangler: string, args: string[]) => ['npx', ...npxArgs(wrangler, args)].join(' ');
+export const npxArgs = (wrangler: string, args: string[]) => [
+  '--yes',
+  `wrangler@${wrangler}`,
+  ...args,
+];
+export const shown = (wrangler: string, args: string[]) =>
+  ['npx', ...npxArgs(wrangler, args)].join(' ');
 
 export type AuthMode = 'browser' | 'token-env' | 'token-prompt';
 
