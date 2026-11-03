@@ -239,7 +239,9 @@ function setup(
       // The relay must never see a Cloudflare credential, whatever the outcome.
       for (const p of cf.probes) {
         expect(p.headers.get('authorization')).toBeNull();
-        expect(JSON.stringify([...p.headers])).not.toContain(TOKEN);
+        const sent: string[] = [];
+        p.headers.forEach((v, k) => sent.push(`${k}: ${v}`));
+        expect(sent.join('\n')).not.toContain(TOKEN);
       }
     }
   };
