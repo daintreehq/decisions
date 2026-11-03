@@ -790,7 +790,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     // Phone: open a question from the list, open the navigator over it, then Back restores the list.
     await page.getByText('Which retry strategy').first().click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
     await page.locator('dialog.nav-sheet .sheet-title').focus();
@@ -825,7 +825,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('60-phone-questions-dark');
     await page.getByRole('button', { name: /Model answers/ }).click();
     await page.getByText('Should the changelog entry').first().click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
     await page.locator('dialog.nav-sheet .sheet-title').focus();
@@ -845,7 +845,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await waitRows();
     await shot('60-tablet-questions');
     await page.getByText('Approve the compact sidebar').first().click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
     await page.locator('dialog.nav-sheet .sheet-title').focus();
@@ -867,7 +867,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       await page.locator('.rail .qrow').first().waitFor({ timeout: 30_000 });
       await shot(`60-desktop-${tag}-choose`);
       await page.locator('.rail .qrow', { hasText: 'Approve the compact sidebar' }).click();
-      await page.locator('article.detail').waitFor({ timeout: 30_000 });
+      await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
       await page.waitForTimeout(600);
       await shot(`60-desktop-${tag}-question`);
       await page.goto(relay.origin + '/history');
@@ -892,7 +892,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await theme('dark');
     await page.goto(relay.origin + '/');
     await page.locator('.rail .qrow', { hasText: 'Which retry strategy' }).click();
-    await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await shot('60-desktop-question-dark');
     await page.goto(relay.origin + '/history');
     await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
@@ -905,6 +905,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   });
 
   it('captures files: gallery, viewer, comparison, All files and failures', async () => {
+    // Earlier blocks finish at desktop sizes; this one starts on a phone.
+    await page.setViewportSize(PHONE);
     const r = await bridge.registerQuestion({
       origin: {
         machine_label: 'Greg’s MacBook Pro',
@@ -941,7 +943,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await bridge.pump();
     const openGallery = async () => {
       await page.goto(`${relay.origin}/q/${ids.gallery}`);
-      await page.locator('article.detail').waitFor({ timeout: 30_000 });
+      await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     };
     const toFiles = async () => {
       await page.evaluate(() => {
@@ -1126,7 +1128,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
         await page.getByRole('radio', { name: /Exponential backoff/ }).check();
         await shot(`40-ws-choice-selected-${tag}`);
         await openId('design');
-        await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+        await filesReady();
         await shot(`40-ws-approval-${tag}`);
         await openId('answered');
         await page.locator('.dock .stage').waitFor({ timeout: 30_000 });

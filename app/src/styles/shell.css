@@ -415,16 +415,7 @@ main.bare {
   }
 }
 
-/* Inside a question below 1100px the workspace replaces the header and the tab bar (the dock takes its place). */
-@media (max-width: 68.74em) {
-  .shell[data-route='question'] .topbar,
-  .shell[data-route='question'] .tabbar {
-    display: none;
-  }
-  .shell[data-route='question'] main {
-    padding-bottom: calc(24px + var(--safe-b));
-  }
-}
+/* Below 1100px the question workspace owns the whole frame (workspace.css). */
 
 /* ---------- the rail (1100px and up) ---------- */
 .shell[data-layout='rail'] {
@@ -457,7 +448,7 @@ main.bare {
   min-height: 0;
 }
 .shell[data-layout='rail'] .workspace-host {
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .rail {

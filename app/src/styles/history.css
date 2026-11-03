@@ -61,7 +61,7 @@
 }
 
 /* ---------- the record ---------- */
-.record {
+.hist-record {
   max-width: 720px;
   margin: 0 auto;
   padding: 0 32px 56px;
@@ -123,7 +123,7 @@
 }
 
 /* Below 1100px: a full-height sheet over the list (from the right on tablets). */
-.record-sheet .record {
+.record-sheet .hist-record {
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -148,7 +148,7 @@
   .record-sheet[open] {
     animation-name: sheet-right;
   }
-  .record-sheet .record {
+  .record-sheet .hist-record {
     padding: 0 28px 48px;
   }
   .record-sheet .record-head {

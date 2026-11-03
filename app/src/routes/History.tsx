@@ -127,7 +127,7 @@ function Record({
   const titleId = useId();
   const c = v.content;
   return (
-    <article className="record" aria-labelledby={titleId}>
+    <article className="hist-record" aria-labelledby={titleId}>
       <header className="record-head">
         {sheet ? (
           <button type="button" className="btn ghost record-back" onClick={onClose}>
