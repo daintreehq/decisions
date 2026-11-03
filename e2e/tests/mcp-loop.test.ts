@@ -147,9 +147,9 @@ describe.skipIf(!chromiumPath)(
 
       const invite = await createPairingInvite(relayClient, 'phone');
       await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this phone' }).click();
-      await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
-      const shown = (await page.locator('.big-code').innerText()).trim();
+      await page.getByRole('button', { name: 'Pair this device' }).click();
+      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
+      const shown = (await page.locator('.pair-digits').innerText()).replace(/\s/g, '');
       const cand = await until(
         async () =>
           (await relayClient.pendingPairings()).pending.find(
@@ -158,7 +158,7 @@ describe.skipIf(!chromiumPath)(
         20_000,
         'pending pairing',
       );
-      expect(await localShortCode(cand)).toBe(shown);
+      expect((await localShortCode(cand)).replace(/\s/g, '')).toBe(shown);
       await approveCandidate(relayClient, cand);
       await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
     }, 120_000);
@@ -239,7 +239,7 @@ describe.skipIf(!chromiumPath)(
 
       await openFromInbox('Use optimistic updates for the todo list?');
       await page.getByRole('radio', { name: /Yes, optimistic/ }).check();
-      await page.getByRole('button', { name: /Submit/ }).click();
+      await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
 
       await until(async () => sink.typed.length > 0, 30_000, 'the answer to be typed');
       expect(sink.typed.map((t) => t.pane)).toEqual(['pane-a']);
@@ -275,12 +275,15 @@ describe.skipIf(!chromiumPath)(
       const typedBefore = sink.typed.length;
       // answered questions leave the inbox; open it where History links to it
       await page.goto(`${relay.origin}/q/${qid}`);
-      await page.getByText('Change this answer').click();
+      await page.locator('.dock').getByRole('button', { name: 'Change answer' }).click();
       await page.getByRole('radio', { name: /No, wait for the server/ }).check();
-      await page
-        .getByLabel(/Why are you changing it/)
-        .fill('Conflicts are too common on shared lists');
-      await page.getByRole('button', { name: 'Send correction' }).first().click();
+      // The reason is its own field: in the page when the correction also has text, otherwise the dock's field.
+      const why = page.getByRole('button', { name: /Why are you changing it/ });
+      if (await why.isVisible()) await why.click();
+      else await page.locator('.dock .dock-field').first().click();
+      await page.locator('#ws-editor').fill('Conflicts are too common on shared lists');
+      await page.locator('.dock-field.done').click();
+      await page.locator('.dock').getByRole('button', { name: 'Send correction' }).click();
       await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
 
       await until(async () => sink.typed.length > typedBefore, 30_000, 'the correction');
@@ -331,7 +334,7 @@ describe.skipIf(!chromiumPath)(
         'cancelled on the relay',
       );
       await page.goto(`${relay.origin}/q/${id}`);
-      await page.getByText('Your agent withdrew this question').waitFor({ timeout: 20_000 });
+      await page.getByText('Withdrawn by your agent').first().waitFor({ timeout: 20_000 });
       // a withdrawn question is never typed into anyone's terminal, even once the desktop has caught up
       await bridge.catchUp();
       await bridge.delivery.drain();
@@ -354,7 +357,7 @@ describe.skipIf(!chromiumPath)(
 
       await openFromInbox('Show completed todos by default?');
       await page.getByRole('radio', { name: /Hide them/ }).check();
-      await page.getByRole('button', { name: /Submit/ }).click();
+      await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
 
       await until(async () => sink.typed.length > typedBefore, 30_000, "pane B's answer");
       const typed = sink.typed.slice(typedBefore);

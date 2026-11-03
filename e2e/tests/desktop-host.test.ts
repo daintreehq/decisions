@@ -128,7 +128,7 @@ describe.skipIf(!chromiumPath)(
       await item.waitFor({ timeout: 30_000 });
       await item.click();
       await page.getByRole('radio', { name: choice }).check();
-      await page.getByRole('button', { name: /Submit (decision|answer)/ }).click();
+      await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
     }
 
     const terminalDelivered = (client: RelayClient, questionId: string) =>
@@ -184,8 +184,8 @@ describe.skipIf(!chromiumPath)(
 
       const invite = await createPairingInvite(owner.client, 'phone');
       await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this phone' }).click();
-      await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
+      await page.getByRole('button', { name: 'Pair this device' }).click();
+      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
       const cand = await until(
         async () =>
           (await owner.client.pendingPairings()).pending.find(

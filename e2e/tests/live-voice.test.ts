@@ -395,8 +395,8 @@ describe.skipIf(!LIVE)('live dictation: real Grok, Anthropic and OpenAI through 
 
       const invite = await createPairingInvite(client, 'phone');
       await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this phone' }).click();
-      await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
+      await page.getByRole('button', { name: 'Pair this device' }).click();
+      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
       const cand = await until(
         async () =>
           (await client.pendingPairings()).pending.find((p) => p.pairing_id === invite.pairingId),

@@ -145,9 +145,9 @@ describe.skipIf(!chromiumPath)(
     it('pairs the phone through the real UI, with matching six-digit codes on both sides', async () => {
       const invite = await createPairingInvite(client, 'phone');
       await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this phone' }).click();
-      await page.getByText('Confirm this code on your computer').waitFor({ timeout: 20_000 });
-      const shown = (await page.locator('.big-code').innerText()).trim();
+      await page.getByRole('button', { name: 'Pair this device' }).click();
+      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
+      const shown = (await page.locator('.pair-digits').innerText()).replace(/\s/g, '');
       const cand = await until(
         async () =>
           (await client.pendingPairings()).pending.find((p) => p.pairing_id === invite.pairingId),
@@ -155,7 +155,7 @@ describe.skipIf(!chromiumPath)(
         'pending pairing',
       );
       // the desktop recomputes the code itself rather than trusting the relay
-      expect(await localShortCode(cand)).toBe(shown);
+      expect((await localShortCode(cand)).replace(/\s/g, '')).toBe(shown);
       await approveCandidate(client, cand);
       await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
       expect(page.url()).not.toContain('#'); // the invite secret is gone from the address bar
@@ -195,6 +195,13 @@ describe.skipIf(!chromiumPath)(
 
       await page.getByText('Ship the compact sidebar?').first().waitFor({ timeout: 30_000 });
       await page.getByText('Ship the compact sidebar?').first().click();
+      // An approval covers exactly the files the person was shown: look at each one before deciding.
+      const tabs = page.locator('.fx-thumb');
+      await tabs.first().waitFor({ timeout: 30_000 });
+      for (let i = 0; i < (await tabs.count()); i++) {
+        await tabs.nth(i).click();
+        await page.locator('.fx-inline-stage .fs-slide.is-active img').waitFor({ timeout: 30_000 });
+      }
       await page.getByRole('radio', { name: /Approve/ }).check();
       await page.getByRole('button', { name: 'Send decision' }).click();
 
