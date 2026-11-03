@@ -598,6 +598,7 @@ describe('decisions deploy', () => {
         PATH: '/usr/bin',
         npm_config_package: '@daintreehq/decisions-cli',
         npm_config_call: 'x',
+        CLOUDFLARE_ENV: 'staging',
       },
     });
     await deploy(t.ctx, {}, {}, t.deps);
@@ -605,6 +606,8 @@ describe('decisions deploy', () => {
       expect(c.env.npm_config_package).toBeUndefined();
       expect(c.env.npm_config_call).toBeUndefined();
       expect(c.env.PATH).toBe('/usr/bin');
+      // Only `decisions update` clears Wrangler's environment selection.
+      expect(c.env.CLOUDFLARE_ENV).toBe('staging');
     }
   });
 

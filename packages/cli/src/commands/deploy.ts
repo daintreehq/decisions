@@ -113,6 +113,94 @@ export const npxArgs = (wrangler: string, args: string[]) => [
 export const shown = (wrangler: string, args: string[]) =>
   ['npx', ...npxArgs(wrangler, args)].join(' ');
 
+/**
+ * Ambient variables `decisions update` clears, because they would make Wrangler act on a different
+ * Worker, environment or API host than the one the update read and showed, or authenticate with a
+ * different credential. `decisions deploy` leaves them as they are.
+ */
+const UPDATE_OVERRIDES = [
+  'CLOUDFLARE_ENV',
+  'WRANGLER_CI_OVERRIDE_NAME',
+  'WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST',
+  'CLOUDFLARE_API_BASE_URL',
+  'CF_API_BASE_URL',
+  'CLOUDFLARE_API_KEY',
+  'CLOUDFLARE_EMAIL',
+  'CF_API_KEY',
+  'CF_EMAIL',
+];
+
+/** The environment every Wrangler child process gets. */
+export function wranglerEnv(
+  ctx: Ctx,
+  accountId?: string,
+  forUpdate = false,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...ctx.env };
+  // Run as `npx -p @daintreehq/decisions-cli decisions deploy`, npm exports the package list to its
+  // children, and the nested `npx wrangler@…` would then run the CLI's package instead of Wrangler.
+  delete env.npm_config_package;
+  delete env.npm_config_call;
+  if (forUpdate) for (const k of UPDATE_OVERRIDES) delete env[k];
+  // Wrangler's debug log (terminal and ~/.wrangler/logs) includes request bodies, such as the
+  // secret upload, when sanitizing is turned off; keep it on whatever the user's shell says.
+  env.WRANGLER_LOG_SANITIZE = 'true';
+  if (accountId) env.CLOUDFLARE_ACCOUNT_ID = accountId;
+  return env;
+}
+
+export type WranglerRun = (
+  args: string[],
+  x?: { capture?: boolean; echo?: boolean; input?: string; env?: Record<string, string> },
+) => Promise<SpawnResult>;
+
+export const authModeFor = (ctx: Ctx, apiToken: boolean | undefined): AuthMode =>
+  apiToken ? 'token-prompt' : ctx.env.CLOUDFLARE_API_TOKEN ? 'token-env' : 'browser';
+
+/**
+ * Makes sure Wrangler is authenticated: a prompted or ambient API token (held in `env` and added to
+ * `secrets`), or Wrangler's own login, opening the browser only when `browserLogin` allows it.
+ * Resolves to the `wrangler whoami` result, or null when not logged in and the browser login was not
+ * allowed. With `whoArgs` (such as `whoami --json`, to read the accounts) that whoami runs instead,
+ * and again after a browser login so the result describes the new login.
+ */
+export async function logIn(
+  ctx: Ctx,
+  wr: WranglerRun,
+  auth: AuthMode,
+  env: Record<string, string | undefined>,
+  secrets: string[],
+  output: (r: SpawnResult) => string,
+  browserLogin = true,
+  whoArgs?: string[],
+): Promise<SpawnResult | null> {
+  if (auth === 'token-prompt') {
+    const token = (
+      await ctx.prompt('Cloudflare API token (input hidden): ', { secret: true })
+    ).trim();
+    if (!token) throw new CliError('no API token entered');
+    secrets.push(token);
+    env.CLOUDFLARE_API_TOKEN = token;
+  } else if (auth === 'token-env') {
+    secrets.push(ctx.env.CLOUDFLARE_API_TOKEN!);
+  }
+  let who = await wr(whoArgs ?? wranglerCommands.whoami());
+  const loggedIn = who.status === 0 && !/not authenticated|not logged in/i.test(output(who));
+  if (auth !== 'browser') {
+    if (!loggedIn) throw new CliError(`Cloudflare refused the API token:\n${output(who)}`);
+    ctx.out('    using the API token');
+  } else if (loggedIn) {
+    ctx.out('    already logged in');
+  } else {
+    if (!browserLogin) return null;
+    ctx.out('    a browser window opens to log in to Cloudflare');
+    const login = await wr(wranglerCommands.login(), { capture: false });
+    if (login.status !== 0) throw new CliError('Cloudflare login failed');
+    if (whoArgs) who = await wr(whoArgs);
+  }
+  return who;
+}
+
 export type AuthMode = 'browser' | 'token-env' | 'token-prompt';
 
 export type PlanStepId =
@@ -310,11 +398,7 @@ export async function deploy(
     }
   }
 
-  const auth: AuthMode = o.apiToken
-    ? 'token-prompt'
-    : ctx.env.CLOUDFLARE_API_TOKEN
-      ? 'token-env'
-      : 'browser';
+  const auth = authModeFor(ctx, o.apiToken);
   let plan = buildDeployPlan({ name, bucket, wrangler, auth, claim: o.claim === true });
   // A person at the terminal is asked the setup questions before anything is created.
   const guided = ctx.interactive === true;
@@ -337,15 +421,7 @@ export async function deploy(
 
   const spawn = deps.spawn ?? nodeSpawner;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const env: Record<string, string | undefined> = { ...ctx.env };
-  // Run as `npx -p @daintreehq/decisions-cli decisions deploy`, npm exports the package list to its
-  // children, and the nested `npx wrangler@…` would then run the CLI's package instead of Wrangler.
-  delete env.npm_config_package;
-  delete env.npm_config_call;
-  // Wrangler's debug log (terminal and ~/.wrangler/logs) includes request bodies, such as the
-  // secret upload, when sanitizing is turned off; keep it on whatever the user's shell says.
-  env.WRANGLER_LOG_SANITIZE = 'true';
-  if (o.accountId) env.CLOUDFLARE_ACCOUNT_ID = o.accountId;
+  const env = wranglerEnv(ctx, o.accountId);
 
   /** Values that must never be echoed back, even inside Wrangler's own error output. */
   const secrets: string[] = [];
@@ -363,15 +439,7 @@ export async function deploy(
     const at = (id: PlanStepId) => plan.findIndex((s) => s.id === id);
     const heading = (id: PlanStepId) => `\n[${at(id) + 1}] ${plan[at(id)]!.title}`;
     const step = (i: number) => say(`\n[${i + 1}] ${plan[i]!.title}`);
-    const wr = (
-      args: string[],
-      x: {
-        capture?: boolean;
-        echo?: boolean;
-        input?: string;
-        env?: Record<string, string>;
-      } = {},
-    ) => {
+    const wr: WranglerRun = (args, x = {}) => {
       say(`    $ ${shown(wrangler, args)}`);
       return spawn({
         cmd: 'npx',
@@ -396,30 +464,16 @@ export async function deploy(
     say(`    Wrangler ${v.stdout.trim().split('\n').pop()}`);
 
     step(1);
-    if (auth === 'token-prompt') {
-      const token = (
-        await ctx.prompt('Cloudflare API token (input hidden): ', { secret: true })
-      ).trim();
-      if (!token) throw new CliError('no API token entered');
-      secrets.push(token);
-      env.CLOUDFLARE_API_TOKEN = token;
-    } else if (auth === 'token-env') {
-      secrets.push(ctx.env.CLOUDFLARE_API_TOKEN!);
-    }
-    const whoArgs = guided ? wranglerCommands.whoamiJson() : wranglerCommands.whoami();
-    let who = await wr(whoArgs);
-    const loggedIn = who.status === 0 && !/not authenticated|not logged in/i.test(output(who));
-    if (auth !== 'browser') {
-      if (!loggedIn) throw new CliError(`Cloudflare refused the API token:\n${output(who)}`);
-      say('    using the API token');
-    } else if (loggedIn) {
-      say('    already logged in');
-    } else {
-      say('    a browser window opens to log in to Cloudflare');
-      const login = await wr(wranglerCommands.login(), { capture: false });
-      if (login.status !== 0) throw new CliError('Cloudflare login failed');
-      if (guided) who = await wr(whoArgs);
-    }
+    const who = (await logIn(
+      ctx,
+      wr,
+      auth,
+      env,
+      secrets,
+      output,
+      true,
+      guided ? wranglerCommands.whoamiJson() : undefined,
+    ))!;
 
     let answers: DeployAnswers | null = null;
     if (guided) {
@@ -712,6 +766,7 @@ function summary(
     lines.push(
       '',
       'The relay was already claimed, so nothing else is needed. Paired phones keep working.',
+      `To update it later, keep its settings and pick a compatible release: decisions update --url ${url}`,
     );
   } else if (s.claimedHere) {
     lines.push(

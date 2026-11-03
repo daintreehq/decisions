@@ -80,4 +80,12 @@ Optional. If you put Access in front of the Worker, allow the paths the installe
 
 ## Updating
 
-Run the deploy again with the newer CLI (`npx @daintreehq/decisions-cli@latest deploy`), or pull a new release and redeploy. Nothing updates itself and nothing is deployed on your behalf. The Worker and desktop check each other's protocol range; the app shows a banner when a new version is ready and never discards unsent answers.
+```bash
+npx @daintreehq/decisions-cli@latest update --url https://<your-worker>.workers.dev
+```
+
+`update` reads the relay's version and protocol range from the URL, finds the Worker and account behind it in Cloudflare (it asks you to pick when the URL is a domain it cannot match; `--name` and `--account-id` answer that up front), and picks the newest published release whose protocol range overlaps the one the caller supports. Daintree passes its own range with `--protocol 1-2`; the default is the CLI's. It shows the current and target versions with their release notes and what it keeps, and changes nothing until you confirm (`--yes` skips the question, `--dry-run` stops before it, `--to <version>` picks an exact release). Already current, or nothing compatible, changes nothing.
+
+The release is downloaded from npm, checked against the registry's integrity digest and its own manifest, and deployed as is with the exact Wrangler version it was built with. The Worker keeps its claim, paired devices, questions and answers (Durable Object storage), its bucket, its secrets, every variable with its current value (a release's defaults only fill in variables the Worker does not have yet), workers.dev and preview URL exposure, and observability, placement, limits, tail and Logpush settings. A Worker with bindings the release does not declare, or a different Durable Object class, is refused before anything changes. Afterwards it waits for the relay, and then its Durable Object, to report the new version (up to a few minutes) and runs `decisions doctor`; a failed update says which version the relay reports.
+
+Nothing updates itself and nothing is deployed on your behalf. The Worker and desktop check each other's protocol range; the app shows a banner when a new version is ready and never discards unsent answers.

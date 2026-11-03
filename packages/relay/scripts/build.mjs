@@ -6,6 +6,7 @@
  *   dist/app/**                 the phone app's static assets (a fresh `vite build`)
  *   dist/wrangler.json          the repository's wrangler.jsonc, pointed at the two above, `no_bundle`
  *   dist/manifest.json          SHA-256 and size of every file above, the version, the Wrangler version
+ *                               and the protocol range (package.json "decisions.protocol")
  *
  * The output is deterministic for a given commit (no timestamps, no absolute paths), because the CLI
  * embeds the SHA-256 of manifest.json at build time and refuses to deploy a bundle that differs.
@@ -95,6 +96,9 @@ const manifest = {
   schema: 1,
   name: pkg.name,
   version: pkg.version,
+  // `decisions update` picks a release by this range, read from the published package.json, and
+  // checks the downloaded manifest says the same.
+  protocol: pkg.decisions.protocol,
   wrangler: wranglerVersion,
   config: 'wrangler.json',
   files,
