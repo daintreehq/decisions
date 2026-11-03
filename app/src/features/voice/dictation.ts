@@ -26,6 +26,7 @@ import {
   type Span,
 } from './insertion.js';
 import { DictationSession, type VoiceLike } from './session.js';
+import { registerHandoffGuard } from '../../components/files/handoff.js';
 
 /**
  * The one owner of dictation in the app. It outlives the editor sheet, the file viewer and even the workspace, and
@@ -760,6 +761,14 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && dictation.isActive())
       void dictation.stop(MESSAGES.hidden);
+  });
+  // Opening a file outside Decisions first stops capture and saves its words (the files work asks for a fresh tap).
+  registerHandoffGuard({
+    busy: () => dictation.isActive(),
+    settle: async () => {
+      await dictation.stop();
+      await drafts.flushAll();
+    },
   });
   // An update reload first stops capture and makes every draft durable.
   app.registerUpdateGuard(async () => {

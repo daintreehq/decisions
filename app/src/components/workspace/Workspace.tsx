@@ -1,12 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ComponentType,
-  type ReactNode,
-  type RefObject,
-} from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { app } from '../../app/controller.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { navigate } from '../../app/router.js';
@@ -18,7 +10,6 @@ import {
   formatBytes,
   verdict as computeVerdict,
   type ComposeMode,
-  type EvidenceState,
   type FieldId,
 } from '../../domain/compose.js';
 import type { QuestionView } from '../../domain/model.js';
@@ -38,7 +29,13 @@ import { dictation, MESSAGES, useDictation, type Binding } from '../../features/
 import { announce } from '../../lib/announce.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, ageLabel, dueLabel, momentLabel } from '../../lib/time.js';
-import { AttachmentGallery } from '../AttachmentGallery.js';
+import {
+  AttachmentGallery,
+  NO_REVIEW,
+  type GalleryHandle,
+  type ReviewState,
+} from '../AttachmentGallery.js';
+import { ActivityTimeline } from '../history/ActivityTimeline.js';
 import { SafeText } from '../SafeText.js';
 import {
   ArrowRight,
@@ -70,18 +67,9 @@ import { Sheet } from './Sheet.js';
 import { useKeyboardInset } from './useKeyboardInset.js';
 import { WorkspaceHeader, type MenuItem } from './WorkspaceHeader.js';
 
-/** The gallery's review report; `presented` arrives with the file viewer work (verified and actually shown). */
-type Review = EvidenceState & { digests: string[] };
-interface GalleryHandle {
-  showFirstUnreviewed(): void;
-}
-type GalleryProps = {
-  view: QuestionView;
-  onReview: (s: Review) => void;
-  handleRef?: RefObject<GalleryHandle | null>;
-};
-const Gallery = AttachmentGallery as unknown as ComponentType<GalleryProps>;
-const NO_REVIEW: Review = { digests: [], total: 0, loaded: 0, expired: 0, failed: 0 };
+/** The gallery's review report: `digests` are the files both verified and actually presented. */
+type Review = ReviewState;
+const Gallery = AttachmentGallery;
 
 /** The question workspace for `/q/:id`. Keyed by id, so another question is always a fresh workspace. */
 export function Workspace({ id }: { id: string }) {
@@ -99,6 +87,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<GalleryHandle | null>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
   useKeyboardInset(rootRef);
   const all = useQuestions();
   const dictAll = useDictation();
@@ -438,6 +427,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     label: 'Copy question ID',
     onSelect: () => void navigator.clipboard?.writeText(id).catch(() => undefined),
   });
+  if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
   if (canCorrect && !inCorrection) menu.push({ label: 'Change answer', onSelect: startCorrection });
 
   /* ---------- dock ---------- */
@@ -794,6 +784,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         }}
         menu={menu}
       />
+      <Sheet
+        open={activityOpen}
+        title="Activity"
+        onClose={() => setActivityOpen(false)}
+        className="activity-sheet"
+      >
+        {activityOpen && <ActivityTimeline view={view} now={now} />}
+      </Sheet>
       <div className="ws-body" ref={bodyRef}>
         <article className="ws-column" aria-labelledby={content ? 'q-title' : undefined}>
           {!verified && <TrustState view={view} headingRef={headingRef} />}

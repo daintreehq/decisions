@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Link } from '../../app/router.js';
+import { backLabel, backTarget, goBack } from '../../app/listState.js';
 import { ConnectionPill } from '../Shell.js';
 import { ChevronLeft, MoreIcon } from '../Icons.js';
 import { Menu } from './Sheet.js';
@@ -23,8 +23,6 @@ export function WorkspaceHeader({
   showExcerpt,
   onExcerpt,
   menu,
-  backTo = '/',
-  backLabel = 'Questions',
 }: {
   project: string;
   machine: string;
@@ -34,15 +32,25 @@ export function WorkspaceHeader({
   showExcerpt?: boolean;
   onExcerpt?: () => void;
   menu?: MenuItem[];
-  backTo?: string;
-  backLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // Back returns to where the question was opened from (Questions, History…), restoring that list.
+  const label = backLabel();
   return (
     <header className="ws-head">
-      <Link to={backTo} className="ws-back" aria-label={`Back to ${backLabel.toLowerCase()}`}>
+      <a
+        href={backTarget()}
+        className="ws-back"
+        aria-label={`Back to ${label}`}
+        title={`Back to ${label}`}
+        onClick={(e) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+          e.preventDefault();
+          goBack();
+        }}
+      >
         <ChevronLeft size={22} />
-      </Link>
+      </a>
       <div className="ws-id">
         {showExcerpt && excerpt ? (
           <button type="button" className="ws-excerpt" onClick={onExcerpt}>
