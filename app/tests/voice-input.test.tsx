@@ -660,6 +660,31 @@ describe('a passage belongs to the revision it was reviewed against', () => {
     expect(t.d.getState().phase).toBe('idle');
     expect(t.mic.stops).toBe(1);
   });
+
+  it('Review update during a Stop that will clean up still bypasses the cleanup', async () => {
+    const t = rig();
+    const b = bindingFor();
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first');
+    const stopping = t.d.stop(); // with cleanup, as a revision change starts it
+    const rebinding = t.d.rebind(b.key, 1); // Review update, while that Stop is finishing
+    await act(() => stopping);
+    await act(() => rebinding);
+    await flush();
+    const d = drafts.get(b.key)!;
+    expect(d.revision).toBe(1);
+    expect(d.text).toBe('first');
+    // Send is not held by a cleanup for the old revision.
+    expect(t.d.busyFor(b.key)).toBe(false);
+    expect(t.d.getState().phase).toBe('idle');
+    // A cleanup that answers later changes nothing.
+    if (t.cleanup.gate) await act(async () => t.cleanup.gate!.resolve(cleaned('First.')));
+    await flush();
+    expect(text(b)).toBe('first');
+    expect(t.d.busyFor(b.key)).toBe(false);
+  });
 });
 
 describe('unpairing and revocation', () => {

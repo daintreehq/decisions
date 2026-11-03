@@ -771,10 +771,14 @@ export class DictationController {
   async rebind(key: string, revision: number): Promise<void> {
     const b = this.state.binding;
     if (b?.key === key) {
+      // A Stop already finishing keeps its own options, so it may still start a cleanup: checked again below.
       if (this.isActive()) await this.stop(undefined, { cleanup: false });
-      else if (this.state.phase === 'cleaning') {
+      const now = this.state.binding;
+      if (this.state.phase === 'cleaning' && now?.key === key) {
         this.cleanGen++;
-        this.set({ ...IDLE, binding: b });
+        this.cleanAbort?.abort();
+        this.cleanAbort = null;
+        this.set({ ...IDLE, binding: now });
       }
     }
     drafts.rebind(key, revision);
