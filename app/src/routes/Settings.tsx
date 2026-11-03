@@ -5,7 +5,7 @@ import { Link } from '../app/router.js';
 import { ConfirmDialog } from '../components/Dialog.js';
 import { VoiceDisclosure } from '../components/VoiceDisclosure.js';
 import {
-  currentSubscription,
+  pushIsOn,
   disablePush,
   enablePush,
   isIos,
@@ -37,8 +37,8 @@ function PushSection() {
 
   useEffect(() => {
     if (support.ok)
-      void currentSubscription()
-        .then((s) => setSubscribed(!!s))
+      void pushIsOn(app.getRelay())
+        .then(setSubscribed)
         .catch(() => setSubscribed(false));
   }, [support.ok]);
 

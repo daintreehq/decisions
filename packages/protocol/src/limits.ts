@@ -27,6 +27,9 @@ export const LIMITS = {
   voiceTicketTtlMs: 30 * 1000,
   voiceMaxSessionMs: 5 * 60 * 1000,
   voiceCorrectionChars: 16_000,
+  /** The question context a cleanup request carries; the cleanup keeps only the newest 3000 characters anyway. */
+  voiceCleanupContextChars: 3_000,
+  voiceCleanupPrecedingChars: 500,
   requestSkewMs: 2 * 60 * 1000,
   nonceTtlMs: 10 * 60 * 1000,
   /** A finite question expiry is at most this far after the relay receives the question (or its reopen). */
@@ -43,3 +46,14 @@ export const DEFAULTS = {
   jobBackoffBaseMs: 1_000,
   jobBackoffMaxMs: 5 * 60 * 1000,
 } as const;
+
+/**
+ * How long one dictation cleanup may take, retry included: 7 s for a short passage and from 15 s for a long one,
+ * plus 4 s when the model reasons first (Daintree desktop's budget). Shared so the phone waits a little longer
+ * than the Worker does.
+ */
+export function voiceCleanupTimeoutMs(chars: number, reasoning: boolean): number {
+  const extra = reasoning ? 4_000 : 0;
+  if (chars < 140) return 7_000 + extra;
+  return Math.min(60_000, 15_000 + Math.max(0, chars - 1000) * 5 + extra);
+}

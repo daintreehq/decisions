@@ -45,9 +45,9 @@ export function PrivacyPage() {
             <tr>
               <th scope="row">Dictation providers (only if you turn dictation on)</th>
               <td>
-                The audio you dictate and the transcript, passed through your relay. This part is{' '}
-                <strong>not</strong> end-to-end encrypted. It is off until you opt in, and you can
-                type instead.
+                The audio you dictate, the transcript, and the question you are answering (for the
+                clean-up), passed through your relay. This part is <strong>not</strong> end-to-end
+                encrypted. It is off until you opt in, and you can type instead.
               </td>
             </tr>
             <tr>

@@ -1566,9 +1566,3 @@ td {
     scroll-behavior: auto !important;
   }
 }
-
-.suggestion .draft-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-weight: 400;
-}

@@ -7273,8 +7273,33 @@
                     "type": "string",
                     "maxLength": 8000
                   },
-                  "option_labels": {
+                  "context": {
+                    "type": "string",
+                    "maxLength": 3000
+                  },
+                  "options": {
                     "default": [],
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "label": {
+                          "type": "string",
+                          "maxLength": 240
+                        },
+                        "description": {
+                          "type": "string",
+                          "maxLength": 1000
+                        }
+                      },
+                      "required": [
+                        "label"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "option_labels": {
                     "maxItems": 12,
                     "type": "array",
                     "items": {
@@ -7282,15 +7307,29 @@
                       "maxLength": 240
                     }
                   },
-                  "keyterms": {
-                    "default": [],
-                    "maxItems": 100,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 50
-                    }
+                  "asked_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                  },
+                  "project_label": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "preceding_text": {
+                    "type": "string",
+                    "maxLength": 500
+                  },
+                  "transcriber": {
+                    "type": "string",
+                    "enum": [
+                      "xai",
+                      "openai"
+                    ]
+                  },
+                  "language": {
+                    "type": "string",
+                    "maxLength": 16
                   }
                 },
                 "required": [
@@ -7299,8 +7338,7 @@
                   "consent",
                   "raw_transcript",
                   "question",
-                  "option_labels",
-                  "keyterms"
+                  "options"
                 ],
                 "additionalProperties": false
               }

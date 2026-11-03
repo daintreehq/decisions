@@ -37,6 +37,8 @@ describe('verified answers reach the exact pane', () => {
     const text = sink.typed[0]!.text;
     expect(text).toContain('[DAINTREE DECISION ANSWER]');
     expect(text).toContain(`question_id: ${qid}`);
+    // The question it answers is quoted from the sealed local copy.
+    expect(text).toContain('question: Ship it?');
     expect(text).toContain('source: human');
     expect(text).toContain('choice: approve');
     expect(text).toContain('comment: Looks good');

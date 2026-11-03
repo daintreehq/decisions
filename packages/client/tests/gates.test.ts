@@ -241,6 +241,49 @@ describe('a gate with choices shapes the question the phone sees', () => {
     });
   });
 
+  it('an approval without options offers Approve and Reject, and still takes a note', async () => {
+    const { bridge, relay } = await setupBridge();
+    const r = await bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Deploy the migration now?', kind: 'approval' },
+    });
+    await bridge.pump();
+    expect(await relay.decryptQuestion(r.questionId)).toMatchObject({
+      kind: 'approval',
+      allow_text: true,
+      options: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'reject', label: 'Reject' },
+      ],
+    });
+  });
+
+  it('the default Approve and Reject are held to the gates like any other options', async () => {
+    const policy = new PolicyRegistry();
+    const gate = { minRequirement: 'human-required', policyVersion: 1, allowText: false } as const;
+    policy.register({ ...gate, gateId: 'choice-only' });
+    policy.register({ ...gate, gateId: 'approve-only', allowedOptionIds: ['approve'] });
+    const { bridge, relay } = await setupBridge({ policy });
+    const approval = (workflow_gate_id: string) =>
+      bridge.registerQuestion({
+        origin: origin({ workflow_gate_id }),
+        input: { question: 'Deploy the migration now?', kind: 'approval' },
+      });
+    // A choice-only gate takes the defaults as the choice it needs.
+    const r = await approval('choice-only');
+    await bridge.pump();
+    expect(await relay.decryptQuestion(r.questionId)).toMatchObject({
+      kind: 'approval',
+      allow_text: false,
+      options: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'reject', label: 'Reject' },
+      ],
+    });
+    // A gate that never permits "reject" refuses the defaults rather than publishing it.
+    await expect(approval('approve-only')).rejects.toThrow(/"reject" is not permitted/);
+  });
+
   it('without a gate, questions still accept free text', async () => {
     const { bridge, relay } = await setupBridge();
     const r = await bridge.registerQuestion({ origin: origin(), input: { question: 'q' } });

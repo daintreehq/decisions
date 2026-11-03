@@ -79,6 +79,12 @@ export function validateOptions(input: AskHumanInput, gate: WorkflowGate | undef
   }
 }
 
+/** What an approval offers when the agent names no options of its own. */
+export const APPROVAL_OPTIONS = [
+  { id: 'approve', label: 'Approve' },
+  { id: 'reject', label: 'Reject' },
+] as const;
+
 /** The options and answer rules a question is published with, once its trusted gates are applied. */
 export interface GatedShape {
   options: NonNullable<AskHumanInput['options']>;
@@ -130,6 +136,11 @@ export function shapeForGates(
       options = g.choices.map((c) => ({ ...c }));
     }
   }
+  const bindArtifacts = active.some((g) => g.bindArtifacts === true);
+  // A yes/no the agent didn't spell out: without options the phone could only offer a text box. Filled in
+  // before the gate checks, so the defaults are held to them like any other options.
+  if (options.length === 0 && (input.kind === 'approval' || bindArtifacts))
+    options = APPROVAL_OPTIONS.map((o) => ({ ...o }));
   // Choices one gate supplies must still be permitted by every other gate's protected option ids.
   for (const g of active) {
     if (!g.allowedOptionIds) continue;
@@ -141,7 +152,6 @@ export function shapeForGates(
       );
   }
   const allowText = active.every((g) => gateAllowsText(g));
-  const bindArtifacts = active.some((g) => g.bindArtifacts === true);
   if (!allowText && options.length === 0) {
     throw new BridgeError(
       'validation_error',

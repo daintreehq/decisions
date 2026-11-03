@@ -39,6 +39,9 @@ export async function handleVoiceSocket(request: Request, env: Env, stub: Stub):
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
   server.accept();
+  // Audio frames must arrive as ArrayBuffers: from compatibility date 2026 workerd hands binary messages over as
+  // Blobs by default, and a Blob forwarded upstream goes out as the text "[object Blob]".
+  server.binaryType = 'arraybuffer';
 
   const started = Date.now();
   let audioBytes = 0;
@@ -102,7 +105,13 @@ export async function handleVoiceSocket(request: Request, env: Env, stub: Stub):
 
   void (async () => {
     try {
-      const up = p.provider === 'xai' ? await connectXai(env, p) : await connectOpenAI(env);
+      let up: WebSocket | null;
+      let first: string | null = null;
+      if (p.provider === 'xai') {
+        const x = await connectXai(env, p, () => ended);
+        up = x?.ws ?? null;
+        first = x?.first ?? null;
+      } else up = await connectOpenAI(env);
       if (!up) return end(1011, 'provider unavailable');
       if (ended) {
         // The client left (or the deadline fired) while we were connecting: do not leave a session open upstream.
@@ -121,6 +130,7 @@ export async function handleVoiceSocket(request: Request, env: Env, stub: Stub):
       });
       up.addEventListener('close', () => end(1000, 'closed'));
       up.addEventListener('error', () => end(1011, 'provider error'));
+      if (first) b.upstream(first);
       for (const frame of prebuffer.splice(0)) handle(frame);
     } catch {
       end(1011, 'provider unavailable');
@@ -140,48 +150,283 @@ function send(ws: WebSocket, o: unknown): void {
 
 /* ---------------- xAI: pass-through with scrubbed errors ---------------- */
 
-async function connectXai(env: Env, p: TicketPayload): Promise<WebSocket | null> {
-  if (!env.XAI_API_KEY) return null;
-  const u = new URL('https://api.x.ai/v1/stt');
-  u.searchParams.set('sample_rate', '16000');
-  u.searchParams.set('encoding', 'pcm');
-  u.searchParams.set('interim_results', 'true');
-  if (p.language) {
-    u.searchParams.set('language', p.language);
-    u.searchParams.set('format', 'true');
+// Daintree desktop's Grok tuning (electron/services/voice/grokTranscriptionTuning.ts and
+// GrokTranscriptionProvider.ts): its model, a 300 ms endpoint, `format` only for a language xAI formats, and the
+// keyterm limits with a full, trimmed, none ladder when xAI refuses a session over its terms.
+const GROK_MODEL = 'grok-voice-transcribe-2.0';
+const GROK_ENDPOINTING_MS = 300;
+const GROK_FORMAT_LANGUAGES = new Set([
+  'ar',
+  'de',
+  'en',
+  'es',
+  'fr',
+  'ja',
+  'pt',
+  'ru',
+  'sv',
+  'vi',
+  'zh',
+]);
+const MAX_GROK_KEYTERMS = 100;
+const MAX_GROK_KEYTERM_LENGTH = 50;
+// The keyterms' share of the query string, as encoded, keeping the URL under the common 8 KiB request-line limit.
+const MAX_GROK_KEYTERM_QUERY_LENGTH = 6_000;
+const TRIMMED_RETRY_KEYTERMS = 20;
+const XAI_READY_TIMEOUT_MS = 10_000;
+
+type KeytermAttempt = 'full' | 'trimmed' | 'none';
+
+/** The keyterms that fit xAI's limits, in priority order. A term too long is skipped, not the end of the list. */
+export function sanitizeGrokKeyterms(keyterms: readonly string[]): string[] {
+  const out: string[] = [];
+  let encoded = 0;
+  for (const raw of keyterms) {
+    const term = raw.trim();
+    if (!term || term.length > MAX_GROK_KEYTERM_LENGTH) continue;
+    if (out.length >= MAX_GROK_KEYTERMS) break;
+    const len = new URLSearchParams([['keyterm', term]]).toString().length + 1;
+    if (encoded + len > MAX_GROK_KEYTERM_QUERY_LENGTH) continue;
+    out.push(term);
+    encoded += len;
   }
-  for (const k of p.keyterms.slice(0, 100)) u.searchParams.append('keyterm', k.slice(0, 50));
-  const res = await fetch(u.toString(), {
+  return out;
+}
+
+export function xaiUrl(p: Pick<TicketPayload, 'language'>, keyterms: readonly string[]): string {
+  const params = new URLSearchParams({
+    model: GROK_MODEL,
+    encoding: 'pcm',
+    sample_rate: '16000',
+    interim_results: 'true',
+    endpointing: String(GROK_ENDPOINTING_MS),
+  });
+  // Left out, xAI detects the language itself.
+  if (p.language) {
+    params.set('language', p.language);
+    if (GROK_FORMAT_LANGUAGES.has(p.language)) params.set('format', 'true');
+  }
+  for (const k of keyterms) params.append('keyterm', k);
+  return `https://api.x.ai/v1/stt?${params.toString()}`;
+}
+
+/** The next rung of the keyterm ladder after a refusal, or null when the refusal can't be about the terms. */
+export function nextKeytermAttempt(
+  attempt: KeytermAttempt,
+  sent: number,
+  available: number,
+): KeytermAttempt | null {
+  if (attempt === 'none' || sent === 0) return null;
+  return attempt === 'full' && available > TRIMMED_RETRY_KEYTERMS ? 'trimmed' : 'none';
+}
+
+type XaiOpen = { kind: 'ready'; ws: WebSocket; first: string } | { kind: 'refused' | 'failed' };
+
+/** Opens one xAI session and waits for `transcript.created`, which is when it has accepted the parameters. */
+async function openXai(env: Env, url: string): Promise<XaiOpen> {
+  const res = await fetch(url, {
+    // A provider key never follows a redirect anywhere.
+    redirect: 'manual',
     headers: { Upgrade: 'websocket', Authorization: `Bearer ${env.XAI_API_KEY}` },
   });
   const ws = res.webSocket;
-  if (!ws) return null;
+  // 400 is bad parameters, most plausibly the terms.
+  if (!ws) return { kind: res.status === 400 ? 'refused' : 'failed' };
   ws.accept();
-  return ws;
+  return new Promise<XaiOpen>((resolve) => {
+    const settle = (v: XaiOpen) => {
+      clearTimeout(timer);
+      ws.removeEventListener('message', onMessage);
+      ws.removeEventListener('close', onGone);
+      ws.removeEventListener('error', onGone);
+      if (v.kind !== 'ready') {
+        try {
+          ws.close(1000, 'retry');
+        } catch {
+          /* already closed */
+        }
+      }
+      resolve(v);
+    };
+    const onMessage = (ev: MessageEvent) => {
+      if (typeof ev.data !== 'string') return;
+      let m: { type?: string };
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      if (m.type === 'transcript.created') settle({ kind: 'ready', ws, first: ev.data });
+      else if (m.type === 'error') settle({ kind: 'refused' });
+    };
+    const onGone = () => settle({ kind: 'failed' });
+    const timer = setTimeout(() => settle({ kind: 'failed' }), XAI_READY_TIMEOUT_MS);
+    ws.addEventListener('message', onMessage);
+    ws.addEventListener('close', onGone);
+    ws.addEventListener('error', onGone);
+  });
+}
+
+async function connectXai(
+  env: Env,
+  p: TicketPayload,
+  gone: () => boolean,
+): Promise<{ ws: WebSocket; first: string } | null> {
+  if (!env.XAI_API_KEY) return null;
+  const sanitized = sanitizeGrokKeyterms(p.keyterms);
+  let attempt: KeytermAttempt = 'full';
+  for (;;) {
+    // A client that left during a refused attempt gets no further attempts made on its behalf.
+    if (gone()) return null;
+    const terms: string[] =
+      attempt === 'none'
+        ? []
+        : attempt === 'trimmed'
+          ? sanitized.slice(0, TRIMMED_RETRY_KEYTERMS)
+          : sanitized;
+    const r = await openXai(env, xaiUrl(p, terms));
+    if (r.kind === 'ready') return { ws: r.ws, first: r.first };
+    const next: KeytermAttempt | null =
+      r.kind === 'refused' ? nextKeytermAttempt(attempt, terms.length, sanitized.length) : null;
+    if (!next) return null;
+    attempt = next;
+  }
+}
+
+/*
+ * Grok's stream, as Daintree's GrokTranscriptionProvider reads it: an `is_final` result without `speech_final` is a
+ * locked chunk of the utterance in progress, and the `speech_final` result restates the whole utterance. Passed
+ * through as they come, the phone would keep the chunks and the restatement, and the words twice. So chunks go to
+ * the phone as preview text, and the utterance final lands once, with any chunk it left out kept ahead of it.
+ */
+
+// A result restates locked chunks when this share of their words opens it, in order, and at least this share of
+// the first chunk's words (Daintree's RESTATED_WORD_SHARE and RESTATED_MIN_WORD_SHARE).
+const RESTATED_WORD_SHARE = 0.75;
+const RESTATED_MIN_WORD_SHARE = 0.5;
+// Two results belong to the same stretch of audio when one starts this close to where the other ends.
+const RESULT_TIMING_TOLERANCE_SECONDS = 0.1;
+const WORD_BOUNDARY_EPSILON_SECONDS = 0.001;
+
+function spokenWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+}
+
+/** How many words `a` and `b` share in order (their longest common subsequence). */
+function sharedWordCount(a: readonly string[], b: readonly string[]): number {
+  let previous = new Array<number>(b.length + 1).fill(0);
+  for (const word of a) {
+    const current = [0];
+    for (let j = 0; j < b.length; j++) {
+      current.push(word === b[j] ? previous[j]! + 1 : Math.max(previous[j + 1]!, current[j]!));
+    }
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+function opensWith(words: readonly string[], said: readonly string[], share: number): boolean {
+  const opening = words.slice(0, said.length + Math.ceil(said.length / 4) + 2);
+  return sharedWordCount(said, opening) >= share * said.length;
+}
+
+interface Chunk {
+  text: string;
+  /** Where its audio ends, in seconds from the session start; null when untimed. */
+  end: number | null;
+}
+
+/** The locked chunks an utterance final does not restate, which land ahead of it. */
+export function chunksNotRestated(chunks: readonly Chunk[], final: string): Chunk[] {
+  const words = spokenWords(final);
+  for (let from = 0; from < chunks.length; from++) {
+    const restated = chunks.slice(from).map((c) => spokenWords(c.text));
+    if (
+      opensWith(words, restated[0]!, RESTATED_MIN_WORD_SHARE) &&
+      opensWith(words, restated.flat(), RESTATED_WORD_SHARE)
+    ) {
+      return chunks.slice(0, from);
+    }
+  }
+  return [...chunks];
+}
+
+interface XaiResult {
+  type?: string;
+  text?: string;
+  is_final?: boolean;
+  speech_final?: boolean;
+  start?: number;
+  duration?: number;
+}
+
+const seconds = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+
+/** Turns xAI events into the events the phone reads: one final per utterance, chunks as its preview. */
+export function xaiTranscriptNormalizer(emit: (event: Record<string, unknown>) => void) {
+  let locked: Chunk[] = [];
+  const join = (parts: readonly string[]) => parts.filter(Boolean).join(' ').trim();
+  const preview = (parts: readonly string[]) =>
+    emit({ type: 'transcript.partial', text: join(parts), is_final: false, speech_final: false });
+  const final = (text: string) => {
+    if (text) emit({ type: 'transcript.partial', text, is_final: true, speech_final: true });
+  };
+  return (m: XaiResult) => {
+    if (m.type === 'transcript.created') emit({ type: 'transcript.created' });
+    else if (m.type === 'transcript.partial') {
+      const text = String(m.text ?? '').trim();
+      const start = seconds(m.start);
+      const duration = seconds(m.duration);
+      const end = start !== null && duration !== null ? start + duration : null;
+      if (m.speech_final) {
+        final(join([...chunksNotRestated(locked, text).map((c) => c.text), text]));
+        locked = [];
+      } else if (m.is_final) {
+        if (text) {
+          // A later chunk final over the same audio replaces the one before it.
+          const before =
+            end === null
+              ? locked
+              : locked.filter((c) => c.end === null || c.end + WORD_BOUNDARY_EPSILON_SECONDS < end);
+          locked = [...before, { text, end }];
+        }
+        preview(locked.map((c) => c.text));
+      } else {
+        // An interim that restates the utterance so far starts before the chunks end, so none go ahead of it.
+        const before =
+          start === null
+            ? locked
+            : locked.filter(
+                (c) => c.end === null || c.end <= start + RESULT_TIMING_TOLERANCE_SECONDS,
+              );
+        preview([...before.map((c) => c.text), text]);
+      }
+    } else if (m.type === 'transcript.done') {
+      // An utterance the stream ended before completing keeps the words its chunks locked.
+      final(join(locked.map((c) => c.text)));
+      locked = [];
+      emit({ type: 'transcript.done', text: String(m.text ?? '') });
+    } else if (m.type === 'error') emit({ type: 'error', message: 'provider_error' });
+  };
 }
 
 function xaiBridge(client: WebSocket, up: WebSocket): Bridge {
+  const normalize = xaiTranscriptNormalizer((event) => send(client, event));
   return {
     control: (type) => send(up, { type }),
     audio: (buf) => up.send(buf),
     upstream: (data) => {
-      let m: { type?: string; text?: string; is_final?: boolean; speech_final?: boolean };
+      let m: XaiResult;
       try {
         m = JSON.parse(data);
       } catch {
         return;
       }
-      if (m.type === 'transcript.created') send(client, { type: 'transcript.created' });
-      else if (m.type === 'transcript.partial') {
-        send(client, {
-          type: 'transcript.partial',
-          text: String(m.text ?? ''),
-          is_final: Boolean(m.is_final),
-          speech_final: Boolean(m.speech_final),
-        });
-      } else if (m.type === 'transcript.done') {
-        send(client, { type: 'transcript.done', text: String(m.text ?? '') });
-      } else if (m.type === 'error') send(client, { type: 'error', message: 'provider_error' });
+      normalize(m);
     },
   };
 }
@@ -191,6 +436,7 @@ function xaiBridge(client: WebSocket, up: WebSocket): Bridge {
 async function connectOpenAI(env: Env): Promise<WebSocket | null> {
   if (!env.OPENAI_API_KEY) return null;
   const res = await fetch('https://api.openai.com/v1/realtime?intent=transcription', {
+    redirect: 'manual',
     headers: { Upgrade: 'websocket', Authorization: `Bearer ${env.OPENAI_API_KEY}` },
   });
   const ws = res.webSocket;

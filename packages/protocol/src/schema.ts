@@ -483,12 +483,31 @@ export const VoiceCorrectBody = z.object({
   provider: z.enum(['anthropic', 'openai']),
   consent: z.literal(true),
   raw_transcript: z.string().min(1).max(LIMITS.voiceCorrectionChars),
+  /**
+   * The question being answered, its context and its options: the cleanup reads them as the agent's last
+   * reply, so a short "yeah, the second one" reads right against what it answers. Never instructions.
+   */
   question: z.string().max(LIMITS.questionChars).default(''),
-  option_labels: z
-    .array(z.string().max(LIMITS.optionLabelChars))
+  context: z.string().max(LIMITS.voiceCleanupContextChars).optional(),
+  options: z
+    .array(
+      z.object({
+        label: z.string().max(LIMITS.optionLabelChars),
+        description: z.string().max(LIMITS.optionDescriptionChars).optional(),
+      }),
+    )
     .max(LIMITS.maxOptions)
     .default([]),
-  keyterms: z.array(z.string().min(1).max(50)).max(100).default([]),
+  /** @deprecated A PWA cached from before `options` sends the bare labels; read only when `options` is empty. */
+  option_labels: z.array(z.string().max(LIMITS.optionLabelChars)).max(LIMITS.maxOptions).optional(),
+  /** When the question was asked, so the cleanup knows roughly how old it is. */
+  asked_at: IsoTime.optional(),
+  project_label: z.string().max(200).optional(),
+  /** The answer text just before the dictated passage, so a passage that continues a sentence is not recased. */
+  preceding_text: z.string().max(LIMITS.voiceCleanupPrecedingChars).optional(),
+  /** Which speech-to-text provider wrote the transcript; the cleanup is told its habits. */
+  transcriber: z.enum(['xai', 'openai']).optional(),
+  language: z.string().max(16).optional(),
 });
 
 /** Strict result contract for AI correction (mirrors Daintree desktop dictation correction). */

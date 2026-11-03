@@ -1,15 +1,22 @@
-import { CorrectionResult, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import {
+  CorrectionResult,
+  LIMITS,
+  PROTOCOL_VERSION,
+  voiceCleanupTimeoutMs,
+} from '@daintreehq/decisions-protocol';
 
 /**
- * Whole-passage AI clean-up of a dictated answer. The contract mirrors Daintree desktop dictation:
- * strict schema, any doubt keeps the raw text, unsure words are flagged rather than guessed.
+ * Whole-passage AI clean-up of a dictated answer, as Daintree desktop dictation does it: one request after the
+ * person stops, strict schema, and the clean-up lands as written. There is no meaning guard; the person reads the
+ * cleaned text in the editor, can go back to exactly what they said in one tap, and nothing is sent until they
+ * press Submit. Any failure keeps the raw text.
  *
  * OFFSET CONVENTION: `uncertain_spans[].start/end` are UTF-16 code-unit offsets (JavaScript string indices,
  * end exclusive) into `corrected_text`, and `corrected_text.slice(start, end)` is the model's current choice.
  */
 
 export type KeptRawReason =
-  'timeout' | 'provider-error' | 'malformed' | 'editor-changed' | 'drift' | 'unavailable';
+  'timeout' | 'provider-error' | 'malformed' | 'editor-changed' | 'unavailable';
 
 export type CorrectionOutcome =
   | {
@@ -17,14 +24,12 @@ export type CorrectionOutcome =
       result: CorrectionResult;
       model: string;
       spans: Span[];
-      /**
-       * True only for conservative changes (token order and negation placement preserved). Anything else is a
-       * suggestion the human must accept explicitly; it is never written over what they dictated on its own.
-       */
-      autoApply: boolean;
-      reviewReason?: string;
+      /** False when the clean-up found nothing to change. */
+      changed: boolean;
+      /** The model said at least one edit was a guess. */
+      lowConfidence: boolean;
     }
-  | { kind: 'kept-raw'; reason: KeptRawReason; detail?: string };
+  | { kind: 'kept-raw'; reason: KeptRawReason };
 
 export interface Span {
   start: number;
@@ -32,132 +37,6 @@ export interface Span {
   raw: string;
   candidate: string;
   reason: string;
-}
-
-const POLARITY_WORDS = new Set([
-  'yes',
-  'no',
-  'nope',
-  'not',
-  'never',
-  'approve',
-  'approved',
-  'approves',
-  'reject',
-  'rejected',
-  'rejects',
-  'without',
-  'dont',
-  'cant',
-  'wont',
-  'cannot',
-]);
-
-function normalizeForPolarity(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[’‘]/g, "'")
-    .replace(/\bcan't\b/g, 'can not')
-    .replace(/\bwon't\b/g, 'will not')
-    .replace(/\bcannot\b/g, 'can not')
-    .replace(/n't\b/g, ' not');
-}
-
-export function polarityCounts(s: string): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const w of normalizeForPolarity(s).match(/[a-z]+/g) ?? []) {
-    if (POLARITY_WORDS.has(w)) counts[w] = (counts[w] ?? 0) + 1;
-  }
-  return counts;
-}
-
-const TOKEN = /[A-Za-z0-9_][A-Za-z0-9_./:\\-]*/g;
-
-function tokens(s: string): string[] {
-  return (s.match(TOKEN) ?? []).map((t) => t.replace(/[.:\\/-]+$/, ''));
-}
-
-function identifierLike(t: string): boolean {
-  return /\d/.test(t) || /[_./:\\]/.test(t) || /[a-z][A-Z]/.test(t);
-}
-
-/** Returns a reason when the corrected text drifted from what was actually said; null when it is safe. */
-export function detectDrift(
-  raw: string,
-  corrected: string,
-  keyterms: readonly string[],
-): string | null {
-  const rawTrim = raw.trim();
-  if (rawTrim.length === 0) return 'nothing was dictated';
-  const ratio = corrected.trim().length / rawTrim.length;
-  if (ratio < 0.5 || ratio > 2.0) return 'length changed too much';
-
-  const a = polarityCounts(raw);
-  const b = polarityCounts(corrected);
-  for (const w of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if ((a[w] ?? 0) !== (b[w] ?? 0)) return `polarity word "${w}" changed`;
-  }
-
-  const known = new Set<string>();
-  for (const t of tokens(raw)) known.add(t.toLowerCase());
-  for (const k of keyterms) {
-    known.add(k.toLowerCase());
-    for (const t of tokens(k)) known.add(t.toLowerCase());
-  }
-  for (const t of tokens(corrected)) {
-    if (identifierLike(t) && !known.has(t.toLowerCase())) return `new identifier or number "${t}"`;
-  }
-  return null;
-}
-
-function wordTokens(s: string): string[] {
-  return normalizeForPolarity(s).match(/[a-z0-9]+/g) ?? [];
-}
-
-function lcsLength(a: readonly string[], b: readonly string[]): number {
-  let prev = new Uint16Array(b.length + 1);
-  let cur = new Uint16Array(b.length + 1);
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1]! + 1 : Math.max(prev[j]!, cur[j - 1]!);
-    }
-    [prev, cur] = [cur, prev];
-  }
-  return prev[b.length]!;
-}
-
-export interface ChangeClass {
-  auto: boolean;
-  reason?: string;
-}
-
-/**
- * Decides whether a corrected passage may replace the dictated text without the human looking at it.
- * Only conservative edits qualify: most words stay in the same order, and every polarity word (not, no,
- * never, approve, reject, ...) keeps the same neighbours, so a negation cannot migrate to a different clause.
- * Everything else is offered as a suggestion that needs an explicit Accept.
- */
-export function classifyChange(raw: string, corrected: string): ChangeClass {
-  const a = wordTokens(raw);
-  const b = wordTokens(corrected);
-  if (a.length > 2000 || b.length > 2000)
-    return { auto: false, reason: 'too long to check automatically' };
-  const pa = a.flatMap((t, i) => (POLARITY_WORDS.has(t) ? [i] : []));
-  const pb = b.flatMap((t, i) => (POLARITY_WORDS.has(t) ? [i] : []));
-  if (pa.length !== pb.length || pa.some((ia, k) => a[ia] !== b[pb[k]!])) {
-    return { auto: false, reason: 'a yes/no/negation word changed' };
-  }
-  for (let k = 0; k < pa.length; k++) {
-    for (const off of [-1, 1, 2]) {
-      if (a[pa[k]! + off] !== b[pb[k]! + off]) {
-        return { auto: false, reason: `the words around "${a[pa[k]!]}" changed` };
-      }
-    }
-  }
-  const longest = Math.max(a.length, b.length);
-  if (longest > 0 && lcsLength(a, b) < 0.85 * longest)
-    return { auto: false, reason: 'the wording or order changed a lot' };
-  return { auto: true };
 }
 
 /** Keep only well-formed, non-overlapping spans that do not split a surrogate pair. */
@@ -226,8 +105,14 @@ export interface CorrectionRequest {
   provider: 'anthropic' | 'openai';
   raw: string;
   question: string;
-  optionLabels: string[];
-  keyterms: string[];
+  context?: string;
+  options: { label: string; description?: string }[];
+  askedAt?: string;
+  projectLabel?: string;
+  /** The answer text before the dictated passage (see `precedingText`). */
+  precedingText?: string;
+  transcriber?: 'xai' | 'openai';
+  language?: string;
   /** Editor text when the request started and a way to read it now. */
   editorAtStart: string;
   getEditorText: () => string;
@@ -235,10 +120,12 @@ export interface CorrectionRequest {
 }
 
 const TIMED_OUT = Symbol('timed out');
+// The Worker gives up at its own deadline; the phone waits a little longer so a slow network is not a timeout.
+const NETWORK_SLACK_MS = 3000;
 
 export async function runCorrection(r: CorrectionRequest): Promise<CorrectionOutcome> {
   const ctl = new AbortController();
-  const ms = r.timeoutMs ?? 8000;
+  const ms = r.timeoutMs ?? voiceCleanupTimeoutMs(r.raw.length, true) + NETWORK_SLACK_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The deadline is enforced here, independently of whether the request honours its abort signal.
   const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
@@ -248,6 +135,7 @@ export async function runCorrection(r: CorrectionRequest): Promise<CorrectionOut
     }, ms);
   });
   const within = <T>(p: Promise<T>) => Promise.race([p, deadline]);
+  const context = r.context?.trim();
   try {
     let res: Response | typeof TIMED_OUT;
     try {
@@ -260,8 +148,17 @@ export async function runCorrection(r: CorrectionRequest): Promise<CorrectionOut
             consent: true,
             raw_transcript: r.raw,
             question: r.question,
-            option_labels: r.optionLabels,
-            keyterms: r.keyterms,
+            // The clean-up keeps only the newest part of a long context, so only that leaves the phone.
+            ...(context ? { context: context.slice(-LIMITS.voiceCleanupContextChars) } : {}),
+            options: r.options.map((o) => ({
+              label: o.label,
+              ...(o.description ? { description: o.description } : {}),
+            })),
+            ...(r.askedAt ? { asked_at: r.askedAt } : {}),
+            ...(r.projectLabel ? { project_label: r.projectLabel } : {}),
+            ...(r.precedingText ? { preceding_text: r.precedingText } : {}),
+            ...(r.transcriber ? { transcriber: r.transcriber } : {}),
+            ...(r.language ? { language: r.language } : {}),
           },
           ctl.signal,
         ),
@@ -283,20 +180,44 @@ export async function runCorrection(r: CorrectionRequest): Promise<CorrectionOut
     if (!parsed.success) return { kind: 'kept-raw', reason: 'malformed' };
     if (r.getEditorText() !== r.editorAtStart)
       return { kind: 'kept-raw', reason: 'editor-changed' };
-    const drift = detectDrift(r.raw, parsed.data.corrected_text, r.keyterms);
-    if (drift) return { kind: 'kept-raw', reason: 'drift', detail: drift };
-    const change = classifyChange(r.raw, parsed.data.corrected_text);
     return {
       kind: 'applied',
       result: parsed.data,
       model: typeof body.model === 'string' ? body.model : 'unknown',
       spans: validSpans(parsed.data.corrected_text, parsed.data.uncertain_spans),
-      autoApply: change.auto,
-      ...(change.reason ? { reviewReason: change.reason } : {}),
+      changed: parsed.data.corrected_text !== r.raw,
+      lowConfidence: parsed.data.warnings.includes('low-confidence'),
     };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Daintree sends up to this much of the draft before a passage as its <confirmed_history>.
+const PRECEDING_CHARS = LIMITS.voiceCleanupPrecedingChars;
+
+/**
+ * The answer text before position `from`, bounded, as Daintree's cleanup is given it: so a dictation that
+ * carries on a typed sentence is not recased as if it stood alone. Empty when nothing but space comes before.
+ */
+export function precedingText(draft: string, from: number): string {
+  const start = Math.max(0, from - PRECEDING_CHARS);
+  let context = draft.slice(start, from);
+  // Drop the word the bound cut through, if it cut one.
+  if (start > 0 && /\S/.test(draft.charAt(start - 1))) context = context.replace(/^\S+/, '');
+  // A trailing newline says the dictation starts a new line, so it stays.
+  context = context.trimStart().replace(/[^\S\n]+$/, '');
+  return context.trim() ? context : '';
+}
+
+/**
+ * The language dictation is transcribed and cleaned up in. Daintree defaults to English; the phone does too when
+ * its own language is English, and otherwise lets the provider detect it rather than guess.
+ */
+export function dictationLanguage(
+  locale: string | undefined = globalThis.navigator?.language,
+): string | undefined {
+  return locale?.toLowerCase().split('-')[0] === 'en' ? 'en' : undefined;
 }
 
 /** Keyterms: option labels plus distinctive words from the question, <=100 terms of <=50 chars. */

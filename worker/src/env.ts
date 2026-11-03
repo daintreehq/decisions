@@ -9,7 +9,8 @@ export interface Env {
   XAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
-  CORRECTION_MODEL: string;
+  /** Dictation cleanup models, Daintree desktop's defaults: claude-haiku-5-5 (or claude-sonnet-5-5) and gpt-6.1-terra. */
+  ANTHROPIC_CORRECTION_MODEL: string;
   OPENAI_CORRECTION_MODEL: string;
   /** VAPID `sub` (mailto: or https:). Empty means the relay's own https origin, recorded when it was claimed. */
   PUSH_SUBJECT: string;

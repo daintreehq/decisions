@@ -45,9 +45,10 @@ export function VoiceDisclosure({
         </li>
         {correction ? (
           <li>
-            After you stop, the transcript (plus the question text and option names, to fix
-            spelling) is sent through your relay to <strong>{correction}</strong> for a single
-            clean-up pass.
+            After you stop, the transcript and the question you are answering (its text, context,
+            options and project name) are sent through your relay to <strong>{correction}</strong>{' '}
+            for a single clean-up pass. The cleaned text replaces your words in the answer box, and
+            one tap puts back exactly what you said.
           </li>
         ) : (
           <li>Clean-up is off, so the transcript is not sent anywhere else after you stop.</li>

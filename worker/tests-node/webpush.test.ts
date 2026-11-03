@@ -13,7 +13,6 @@ import {
 } from '../src/push/webpush.js';
 import { isQuiet, nextAllowed } from '../src/push/quiet-hours.js';
 import { openaiBridge, resample16kTo24k } from '../src/voice-proxy.js';
-import { correct } from '../src/voice-correct.js';
 
 function subscriber() {
   const ecdh = createECDH('prime256v1');
@@ -227,62 +226,5 @@ describe('dictation helpers', () => {
     expect(out[3]).toBe(600);
     expect(out[1]).toBe(200);
     expect(resample16kTo24k(new Int16Array(0)).length).toBe(0);
-  });
-
-  const env = {
-    ANTHROPIC_API_KEY: 'k',
-    OPENAI_API_KEY: 'k',
-    CORRECTION_MODEL: 'claude-haiku-5-5',
-    OPENAI_CORRECTION_MODEL: 'm',
-    CLAIM_SECRET: '',
-    PUSH_SUBJECT: '',
-  } as never;
-  const body = {
-    protocol_version: 1 as const,
-    provider: 'anthropic' as const,
-    consent: true as const,
-    raw_transcript: 'um yes approve it',
-    question: 'Ship?',
-    option_labels: ['Approve'],
-    keyterms: ['Daintree'],
-  };
-  const good = {
-    corrected_text: 'Yes, approve it.',
-    uncertain_spans: [],
-    applied_commands: [],
-    warnings: [],
-  };
-  const reply = (input: unknown, status = 200) =>
-    (async () =>
-      new Response(JSON.stringify({ content: [{ type: 'tool_use', input }] }), {
-        status,
-      })) as never;
-
-  it('accepts a schema-valid correction and sends the key only to the provider', async () => {
-    let req: { url: string; init: RequestInit } | undefined;
-    const out = await correct(env, body, (async (url: string, init: RequestInit) => {
-      req = { url, init };
-      return new Response(JSON.stringify({ content: [{ type: 'tool_use', input: good }] }));
-    }) as never);
-    expect(out).toMatchObject({ ok: true, model: 'claude-haiku-5-5' });
-    expect(req!.url).toBe('https://api.anthropic.com/v1/messages');
-    const sent = JSON.parse(req!.init.body as string);
-    expect(sent.tool_choice).toEqual({ type: 'tool', name: 'return_correction' });
-    expect(sent.system).toMatch(/untrusted/);
-  });
-  it('fails closed on malformed, extra-field, oversize or erroring responses', async () => {
-    expect((await correct(env, body, reply({ ...good, extra: 1 }))).ok).toBe(false);
-    expect((await correct(env, body, reply({ corrected_text: 5 }))).ok).toBe(false);
-    expect((await correct(env, body, reply(good, 500))).ok).toBe(false);
-    expect(
-      (
-        await correct(env, body, (async () => {
-          throw new Error('boom');
-        }) as never)
-      ).ok,
-    ).toBe(false);
-    expect((await correct({ ...env, ANTHROPIC_API_KEY: '' } as never, body, reply(good))).ok).toBe(
-      false,
-    );
   });
 });

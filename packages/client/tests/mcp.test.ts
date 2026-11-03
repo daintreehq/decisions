@@ -213,7 +213,7 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     });
     expect(res.isError).toBeUndefined();
     expect(res.content[0].text).toMatch(
-      /^Asked as q-1\. End your turn now \(or continue with unrelated work\); the answer will arrive as a message in this terminal\.$/,
+      /^Asked as q-1\. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn\. The answer arrives as a new message in this terminal, with your question quoted\.$/,
     );
     expect(res.structuredContent).toMatchObject({
       status: 'queued',

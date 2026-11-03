@@ -27,8 +27,8 @@
     "DecisionRoom": { "type": "durable-object", "storage": "sqlite" },
   },
   "vars": {
-    "CORRECTION_MODEL": "claude-haiku-5-5",
-    "OPENAI_CORRECTION_MODEL": "gpt-5-mini",
+    "ANTHROPIC_CORRECTION_MODEL": "claude-haiku-5-5",
+    "OPENAI_CORRECTION_MODEL": "gpt-6.1-terra",
     "PUSH_SUBJECT": "",
   },
 }

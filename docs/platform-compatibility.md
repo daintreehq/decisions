@@ -21,7 +21,7 @@ The app needs WebCrypto ECDSA/ECDH P-256 and AES-GCM, IndexedDB, Service Workers
 
 ## Model and provider identifiers
 
-Model ids are configuration. `claude-haiku-5-5` (correction) and `gpt-5-mini` (OpenAI correction, preview) are defaults that must be checked against the provider's current list before relying on them. The xAI streaming endpoint is `wss://api.x.ai/v1/stt`; the OpenAI realtime transcription endpoint is `wss://api.openai.com/v1/realtime?intent=transcription`.
+Model ids are configuration. `claude-haiku-5-5` (Anthropic cleanup) and `gpt-6.1-terra` (OpenAI cleanup) are defaults that must be checked against the provider's current list before relying on them. The xAI streaming endpoint is `wss://api.x.ai/v1/stt`; the OpenAI realtime transcription endpoint is `wss://api.openai.com/v1/realtime?intent=transcription`.
 
 ## Agents
 

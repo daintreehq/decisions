@@ -258,8 +258,11 @@ terminal delivered`.
 The client sends **binary mono PCM16 little-endian, 16 kHz** frames (~100 ms) and the text frames `{"type":"finalize"}` /
 `{"type":"audio.done"}`; it receives normalised events `transcript.created`, `transcript.partial {text, is_final,
 speech_final}`, `transcript.done {text}` and `error {message}`. `POST /voice/correct {provider: anthropic|openai,
-consent: true, raw_transcript, question, option_labels[], keyterms[]}` returns a `CorrectionResult`. **This path is
-not end-to-end encrypted**: the Worker and provider see audio/text transiently; nothing is stored or logged.
+consent: true, raw_transcript, question, context?, options[{label, description?}], asked_at?, project_label?,
+preceding_text?, transcriber?: xai|openai, language?}` returns `{result: CorrectionResult, model}`: one whole-passage
+cleanup with Daintree desktop dictation's rules and request shape, the question given as the agent's last reply.
+**This path is not end-to-end encrypted**: the Worker and provider see audio/text transiently; nothing is stored or
+logged.
 
 ## 14. Admin
 
