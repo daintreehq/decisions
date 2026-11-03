@@ -1262,9 +1262,12 @@ describe('decisions deploy, guided at a terminal', () => {
     });
 
     it('takes names from the host unless a flag gives them', async () => {
-      const t = hosted({ name: 'from-host', bucket: 'from-host', keys: {} }, {
-        answers: ['', '', '', '', 'y'],
-      });
+      const t = hosted(
+        { name: 'from-host', bucket: 'from-host', keys: {} },
+        {
+          answers: ['', '', '', '', 'y'],
+        },
+      );
       await t.run({ name: 'from-flag' });
       expect(subs(t)).toContain('r2 bucket create from-host');
       expect(subs(t)).toContain('secret put CLAIM_SECRET --name from-flag');
@@ -1272,16 +1275,19 @@ describe('decisions deploy, guided at a terminal', () => {
 
     it('starts the account choice on the host account', async () => {
       const other = 'f0e1d2c3'.repeat(4);
-      const t = hosted({ accountId: other, keys: {} }, {
-        wrangler: {
-          loggedIn: true,
-          accounts: [
-            { id: ACCOUNT, name: 'Personal' },
-            { id: other, name: 'Work' },
-          ],
+      const t = hosted(
+        { accountId: other, keys: {} },
+        {
+          wrangler: {
+            loggedIn: true,
+            accounts: [
+              { id: ACCOUNT, name: 'Personal' },
+              { id: other, name: 'Work' },
+            ],
+          },
+          answers: ['', '', '', '', '', 'y'],
         },
-        answers: ['', '', '', '', '', 'y'],
-      });
+      );
       await t.run();
       expect(t.prompts[0]).toMatch(/^Account to deploy to: \[2\]/);
       expect(text(t.out)).toMatch(/Cloudflare account +Work/);
@@ -1305,7 +1311,9 @@ describe('decisions deploy, guided at a terminal', () => {
         { answers: ['', '', '', '', '', '', '', 'y'] },
       );
       await t.run();
-      expect(text(t.out)).toMatch(/gpt-5-mini is not offered for cleanup; the default is gpt-6.1-terra/);
+      expect(text(t.out)).toMatch(
+        /gpt-5-mini is not offered for cleanup; the default is gpt-6.1-terra/,
+      );
       const deployed = t.calls.find((c) => c.args.includes('deploy'))!;
       expect(deployed.configAtCall).toMatchObject({
         vars: { OPENAI_CORRECTION_MODEL: 'gpt-6.1-terra' },
@@ -1364,7 +1372,10 @@ describe('decisions deploy, guided at a terminal', () => {
     });
 
     it('reports a failure before the claim secret without one', async () => {
-      const t = hosted({ keys: {} }, { answers: ['', '', '', '', 'y'], wrangler: { failOn: 'r2' } });
+      const t = hosted(
+        { keys: {} },
+        { answers: ['', '', '', '', 'y'], wrangler: { failOn: 'r2' } },
+      );
       await expect(t.run()).rejects.toThrow(/R2 bucket/);
       expect(t.results[0]).toMatchObject({ status: 'failed', url: null, claimSecret: null });
     });

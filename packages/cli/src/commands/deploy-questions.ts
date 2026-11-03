@@ -208,7 +208,9 @@ async function askKey(
 ): Promise<KeyAnswer | null> {
   const retry = `Enter the key again, or press Enter to leave ${feature} off.`;
   if (prefilled) {
-    ctx.out(`    ${PROVIDER_LABEL[provider]} key: present (from the app that started this deploy).`);
+    ctx.out(
+      `    ${PROVIDER_LABEL[provider]} key: present (from the app that started this deploy).`,
+    );
     if (await askYesNo(ctx, 'Use this key?', true)) {
       const got = await tryKey(ctx, provider, prefilled, retry);
       if (got) return got;

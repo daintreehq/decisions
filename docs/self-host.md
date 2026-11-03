@@ -52,20 +52,34 @@ The person at the terminal still sees and answers every question: the app's valu
 2. The app answers within 15 seconds with its defaults. Every field is optional; a field this version does not know, or one of the wrong shape, fails the deploy, and the CLI says why in a `failed` result:
 
    ```json
-   {"v":1,"type":"prefill","answers":{
-     "name":"daintree-decisions-1a2b","bucket":"daintree-decisions-1a2b",
-     "account_id":"<32 hex digits>",
-     "transcription":{"provider":"xai"},
-     "cleanup":{"provider":"anthropic","model":"claude-haiku-5-5"},
-     "keys":{"xai":"…","anthropic":"…","openai":"…"}}}
+   {
+     "v": 1,
+     "type": "prefill",
+     "answers": {
+       "name": "daintree-decisions-1a2b",
+       "bucket": "daintree-decisions-1a2b",
+       "account_id": "<32 hex digits>",
+       "transcription": { "provider": "xai" },
+       "cleanup": { "provider": "anthropic", "model": "claude-haiku-5-5" },
+       "keys": { "xai": "…", "anthropic": "…", "openai": "…" }
+     }
+   }
    ```
 
    `transcription.provider` is `xai` or `openai` (null turns the default off), `cleanup.provider` is `anthropic` or `openai`, and a cleanup model the CLI does not offer falls back to its default. `--name`, `--bucket` and `--account-id` on the command line win over `name`, `bucket` and `account_id`, and `account_id` only starts the account choice. Only the keys of the providers the person ends up choosing are set on the Worker.
+
 3. The app sends nothing else while the deploy runs; the person may take as long as they need.
 4. When the deploy ends, the CLI sends the outcome:
 
    ```json
-   {"v":1,"type":"result","status":"completed","url":"https://….workers.dev","claim_secret":"…","claim_state":"unclaimed"}
+   {
+     "v": 1,
+     "type": "result",
+     "status": "completed",
+     "url": "https://….workers.dev",
+     "claim_secret": "…",
+     "claim_state": "unclaimed"
+   }
    ```
 
    `status` is `completed`, `cancelled` (the person declined the summary or pressed Ctrl-C) or `failed` (with `error`, a message with every secret removed). `url` is the Worker URL once the deploy printed it, and `claim_secret` is set once its upload started, even when a later step failed, since it may then be live; both are null otherwise. A relay that was already claimed (`claim_state` `claimed`) gets no new claim secret. The app replies `{"v":1,"type":"received"}` within 10 seconds, then claims the relay with its own keys. Without that reply the CLI says the result may not have arrived and exits non-zero; it never prints the secret instead. If the connection closes with no result, the CLI stopped without one (a second Ctrl-C, or a crash): the app should check the relay's state (`GET /api/v1/info`) before running the deploy again, which sets a new claim secret on a relay nobody has claimed.

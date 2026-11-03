@@ -306,7 +306,13 @@ export async function openHostChannel(path: string, o: HostChannelOptions): Prom
       prefill = parsePrefill(msg.answers);
     } catch (e) {
       const error = (e as Error).message;
-      await sendResult({ status: 'failed', url: null, claimSecret: null, claimState: 'unknown', error });
+      await sendResult({
+        status: 'failed',
+        url: null,
+        claimSecret: null,
+        claimState: 'unknown',
+        error,
+      });
       throw e;
     }
     return { prefill, isOpen: () => !closed && reader.isOpen(), sendResult, close };

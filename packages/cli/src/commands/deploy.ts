@@ -605,7 +605,10 @@ async function runDeploy(
     if (guided) {
       const accounts = accountsFromWhoami(who.stdout);
       // A host's account only starts the choice; a flag or the environment fixes it.
-      const fixed = o.accountId ?? ctx.env.CLOUDFLARE_ACCOUNT_ID ?? (accounts.length ? undefined : pre?.accountId);
+      const fixed =
+        o.accountId ??
+        ctx.env.CLOUDFLARE_ACCOUNT_ID ??
+        (accounts.length ? undefined : pre?.accountId);
       const account: CloudflareAccount | null = fixed
         ? (accounts.find((a) => a.id.toLowerCase() === fixed.toLowerCase()) ?? {
             id: fixed,
