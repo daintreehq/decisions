@@ -352,12 +352,13 @@ export function planConfig(live: WorkerSnapshot, target: TargetConfig): ConfigPl
 }
 
 /**
- * The settings API's placement in Wrangler's config shape: smart placement as it is, a single
+ * The settings API's placement in Wrangler's config shape: smart placement with its hint, a single
  * targeted region, host or hostname flattened, no placement as null.
  */
 function wranglerPlacement(p: unknown): Record<string, unknown> | null | 'unsupported' {
   if (!p || typeof p !== 'object') return null;
   const o = p as {
+    hint?: unknown;
     mode?: unknown;
     target?: unknown;
     region?: unknown;
@@ -369,7 +370,8 @@ function wranglerPlacement(p: unknown): Record<string, unknown> | null | 'unsupp
       if (typeof o[k] === 'string') return { [k]: o[k] };
     return null;
   }
-  if (o.mode === 'smart') return { mode: 'smart' };
+  if (o.mode === 'smart')
+    return typeof o.hint === 'string' ? { mode: 'smart', hint: o.hint } : { mode: 'smart' };
   if (o.mode === 'targeted') {
     const t =
       Array.isArray(o.target) && o.target.length === 1

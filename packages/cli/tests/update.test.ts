@@ -565,6 +565,12 @@ describe('decisions update, after review', () => {
     expect(c.placement).toEqual({ region: 'aws:eu-west-1' });
   });
 
+  it('keeps a smart placement hint', async () => {
+    const t = setup({ answers: ['y'], placement: { mode: 'smart', hint: 'aws:us-east-1' } });
+    await t.run();
+    expect(t.deploys()[0]!.config!.placement).toEqual({ mode: 'smart', hint: 'aws:us-east-1' });
+  });
+
   it('refuses a placement it cannot express in the Wrangler config', async () => {
     const t = setup({
       placement: { mode: 'targeted', target: [{ region: 'a' }, { region: 'b' }] },
