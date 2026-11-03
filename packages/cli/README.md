@@ -17,6 +17,7 @@ decisions --help
 
 `decisions deploy` uploads the prebuilt relay from `@daintreehq/decisions-relay`, installed at the same version,
 after checking every file against a SHA-256 manifest pinned in the CLI. The claim secret is shown once and never
-saved. More in the [self-hosting guide](https://github.com/daintreehq/decisions/blob/main/docs/self-host.md).
+saved. An app that starts the deploy for its user can supply the answers' defaults and receive the result over a
+local socket (`--host-channel`). More in the [self-hosting guide](https://github.com/daintreehq/decisions/blob/main/docs/self-host.md).
 
 Node 22+. Apache-2.0.
