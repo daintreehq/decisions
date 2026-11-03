@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { app } from '../app/controller.js';
 import { useApp, useNow, useQuestions } from '../app/hooks.js';
+import { abandonLayers } from '../app/layers.js';
 import { resetNavState } from '../app/listState.js';
 import { useWide } from '../app/media.js';
 import { closeNavigator, useNavigatorOpen } from '../app/navigator.js';
@@ -364,11 +365,14 @@ export function Shell({ children }: { children: ReactNode }) {
   );
 }
 
-// Unpairing or revocation forgets how this device's lists were left.
+// Unpairing or revocation forgets how this device's lists were left, and closes whatever layer was open without
+// stepping history back under the lock screen.
 let lastPhase = app.getSnapshot().phase;
 app.subscribe(() => {
   const p = app.getSnapshot().phase;
-  if (p !== lastPhase && (p === 'unpaired' || p === 'revoked') && lastPhase === 'ready')
+  if (p !== lastPhase && (p === 'unpaired' || p === 'revoked') && lastPhase === 'ready') {
+    abandonLayers();
     resetNavState();
+  }
   lastPhase = p;
 });

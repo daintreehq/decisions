@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { dropLayers, hasLayers } from './layers.js';
+import { leaveLayers } from './layers.js';
 
 const EVT = 'decisions:navigate';
 
@@ -24,17 +24,22 @@ export function setNavigationGuard(guard: NavigationGuard): () => void {
   };
 }
 
-export function navigate(to: string, replace = false): void {
+/**
+ * Go to `to`. Leaving through open layers (the navigator over the viewer, say) closes them and unwinds their history
+ * entries first, so the route gets exactly one entry. The change waits for any layer traversal still in flight, so
+ * it cannot be undone by one. `state` becomes the new entry's history state.
+ */
+export function navigate(to: string, replace = false, state: object | null = null): void {
   if (navGuard && to !== location.pathname + location.search && !navGuard(to)) return;
-  // Leaving through an open layer (the navigator, say) replaces its history entry instead of stacking on it.
-  if (hasLayers()) {
-    dropLayers();
-    replace = true;
-  }
-  if (to === location.pathname + location.search) return;
-  history[replace ? 'replaceState' : 'pushState'](null, '', to);
-  window.dispatchEvent(new Event(EVT));
-  window.scrollTo(0, 0);
+  leaveLayers(() => {
+    if (to === location.pathname + location.search) {
+      if (state) history.replaceState({ ...(history.state as object | null), ...state }, '');
+      return;
+    }
+    history[replace ? 'replaceState' : 'pushState'](state, '', to);
+    window.dispatchEvent(new Event(EVT));
+    window.scrollTo(0, 0);
+  });
 }
 
 function subscribe(cb: () => void): () => void {

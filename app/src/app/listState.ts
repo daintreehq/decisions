@@ -1,5 +1,6 @@
 import { useLayoutEffect, useSyncExternalStore, type RefObject } from 'react';
 import type { HistoryMode, NeedsSort, Scope } from '../domain/lists.js';
+import { afterHistorySettles } from './layers.js';
 import { matchRoute, navigate } from './router.js';
 
 /**
@@ -247,8 +248,11 @@ export function goBack(): void {
   const r = matchRoute(location.pathname);
   const info = currentBack();
   if (info?.prev) {
-    const depth = (history.state as { layerDepth?: number } | null)?.layerDepth ?? 0;
-    history.go(-(depth + 1));
+    // Once any layer traversal has landed, so the depth read is the one we are standing on.
+    afterHistorySettles(() => {
+      const depth = (history.state as { layerDepth?: number } | null)?.layerDepth ?? 0;
+      history.go(-(depth + 1));
+    });
     return;
   }
   if (r.name === 'question' && !info) {
@@ -309,12 +313,8 @@ export function openQuestion(
     info = { path: location.pathname, prev: true };
   }
   backById.set(id, info);
-  navigate(to);
-  try {
-    history.replaceState({ ...((history.state as object | null) ?? {}), decisionsBack: info }, '');
-  } catch {
-    /* the in-memory map still answers */
-  }
+  // The origin travels in the question's own entry, written when that entry is (navigation can wait on layers).
+  navigate(to, false, { decisionsBack: info });
 }
 
 /** Activate a row link the way `Link` does: modified clicks keep the browser's own behaviour. */
