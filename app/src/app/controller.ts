@@ -407,13 +407,29 @@ export class AppController {
     });
   }
 
-  applyUpdate(): void {
+  private updateGuards = new Set<() => Promise<boolean>>();
+
+  /**
+   * Work that must settle before the app reloads into an update (an active dictation stops and its words are
+   * saved; drafts flush). A guard resolves false when it cannot make its work safe, and the update waits.
+   */
+  registerUpdateGuard(guard: () => Promise<boolean>): () => void {
+    this.updateGuards.add(guard);
+    return () => this.updateGuards.delete(guard);
+  }
+
+  /** Reload into the waiting version once every guard has made its work safe. Resolves false if one refused. */
+  async applyUpdate(): Promise<boolean> {
     const w = this.swReg?.waiting;
-    if (!w) return;
+    if (!w) return false;
+    for (const guard of this.updateGuards) {
+      if (!(await guard().catch(() => false))) return false;
+    }
     navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), {
       once: true,
     });
     w.postMessage({ type: 'SKIP_WAITING' });
+    return true;
   }
 
   /** Exposed for tests. */

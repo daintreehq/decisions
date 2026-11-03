@@ -106,7 +106,7 @@ export function Shell({ children }: { children: ReactNode }) {
       {snap.updateAvailable && (
         <div className="banner" role="status">
           <span>A new version is ready.</span>
-          <button type="button" className="btn small" onClick={() => app.applyUpdate()}>
+          <button type="button" className="btn small" onClick={() => void app.applyUpdate()}>
             Update
           </button>
         </div>
