@@ -169,7 +169,11 @@ function relayFetch(
     if (models) {
       const p = over.providers ?? {};
       const headers = { ...(init?.headers as Record<string, string>) };
-      p.calls?.push({ host: url.host, headers, ...(init?.redirect ? { redirect: init.redirect } : {}) });
+      p.calls?.push({
+        host: url.host,
+        headers,
+        ...(init?.redirect ? { redirect: init.redirect } : {}),
+      });
       if (p.down) throw new TypeError('fetch failed: getaddrinfo ENOTFOUND');
       const key = headers['x-api-key'] ?? headers.authorization?.replace(/^Bearer /, '');
       if (!key || !(p.goodKeys ?? []).includes(key))

@@ -96,7 +96,8 @@ export async function checkProviderKey(
     const timedOut = (e as Error).name === 'TimeoutError' || (e as Error).name === 'AbortError';
     return { ok: false, rejected: false, reason: timedOut ? 'timed out' : 'network error' };
   }
-  if (res.status === 401 || res.status === 403) return { ok: false, rejected: true, status: res.status };
+  if (res.status === 401 || res.status === 403)
+    return { ok: false, rejected: true, status: res.status };
   if (!res.ok) return { ok: false, rejected: false, reason: `HTTP ${res.status}` };
   try {
     const body = (await res.json()) as { data?: { id?: unknown }[] };
@@ -242,7 +243,7 @@ export async function askDeployQuestions(
   say(`    Cloudflare account: ${describeAccount(account)}`);
   say('    A Worker (the relay, its Durable Object and the phone app) and a private R2 bucket.');
   say(
-    "    Cost: billed under your Cloudflare plan; personal use normally fits the free allowances for Workers, Durable Objects and R2.",
+    '    Cost: billed under your Cloudflare plan; personal use normally fits the free allowances for Workers, Durable Objects and R2.',
   );
   const name = await askName(ctx, 'Worker name', d.name, rules.name);
   const bucket = await askName(ctx, 'R2 bucket name', d.bucket, rules.bucket);

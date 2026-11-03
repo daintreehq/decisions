@@ -111,14 +111,7 @@ const shown = (wrangler: string, args: string[]) => ['npx', ...npxArgs(wrangler,
 export type AuthMode = 'browser' | 'token-env' | 'token-prompt';
 
 export type PlanStepId =
-  | 'tools'
-  | 'login'
-  | 'bucket'
-  | 'deploy'
-  | 'claim-secret'
-  | 'keys'
-  | 'check'
-  | 'claim';
+  'tools' | 'login' | 'bucket' | 'deploy' | 'claim-secret' | 'keys' | 'check' | 'claim';
 
 export interface PlanStep {
   id: PlanStepId;
