@@ -113,6 +113,86 @@ async function mockUi(browser: Browser, variant: 'before' | 'after'): Promise<Ui
   return buf;
 }
 
+/** Renders arbitrary markup as a PNG, for the multi-file gallery fixture. */
+async function mockShot(
+  browser: Browser,
+  size: { width: number; height: number },
+  body: string,
+): Promise<Uint8Array> {
+  const page = await browser.newPage({ viewport: size });
+  await page.setContent(
+    `<body style="margin:0;font:14px -apple-system,system-ui,sans-serif">${body}</body>`,
+  );
+  const buf = new Uint8Array(await page.screenshot({ type: 'png' }));
+  await page.close();
+  return buf;
+}
+
+const settingRow = (label: string, value: string) =>
+  `<div style="display:flex;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #e6e1d8;background:#ffffff"><span>${label}</span><span style="color:#6b6458">${value}</span></div>`;
+
+/** Five different screens for the strip: wide desktop, a tall phone capture, a dialog, a chart, a terminal. */
+async function galleryShots(browser: Browser): Promise<Record<string, Uint8Array>> {
+  return {
+    'g-settings.png': await mockShot(
+      browser,
+      { width: 1280, height: 800 },
+      `<div style="display:flex;height:800px;background:#f6f0e6;color:#1c2028">
+        <div style="width:240px;background:#f2e9da;padding:20px;box-sizing:border-box;border-right:1px solid #ddd3c2">
+          ${['General', 'Appearance', 'Agents', 'Keyboard', 'Notifications'].map((t, i) => `<div style="padding:10px 12px;border-radius:8px;margin:2px 0;${i === 1 ? 'background:#fff;font-weight:600' : ''}">${t}</div>`).join('')}
+        </div>
+        <div style="flex:1;padding:32px 40px">
+          <div style="font-size:24px;font-weight:700;margin-bottom:20px">Appearance</div>
+          <div style="border:1px solid #ddd3c2;border-radius:10px;overflow:hidden;max-width:720px">
+            ${settingRow('Theme', 'Match device')}${settingRow('Density', 'Compact')}${settingRow('Sidebar', 'Collapse below 900 px')}${settingRow('Font size', '14 px')}${settingRow('Reduce motion', 'Follow system')}
+          </div>
+        </div>
+      </div>`,
+    ),
+    'g-phone.png': await mockShot(
+      browser,
+      { width: 390, height: 1200 },
+      `<div style="background:#110d0b;color:#e4e4e7;min-height:1200px;padding:56px 18px 18px;box-sizing:border-box">
+        <div style="font-size:26px;font-weight:700;margin-bottom:16px">Agents</div>
+        ${Array.from({ length: 9 }, (_, i) => `<div style="background:#1f1b19;border:1px solid #2e2926;border-radius:12px;padding:16px;margin-bottom:12px"><div style="font-weight:600">checkout-${i + 1}</div><div style="color:#a1a1aa;margin-top:6px">${i % 3 === 0 ? 'Waiting for you' : 'Working · 4 files changed'}</div></div>`).join('')}
+      </div>`,
+    ),
+    'g-dialog.png': await mockShot(
+      browser,
+      { width: 900, height: 560 },
+      `<div style="height:560px;display:grid;place-items:center;background-color:#3a3632">
+        <div style="width:440px;background:#fff;border-radius:14px;padding:24px;color:#1c2028;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+          <div style="font-size:18px;font-weight:700">Delete this workspace?</div>
+          <p style="color:#454d56;line-height:1.5">checkout-3 has 2 unsaved changes. They will be lost.</p>
+          <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px"><span style="padding:10px 16px;border:1px solid #ccc;border-radius:8px">Cancel</span><span style="padding:10px 16px;background:#aa3931;color:#fff;border-radius:8px">Delete</span></div>
+        </div>
+      </div>`,
+    ),
+    'g-chart.png': await mockShot(
+      browser,
+      { width: 1000, height: 620 },
+      `<div style="height:620px;background:#1a1918;color:#e4e4e7;padding:28px;box-sizing:border-box">
+        <div style="font-size:18px;font-weight:700;margin-bottom:24px">Webhook retries, last 24 h</div>
+        <div style="display:flex;align-items:flex-end;gap:14px;height:440px;border-bottom:1px solid #3f3b38">
+          ${[40, 62, 55, 90, 140, 210, 320, 280, 190, 120, 80, 60, 45, 70, 110].map((h) => `<div style="flex:1;height:${h}px;background:#36ce94;border-radius:4px 4px 0 0"></div>`).join('')}
+        </div>
+      </div>`,
+    ),
+    'g-terminal.png': await mockShot(
+      browser,
+      { width: 1100, height: 520 },
+      `<pre style="margin:0;height:520px;background:#110d0b;color:#e4e4e7;padding:22px;font:15px/1.6 ui-monospace,Menlo,monospace;box-sizing:border-box">$ pnpm test
+ ✓ checkout/cart.test.ts (14)
+ ✓ checkout/payment.test.ts (22)
+ × checkout/retry.test.ts (3)
+   → expected 5 retries, received 3
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 38 passed (39)</pre>`,
+    ),
+  };
+}
+
 describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   let relay: RunningRelay;
   let browser: Browser;
@@ -151,6 +231,16 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   const theme = async (scheme: 'light' | 'dark') => {
     await page.emulateMedia({ colorScheme: scheme });
   };
+  /** The inline gallery shows its active file and every thumbnail has loaded. */
+  const filesReady = async () => {
+    await page.locator('.fx-inline-stage .fs-slide.is-active img').waitFor({ timeout: 30_000 });
+    await until(
+      async () =>
+        (await page.locator('.fx-thumb img').count()) === (await page.locator('.fx-thumb').count()),
+      30_000,
+      'every thumbnail to load',
+    );
+  };
   const open = async (text: string) => {
     await page.goto(relay.origin + '/');
     await page.getByText(text).first().click();
@@ -169,6 +259,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     });
     images.set('before.png', await mockUi(browser, 'before'));
     images.set('after.png', await mockUi(browser, 'after'));
+    for (const [k, v] of Object.entries(await galleryShots(browser))) images.set(k, v);
     context = await browser.newContext({
       viewport: PHONE,
       deviceScaleFactor: 2,
@@ -382,7 +473,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 });
 
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('09-detail-approval');
     await shot('09-detail-approval-full', { full: true });
     await page.getByRole('radio', { name: /^Approve/ }).check();
@@ -398,10 +489,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     });
     await shot('10-detail-approval-note');
     await note.fill('');
+    await page.getByRole('tab', { name: /^After/ }).click();
     await page.getByRole('button', { name: /Enlarge After/ }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.locator('.fx-viewer .fs-slide.is-active img').waitFor({ timeout: 30_000 });
     await shot('11-dialog-zoom');
-    await page.getByRole('dialog').getByRole('button', { name: 'Close' }).click();
+    await page.getByRole('button', { name: 'Close viewer' }).click();
+    await page.locator('.fx-viewer').waitFor({ state: 'detached' });
 
     await open('Which retry strategy');
     await shot('12-detail-choice', { full: true });
@@ -621,7 +714,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Approve the compact sidebar').first().waitFor({ timeout: 30_000 });
     await shot('26-inbox-dark');
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('27-detail-approval-dark', { full: true });
     await page.goto(`${relay.origin}/q/${ids.proxy}`);
     await page.locator('.card.proxy').waitFor({ timeout: 30_000 });
@@ -633,7 +726,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     await page.setViewportSize(WIDE);
     await open('Approve the compact sidebar');
-    await page.locator('.compare img').nth(1).waitFor({ timeout: 30_000 });
+    await filesReady();
     await shot('30-wide-inbox-detail');
     await page.goto(relay.origin + '/');
     await shot('31-wide-inbox');
@@ -785,6 +878,176 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.keyboard.press('Escape');
     await page.goto(relay.origin + '/');
     await theme('light');
+  });
+
+  it('captures files: gallery, viewer, comparison, All files and failures', async () => {
+    const r = await bridge.registerQuestion({
+      origin: {
+        machine_label: 'Greg’s MacBook Pro',
+        host_id: 'host_01JC8Z4MQ7',
+        pane_id: 'p9',
+        terminal_generation: 1,
+        ownership_principal: 'principal-p9',
+        agent_incarnation: '1',
+        agent_kind: 'claude-code',
+        agent_session_id: 's-p9',
+        project_id: 'checkout',
+        worktree_id: 'wt-p9',
+        worktree_root: '/work/checkout',
+        workflow_gate_id: null,
+      },
+      input: {
+        question: 'Which of these should I fix before the checkout release?',
+        context: 'Five captures from the release candidate.',
+        kind: 'choice',
+        options: [
+          { id: 'retry', label: 'The retry test' },
+          { id: 'dialog', label: 'The delete dialog copy' },
+        ],
+        attachments: [
+          { local_resource_id: 'g-settings.png', alt: 'Appearance settings, desktop' },
+          { local_resource_id: 'g-phone.png', alt: 'Agents list on a phone' },
+          { local_resource_id: 'g-dialog.png', alt: 'Delete dialog' },
+          { local_resource_id: 'g-chart.png', alt: 'Webhook retries chart' },
+          { local_resource_id: 'g-terminal.png' },
+        ],
+      },
+    });
+    ids.gallery = r.questionId;
+    await bridge.pump();
+    const openGallery = async () => {
+      await page.goto(`${relay.origin}/q/${ids.gallery}`);
+      await page.locator('article.detail').waitFor({ timeout: 30_000 });
+    };
+    const toFiles = async () => {
+      await page.evaluate(() => {
+        const el = document.querySelector('.fx-files')!;
+        window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 64);
+      });
+    };
+    const viewer = page.locator('.fx-viewer');
+
+    // Phone, light: the five-file strip, a tall capture, All files.
+    await openGallery();
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-strip-phone');
+    await page.getByRole('tab', { name: /^Agents list on a phone/ }).click();
+    await shot('50-gallery-tall-phone');
+    await page.getByRole('button', { name: /All files/ }).click();
+    await page.locator('.fx-grid').waitFor();
+    await shot('50-allfiles-phone');
+    await page.keyboard.press('Escape');
+    await page.locator('.fx-grid').waitFor({ state: 'detached' });
+
+    // The before/after approval: inline, viewer at Fit, zoomed, Move, menu, handoff, question, compare.
+    await open('Approve the compact sidebar');
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-phone');
+    await page.getByRole('tab', { name: /^After/ }).click();
+    await page.getByRole('button', { name: 'Enlarge After' }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-fit-phone');
+    const box = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
+    await page.mouse.dblclick(box.x + box.width * 0.3, box.y + box.height * 0.45);
+    await shot('50-viewer-zoomed-phone');
+    await viewer.getByRole('button', { name: 'Move', exact: true }).click();
+    await viewer.getByRole('button', { name: 'Move right' }).click();
+    await shot('50-viewer-move-phone');
+    await viewer.getByRole('button', { name: 'Done' }).click();
+    await page.keyboard.press('0');
+    await viewer.getByRole('button', { name: 'File menu' }).click();
+    await page.getByRole('menu').waitFor();
+    await shot('50-viewer-menu-phone');
+    await page.getByRole('menuitem', { name: 'Download' }).click();
+    await page.getByRole('dialog', { name: 'Download this file?' }).waitFor();
+    await shot('50-viewer-handoff-phone');
+    await page
+      .getByRole('dialog', { name: 'Download this file?' })
+      .getByRole('button', { name: 'Cancel' })
+      .click();
+    await viewer.getByRole('button', { name: 'Question', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Question', exact: true }).waitFor();
+    await shot('50-viewer-question-phone');
+    await page.keyboard.press('Escape');
+    await viewer.getByRole('button', { name: 'Compare before and after' }).click();
+    await page.locator('.fx-compare .fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-compare-phone');
+    await page.locator('.fx-compare').getByRole('button', { name: 'Before', exact: true }).click();
+    await page.keyboard.press('+');
+    await page.keyboard.press('+');
+    await shot('50-compare-phone-before-zoomed');
+    await page.getByRole('button', { name: 'Close comparison' }).click();
+    await viewer.waitFor();
+    await page.getByRole('button', { name: 'Close viewer' }).click();
+    await viewer.waitFor({ state: 'detached' });
+
+    // Dark.
+    await theme('dark');
+    await toFiles();
+    await shot('50-gallery-phone-dark');
+    await page.getByRole('button', { name: /^Enlarge/ }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-fit-phone-dark');
+    await page.keyboard.press('Escape');
+    await viewer.waitFor({ state: 'detached' });
+    await theme('light');
+
+    // Failures, on a fresh load: one file will not load, one fails verification, one the relay deleted.
+    const order: string[] = [];
+    await context.route('**/attachments/*/content', async (route) => {
+      const id = /attachments\/([^/]+)\/content/.exec(route.request().url())?.[1] ?? '';
+      if (!order.includes(id)) order.push(id);
+      const i = order.indexOf(id);
+      if (i === 2)
+        return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+      if (i === 3) return route.fulfill({ status: 200, body: Buffer.alloc(2048, 7) });
+      if (i === 4)
+        return route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 'not_found', message: 'gone' }),
+        });
+      return route.continue();
+    });
+    await openGallery();
+    await page.locator('.fx-thumb.is-expired').waitFor({ timeout: 30_000 });
+    await page.getByRole('tab', { name: /^Delete dialog/ }).click();
+    await toFiles();
+    await shot('50-gallery-error-phone');
+    await page.getByRole('tab', { name: /^Webhook retries chart/ }).click();
+    await shot('50-gallery-unverified-phone');
+    await page.getByRole('button', { name: /All files/ }).click();
+    await page.locator('.fx-grid').waitFor();
+    await shot('50-allfiles-states-phone');
+    await page.keyboard.press('Escape');
+    await context.unroute('**/attachments/*/content');
+
+    // Wide.
+    await page.setViewportSize(WIDE);
+    await open('Approve the compact sidebar');
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-wide');
+    await page.getByRole('button', { name: /^Enlarge/ }).click();
+    await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    await shot('50-viewer-wide');
+    await viewer.getByRole('button', { name: 'Compare before and after' }).click();
+    await page.locator('.fx-compare .fx-pane img.is-sized').nth(1).waitFor({ timeout: 30_000 });
+    await shot('50-compare-wide');
+    await page.keyboard.press('+');
+    await page.keyboard.press('+');
+    await shot('50-compare-wide-zoomed');
+    await theme('dark');
+    await shot('50-compare-wide-dark');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await theme('light');
+    await openGallery();
+    await filesReady();
+    await toFiles();
+    await shot('50-gallery-strip-wide');
     await page.setViewportSize(PHONE);
   });
 
@@ -802,7 +1065,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     const files = readdirSync(OUT!).filter((f) => f.endsWith('.png'));
     for (const f of written) expect(files).toContain(f);
-    // 38 baseline captures, 26 for the lists and shell, 32 for settings and onboarding.
-    expect(written.length).toBe(38 + 26 + 32);
+    // 38 baseline captures, 26 for the lists and shell, 32 for settings and onboarding, 23 for files.
+    expect(written.length).toBe(38 + 26 + 32 + 23);
   });
 });

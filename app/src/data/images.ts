@@ -4,8 +4,14 @@ export interface LoadedImage {
   mime: string;
 }
 
+/**
+ * `expired`: the relay no longer has it. `unverified`: the bytes arrived but did not decrypt, match their signed
+ * digest, match their declared type or decode, so nothing of them is shown or exported. `error`: anything else
+ * (network, missing key); retryable.
+ */
 export type ImageResult =
-  { ok: true; image: LoadedImage } | { ok: false; reason: 'expired' | 'error'; message: string };
+  | { ok: true; image: LoadedImage }
+  | { ok: false; reason: 'expired' | 'unverified' | 'error'; message: string };
 
 export interface ImageContext {
   /** Aborted when the cache is disposed (unpair / wipe). Pass it to the network request. */
