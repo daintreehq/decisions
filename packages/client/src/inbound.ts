@@ -3,13 +3,19 @@ import {
   EventData,
   HUMAN_ROLES,
   HumanAnswerContentV1,
+  MESSAGE_RECORD_TYPE,
+  MessageContentV1,
   ProxyAnswerContentV1,
+  imagesMatchRecord,
+  messageEnvelopeIssues,
   provenanceForAction,
   type ActionKind,
   type ActionRecord,
   type CryptoEnvelope,
   type DeviceCert,
+  type EnvelopePurpose,
   type LedgerEvent,
+  type MessageEntry,
   type Role,
 } from '@daintreehq/decisions-protocol';
 import {
@@ -55,6 +61,15 @@ export interface VerifiedAnswer {
   signerRole: Role;
   content:
     (HumanAnswerContentV1 & Partial<Pick<ProxyAnswerContentV1, 'model_id' | 'confidence'>>) | null;
+}
+
+/** A thread message whose signer, signature, envelope binding and content all checked out. */
+export interface VerifiedMessage {
+  ok: true;
+  /** The message as the relay committed it: `message_seq`, `committed_at`, the signed record and envelope. */
+  entry: MessageEntry;
+  content: MessageContentV1;
+  signerRole: Role;
 }
 
 export const revokedKey = (deviceId: string): string => `revoked:${deviceId}`;
@@ -124,6 +139,59 @@ export class EventVerifier {
     return this.dir.get(deviceId) ?? null;
   }
 
+  /**
+   * The signer's directory entry, if it may sign a record created at `createdAt` and carried by the event at
+   * ledger `seq`: known to the pinned directory, not revoked by then, and not revoked by any event we observed.
+   */
+  private async signer(
+    deviceId: string,
+    createdAt: string,
+    seq: number,
+  ): Promise<DirEntry | Rejection> {
+    const signer = await this.lookup(deviceId);
+    if (!signer) return { ok: false, reason: 'unknown-signer' };
+    if (signer.revokedAt !== null && Date.parse(createdAt) >= signer.revokedAt) {
+      return { ok: false, reason: 'signer-revoked' };
+    }
+    // A revocation we observed in the ledger sticks, even if a stale directory says otherwise.
+    const rev = await this.ctx.store.getMeta(revokedKey(deviceId));
+    if (rev !== null && seq > Number(rev)) return { ok: false, reason: 'signer-revoked' };
+    return signer;
+  }
+
+  /**
+   * Decrypt an inbound envelope under its exact binding. A key epoch this identity does not hold yet is reloaded
+   * once (rotated by another process) and otherwise throws `TransientError`, so the event is retried in order.
+   */
+  private async decrypt(
+    envelope: CryptoEnvelope,
+    binding: {
+      installationId: string;
+      questionId: string;
+      recordType: string;
+      revision: number;
+      senderDeviceId: string;
+      purpose: EnvelopePurpose;
+    },
+  ): Promise<{ raw: unknown } | Rejection> {
+    const { ctx } = this;
+    try {
+      return { raw: await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding) };
+    } catch {
+      if (ctx.identity.epochs.has(envelope.key_epoch))
+        return { ok: false, reason: 'decryption-failed' };
+    }
+    // Rotated by another process: reload epoch material, then try once more.
+    await ctx.refreshIdentity?.();
+    if (!ctx.identity.epochs.has(envelope.key_epoch))
+      throw new TransientError(`missing epoch key ${envelope.key_epoch}`);
+    try {
+      return { raw: await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding) };
+    } catch {
+      return { ok: false, reason: 'decryption-failed' };
+    }
+  }
+
   async verifyAction(ev: LedgerEvent): Promise<VerifiedAnswer | Rejection> {
     const { ctx } = this;
     const expected = EVENT_ACTION[ev.event_type];
@@ -138,14 +206,8 @@ export class EventVerifier {
       return { ok: false, reason: 'wrong-installation' };
     if (ev.question_id !== record.question_id) return { ok: false, reason: 'question-mismatch' };
 
-    const signer = await this.lookup(record.signer_device_id);
-    if (!signer) return { ok: false, reason: 'unknown-signer' };
-    if (signer.revokedAt !== null && Date.parse(record.created_at) >= signer.revokedAt) {
-      return { ok: false, reason: 'signer-revoked' };
-    }
-    // A revocation we observed in the ledger sticks, even if a stale directory says otherwise.
-    const rev = await ctx.store.getMeta(revokedKey(record.signer_device_id));
-    if (rev !== null && ev.seq > Number(rev)) return { ok: false, reason: 'signer-revoked' };
+    const signer = await this.signer(record.signer_device_id, record.created_at, ev.seq);
+    if ('reason' in signer) return signer;
 
     const role = signer.cert.role;
     const prov = provenanceForAction(action);
@@ -176,28 +238,11 @@ export class EventVerifier {
         senderDeviceId: record.signer_device_id,
         purpose: 'answer-content' as const,
       };
-      let raw: unknown;
-      try {
-        raw = await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding);
-      } catch (e) {
-        if (!ctx.identity.epochs.has(envelope.key_epoch)) {
-          // Rotated by another process: reload epoch material, then try once more.
-          await ctx.refreshIdentity?.();
-          if (ctx.identity.epochs.has(envelope.key_epoch)) {
-            try {
-              raw = await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding);
-            } catch {
-              return { ok: false, reason: 'decryption-failed' };
-            }
-          } else {
-            throw new TransientError(`missing epoch key ${envelope.key_epoch}`);
-          }
-        } else {
-          void e;
-          return { ok: false, reason: 'decryption-failed' };
-        }
-      }
-      const p = (prov === 'proxy' ? ProxyAnswerContentV1 : HumanAnswerContentV1).safeParse(raw);
+      const opened = await this.decrypt(envelope, binding);
+      if ('reason' in opened) return opened;
+      const p = (prov === 'proxy' ? ProxyAnswerContentV1 : HumanAnswerContentV1).safeParse(
+        opened.raw,
+      );
       if (!p.success) return { ok: false, reason: 'malformed-answer-content' };
       content = p.data;
     }
@@ -209,6 +254,57 @@ export class EventVerifier {
       signerDeviceId: record.signer_device_id,
       signerRole: role,
       content,
+    };
+  }
+  /**
+   * Verify a `decision.message.posted` event (protocol section 16): the signed record and its envelope, bound to
+   * each other and to this installation and question; a signer the pinned directory knows and has not revoked;
+   * a human message signed by a phone or tablet, and an agent message only by this desktop, which published every
+   * question it holds live; and decrypted content of the same side referencing exactly the signed images.
+   * The relay's `target_host_id` is never trusted for routing: the question's own origin is.
+   */
+  async verifyMessage(ev: LedgerEvent): Promise<VerifiedMessage | Rejection> {
+    const { ctx } = this;
+    if (ev.event_type !== 'decision.message.posted')
+      return { ok: false, reason: 'not-a-message-event' };
+    const parsed = EventData.messagePosted.safeParse(ev.data);
+    if (!parsed.success) return { ok: false, reason: 'malformed-event' };
+    const { record, envelope, message_seq, committed_at } = parsed.data;
+    if (messageEnvelopeIssues(record, envelope).length > 0)
+      return { ok: false, reason: 'envelope-binding-mismatch' };
+    if (record.installation_id !== ctx.identity.config.installationId)
+      return { ok: false, reason: 'wrong-installation' };
+    if (ev.question_id !== record.question_id) return { ok: false, reason: 'question-mismatch' };
+
+    const signer = await this.signer(record.signer_device_id, record.created_at, ev.seq);
+    if ('reason' in signer) return signer;
+    const role = signer.cert.role;
+    if (record.side === 'human' && !HUMAN_ROLES.includes(role))
+      return { ok: false, reason: 'human-message-by-non-human-device' };
+    if (record.side === 'agent' && record.signer_device_id !== ctx.identity.config.deviceId)
+      return { ok: false, reason: 'agent-message-by-another-device' };
+    if (!(await verifyRecordAndEnvelope(record, envelope, signer.pub)))
+      return { ok: false, reason: 'bad-signature-or-digest' };
+
+    const opened = await this.decrypt(envelope, {
+      installationId: ctx.identity.config.installationId,
+      questionId: record.question_id,
+      recordType: MESSAGE_RECORD_TYPE,
+      revision: 0,
+      senderDeviceId: record.signer_device_id,
+      purpose: 'message-content',
+    });
+    if ('reason' in opened) return opened;
+    const p = MessageContentV1.safeParse(opened.raw);
+    if (!p.success) return { ok: false, reason: 'malformed-message-content' };
+    if (p.data.side !== record.side) return { ok: false, reason: 'message-side-mismatch' };
+    if (!imagesMatchRecord(record.attachment_ids, p.data.side === 'human' ? p.data.images : []))
+      return { ok: false, reason: 'message-images-mismatch' };
+    return {
+      ok: true,
+      entry: { message_seq, committed_at, record, envelope },
+      content: p.data,
+      signerRole: role,
     };
   }
 }

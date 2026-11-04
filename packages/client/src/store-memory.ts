@@ -30,7 +30,7 @@ export class MemoryLocalStore implements LocalStore {
   }
   async commitNewQuestion(row: QuestionRow, outbox: OutboxItem) {
     if (this.questions.has(row.question_id)) throw new Error('duplicate question');
-    this.questions.set(row.question_id, clone(row));
+    this.questions.set(row.question_id, clone({ ...row, messages_json: row.messages_json ?? '[]' }));
     this.outbox.set(outbox.id, clone(outbox));
   }
   async getQuestion(id: string) {
@@ -110,7 +110,7 @@ export class MemoryLocalStore implements LocalStore {
     if (seq > (await this.getCursor())) this.meta.set('cursor', String(seq));
   }
   async putIntent(i: InjectionIntent) {
-    this.intents.set(i.injection_id, clone(i));
+    this.intents.set(i.injection_id, clone({ ...i, message_id: i.message_id ?? null }));
   }
   async updateIntent(id: string, patch: Partial<InjectionIntent>) {
     const i = this.intents.get(id);
@@ -129,7 +129,7 @@ export class MemoryLocalStore implements LocalStore {
   }
   async hasUncertainIntent(questionId: string) {
     return [...this.intents.values()].some(
-      (i) => i.question_id === questionId && i.state === 'uncertain',
+      (i) => i.question_id === questionId && i.message_id == null && i.state === 'uncertain',
     );
   }
   async settleIntent(

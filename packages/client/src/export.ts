@@ -291,6 +291,7 @@ export async function importDecisions(
       error_code: null,
       content_sealed: r.content ? await sealQuestionContent(ctx, r.question_id, r.content) : null,
       answers_json: serializeAnswers(answers),
+      messages_json: '[]',
       history_only: true,
       delivered_revision: r.revision ?? 0,
       attachment_digests: r.attachment_digests ?? [],

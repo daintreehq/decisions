@@ -52,7 +52,10 @@ export interface LocalStore {
   updateIntent(id: string, patch: Partial<InjectionIntent>): Promise<InjectionIntent | null>;
   getIntent(id: string): Promise<InjectionIntent | null>;
   openIntents(): Promise<InjectionIntent[]>;
-  /** True while any intent for this question is unresolved-uncertain: delivery must stay blocked. */
+  /**
+   * True while any ANSWER intent for this question (`message_id` null) is unresolved-uncertain: its answers must
+   * stay blocked. A follow-up message's uncertain intent blocks only that message, never the answers.
+   */
   hasUncertainIntent(questionId: string): Promise<boolean>;
   /** Update an intent and its question in ONE atomic write (no crash window between them). */
   settleIntent(
