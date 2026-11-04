@@ -315,7 +315,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the chat’s terminal drawer
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
+    await page.getByText('No questions yet.').waitFor({ timeout: 30_000 });
 
     const origin = (pane: string, project: string, agent = 'claude-code'): QuestionOrigin => ({
       machine_label: 'Greg’s MacBook Pro',
