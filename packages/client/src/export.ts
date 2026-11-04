@@ -13,6 +13,7 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { serializeAnswers, type AnswerEntry, type OpenAnswerEntry } from './answers.js';
 import {
+  answerImageFields,
   openAnswers,
   openQuestionContent,
   sealAnswerContent,
@@ -252,6 +253,7 @@ export async function importDecisions(
         ...(typeof a.confidence === 'number' ? { confidence: a.confidence } : {}),
         ...(typeof a.model_id === 'string' ? { model_id: a.model_id } : {}),
         ...(typeof a.reason === 'string' && a.reason ? { reason: a.reason } : {}),
+        ...answerImageFields(a),
       };
       const sealed =
         a.kind === 'answer'

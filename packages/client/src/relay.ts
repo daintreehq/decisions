@@ -1,8 +1,10 @@
 import {
   API_PREFIX,
   EventsPage,
+  FEATURES_QUERY_PARAM,
   KeyGrantsResponse,
   PROTOCOL_VERSION,
+  formatFeatures,
   type ActionKind,
   type ClaimResponse,
   type CommandReceipt,
@@ -12,6 +14,7 @@ import {
   type EpochGrant,
   type InfoResponse,
   type PendingPairing,
+  type ProtocolFeature,
   type QuestionDetail,
   type SignedAction,
   type SignedQuestion,
@@ -42,10 +45,49 @@ export interface RequestOptions {
   headers?: Record<string, string>;
   /** Return the response body as bytes instead of parsing JSON. */
   raw?: boolean;
+  /** `raw` only: refuse a body larger than this many bytes (`payload_too_large`) without reading the rest. */
+  maxBytes?: number;
   retry?: boolean;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** A raw response body, read only as far as `max` allows: a relay cannot make the client buffer more. */
+async function readRaw(res: Response, max: number | undefined): Promise<Uint8Array> {
+  if (max === undefined) return new Uint8Array(await res.arrayBuffer());
+  const tooLarge = () =>
+    new RelayError('payload_too_large', `response larger than ${max} bytes`, res.status);
+  const declared = Number(res.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    throw tooLarge();
+  }
+  if (!res.body) {
+    const all = new Uint8Array(await res.arrayBuffer());
+    if (all.length > max) throw tooLarge();
+    return all;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
 
 export function backoffMs(
   attempt: number,
@@ -156,7 +198,7 @@ export class RelayClient {
         await this.sleep(backoffMs(attempt++));
         continue;
       }
-      if (res.ok && opts.raw) return new Uint8Array(await res.arrayBuffer()) as T;
+      if (res.ok && opts.raw) return (await readRaw(res, opts.maxBytes)) as T;
       const text = await res.text();
       if (res.ok) return (text ? JSON.parse(text) : {}) as T;
       const err = RelayError.fromBody(res.status, text);
@@ -242,18 +284,32 @@ export class RelayClient {
   }
 
   /* ---- events / socket ---- */
-  async events(after: number, limit = 100): Promise<EventsPage> {
+  /**
+   * One page of events. `features` declares the protocol extensions the caller understands (section 19); the
+   * relay leaves out events that need any other. None declared is the 0.3.0 baseline.
+   */
+  async events(
+    after: number,
+    limit = 100,
+    features: readonly ProtocolFeature[] = [],
+  ): Promise<EventsPage> {
+    const declared = formatFeatures(features);
     const raw = await this.request<unknown>('GET', `${API_PREFIX}/events`, {
-      query: { after, limit },
+      query: { after, limit, ...(declared ? { [FEATURES_QUERY_PARAM]: declared } : {}) },
     });
     return EventsPage.parse(raw);
   }
-  socketTicket() {
+  /** A socket ticket. `features` declares what the socket may be sent, as for `events`. */
+  socketTicket(features: readonly ProtocolFeature[] = []) {
+    const declared = [...new Set(features)].sort();
     return this.request<{ ticket: string; expires_at: string; ws_path: string }>(
       'POST',
       `${API_PREFIX}/socket-ticket`,
       {
-        body: { protocol_version: PROTOCOL_VERSION },
+        body: {
+          protocol_version: PROTOCOL_VERSION,
+          ...(declared.length ? { features: declared } : {}),
+        },
         retry: false,
       },
     );
@@ -348,8 +404,12 @@ export class RelayClient {
       headers: { 'x-content-sha256': sha256Ciphertext },
     });
   }
-  downloadAttachment(attachmentId: string): Promise<Uint8Array> {
-    return this.request('GET', `${API_PREFIX}/attachments/${attachmentId}/content`, { raw: true });
+  /** Ciphertext bytes. `maxBytes` refuses a larger body (`payload_too_large`) before it is buffered. */
+  downloadAttachment(attachmentId: string, opts: { maxBytes?: number } = {}): Promise<Uint8Array> {
+    return this.request('GET', `${API_PREFIX}/attachments/${attachmentId}/content`, {
+      raw: true,
+      ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
+    });
   }
   completeAttachment(attachmentId: string) {
     return this.request('POST', `${API_PREFIX}/attachments/${attachmentId}/complete`, {

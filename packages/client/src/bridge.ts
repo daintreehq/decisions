@@ -1,4 +1,9 @@
-import { LIMITS, type DecisionContentV1, type LedgerEvent } from '@daintreehq/decisions-protocol';
+import {
+  LIMITS,
+  type DecisionContentV1,
+  type LedgerEvent,
+  type ProtocolFeature,
+} from '@daintreehq/decisions-protocol';
 import { AuditLog } from './audit.js';
 import { BridgeError } from './content.js';
 import {
@@ -27,6 +32,7 @@ import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex, TransientError } from './mutex.js';
 import { RelayClient } from './relay.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
+import type { PhoneImageStore } from './phone-images.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
 import type { LocalStore } from './store.js';
 import type { QuestionOrigin, QuestionRow } from './types.js';
@@ -49,6 +55,12 @@ export interface BridgeOptions {
    */
   learner?: DecisionLearner;
   adapters?: AgentResumeAdapter[];
+  /**
+   * Where verified phone images go, so the agent can open the photos a person attaches to an answer: the host
+   * stores each one where the pane's agent can read it and returns the path, which the typed block lists.
+   * Without it, each image is listed as unavailable (`no_image_store`) and the words are delivered as usual.
+   */
+  phoneImages?: PhoneImageStore;
   auditPath?: string;
   debugContent?: boolean;
   client?: RelayClient;
@@ -61,6 +73,13 @@ export interface BridgeOptions {
 }
 
 export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
+
+/**
+ * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
+ * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
+ * answer from a client that does not declare it, and its words must still arrive.
+ */
+export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1'];
 
 export interface DecisionView {
   questionId: string;
@@ -205,9 +224,11 @@ export class DecisionsBridge {
       sink: o.sink,
       ...(o.adapters ? { adapters: o.adapters } : {}),
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
+      ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
     });
     this.socket = new RelaySocket({
       client,
+      features: BRIDGE_FEATURES,
       getCursor: () => this.ctx.store.getCursor(),
       ...(o.webSocket ? { webSocket: o.webSocket } : {}),
       handlers: {
@@ -525,7 +546,7 @@ export class DecisionsBridge {
   async catchUp(): Promise<number> {
     let after = await this.ctx.store.getCursor();
     for (;;) {
-      const page = await this.ctx.client.events(after, LIMITS.eventPageSize);
+      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, BRIDGE_FEATURES);
       for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
       await this.ctx.store.advanceCursor();
       if (page.next_after > after) {
