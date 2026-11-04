@@ -4,7 +4,7 @@ import type { ActionView, QuestionView } from '../../domain/model.js';
 import type { OutboxEntry } from '../../data/outbox.js';
 import { momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
-import { CopyIcon, ModelIcon, WarningIcon } from '../Icons.js';
+import { CopyIcon, WarningIcon } from '../Icons.js';
 
 export const optionLabel = (view: QuestionView, id: string) =>
   view.content?.options.find((o) => o.id === id)?.label ?? id;
@@ -74,109 +74,6 @@ export function AnswerBody({ view, content }: { view: QuestionView; content: Con
         </p>
       )}
     </div>
-  );
-}
-
-/** A human answer in force, as a read-only card with its author and time. */
-export function AnswerCard({ view, a, now }: { view: QuestionView; a: ActionView; now: number }) {
-  return (
-    <section className="answer-card" aria-labelledby="ws-answer-h" id="ws-answer">
-      <header>
-        <h2 id="ws-answer-h" className="eyebrow">
-          {a.action === 'override' ? 'Your corrected answer' : 'Your answer'}
-        </h2>
-        <span className="answer-when">{momentLabel(a.createdAt, now)}</span>
-      </header>
-      <AnswerBody view={view} content={a.content as Content} />
-    </section>
-  );
-}
-
-/**
- * The decision model's answer. Provenance stays visible (violet, always with the words "Model answer"); confirming
- * records an endorsement and never rewrites who authored it.
- */
-export function ModelAnswerCard({
-  view,
-  a,
-  now,
-  confirmedAt,
-  review,
-}: {
-  view: QuestionView;
-  a: ActionView;
-  now: number;
-  confirmedAt: string | null;
-  review: boolean;
-}) {
-  const c = a.content as ProxyAnswerContentV1;
-  const pct = Math.round((c.confidence ?? 0) * 100);
-  return (
-    <section className="answer-card model" aria-labelledby="ws-answer-h" id="ws-answer">
-      <header>
-        <h2 id="ws-answer-h" className="model-label">
-          <ModelIcon size={12} />
-          {confirmedAt
-            ? `Model answer, confirmed by you · ${momentLabel(confirmedAt, now)}`
-            : 'Model answer'}
-        </h2>
-        {!confirmedAt && <span className="answer-when">{momentLabel(a.createdAt, now)}</span>}
-      </header>
-      <AnswerBody view={view} content={a.content as Content} />
-      <p className="model-meta">
-        <span>{c.model_id}</span>
-        <span aria-hidden="true"> · </span>
-        <span>Model-reported confidence {pct}%</span>
-      </p>
-      {(c.rationale || c.retrieval_reference_ids.length > 0) && (
-        <details className="disclosure">
-          <summary>Why the model chose this</summary>
-          {c.rationale && <SafeText text={c.rationale} />}
-          {c.retrieval_reference_ids.length > 0 && (
-            <p className="muted">
-              Based on {c.retrieval_reference_ids.length} of your earlier decisions.
-            </p>
-          )}
-        </details>
-      )}
-      {review && !confirmedAt && (
-        <p className="model-note">
-          Your agent may already be acting on this. Confirm it, or change it to send a correction.
-        </p>
-      )}
-    </section>
-  );
-}
-
-/** The answer sealed on this device and on its way, read-only (there is no second Send). */
-export function PendingCard({ view, entry }: { view: QuestionView; entry: OutboxEntry }) {
-  const labels = entry.selected.map((id) => optionLabel(view, id));
-  return (
-    <section className="answer-card" aria-labelledby="ws-answer-h" id="ws-answer">
-      <header>
-        <h2 id="ws-answer-h" className="eyebrow">
-          {entry.kind === 'override'
-            ? 'Your correction'
-            : entry.kind === 'confirm-proxy'
-              ? 'Your confirmation'
-              : 'Your answer'}
-        </h2>
-      </header>
-      {entry.kind === 'confirm-proxy' ? (
-        <p className="answer-text">Confirming the model answer.</p>
-      ) : (
-        <div className="answer-body">
-          {labels.length > 0 && <p className="answer-choice">{labels.join(', ')}</p>}
-          {entry.text.trim() && <SafeText text={entry.text} className="answer-text" />}
-          {entry.reason.trim() && (
-            <p className="answer-reason">
-              <span className="eyebrow-inline">Reason</span>{' '}
-              <SafeText text={entry.reason} className="inline" />
-            </p>
-          )}
-        </div>
-      )}
-    </section>
   );
 }
 

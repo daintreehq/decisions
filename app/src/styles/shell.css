@@ -167,14 +167,15 @@ main.bare {
   display: none;
 }
 
-/* Inside a question the button takes the header's leading slot, so Back is the sidebar's Home (and the system's
-   Back) and the header row is the button's row. */
-.shell[data-layout='single'] .ws-back {
-  display: none;
-}
+/* Inside a question the button takes the header's leading slot (Back, when there is one, sits beside it), and the
+   header row is the button's row. */
 .shell[data-layout='single'] .ws-head {
+  --ws-pad-l: var(--fab-x);
+  --ws-lead: calc(var(--fab-size) + 4px + var(--tap-min));
   min-height: calc(var(--safe-t) + var(--fab-size) + 12px);
-  padding-left: calc(var(--fab-x) + var(--fab-size) + 4px);
+}
+.shell[data-layout='single'] .ws-menu-slot {
+  display: block;
 }
 /* In the header's row the button sits on a bar rather than floating over content, so it casts the resting shadow. */
 .shell[data-layout='single'][data-route='question'] .menu-fab {

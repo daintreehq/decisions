@@ -283,7 +283,9 @@ describe.skipIf(!chromiumPath)(
       const typedBefore = sink.typed.length;
       // answered questions leave the inbox; open it where History links to it
       await page.goto(`${relay.origin}/q/${qid}`);
-      await page.locator('.dock').getByRole('button', { name: 'Change answer' }).click();
+      // Change answer lives in the question's overflow menu.
+      await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+      await page.getByRole('menuitem', { name: 'Change answer' }).click();
       await page.getByRole('radio', { name: /No, wait for the server/ }).check();
       // The reason is its own field: in the page when the correction also has text, otherwise the dock's field.
       const why = page.getByRole('button', { name: /Why are you changing it/ });

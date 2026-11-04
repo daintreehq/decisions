@@ -1,12 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { app } from '../../app/controller.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
-import { navigate } from '../../app/router.js';
+import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { openNavigator } from '../../app/navigator.js';
 import { StaleQuestionError } from '../../domain/answer.js';
 import {
   composeShape,
-  firstLine,
   formatBytes,
   verdict as computeVerdict,
   type ComposeMode,
@@ -28,7 +35,7 @@ import { drafts, fieldValue, useDraft } from '../../features/compose/draftStore.
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
 import { announce } from '../../lib/announce.js';
 import { previewText } from '../../lib/safe-text.js';
-import { absoluteLabel, ageLabel, dueLabel, momentLabel } from '../../lib/time.js';
+import { absoluteLabel, dueLabel, momentLabel } from '../../lib/time.js';
 import {
   AttachmentGallery,
   NO_REVIEW,
@@ -39,37 +46,43 @@ import { ActivityTimeline } from '../history/ActivityTimeline.js';
 import { SafeText } from '../SafeText.js';
 import {
   ArrowRight,
+  CheckIcon,
+  ChevronDown,
   ClockIcon,
-  ErrorIcon,
-  LockIcon,
   ModelIcon,
-  SuccessIcon,
+  PersonIcon,
+  RefreshIcon,
+  UndoIcon,
   WarningIcon,
 } from '../Icons.js';
 import { AllQaButton, AnswerDock, DictateButton } from './AnswerDock.js';
 import { ChoiceSheet, ConsentSheet } from './ChoiceSheet.js';
 import { composeCentre, composeSummary, TranscriptPanel } from './ComposeDock.js';
-import {
-  AnswerBody,
-  AnswerCard,
-  ConflictCard,
-  CopyButton,
-  ModelAnswerCard,
-  OptionCards,
-  optionLabel,
-  PendingCard,
-} from './DecisionArea.js';
-import { DeliveryStage, DeliveryStepper } from './DeliveryStatus.js';
+import { AnswerBody, ConflictCard, CopyButton, OptionCards, optionLabel } from './DecisionArea.js';
+import { Receipt } from './DeliveryStatus.js';
 import { EditorSheet, FIELD_LABEL } from './EditorSheet.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
 import { Sheet } from './Sheet.js';
+import {
+  AgentMessage,
+  HumanAnswer,
+  MessageContext,
+  ModelMessage,
+  OutgoingMessage,
+  StaticChoices,
+  SystemLine,
+  Thread,
+} from './Thread.js';
 import { useKeyboardInset } from './useKeyboardInset.js';
 import { WorkspaceHeader, type MenuItem } from './WorkspaceHeader.js';
 
 /** The gallery's review report: `digests` are the files both verified and actually presented. */
 type Review = ReviewState;
 const Gallery = AttachmentGallery;
+
+const reducedMotion = () =>
+  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /** The question workspace for `/q/:id`. Keyed by id, so another question is always a fresh workspace. */
 export function Workspace({ id }: { id: string }) {
@@ -86,8 +99,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<GalleryHandle | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   useKeyboardInset(rootRef);
   const all = useQuestions();
   const dictAll = useDictation();
@@ -101,7 +116,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const [choiceOpen, setChoiceOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
-  const [stepperOpen, setStepperOpen] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [headingAway, setHeadingAway] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -122,9 +136,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const kind = submitKind(view, now);
   const modelReview = proxyNeedsReview(view, now);
   const confirmed = view.actions.find((a) => a.verified && a.action === 'confirm-proxy');
-  const progress = app.store
-    ? deliveryProgress(view, app.store, pendingEntry?.state as 'queued' | 'sending' | undefined)
-    : null;
+  // Where the answer in force has reached, and (separately) where this device's reply on its way has reached.
+  const progress = app.store ? deliveryProgress(view, app.store) : null;
+  const pendingProgress =
+    app.store && pendingEntry
+      ? deliveryProgress(view, app.store, pendingEntry.state as 'queued' | 'sending')
+      : null;
   const canCorrect = verified && !!content && kind === 'override' && !pendingEntry;
 
   const answerDraft = useDraft(id, 'answer', view.revision);
@@ -261,7 +278,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const long = opts.length > 3 || opts.some((o) => (o.description?.length ?? 0) > 90);
     const el = document.getElementById('ws-options');
     if (!long && el) {
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
       el.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
     } else setChoiceOpen(true);
   };
@@ -379,50 +396,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
 
   /* ---------- header ---------- */
 
-  const glyph =
-    status === 'open' ? (
-      <span className="glyph-waiting" />
-    ) : status === 'proxy-answered' ? (
-      <ModelIcon size={12} />
-    ) : status === 'human-answered' ? (
-      <SuccessIcon size={14} />
-    ) : status === 'expired' ? (
-      <ClockIcon size={14} />
-    ) : status === 'unverified' ? (
-      unreadableHere(view) ? (
-        <LockIcon size={14} />
-      ) : (
-        <ErrorIcon size={14} />
-      )
-    ) : null;
-  const statusWords =
-    status === 'open'
-      ? 'Needs you'
-      : status === 'proxy-answered'
-        ? modelReview
-          ? 'Model answer · review'
-          : 'Answered by the model'
-        : status === 'human-answered'
-          ? 'Answered'
-          : status === 'expired'
-            ? 'Expired'
-            : status === 'cancelled'
-              ? 'Withdrawn'
-              : unreadableHere(view)
-                ? 'Not readable here'
-                : 'Could not verify';
   const menu: MenuItem[] = [];
   if (content) {
-    menu.push({
-      label: 'Question details',
-      onSelect: () => {
-        const d = document.getElementById('ws-details') as HTMLDetailsElement | null;
-        if (d) {
-          d.open = true;
-          d.scrollIntoView({ block: 'start', behavior: 'smooth' });
-        }
-      },
-    });
+    menu.push({ label: 'Question details', onSelect: () => setDetailsOpen(true) });
     menu.push({
       label: 'Copy question',
       onSelect: () => void navigator.clipboard?.writeText(content.question).catch(() => undefined),
@@ -433,7 +409,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     onSelect: () => void navigator.clipboard?.writeText(id).catch(() => undefined),
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
-  if (canCorrect && !inCorrection) menu.push({ label: 'Change answer', onSelect: startCorrection });
+  if (canCorrect && !inCorrection)
+    menu.push({
+      label: hasWords(correctionDraft) ? 'Resume correction' : 'Change answer',
+      onSelect: startCorrection,
+    });
 
   /* ---------- dock ---------- */
 
@@ -444,18 +424,39 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       onClick={allQa}
     />
   );
+  // A lateral move keeps the first question's origin, so Back still returns to the list it came from.
+  const goNext = () => {
+    if (!next) return;
+    if (dictation.isActive()) void dictation.stop();
+    openQuestion(next.id, backTarget() === '/history' ? 'history' : 'questions', null, {
+      refocus: false,
+    });
+  };
   const nextButton = next ? (
-    <button
-      type="button"
-      className="btn primary dock-next"
-      onClick={() => navigate(`/q/${next.id}`)}
-    >
+    <button type="button" className="btn primary dock-next" onClick={goNext}>
       Next question
       <ArrowRight size={18} />
     </button>
   ) : (
     <span className="dock-none">No more questions need you</span>
   );
+  /** Moving on, as the dock's whole centre: the one thing left to do once an answer is on its way. */
+  const moveOn = (strong: boolean) =>
+    next ? (
+      <button
+        type="button"
+        className={`btn${strong ? ' primary' : ''} dock-next wide`}
+        onClick={goNext}
+      >
+        Next question
+        <ArrowRight size={18} />
+      </button>
+    ) : (
+      <span className="dock-done">
+        <CheckIcon size={16} />
+        No more questions need you
+      </span>
+    );
   let dock: ReactNode;
   let dockExpanded = false;
   if (!verified || !content) {
@@ -475,38 +476,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       />
     );
   } else if (pendingEntry) {
-    const queuedOffline = pendingEntry.state === 'queued' && !navigator.onLine;
-    dock = (
-      <AnswerDock
-        left={qa}
-        summary={
-          <div className="dock-status">
-            <span className="status" role="status">
-              {pendingEntry.kind === 'confirm-proxy' ? (
-                'Confirming…'
-              ) : progress ? (
-                <DeliveryStage progress={progress} />
-              ) : null}
-              {queuedOffline && (
-                <span className="status-quiet"> It will send when you’re back online.</span>
-              )}
-            </span>
-          </div>
-        }
-        centre={
-          <div className="dock-field passive">
-            <span className="dock-preview">
-              {[
-                pendingEntry.selected.map((s) => optionLabel(view, s)).join(', '),
-                firstLine(pendingEntry.text),
-              ]
-                .filter(Boolean)
-                .join(' · ') || 'Your answer'}
-            </span>
-          </div>
-        }
-      />
-    );
+    // The reply and its receipt are in the thread; the dock offers what comes next.
+    dock = <AnswerDock left={qa} centre={moveOn(true)} />;
   } else if (failed.length > 0) {
     dock = (
       <AnswerDock
@@ -656,119 +627,387 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       />
     );
   } else if (modelReview && proxy) {
-    dock = (
-      <AnswerDock
-        left={qa}
-        summary={
-          <>
-            <div className="dock-status">
-              <span className="selection">
-                <span className="selection-key">Model chose</span>
-                <span className="selection-value">
-                  {(
-                    (proxy.content as { selected_option_ids?: string[] } | null)
-                      ?.selected_option_ids ?? []
-                  )
-                    .map((o) => optionLabel(view, o))
-                    .join(', ') || 'A written answer'}
-                </span>
-              </span>
-              {confirmError && (
-                <span className="status error" role="alert">
-                  {confirmError}
-                </span>
-              )}
-            </div>
-            <button
-              type="button"
-              className="btn primary dock-send"
-              aria-disabled={busy || undefined}
-              onClick={() => !busy && void confirmModel()}
-            >
-              Confirm answer
-            </button>
-          </>
-        }
-        centre={
-          canCorrect ? (
-            <button type="button" className="dock-field" onClick={startCorrection}>
-              <span className="dock-placeholder strong">Change answer</span>
-            </button>
-          ) : undefined
-        }
-      />
-    );
-  } else if (answer && (status === 'human-answered' || status === 'proxy-answered')) {
-    dock = (
-      <AnswerDock
-        left={qa}
-        above={
-          stepperOpen && progress ? (
-            <div className="dock-stepper">
-              <DeliveryStepper progress={progress} fromPhone={answer.provenance !== 'proxy'} />
-            </div>
-          ) : undefined
-        }
-        summary={
-          <>
-            <div className="dock-status">
-              {progress && (
-                <button
-                  type="button"
-                  className="stage-button"
-                  aria-expanded={stepperOpen}
-                  onClick={() => setStepperOpen((o) => !o)}
-                >
-                  <DeliveryStage progress={progress} />
-                </button>
-              )}
-            </div>
-            {canCorrect && (
-              <button type="button" className="btn small" onClick={startCorrection}>
-                {hasWords(correctionDraft) ? 'Resume correction' : 'Change answer'}
-              </button>
-            )}
-          </>
-        }
-        centre={
-          <button
-            type="button"
-            className="dock-field"
-            onClick={() =>
-              document.getElementById('ws-answer')?.scrollIntoView({ block: 'center' })
-            }
-          >
-            <span className="dock-placeholder strong">View answer</span>
-          </button>
-        }
-        right={nextButton}
-      />
-    );
+    // Confirm and Overrule live on the model's message; moving on stays here, quieter than Confirm.
+    dock = <AnswerDock left={qa} centre={moveOn(false)} />;
   } else {
-    dock = (
-      <AnswerDock
-        left={qa}
-        summary={
-          <div className="dock-status">
-            <span className="status">
-              {status === 'expired' ? 'This question expired' : 'Withdrawn by your agent'}
-            </span>
-          </div>
-        }
-        right={nextButton}
-      />
-    );
+    // Answered, expired or withdrawn: the thread says which; the dock offers the next question.
+    dock = <AnswerDock left={qa} centre={moveOn(true)} />;
   }
 
-  /* ---------- body ---------- */
+  /* ---------- the thread ---------- */
 
+  const soon =
+    status === 'open' && !!view.expiresAt && Date.parse(view.expiresAt) - now < 24 * 3_600_000;
   const due =
     status === 'open' && view.expiresAt ? (
-      <span className={Date.parse(view.expiresAt) - now < 24 * 3_600_000 ? 'due soon' : 'due'}>
-        {Date.parse(view.expiresAt) - now < 24 * 3_600_000 && <ClockIcon size={13} />}
+      <span className={soon ? 'due soon' : 'due'}>
+        <ClockIcon size={13} />
         {dueLabel(view.expiresAt, now)}
       </span>
     ) : null;
+  const inForce =
+    (answer?.content as { selected_option_ids?: string[] } | null)?.selected_option_ids ?? [];
+  const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
+  const closed = status === 'expired' || status === 'cancelled';
+  const items: ReactNode[] = [];
+  if (content) {
+    items.push(
+      <AgentMessage
+        key="question"
+        view={view}
+        now={now}
+        headingRef={headingRef}
+        files={<Gallery view={view} onReview={onReview} handleRef={galleryRef} />}
+        context={content.context ? <MessageContext text={content.context} /> : undefined}
+        choices={
+          offerChoices ? (
+            <OptionCards
+              view={view}
+              selected={draft.selected}
+              onSelect={select}
+              disabled={stale || busy}
+              legend={content.kind === 'approval' ? 'Your decision' : 'Choose one'}
+            />
+          ) : (
+            <StaticChoices
+              view={view}
+              chosen={
+                pendingEntry && pendingEntry.kind !== 'confirm-proxy'
+                  ? pendingEntry.selected
+                  : inForce
+              }
+              caption={closed ? 'The options were' : undefined}
+            />
+          )
+        }
+        meta={due}
+      />,
+    );
+    // The gate matters while the question is open: no model will step in, so it waits for a person.
+    if (status === 'open' && view.requirement === 'human-required')
+      items.push(
+        <SystemLine
+          key="gate"
+          now={now}
+          icon={<PersonIcon size={14} />}
+          detail="The decision model doesn’t answer this one."
+        >
+          Human decision required
+        </SystemLine>,
+      );
+    if (view.integrityIssues.length > 0)
+      items.push(
+        <SystemLine
+          key="integrity"
+          now={now}
+          tone="warn"
+          icon={<WarningIcon size={14} />}
+          detail={
+            <ul className="plain">
+              {view.integrityIssues.slice(0, 4).map((m, i) => (
+                <li key={i}>{m}</li>
+              ))}
+            </ul>
+          }
+        >
+          Some activity could not be verified
+        </SystemLine>,
+      );
+    for (const a of view.actions) {
+      if (!a.verified) {
+        items.push(
+          <SystemLine key={a.actionId} now={now} tone="warn" icon={<WarningIcon size={14} />}>
+            An action could not be verified and was ignored
+          </SystemLine>,
+        );
+        continue;
+      }
+      const isCurrent = a === answer;
+      if (a.action === 'answer' || a.action === 'override') {
+        items.push(
+          <HumanAnswer
+            key={a.actionId}
+            view={view}
+            a={a}
+            now={now}
+            receipt={isCurrent && progress ? <Receipt progress={progress} fromPhone /> : undefined}
+            flagged={isCurrent && progress?.step === 'attention'}
+          />,
+        );
+      } else if (a.action === 'proxy-answer') {
+        items.push(
+          <ModelMessage
+            key={a.actionId}
+            view={view}
+            a={a}
+            now={now}
+            review={modelReview && a === proxy && !confirmed && !pendingEntry}
+            busy={busy}
+            error={confirmError}
+            onConfirm={() => void confirmModel()}
+            onOverrule={canCorrect ? startCorrection : undefined}
+            receipt={
+              isCurrent && progress ? <Receipt progress={progress} fromPhone={false} /> : undefined
+            }
+          />,
+        );
+      } else if (a.action === 'proxy-abstain') {
+        items.push(
+          <SystemLine
+            key={a.actionId}
+            now={now}
+            at={a.createdAt}
+            icon={
+              <span className="model-mark">
+                <ModelIcon size={12} />
+              </span>
+            }
+          >
+            The decision model left it to you
+          </SystemLine>,
+        );
+      } else if (a.action === 'confirm-proxy') {
+        items.push(
+          <OutgoingMessage key={a.actionId} at={a.createdAt} now={now}>
+            <p className="answer-text">Confirmed the model answer</p>
+            {a.content?.reason && <SafeText text={a.content.reason} className="answer-reason" />}
+          </OutgoingMessage>,
+        );
+      } else if (a.action === 'cancel') {
+        items.push(
+          <SystemLine
+            key={a.actionId}
+            now={now}
+            at={a.createdAt}
+            icon={<UndoIcon size={14} />}
+            detail="No answer is needed, and nothing was approved here."
+          >
+            Withdrawn by your agent
+          </SystemLine>,
+        );
+      } else if (a.action === 'reopen') {
+        items.push(
+          <SystemLine key={a.actionId} now={now} at={a.createdAt} icon={<RefreshIcon size={14} />}>
+            Reopened by your agent
+          </SystemLine>,
+        );
+      }
+    }
+    if (status === 'expired' && view.expiresAt)
+      items.push(
+        <SystemLine
+          key="expired"
+          now={now}
+          at={view.expiresAt}
+          icon={<ClockIcon size={14} />}
+          detail="Nothing was approved. To decide now, ask your agent again from your computer."
+        >
+          Expired without an answer
+        </SystemLine>,
+      );
+    if (pendingEntry) {
+      const queuedOffline = pendingEntry.state === 'queued' && !navigator.onLine;
+      items.push(
+        <OutgoingMessage
+          key="pending"
+          now={now}
+          tone="pending"
+          id="ws-answer"
+          label={pendingEntry.kind === 'override' ? 'Changed answer' : undefined}
+          receipt={
+            pendingProgress ? (
+              <Receipt
+                progress={pendingProgress}
+                fromPhone
+                steps={pendingEntry.kind !== 'confirm-proxy'}
+                note={queuedOffline ? 'Sends when you’re back online' : undefined}
+              />
+            ) : undefined
+          }
+        >
+          {pendingEntry.kind === 'confirm-proxy' ? (
+            <p className="answer-text">Confirmed the model answer</p>
+          ) : (
+            <AnswerBody
+              view={view}
+              content={{
+                content_version: 1,
+                selected_option_ids: pendingEntry.selected,
+                text: pendingEntry.text.trim() || undefined,
+                reviewed_attachment_digests: [],
+                reason: pendingEntry.reason.trim() || undefined,
+              }}
+            />
+          )}
+        </OutgoingMessage>,
+      );
+    }
+    for (const e of failed)
+      items.push(
+        <div key={e.id} className="msg out wide">
+          <ConflictCard
+            view={view}
+            entry={e}
+            current={answer}
+            now={now}
+            canCorrect={canCorrect || kind === 'override'}
+            onDismiss={() => {
+              if (status === 'open' && !hasWords(answerDraft) && e.text.trim())
+                drafts.edit(answerDraft.key, { text: e.text });
+              void app.outbox?.discard(e.id);
+            }}
+            onUseAsCorrection={() => {
+              drafts.edit(correctionDraft.key, {
+                selected: e.selected,
+                text: e.text,
+              });
+              void app.outbox?.discard(e.id);
+              setCorrecting(true);
+            }}
+          />
+        </div>,
+      );
+    if (composing && mode === 'answer' && stale)
+      items.push(
+        <SystemLine
+          key="stale"
+          now={now}
+          tone="warn"
+          icon={<WarningIcon size={14} />}
+          detail={
+            <button
+              type="button"
+              className="btn small"
+              onClick={() => void dictation.rebind(draft.key, view.revision)}
+            >
+              Review update
+            </button>
+          }
+        >
+          This question changed. Your draft is saved; review the update before sending.
+        </SystemLine>,
+      );
+    if (inCorrection && shape)
+      items.push(
+        <div key="correction" className="msg out wide">
+          <CorrectionArea
+            view={view}
+            answerContent={answer?.content ?? null}
+            // The answer in force is already in the thread just above.
+            showCurrent={false}
+            draft={correctionDraft}
+            hasOptions={shape.hasOptions}
+            reasonInPage={shape.fields.length > 1}
+            onSelect={select}
+            onReason={() => {
+              setField('reason');
+              setEditor({ open: true, expanded: false });
+            }}
+            onCancel={() => {
+              if (dictation.isActive()) void dictation.stop();
+              setEditor({ open: false, expanded: false });
+              setCorrecting(false);
+            }}
+            onDiscard={() => setDiscardOpen(true)}
+          />
+        </div>,
+      );
+    if (closed && answerDraft.text.trim())
+      items.push(
+        <OutgoingMessage key="draft" now={now} tone="draft" label="Unsent draft">
+          <SafeText text={answerDraft.text} className="answer-text" />
+          <div className="row">
+            <CopyButton text={answerDraft.text} />
+          </div>
+        </OutgoingMessage>,
+      );
+  }
+
+  // On open, a question still waiting for an answer starts at the question; anything else shows its latest item
+  // (a reply, a model answer, an expiry line): all of it when it fits, otherwise from its start. Later, a new item
+  // or a delivery change that grows the latest one (a problem and its explanation) is brought into view when it is
+  // the person's own reply or when they were already following the end. Someone reading further up keeps their
+  // place, and "New activity" offers the way down.
+  // What counts as activity: the thread's items by identity (a gate line replaced by an expiry is activity even
+  // though the count is the same) and the delivery steps of the answer in force and any pending reply.
+  const itemKeys = items.map((it) => String((it as { key?: string | null }).key ?? ''));
+  const keysKey = itemKeys.join('|');
+  const lastKey = itemKeys[itemKeys.length - 1] ?? '';
+  const deliveryKey = `${progress?.step ?? ''}/${pendingProgress?.step ?? ''}`;
+  const waitingForAnswer = status === 'open' && !pendingEntry && failed.length === 0;
+  const shownKeys = useRef<string | null>(null);
+  const shownDelivery = useRef(deliveryKey);
+  const following = useRef(true);
+  const [newBelow, setNewBelow] = useState(false);
+  const atEnd = (b: HTMLElement) => b.scrollHeight - b.scrollTop - b.clientHeight < 96;
+  const onBodyScroll = () => {
+    const b = bodyRef.current;
+    if (!b) return;
+    following.current = atEnd(b);
+    if (following.current && newBelow) setNewBelow(false);
+  };
+  /** The latest item: all of it when it fits, otherwise from its start (`end` shows its end instead). */
+  const showLatest = (smooth: boolean, end = false) => {
+    const body = bodyRef.current;
+    const thread = threadRef.current;
+    if (!body || !thread) return;
+    const all = thread.querySelectorAll<HTMLElement>(':scope > .msg');
+    const latest = all[all.length - 1];
+    const max = body.scrollHeight - body.clientHeight;
+    if (max <= 0) return;
+    const top =
+      latest && !end
+        ? latest.getBoundingClientRect().top -
+          body.getBoundingClientRect().top +
+          body.scrollTop -
+          12
+        : max;
+    const to = Math.min(max, Math.max(0, top));
+    if (smooth) body.scrollTo({ top: to, behavior: reducedMotion() ? 'auto' : 'smooth' });
+    else body.scrollTop = to;
+    following.current = max - to < 96;
+  };
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body || !threadRef.current) return;
+    const first = shownKeys.current === null;
+    const before = new Set((shownKeys.current ?? '').split('|'));
+    // Something new arrived (an item that wasn't there before); a removal alone is not activity.
+    const added = itemKeys.filter((k) => !before.has(k));
+    const itemsChanged = added.length > 0;
+    const deliveryChanged = deliveryKey !== shownDelivery.current;
+    shownKeys.current = keysKey;
+    shownDelivery.current = deliveryKey;
+    if (first) {
+      if (waitingForAnswer) body.scrollTop = 0;
+      else showLatest(false);
+      following.current = atEnd(body);
+      return;
+    }
+    if (!itemsChanged && !deliveryChanged) return;
+    // The person's own reply is always followed; anything else only while they are following the end.
+    const mine = added.includes(lastKey) && (lastKey === 'pending' || lastKey === 'correction');
+    if (mine || following.current) {
+      // A delivery change grows the end of the latest reply (its receipt or problem): show that end.
+      showLatest(true, deliveryChanged && !itemsChanged);
+      setNewBelow(false);
+    } else setNewBelow(true);
+  }, [keysKey, deliveryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Delivery outcomes are announced once, when they happen: typed into the terminal, or needing attention, for the
+  // person's answer or the model's. The steps in between stay silent, and an outcome already reached when the
+  // question opens is not repeated.
+  const outcomeKey = answer && progress ? `${answer.actionId}:${progress.step}` : '';
+  const lastOutcome = useRef(outcomeKey);
+  useEffect(() => {
+    const prev = lastOutcome.current;
+    lastOutcome.current = outcomeKey;
+    if (!outcomeKey || outcomeKey === prev || !answer || !progress) return;
+    const subject = answer.provenance === 'proxy' ? 'The model answer' : 'Your answer';
+    if (progress.step === 'terminal') announce(`${subject} was typed into the terminal.`);
+    else if (progress.step === 'attention')
+      announce(`${progress.label}. Open Daintree on your computer to see what happened.`);
+  }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
@@ -779,14 +1018,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       <WorkspaceHeader
         project={project}
         machine={machine}
-        glyph={glyph}
-        statusText={statusWords}
         excerpt={excerpt}
         showExcerpt={headingAway}
         onExcerpt={() => {
-          bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+          bodyRef.current?.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
           headingRef.current?.focus({ preventScroll: true });
         }}
+        back={cameFromApp()}
         menu={menu}
       />
       <Sheet
@@ -797,177 +1035,27 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       >
         {activityOpen && <ActivityTimeline view={view} now={now} />}
       </Sheet>
-      <div className="ws-body" ref={bodyRef}>
+      <Sheet open={detailsOpen} title="Question details" onClose={() => setDetailsOpen(false)}>
+        {detailsOpen && <QuestionDetails view={view} />}
+      </Sheet>
+      <div className="ws-body" ref={bodyRef} onScroll={onBodyScroll}>
         <article className="ws-column" aria-labelledby={content ? 'q-title' : undefined}>
           {!verified && <TrustState view={view} headingRef={headingRef} />}
-          {content && (
-            <>
-              <div id="q-title" role="heading" aria-level={1} tabIndex={-1} ref={headingRef}>
-                <SafeText text={content.question} className="question" />
-              </div>
-              <p className="status-line">
-                <span className={`principal ${status}`}>
-                  {glyph}
-                  {statusWords}
-                </span>
-                {status === 'open' && view.requirement === 'human-required' && (
-                  <span>Human decision required</span>
-                )}
-                {status === 'open' && view.proxyAbstained && <span>The model passed</span>}
-                {due ?? (
-                  <span title={absoluteLabel(view.createdAt)}>
-                    Asked {ageLabel(view.createdAt, now)}
-                  </span>
-                )}
-              </p>
-              <Gallery view={view} onReview={onReview} handleRef={galleryRef} />
-              {content.context && (
-                <details className="disclosure context">
-                  <summary>
-                    <span className="summary-title">Context from the agent</span>
-                    <span className="summary-preview">{previewText(content.context, 120)}</span>
-                  </summary>
-                  <SafeText text={content.context} />
-                </details>
-              )}
-              {view.integrityIssues.length > 0 && (
-                <div className="callout warn" role="alert">
-                  <WarningIcon size={16} />
-                  <div>
-                    <strong>Some activity could not be verified</strong>
-                    <ul className="plain">
-                      {view.integrityIssues.slice(0, 4).map((m, i) => (
-                        <li key={i}>{m}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              )}
-              <section className="decision" aria-label="Decision">
-                {pendingEntry ? (
-                  <PendingCard view={view} entry={pendingEntry} />
-                ) : failed.length > 0 ? (
-                  failed.map((e) => (
-                    <ConflictCard
-                      key={e.id}
-                      view={view}
-                      entry={e}
-                      current={answer}
-                      now={now}
-                      canCorrect={canCorrect || kind === 'override'}
-                      onDismiss={() => {
-                        if (status === 'open' && !hasWords(answerDraft) && e.text.trim())
-                          drafts.edit(answerDraft.key, { text: e.text });
-                        void app.outbox?.discard(e.id);
-                      }}
-                      onUseAsCorrection={() => {
-                        drafts.edit(correctionDraft.key, {
-                          selected: e.selected,
-                          text: e.text,
-                        });
-                        void app.outbox?.discard(e.id);
-                        setCorrecting(true);
-                      }}
-                    />
-                  ))
-                ) : (
-                  <>
-                    {answer &&
-                      (answer.provenance === 'proxy' ? (
-                        <ModelAnswerCard
-                          view={view}
-                          a={answer}
-                          now={now}
-                          confirmedAt={confirmed?.createdAt ?? null}
-                          review={modelReview}
-                        />
-                      ) : (
-                        !inCorrection && <AnswerCard view={view} a={answer} now={now} />
-                      ))}
-                    {inCorrection && shape && (
-                      <CorrectionArea
-                        view={view}
-                        answerContent={answer?.content ?? null}
-                        showCurrent={
-                          answer?.provenance !== 'proxy' &&
-                          (!shape.hasOptions || !!currentContent?.text)
-                        }
-                        draft={correctionDraft}
-                        hasOptions={shape.hasOptions}
-                        reasonInPage={shape.fields.length > 1}
-                        onSelect={select}
-                        onReason={() => {
-                          setField('reason');
-                          setEditor({ open: true, expanded: false });
-                        }}
-                        onCancel={() => {
-                          if (dictation.isActive()) void dictation.stop();
-                          setEditor({ open: false, expanded: false });
-                          setCorrecting(false);
-                        }}
-                        onDiscard={() => setDiscardOpen(true)}
-                      />
-                    )}
-                    {composing && mode === 'answer' && (
-                      <>
-                        {stale && (
-                          <div className="callout warn" role="status">
-                            <WarningIcon size={16} />
-                            <div>
-                              <p className="callout-text">
-                                This question changed. Your draft is saved; review the update before
-                                sending.
-                              </p>
-                              <button
-                                type="button"
-                                className="btn small"
-                                onClick={() => void dictation.rebind(draft.key, view.revision)}
-                              >
-                                Review update
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        {shape?.hasOptions && (
-                          <OptionCards
-                            view={view}
-                            selected={draft.selected}
-                            onSelect={select}
-                            disabled={stale || busy}
-                            legend={content.kind === 'approval' ? 'Your decision' : 'Choose one'}
-                          />
-                        )}
-                      </>
-                    )}
-                    {(status === 'expired' || status === 'cancelled') && (
-                      <ClosedState view={view} status={status} draftText={answerDraft.text} />
-                    )}
-                  </>
-                )}
-              </section>
-              <section className="record" aria-label="Record">
-                {answer && progress && !pendingEntry && (
-                  <details className="disclosure">
-                    <summary>
-                      <span className="summary-title">Delivery</span>
-                      <span className="summary-preview">{progress.label}</span>
-                    </summary>
-                    <DeliveryStepper
-                      progress={progress}
-                      fromPhone={answer.provenance !== 'proxy'}
-                    />
-                  </details>
-                )}
-                <details className="disclosure" id="ws-details">
-                  <summary>
-                    <span className="summary-title">Question details</span>
-                  </summary>
-                  <QuestionDetails view={view} />
-                </details>
-              </section>
-            </>
-          )}
+          {content && <Thread ref={threadRef}>{items}</Thread>}
         </article>
+        {newBelow && (
+          <button
+            type="button"
+            className="new-activity"
+            onClick={() => {
+              setNewBelow(false);
+              showLatest(true);
+            }}
+          >
+            New activity
+            <ChevronDown size={16} />
+          </button>
+        )}
       </div>
       <div id="workspace-overlay" className="ws-overlay" />
       {dock}
@@ -1143,51 +1231,6 @@ function CorrectionArea({
         </button>
       )}
     </section>
-  );
-}
-
-function ClosedState({
-  view,
-  status,
-  draftText,
-}: {
-  view: QuestionView;
-  status: 'expired' | 'cancelled';
-  draftText: string;
-}) {
-  const opts = view.content?.options ?? [];
-  return (
-    <div className="closed">
-      <div className="callout">
-        {status === 'expired' ? <ClockIcon size={16} /> : <ErrorIcon size={16} />}
-        <div>
-          <p className="callout-text">
-            {status === 'expired'
-              ? 'It expired before it was answered, so nothing was approved. If you still want to decide, ask your agent again from your computer.'
-              : 'Your agent withdrew it. No answer is needed and nothing was approved here.'}
-          </p>
-        </div>
-      </div>
-      {opts.length > 0 && (
-        <div className="closed-options">
-          <span className="eyebrow">The options were</span>
-          <ul>
-            {opts.map((o) => (
-              <li key={o.id}>{o.label}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {draftText.trim() && (
-        <div className="closed-draft">
-          <span className="eyebrow">Your unsent draft</span>
-          <SafeText text={draftText} />
-          <div className="row">
-            <CopyButton text={draftText} />
-          </div>
-        </div>
-      )}
-    </div>
   );
 }
 

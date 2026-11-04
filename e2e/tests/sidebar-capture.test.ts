@@ -305,8 +305,8 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     await page.getByRole('radio', { name: /Yes, rename/ }).check();
     await page.getByRole('button', { name: 'Send decision' }).click();
     await page
-      .locator('.dock .stage')
-      .filter({ hasText: 'Delivered to the agent' })
+      .locator('.ws .receipt')
+      .filter({ hasText: 'Typed into the terminal' })
       .waitFor({ timeout: 30_000 });
 
     // Phone, light.

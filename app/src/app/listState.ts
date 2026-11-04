@@ -228,6 +228,14 @@ const LABELS: Record<string, string> = {
   '/devices': 'Devices',
 };
 
+/**
+ * True when the open question was reached from a page inside the app (a list, History, or another question), so
+ * the question offers Back. A notification or a direct link offers only the menu.
+ */
+export function cameFromApp(): boolean {
+  return currentBack() !== null;
+}
+
 /** Where Back from the open question goes: `/` (Questions) unless it was opened from another page. */
 export function backTarget(): string {
   return currentBack()?.path ?? '/';
