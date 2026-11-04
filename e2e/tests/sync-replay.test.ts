@@ -132,11 +132,10 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
     let ticketAsked = false;
     let releaseTicket = () => {};
     const ticketReleased = new Promise<void>((r) => (releaseTicket = r));
+    // Every ticket waits, not just the first: a redeclaration (`GET /info` answering late) asks for another one.
     await page.route(/\/api\/v1\/socket-ticket/, async (route) => {
-      if (!ticketAsked) {
-        ticketAsked = true;
-        await ticketReleased;
-      }
+      ticketAsked = true;
+      await ticketReleased;
       await route.continue();
     });
     let syncSent = false;
