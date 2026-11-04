@@ -43,8 +43,14 @@
   color: var(--text-2);
 }
 .s-index-label {
-  flex: none;
+  /* The label keeps its words before the value does, and on a narrow screen or with large text it may take a
+     second line rather than push the value out entirely. */
+  flex: 0 1 auto;
+  min-width: 0;
   font-weight: 500;
+}
+.s-index-list .value {
+  flex: 0 1 auto;
 }
 .s-version {
   margin: 20px 0 0;
@@ -155,6 +161,12 @@
 }
 .s-title {
   margin: 4px 0 6px;
+}
+/* On a phone the floating menu button sits just left of the back link: no pull into its shadow. */
+@media (max-width: 719px) {
+  .s-back {
+    margin-left: 0;
+  }
 }
 .s-title:focus {
   outline: none;
@@ -304,7 +316,8 @@ h2.s-group-label {
   border-top: 1px solid var(--line-subtle);
 }
 .s-dependents .s-row {
-  padding-left: 52px;
+  /* A step in, not the whole way to the parent's text, so their labels keep one line on a phone. */
+  padding-left: 32px;
   min-height: 52px;
 }
 .s-row.stacked .s-select.wide {
@@ -318,7 +331,7 @@ h2.s-group-label {
 .s-select,
 .s-time {
   width: auto;
-  min-height: 40px;
+  min-height: var(--tap-min);
   padding-top: 6px;
   padding-bottom: 6px;
 }
@@ -474,7 +487,7 @@ input.s-switch:disabled {
   }
 }
 .theme-card.on {
-  background: var(--selected);
+  background: var(--raised-select);
   border-color: var(--text-2);
   box-shadow: inset 0 0 0 1px var(--text-2);
 }
@@ -604,6 +617,18 @@ input.s-switch:disabled {
   border-color: var(--line-strong);
   box-shadow: var(--shadow-2);
 }
+/* The page's own field fills the gap under the lifted bar, so the card it floats over never shows beneath it. */
+.s-savebar.dirty::after {
+  content: '';
+  position: absolute;
+  /* Out past the bar's own 1 px border, so the card's edges beneath don't show either side of it. */
+  left: -2px;
+  right: -2px;
+  top: 100%;
+  height: calc(var(--safe-b) + 13px);
+  background: var(--surface-page);
+  pointer-events: none;
+}
 .s-savebar.dirty .s-savebar-status {
   color: var(--text);
   font-weight: 500;
@@ -679,8 +704,8 @@ input.s-switch:disabled {
   width: 7px;
   height: 7px;
   margin: 0 4px 0 auto;
-  border-right: 1.75px solid var(--text-3);
-  border-bottom: 1.75px solid var(--text-3);
+  border-right: 1.75px solid var(--text-2);
+  border-bottom: 1.75px solid var(--text-2);
   transform: rotate(-45deg);
 }
 .s-facts {

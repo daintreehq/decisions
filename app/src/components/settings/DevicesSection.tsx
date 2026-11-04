@@ -30,7 +30,10 @@ function seenLabel(d: DeviceInfo, mine: boolean, now: number): string {
   if (mine) return 'You’re using it now';
   if (!d.last_seen_at) return 'Not seen yet';
   const age = ageLabel(d.last_seen_at, now);
-  return age === 'just now' ? 'Last seen just now' : `Last seen ${age}`;
+  // The number keeps its unit on one line ("1 min", never "1 / min").
+  return age === 'just now'
+    ? 'Last seen just now'
+    : `Last seen ${age.replace(/(\d) /g, '$1\u00a0')}`;
 }
 
 function Fingerprint({ value }: { value: string }) {

@@ -31,23 +31,24 @@
 .composer-pill.has-add.two .composer-actions {
   padding-left: 0;
 }
-/* With `+` on the action row, the save state or Send's reason has its own line above it, aligned with the field's
-   text, at every width: on a phone there is no room beside `+`, the mic and Send, and one place reads the same
-   everywhere. */
+/* With `+` on the action row, the save state or Send's reason sits between `+` and the buttons, in two short lines at
+   most, so it never adds a row of its own: the open pill is the field and one row of controls. */
 .composer-pill.has-add.two {
   grid-template-areas:
     'lane lane lane'
     'tray tray tray'
     'field field field'
-    'note note note'
-    'add actions actions';
+    'add note actions';
 }
 .composer-pill.has-add.two .composer-actions {
   display: contents;
 }
 .composer-pill.has-add.two .composer-note {
   grid-area: note;
-  padding: 0 12px 2px;
+  align-self: center;
+  padding: 0 4px 0 6px;
+  font-size: var(--text-xs);
+  line-height: 16px;
 }
 .composer-pill.has-add.two .composer-note:empty {
   display: none;
@@ -362,7 +363,7 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: color-mix(in oklab, #000 38%, transparent);
+  background: var(--photo-scrim);
   pointer-events: none;
 }
 .photo-ring {
@@ -375,10 +376,10 @@
   stroke-width: 3;
 }
 .photo-ring-track {
-  stroke: color-mix(in oklab, #fff 32%, transparent);
+  stroke: color-mix(in oklab, var(--on-photo) 32%, transparent);
 }
 .photo-ring-fill {
-  stroke: #fff;
+  stroke: var(--on-photo);
   stroke-linecap: round;
   transition: stroke-dashoffset var(--dur) var(--ease-out);
 }
@@ -408,7 +409,7 @@
   color: var(--warning-text);
 }
 .photo-progress.is-waiting {
-  background: color-mix(in oklab, #000 24%, transparent);
+  background: var(--photo-scrim-soft);
 }
 .photo-retry {
   display: grid;

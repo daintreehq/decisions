@@ -39,7 +39,7 @@ import {
 import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import { currentSubscription, isIos, isStandalone, pushSupport } from '../../features/push.js';
-import { ChevronDown, CloseIcon, FilterIcon, OfflineIcon, SearchIcon } from '../Icons.js';
+import { ArrowDown, CloseIcon, FilterIcon, OfflineIcon, SearchIcon } from '../Icons.js';
 import { FilterChips, FilterSheet, type FacetValue } from './Filters.js';
 import { QuestionRow, type PendingAnswer } from './QuestionRow.js';
 import { StatusGlyph } from './StatusGlyph.js';
@@ -341,12 +341,12 @@ export function NavigatorPanel({
     s,
     ids: visible.filter((id) => byId.get(id)!.section === si),
   }));
-  // Under load what follows Needs you falls below the fold: a long Needs you points to answers still waiting to
-  // leave this device and to model answers waiting for review.
+  // Under load what follows Needs you falls below the fold: a long Needs you (more rows than a phone shows at once)
+  // points to answers still waiting to leave this device and to model answers waiting for review.
   const countOf = (kind: string) => shown.find((x) => x.s.kind === kind)?.ids.length ?? 0;
   const needsCount = countOf('needs');
   const jumps =
-    needsCount >= 4 && !searching
+    needsCount >= 8 && !searching
       ? [
           {
             key: 'sending',
@@ -442,7 +442,8 @@ export function NavigatorPanel({
               <button key={j.key} type="button" className="jump-link" onClick={() => jumpTo(j.key)}>
                 <StatusGlyph status={j.glyph} label={false} />
                 {j.label(j.n)}
-                <ChevronDown size={14} />
+                {/* It moves down the list, so an arrow: the chevron beside it opens the sort picker. */}
+                <ArrowDown size={14} />
               </button>
             ))}
           {ids.length > 0 ? (
@@ -598,7 +599,8 @@ export function NavigatorPanel({
           Questions
         </h1>
       )}
-      {tools}
+      {/* With nothing saved yet there is nothing to search or filter, so no tools that would do nothing. */}
+      {(all.length > 0 || searching || filtered) && tools}
       <div className="nav-scroll" ref={listRef}>
         {floating && <FilterChips project={nav.project} computer={nav.computer} />}
         {offline && all.length > 0 && !loading && (

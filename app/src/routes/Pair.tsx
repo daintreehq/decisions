@@ -251,7 +251,7 @@ export function PairPage() {
           </button>
           {!pasteOpen && (
             <button type="button" className="btn big" onClick={() => setPasteOpen(true)}>
-              <LinkIcon size={18} />
+              <LinkIcon size={20} />
               Paste pairing link
             </button>
           )}
@@ -301,7 +301,9 @@ export function PairPage() {
   }
 
   return (
-    <div className="page onb">
+    // Once pairing is under way the back link goes, so the code comparison takes the welcome's centred column
+    // rather than jumping to the top edge with the lower half empty.
+    <div className={`page onb${busy ? ' onb-center' : ''}`}>
       {/* Leaving this page cancels a pairing in progress, so the way out is offered only before one starts. */}
       {!busy && <BackLink />}
       <div className="onb-body">

@@ -228,7 +228,9 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
+    await page
+      .getByText(/^(No questions yet\.|Nothing needs you right now\.)$/)
+      .waitFor({ timeout: 30_000 });
 
     const origin = (pane: string, project: string, agent = 'claude-code'): QuestionOrigin => ({
       machine_label: 'Greg’s MacBook Pro',

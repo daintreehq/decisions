@@ -5,7 +5,7 @@ import { agentName, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
-import { CheckIcon, ModelIcon, WarningIcon } from '../Icons.js';
+import { CheckIcon, ModelIcon } from '../Icons.js';
 import { AnswerBody } from './DecisionArea.js';
 import { PhotoGrid, type PhotoUpload } from './Photos.js';
 
@@ -66,12 +66,11 @@ export function AgentMessage({
   const { project } = originParts(view);
   return (
     <div className="msg in agent">
+      {/* The header already names the project and computer, so the sender line is who and when; the project is
+          kept for assistive tech, which reads the thread on its own. */}
       <p className="msg-from">
         <span className="msg-name">{agentName(view)}</span>
-        <span className="msg-origin">
-          <span className="sr-only"> in </span>
-          {project}
-        </span>
+        <span className="sr-only"> in {project}</span>
         <Time iso={view.createdAt} now={now} />
       </p>
       <div className="bubble">
@@ -143,10 +142,13 @@ export function StaticChoices({
   view,
   chosen,
   caption,
+  byModel,
 }: {
   view: QuestionView;
   chosen: readonly string[];
   caption?: string;
+  /** The marked option is the decision model's, still waiting for review: it wears the model's mark, not a check. */
+  byModel?: boolean;
 }) {
   const opts = view.content?.options ?? [];
   if (!opts.length) return null;
@@ -158,13 +160,17 @@ export function StaticChoices({
           const on = chosen.includes(o.id);
           return (
             <li key={o.id} className={on ? 'on' : undefined}>
-              <span className="choice-mark" aria-hidden="true">
-                {on && <CheckIcon size={12} />}
+              <span className={`choice-mark${on && byModel ? ' model' : ''}`} aria-hidden="true">
+                {on && (byModel ? <ModelIcon size={12} /> : <CheckIcon size={12} />)}
               </span>
               <span className="choice-body">
                 <span className="choice-label">
                   {o.label}
-                  {on && <span className="sr-only"> (in force)</span>}
+                  {on && (
+                    <span className="sr-only">
+                      {byModel ? ' (the model’s answer, not yet confirmed)' : ' (in force)'}
+                    </span>
+                  )}
                 </span>
                 {o.description && <SafeText text={o.description} className="choice-desc" />}
               </span>
@@ -177,8 +183,10 @@ export function StaticChoices({
 }
 
 /**
- * One of the person's own messages: right-aligned, with its time inside the bubble and, for the answer in force,
- * its receipt underneath. `tone` marks a pending reply or one that was not applied.
+ * One of the person's own messages, right-aligned. With a receipt, its time and the receipt share one quiet line
+ * under the bubble ("17:57 · Typed into the terminal"); when delivery needs attention the line is the time alone and
+ * the explanation follows it. Without a receipt the time sits inside the bubble. `tone` marks a pending reply or one
+ * that was not applied.
  */
 export function OutgoingMessage({
   label,
@@ -200,6 +208,9 @@ export function OutgoingMessage({
   id?: string;
   children: ReactNode;
 }) {
+  // With a receipt the time is always on the line under the bubble, so the bubble's shape never depends on
+  // delivery; when delivery needs attention that line is the time alone and the explanation follows it.
+  const footed = !!receipt && !!at;
   return (
     <div className={`msg out${tone ? ` ${tone}` : ''}${flagged ? ' flagged' : ''}`} id={id}>
       <div className="bubble">
@@ -210,19 +221,30 @@ export function OutgoingMessage({
           </p>
         )}
         {children}
-        {at && (
+        {at && !footed && (
           <span className="bubble-time">
-            {flagged && (
-              <>
-                <WarningIcon size={13} />
-                <span className="sr-only">Not typed into the terminal, </span>
-              </>
-            )}
+            {/* The explanation right under the bubble carries the warning; this only says it for assistive tech. */}
+            {flagged && <span className="sr-only">Not typed into the terminal, </span>}
             <Time iso={at} now={now} />
           </span>
         )}
       </div>
-      {receipt}
+      {footed && flagged ? (
+        <>
+          <div className="msg-foot">
+            <span className="sr-only">Not typed into the terminal, </span>
+            <Time iso={at!} now={now} />
+          </div>
+          {receipt}
+        </>
+      ) : footed ? (
+        <div className="msg-foot">
+          <Time iso={at!} now={now} />
+          {receipt}
+        </div>
+      ) : (
+        receipt
+      )}
     </div>
   );
 }

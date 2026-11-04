@@ -196,7 +196,9 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
+    await page
+      .getByText(/^(No questions yet\.|Nothing needs you right now\.)$/)
+      .waitFor({ timeout: 30_000 });
     hasMenu = (await page.locator('.menu-fab').count()) > 0;
 
     await shot('p-empty-closed-light');
@@ -324,9 +326,16 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     }
     // The page scrolled, so content passes under the floating button (Home lists every question).
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-    await page.evaluate(() => window.scrollTo(0, 260));
+    // Scroll the way a person does, so a scroll lock left behind by the sidebar would fail here.
+    await page.mouse.move(195, 600);
+    await page.mouse.wheel(0, 260);
     await settle();
-    if ((await page.evaluate(() => window.scrollY)) < 200) throw new Error('Home did not scroll');
+    // Home is dense, so this set may scroll only a little on a phone: it must go as far as it can.
+    const { y, max } = await page.evaluate(() => ({
+      y: window.scrollY,
+      max: document.documentElement.scrollHeight - window.innerHeight,
+    }));
+    if (max > 0 && y < Math.min(max, 260) - 2) throw new Error('Home did not scroll');
     await shot('p-home-scrolled-light');
     await page.evaluate(() => window.scrollTo(0, 0));
     await go('/history');

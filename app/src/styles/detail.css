@@ -23,7 +23,8 @@
 .thread {
   /* The person's own bubbles: a neutral step off the page, never the accent. */
   --out-bg: color-mix(in oklab, var(--surface-page), var(--text) 12%);
-  --bubble-r: var(--radius-sheet);
+  /* Cards' radius (guide 2.4), with a tighter corner on the speaker's side. */
+  --bubble-r: var(--radius-lg);
   --bubble-tail: var(--radius-sm);
   display: flex;
   flex-direction: column;
@@ -69,6 +70,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The model's id is an identifier: in the code face, like IDs and fingerprints elsewhere (guide 2.3). */
+.msg.model .msg-origin {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
 .msg-origin::before,
 .msg-from .msg-time::before {
   content: '·';
@@ -108,9 +114,6 @@
 }
 .msg.out.wide .bubble {
   max-width: none;
-}
-.bubble-time svg {
-  color: var(--warning-text);
 }
 .msg.out.draft .bubble {
   background: transparent;
@@ -214,13 +217,25 @@
 .due.soon svg {
   color: var(--warning-text);
 }
+.gate {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.gate svg {
+  color: var(--text-2);
+}
+.msg-meta .meta-dot {
+  margin: 0 -2px;
+}
 
 /* Files inside the message: a shorter stage, the same viewer. */
 .bubble .fx-files {
   margin: 12px 0 0;
 }
 .bubble .fx-inline-stage {
-  height: clamp(190px, 28svh, 260px);
+  /* Short enough that a choice question's first options still show above the dock on a phone. */
+  height: clamp(160px, 24svh, 220px);
 }
 @media (min-width: 720px) {
   .bubble .fx-inline-stage {
@@ -334,15 +349,22 @@
 }
 .option.on,
 .bubble .option.on {
-  background: var(--surface-raised);
+  /* The neutral lift (white on Bondi, a raised plane on Daintree) under a 1 px text-secondary edge, the same
+     hairline as the synced chip above the composer. */
+  background: var(--raised-select);
   border-color: var(--text-2);
-  box-shadow:
-    inset 0 0 0 1px var(--text-2),
-    var(--shadow-1);
+  box-shadow: var(--shadow-1);
+}
+.option:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 .options:disabled .option {
   cursor: not-allowed;
-  opacity: 0.6;
+  /* Stepped down with tokens, never faded with alpha. */
+  background: var(--subtle);
+  border-color: var(--line-default);
+  color: var(--text-2);
 }
 .option-body {
   min-width: 0;
@@ -412,6 +434,11 @@
 .choice-list li.on .choice-label {
   font-weight: 600;
 }
+/* The decision model's pick, before anyone has confirmed it: its violet mark, not the check a decision gets. */
+.choice-list li.on .choice-mark.model svg {
+  color: var(--model);
+  fill: color-mix(in oklab, var(--model) 30%, transparent);
+}
 .choice-body {
   min-width: 0;
 }
@@ -479,6 +506,39 @@
 }
 .bubble .row {
   margin-top: 8px;
+}
+/* An outgoing message's time and its receipt, on one line under the bubble. */
+.msg-foot {
+  /* A grid, so an opened stepper takes its own row under the line and the time stays beside the receipt's words. */
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: end;
+  align-items: start;
+  max-width: 100%;
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  line-height: 18px;
+  color: var(--text-2);
+}
+.msg-foot > .msg-time {
+  /* Level with the receipt's words, which sit in a 44 px button pulled up by its negative margin. */
+  padding-top: 7px;
+}
+.msg-foot > .msg-time:not(:last-child)::after {
+  content: '·';
+  margin: 0 2px 0 6px;
+}
+/* The time alone (delivery needs attention): it sits on its own line, so it needs no lift to meet a receipt. */
+.msg-foot > .msg-time:last-child {
+  padding-top: 0;
+  margin-bottom: 6px;
+}
+.msg-foot .receipt {
+  display: contents;
+}
+.msg-foot .receipt > :not(.receipt-button) {
+  grid-column: 1 / -1;
+  justify-self: end;
 }
 
 /* The decision model's message: violet only on the mark and a faint edge; the words always say "Model answer". */
@@ -571,7 +631,8 @@
   transform: rotate(180deg);
 }
 .receipt.done .receipt-label {
-  color: var(--text);
+  /* Finished is the quiet state: the check carries it, the words stay secondary like the time beside them. */
+  color: var(--text-2);
 }
 .receipt-button.static {
   cursor: default;

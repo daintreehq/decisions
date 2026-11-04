@@ -178,6 +178,15 @@ main:focus,
     transition-duration: 1ms !important;
     scroll-behavior: auto !important;
   }
+  /* Press feedback keeps its colour and edge, but nothing scales. */
+  .btn:active,
+  .chip:active,
+  .menu-fab:active,
+  .float-btn:active,
+  .option:active,
+  .new-activity:active {
+    transform: none !important;
+  }
 }
 
 /* macOS "Increase contrast" fires only this; Windows swaps in system colours via forced-colors. Keep them apart. */

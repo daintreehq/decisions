@@ -114,6 +114,9 @@
   .orbit-wait {
     animation: none;
   }
+  .dictate-btn:active {
+    transform: none;
+  }
 }
 @media (forced-colors: active) {
   .dictate-btn {
@@ -149,6 +152,20 @@
   position: absolute;
   inset: -5px;
   border-radius: 50%;
+}
+/* The pill's padding is 6 px, so the orbit (and the halo on its dot) stays inside it instead of crossing its edge. */
+.composer .orbit {
+  inset: -3px;
+}
+.composer .orbit-band {
+  padding: 2.5px;
+}
+.composer .orbit-dot {
+  top: 1.25px;
+}
+.composer .orbit-halo {
+  width: 6px;
+  height: 6px;
 }
 @media (hover: hover) {
   .composer .dictate:not(.active) .dictate-btn:hover {

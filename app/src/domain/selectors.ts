@@ -139,7 +139,16 @@ export function originParts(v: QuestionView): { project: string; machine: string
   const c = v.content;
   if (!c)
     return { project: unreadableHere(v) ? 'Earlier question' : 'Unverified question', machine: '' };
-  return { project: c.project_label || 'Daintree', machine: c.machine_label || '' };
+  // A desktop with no name of its own sends its host id in the name's place (the client's fallback); an id is not a
+  // name a person recognises, so it reads as what it is. The id itself stays in Question details.
+  const machine = c.machine_label || '';
+  const unnamed =
+    !!machine &&
+    ((!!v.targetHostId && machine === v.targetHostId) || /^host_[0-9a-z]{6,}$/i.test(machine));
+  return {
+    project: c.project_label || 'Daintree',
+    machine: unnamed ? 'Unnamed computer' : machine,
+  };
 }
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
   if (effectiveStatus(v, now) !== 'proxy-answered') return false;

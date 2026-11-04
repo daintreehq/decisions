@@ -196,7 +196,8 @@ describe.skipIf(!chromiumPath)(
       await page.getByText('Ship the compact sidebar?').first().waitFor({ timeout: 30_000 });
       await page.getByText('Ship the compact sidebar?').first().click();
       // An approval covers exactly the files the person was shown: look at each one before deciding.
-      const tabs = page.locator('.fx-thumb');
+      // One Before and one After: the files are a Before | After switch, still a tab per file.
+      const tabs = page.getByRole('tablist', { name: 'Files' }).getByRole('tab');
       await tabs.first().waitFor({ timeout: 30_000 });
       for (let i = 0; i < (await tabs.count()); i++) {
         await tabs.nth(i).click();

@@ -372,7 +372,9 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    await page.getByText('Nothing needs you right now.').waitFor({ timeout: 30_000 });
+    await page
+      .getByText(/^(No questions yet\.|Nothing needs you right now\.)$/)
+      .waitFor({ timeout: 30_000 });
     await shot('07-inbox-empty');
   });
 
@@ -607,7 +609,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('71-appearance');
     // A choice is stored before it shows as selected, so waiting for the mark also waits for the write.
     const pickTheme = async (name: string) => {
-      await page.getByText(name, { exact: true }).click();
+      await page
+        .getByRole('radiogroup', { name: 'Theme' })
+        .getByText(name, { exact: true })
+        .click();
       await page.locator('.theme-card.on .theme-name', { hasText: name }).waitFor();
     };
     await pickTheme('Daintree');
@@ -1085,7 +1090,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
     await shot('50-viewer-wide');
     await viewer.getByRole('button', { name: 'Compare before and after' }).click();
-    await page.locator('.fx-compare .fx-pane img.is-sized').nth(1).waitFor({ timeout: 30_000 });
+    // Beside the sidebar column the comparison may be one stage with a Before | After switch, not two panes.
+    await page.locator('.fx-compare img.is-sized').first().waitFor({ timeout: 30_000 });
     await shot('50-compare-wide');
     await page.keyboard.press('+');
     await page.keyboard.press('+');
@@ -1279,8 +1285,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('dialog').waitFor();
     await shot('40-ws-dictation-consent');
     await page.getByRole('button', { name: 'Enable and start dictation' }).click();
-    await page.locator('.status.rec').waitFor({ timeout: 15_000 });
-    await page.locator('.live-text .interim').waitFor({ timeout: 15_000 });
+    await page.locator('.composer-lane .lane.rec').waitFor({ timeout: 15_000 });
+    await page.locator('.composer-interim').waitFor({ timeout: 15_000 });
     await shot('40-ws-recording');
     await theme('dark');
     await shot('40-ws-recording-dark');
@@ -1289,7 +1295,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Tidying wording…').waitFor({ timeout: 15_000 });
     await shot('40-ws-cleaning');
     releaseCleanup();
-    await page.locator('.status.review').waitFor({ timeout: 15_000 });
+    await page.getByText('Tidying wording…').waitFor({ state: 'hidden', timeout: 15_000 });
     await shot('40-ws-cleaned');
     await page.setViewportSize(WIDE);
     await shot('40-ws-cleaned-w');

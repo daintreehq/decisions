@@ -74,6 +74,7 @@ export function AttachmentGallery({
   const [naturals, setNaturals] = useState<Record<string, Size>>({});
   const [announce, setAnnounce] = useState('');
   const pair = useMemo(() => autoPair(items), [items]);
+  const switcher = !!pair && n === 2;
 
   /* ---------- evidence ---------- */
   const scope = scopeKey(view);
@@ -292,13 +293,18 @@ export function AttachmentGallery({
       </span>
 
       <div className="fx-files-meta">
-        <span className="fx-files-label" title={item.label}>
-          {item.label}
-        </span>
-        {n > 1 && (
-          <span className="fx-files-count tabular">
-            {active + 1} of {n}
-          </span>
+        {/* With the Before | After switch, the selected half is the label and the count. */}
+        {!switcher && (
+          <>
+            <span className="fx-files-label" title={item.label}>
+              {item.label}
+            </span>
+            {n > 1 && (
+              <span className="fx-files-count tabular">
+                {active + 1} of {n}
+              </span>
+            )}
+          </>
         )}
         <span className="fx-spacer" />
         {pair && (
@@ -321,9 +327,11 @@ export function AttachmentGallery({
 
       {n > 1 && (
         <div className="fx-strip-row">
+          {/* Exactly one Before and one After: a labelled Before | After switch (guide 5.5), since two thumbnails of
+              near-identical screenshots don't say which is which. Any other set keeps its thumbnails. */}
           <div
             ref={strip}
-            className="fx-strip"
+            className={switcher ? 'fx-strip seg fx-pair-switch' : 'fx-strip'}
             role="tablist"
             aria-label="Files"
             onKeyDown={tabKey}
@@ -341,11 +349,13 @@ export function AttachmentGallery({
                   aria-selected={on}
                   aria-controls={panelId}
                   tabIndex={it.index === focusTab ? 0 : -1}
-                  className={`fx-thumb${on ? ' is-active' : ''} is-${st}`}
+                  className={switcher ? undefined : `fx-thumb${on ? ' is-active' : ''} is-${st}`}
                   aria-label={`${it.label}, file ${it.index + 1} of ${n}${st === 'ready' ? '' : `, ${STATUS_SHORT[st]}`}`}
                   onClick={() => select(it.index)}
                 >
-                  {ri?.ok ? (
+                  {switcher ? (
+                    <span aria-hidden="true">{it.label}</span>
+                  ) : ri?.ok ? (
                     <img src={ri.image.url} alt="" draggable={false} />
                   ) : (
                     <StatusGlyph status={st} />
@@ -354,10 +364,13 @@ export function AttachmentGallery({
               );
             })}
           </div>
-          <button type="button" className="fx-strip-all" onClick={() => setAllFiles(true)}>
-            <GridIcon size={18} />
-            <span>All files</span>
-          </button>
+          {/* Two files are both in the switch already; All files is for a set worth seeing at once. */}
+          {!switcher && (
+            <button type="button" className="fx-strip-all" onClick={() => setAllFiles(true)}>
+              <GridIcon size={18} />
+              <span>All files</span>
+            </button>
+          )}
         </div>
       )}
 

@@ -78,8 +78,17 @@ export function WorkspaceHeader({
               ) : (
                 <>
                   <span className="sr-only">, from </span>
-                  {project}
-                  {machine && ` · ${machine}`}
+                  {/* Project and computer give way separately, as on Home's rows, so the computer stays legible. */}
+                  <span className="ws-sub-project">{project}</span>
+                  {machine && (
+                    <>
+                      <span className="ws-sub-sep" aria-hidden="true">
+                        {' · '}
+                      </span>
+                      <span className="sr-only">, on </span>
+                      <span className="ws-sub-machine">{machine}</span>
+                    </>
+                  )}
                 </>
               )}
               <span className="sr-only">. Scroll to the question.</span>
