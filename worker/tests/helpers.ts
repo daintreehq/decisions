@@ -374,14 +374,8 @@ export async function act(
     confirmsActionId: opts.confirmsActionId ?? null,
     expiresAt: opts.expiresAt ?? null,
     ...(opts.actionId ? { actionId: opts.actionId } : {}),
+    ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
   });
-  if (opts.attachmentIds) {
-    const { signature: _s, ...unsigned } = signed.record;
-    signed.record = (await signObject(actor.keys.signing.privateKey, {
-      ...unsigned,
-      attachment_ids: opts.attachmentIds,
-    })) as typeof signed.record;
-  }
   const res = await actor.call('POST', `/api/v1/questions/${questionId}/${kind}`, {
     protocol_version: PROTOCOL_VERSION,
     idempotency_key: opts.idempotencyKey ?? newId(),
