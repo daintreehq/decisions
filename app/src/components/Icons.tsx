@@ -72,6 +72,8 @@ export const ChevronDown = icon('M5 9l7 7 7-7');
 export const ArrowLeft = icon('M19 12H5M12 19l-7-7 7-7');
 export const ArrowRight = icon('M5 12h14M12 5l7 7-7 7');
 export const CloseIcon = icon('M18 6 6 18M6 6l12 12');
+/** The sidebar's menu button: Lucide's menu. */
+export const MenuIcon = icon('M4 6h16M4 12h16M4 18h16', 22);
 export const MicIcon = icon(
   'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3',
   20,

@@ -46,40 +46,35 @@
   flex-direction: column;
 }
 
-@media (max-width: 1099px) {
-  /* The workspace is the whole frame here: no global header, tab bar or strips; no page gutter or scroll. */
-  .shell[data-route='question'] .topbar,
-  .shell[data-route='question'] .tabbar,
-  .shell[data-route='question'] .banner {
-    display: none;
-  }
-  .shell[data-route='question'] main {
-    padding: 0;
-    max-width: none;
-    min-height: 0;
-  }
-  .shell[data-route='question'] .ws {
-    height: 100dvh;
-  }
-  /* The keyboard is up: the workspace follows the visual viewport so the editor, Send and Stop stay above it. */
-  .shell[data-route='question'] .ws[data-kb] {
-    position: fixed;
-    left: 0;
-    right: 0;
-    top: var(--vv-top, 0px);
-    height: var(--vv-h, 100dvh);
-    z-index: 30;
-  }
-  .ws[data-kb] .dock {
-    padding-bottom: 6px;
-  }
+/* Below 1100px (the shell's single layout, which follows its em breakpoint) the workspace is the whole frame: no
+   strips, no page gutter or scroll. */
+.shell[data-layout='single'][data-route='question'] .banner {
+  display: none;
+}
+.shell[data-layout='single'][data-route='question'] main {
+  padding: 0;
+  max-width: none;
+  min-height: 0;
+}
+.shell[data-layout='single'][data-route='question'] .ws {
+  height: 100dvh;
+}
+/* The keyboard is up: the workspace follows the visual viewport so the editor, Send and Stop stay above it. */
+.shell[data-layout='single'][data-route='question'] .ws[data-kb] {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vv-h, 100dvh);
+  z-index: 30;
+}
+.shell[data-layout='single'] .ws[data-kb] .dock {
+  padding-bottom: 6px;
 }
 
-/* At 1100 px and up the rail layout gives .workspace-host a definite height; the workspace fills it. */
-@media (min-width: 1100px) {
-  .workspace-host > .ws {
-    height: 100%;
-  }
+/* Beside the sidebar column the shell gives .workspace-host a definite height; the workspace fills it. */
+.shell[data-layout='column'] .workspace-host > .ws {
+  height: 100%;
 }
 
 /* ---------- header ---------- */
@@ -96,25 +91,9 @@
   position: relative;
   z-index: 7;
 }
-@media (min-width: 1100px) {
-  .ws-head {
-    padding-top: 0;
-    min-height: 52px;
-  }
-}
-@media (display-mode: window-controls-overlay) and (max-width: 1099px) {
-  .ws-head {
-    padding-top: env(titlebar-area-y, 0px);
-    padding-left: max(4px, env(titlebar-area-x, 0px));
-    -webkit-app-region: drag;
-    app-region: drag;
-  }
-  .ws-head a,
-  .ws-head button,
-  .ws-head .conn {
-    -webkit-app-region: no-drag;
-    app-region: no-drag;
-  }
+.shell[data-layout='column'] .ws-head {
+  padding-top: 0;
+  min-height: 52px;
 }
 .ws-back {
   display: grid;
@@ -332,10 +311,8 @@
   box-shadow: var(--shadow-2);
   padding: 0 calc(10px + var(--safe-r)) calc(8px + var(--safe-b)) calc(10px + var(--safe-l));
 }
-@media (min-width: 1100px) {
-  .dock {
-    padding-bottom: 10px;
-  }
+.shell[data-layout='column'] .dock {
+  padding-bottom: 10px;
 }
 .dock > * {
   max-width: 760px;
@@ -957,9 +934,7 @@ button.selection.choose {
   }
 }
 
-/* With the rail layout the frame's own header carries the connection status; one indicator is enough. */
-@media (min-width: 1100px) {
-  .ws-head .conn {
-    display: none;
-  }
+/* Beside the sidebar column the column's foot carries the connection status; one indicator is enough. */
+.shell[data-layout='column'] .ws-head .conn {
+  display: none;
 }

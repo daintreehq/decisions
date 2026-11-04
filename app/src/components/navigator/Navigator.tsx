@@ -18,6 +18,7 @@ import {
   useNavState,
   useRestoreList,
 } from '../../app/listState.js';
+import { useWide } from '../../app/media.js';
 import { Link, usePath } from '../../app/router.js';
 import {
   filterOptions,
@@ -33,13 +34,13 @@ import { CloseIcon, OfflineIcon, SearchIcon, SuccessIcon } from '../Icons.js';
 import { QuestionRow } from './QuestionRow.js';
 import { SearchField, useDebounced } from './SearchField.js';
 
-export type Presentation = 'page' | 'sheet' | 'rail';
+export type Presentation = 'page' | 'sheet';
 
-/* ---------------- search focus (Ctrl/⌘+K, and the dock's All Q&A on wide screens) ---------------- */
+/* ---------------- search focus (Ctrl/⌘+K) ---------------- */
 
 const searchInputs = new Set<HTMLInputElement>();
 
-/** Focus the navigator's search if one is on screen (the rail). Returns false when there is none. */
+/** Focus the Home list's own search if it is on screen. Returns false when there is none. */
 export function focusNavigatorSearch(): boolean {
   for (const el of searchInputs) {
     if (el.isConnected && el.offsetParent !== null) {
@@ -159,9 +160,9 @@ const SCOPES: { id: Scope; label: string; unit: string }[] = [
 ];
 
 /**
- * The Questions & answers navigator: one model, three presentations. A full page under the tab bar on phones
- * (`/`), a sheet over a question (`sheet`), and the persistent rail at 1100px and up (`rail`). Same scopes,
- * counts, filters, search and selection everywhere.
+ * The Questions & answers navigator: one model, two presentations. Home's list (`page`, at `/`) and a sheet over a
+ * question (`sheet`, opened by the dock's All Q&A or Ctrl/⌘+K). Same scopes, counts, filters, search and selection
+ * in both.
  */
 export function NavigatorPanel({
   presentation,
@@ -179,6 +180,7 @@ export function NavigatorPanel({
   const nav = useNavState().questions;
   const query = useDebounced(nav.query, 200);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const wide = useWide();
   const listRef = useRef<HTMLDivElement | null>(null);
   const uid = useId();
 
@@ -247,7 +249,7 @@ export function NavigatorPanel({
     (el: HTMLInputElement | null) => {
       if (searchRef.current) searchInputs.delete(searchRef.current);
       searchRef.current = el;
-      if (el && presentation === 'rail') searchInputs.add(el);
+      if (el && presentation === 'page') searchInputs.add(el);
     },
     [presentation],
   );
@@ -396,7 +398,9 @@ export function NavigatorPanel({
           onChange={(q) => setQuestions({ query: q })}
           label="Search questions"
           placeholder="Search questions"
-          shortcut={presentation === 'rail' ? (isMac() ? 'Meta+K' : 'Control+K') : undefined}
+          shortcut={
+            presentation === 'page' && wide ? (isMac() ? 'Meta+K' : 'Control+K') : undefined
+          }
         />
         {showFilters && (
           <FilterBar

@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from 'react';
 
 /**
- * Whether the Questions & answers navigator is open. One shared model: the dock's All Q&A opens it, the navigator
- * (a sheet on phones, the persistent rail on wide screens) renders it. Callers that are recording stop first.
+ * Whether the Questions & answers navigator sheet is open. The dock's All Q&A and Ctrl/⌘+K open it. Callers that
+ * are recording stop first.
  */
 let open = false;
 const listeners = new Set<() => void>();
