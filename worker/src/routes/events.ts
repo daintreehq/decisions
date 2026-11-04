@@ -1,9 +1,19 @@
-import { ApiError, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import {
+  ApiError,
+  FEATURES_QUERY_PARAM,
+  FeatureList,
+  LIMITS,
+  knownFeatures,
+} from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import { json } from '../util.js';
 import { sweepExpired } from './questions.js';
-import type { DecisionRoom } from '../decision-room.js';
 
+/**
+ * `GET /events?after=&limit=&features=`. The page holds only the events the request's declared features allow
+ * (docs/protocol.md section 19): a request without `features`, which is every 0.3.0 client, gets the 0.3.0
+ * baseline whatever the device declared before.
+ */
 export const listEvents: Handler = async (room, c) => {
   await sweepExpired(room);
   const params = new URLSearchParams(c.req.query);
@@ -14,27 +24,9 @@ export const listEvents: Handler = async (room, c) => {
   );
   if (!Number.isSafeInteger(after) || after < 0)
     throw new ApiError('validation_error', 'bad cursor');
-  const rows = (room as unknown as DecisionRoom).eventRows(after, limit + 1);
-  const highWater = (room as unknown as DecisionRoom).eventHighWater();
-  const page = [];
-  let bytes = 0;
-  let hasMore = rows.length > limit;
-  for (const ev of rows.slice(0, limit)) {
-    const size = JSON.stringify(ev).length;
-    if (page.length > 0 && bytes + size > LIMITS.eventPageBytes) {
-      hasMore = true;
-      break;
-    }
-    page.push(ev);
-    bytes += size;
-  }
-  const next = page.length ? page[page.length - 1]!.seq : after;
-  return json(200, {
-    protocol_version: PROTOCOL_VERSION,
-    from_exclusive: after,
-    high_water_seq: highWater,
-    events: page,
-    next_after: next,
-    has_more: hasMore,
-  });
+  const declared = params.get(FEATURES_QUERY_PARAM);
+  const tokens = declared ? declared.split(',') : [];
+  if (!FeatureList.safeParse(tokens).success)
+    throw new ApiError('validation_error', 'bad features declaration');
+  return json(200, room.eventsPage(after, knownFeatures(tokens), limit, LIMITS.eventPageBytes));
 };

@@ -128,7 +128,7 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 | `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                          |
 | `POST /questions/{id}/cancel`           | desktops      | idempotent; cannot remove a committed human answer                                              |
 | `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                         |
-| `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, attachments; emits `decision.deleted`                            |
+| `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, messages, attachments; emits `decision.deleted`                  |
 
 Idempotency: a repeated `idempotency_key` with identical body returns the original receipt; a different body is
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent.
@@ -294,8 +294,8 @@ frame (section 19).
 
 Sections 16 to 19 define three opt-in extensions, each named by a feature (section 19). Their shapes are in
 `thread.ts`, `snapshot.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
-and `openapi.json` when the relay serves them; until a relay advertises a feature in `GET /info`, clients MUST NOT
-use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
+and `openapi.json` when the relay serves them (the thread-message routes have); until a relay advertises a feature in
+`GET /info`, clients MUST NOT use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
 with messages in both directions (`THREAD_FIXTURE`), phone image references, a fresh snapshot, stale snapshots and a
 sharing-off record. Content there is plaintext and records are unsigned templates that each test encrypts and signs
 with its own keys.
@@ -348,8 +348,12 @@ question state unchanged with `deliverable: false` and `approval: false`.
 
 **Limits** (`LIMITS`): text 16 KiB UTF-8 (`messageTextBytes`, the same budget as an answer's text); 4 images per
 message; 200 messages per question over its lifetime, both sides together, not reset by a reopen
-(`messagesPerQuestion`, `409 invalid_state` beyond it); 50 messages per page. The envelope is bounded by
-`envelopeCiphertextChars`, like every envelope.
+(`messagesPerQuestion`, `409 invalid_state` beyond it); 50 messages per page, and a page also stops before 256 KiB of
+records and envelopes (`eventPageBytes`, like an events page) while always holding at least one message. The envelope
+is bounded by `envelopeCiphertextChars`, like every envelope. The relay never sees the text, so the text limit and
+"text or an image" are the sender's and reader's checks; the relay enforces the envelope bound, the image count in the
+signed record and the per-question count. Until it advertises `phone-images-v1`, it refuses a message that lists
+images (`400 validation_error`).
 
 | Route                                        | Role                                  | Notes                                                                               |
 | -------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------- |
@@ -375,7 +379,9 @@ An agent message with `expects_reply: true` asks the person something. The threa
 (`threadAwaitsHuman`) while the latest agent message expects a reply and nothing human came after it in ledger order:
 a human message, or a human answer, override or confirmation. A later agent message that asks nothing withdraws the
 request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
-"Needs you" again. The relay sends a `decision-reply` push for an agent message that expects a reply.
+"Needs you" again. The relay sends a `decision-reply` push (`{type, question_id}` and nothing else) for an agent message
+that expects a reply. Quiet hours hold it back like any push, a newer asking message on the same question replaces one
+not yet sent, and when it is due the relay sends it only if the thread still waits on the person.
 
 ### 16.3 Delivering human messages
 
@@ -387,8 +393,12 @@ never as an answer or an approval. Agent messages are not delivered anywhere; ph
 Each human message has its own delivery: `relay-queued → received → terminal-delivered`, or `needs-attention` /
 `delivery-uncertain` with an `error_code`. Only the publishing desktop reports it, with `POST /deliveries/messages`
 `{protocol_version, idempotency_key, question_id, message_id, host_id, status, injection_id (terminal-delivered),
-error_code (needs-attention, delivery-uncertain)}`. `received` is an explicit receipt: a ledger `ack` never marks a
-message received. The crash-recovery key is `messageDeliveryKey(question_id, message_id)`, in place of an answer's
+error_code (needs-attention, delivery-uncertain)}`; `host_id` is the question's `target_host_id`, and an agent message,
+an unknown message or another host is `404 not_found`. `received` is an explicit receipt: a ledger `ack` never marks a
+message received. Nothing moves a message back from `terminal-delivered`: a repeat with the same `injection_id` is
+harmless, and a different injection or a later failure is `409 invalid_state`. A failure can be followed by
+`terminal-delivered` once the desktop recovers, and a late `received` only fills in `received_at`. Each change emits
+`delivery.message`, and `GET /questions/{id}/messages` carries each human message's current delivery. The crash-recovery key is `messageDeliveryKey(question_id, message_id)`, in place of an answer's
 `(question_id, answer_revision)`: the desktop records its injection intent under that key before touching the
 terminal, reuses its `injection_id` after a restart, and reconciles an uncertain attempt rather than typing again.
 
@@ -515,7 +525,9 @@ receives use `FeatureToken`, so a newer peer's unknown features parse and are ig
 
 **Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
 and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No
-declaration, which is every 0.3.0 client, means the 0.3.0 baseline, whatever the device declared before.
+declaration, which is every 0.3.0 client, means the 0.3.0 baseline, whatever the device declared before. A socket-ticket
+body without `features` (the 0.3.0 phone app sends `{}`) is such a baseline declaration; a malformed list is
+`400 validation_error`.
 
 **Advertising.** The relay lists the features it implements in `GET /info` (`features`; absent means none). It
 records each device's latest socket-ticket declaration and shows it in `GET /devices` (`DeviceInfo.features`). A

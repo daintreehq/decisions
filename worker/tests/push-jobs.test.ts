@@ -2,14 +2,16 @@ import { settle } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
-import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { PushPayload, bytesToBase64Url } from '@daintreehq/decisions-protocol';
 import { newId } from '@daintreehq/decisions-crypto';
 import {
   act,
   ask,
   claimRelay,
+  declare,
   inRoom,
   pairDevice,
+  say,
   stub,
   type Actor,
   type World,
@@ -420,5 +422,232 @@ describe('settings, voice sessions and admin', () => {
     const { raw } = await import('./helpers.js');
     expect((await raw('GET', '/api/v1/info')).json.claimed).toBe(false);
     expect((await phone.call('GET', '/api/v1/devices')).status).toBe(401);
+  });
+});
+
+/* ---------- reply pushes for thread messages (docs/protocol.md section 16.2) ---------- */
+
+const utf8 = (t: string) => new TextEncoder().encode(t);
+const concat = (...parts: Uint8Array[]) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+};
+async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, bytes: number) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(
+    await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, bytes * 8),
+  );
+}
+
+/** A push subscriber that keeps its private key, so a test can read exactly what the relay sent. */
+async function subscriber(phone: Actor) {
+  const kp = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
+    'deriveBits',
+  ])) as CryptoKeyPair;
+  const pub = new Uint8Array((await crypto.subtle.exportKey('raw', kp.publicKey)) as ArrayBuffer);
+  const auth = crypto.getRandomValues(new Uint8Array(16));
+  const r = await phone.call('POST', '/api/v1/push/subscriptions', {
+    protocol_version: 1,
+    endpoint: `https://fcm.googleapis.com/fcm/send/${newId()}`,
+    p256dh: bytesToBase64Url(pub),
+    auth: bytesToBase64Url(auth),
+  });
+  expect(r.status).toBe(201);
+  /** RFC 8291 / RFC 8188 (aes128gcm, one record), the way a browser's push service client opens it. */
+  const open = async (body: Uint8Array): Promise<unknown> => {
+    const salt = body.slice(0, 16);
+    const idlen = body[20]!;
+    const serverPub = body.slice(21, 21 + idlen);
+    const serverKey = await crypto.subtle.importKey(
+      'raw',
+      serverPub,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      [],
+    );
+    const shared = new Uint8Array(
+      await crypto.subtle.deriveBits(
+        { name: 'ECDH', public: serverKey } as never,
+        kp.privateKey,
+        256,
+      ),
+    );
+    const ikm = await hkdf(auth, shared, concat(utf8('WebPush: info\0'), pub, serverPub), 32);
+    const cek = await hkdf(salt, ikm, utf8('Content-Encoding: aes128gcm\0'), 16);
+    const nonce = await hkdf(salt, ikm, utf8('Content-Encoding: nonce\0'), 12);
+    const key = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['decrypt']);
+    const plain = new Uint8Array(
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, body.slice(21 + idlen)),
+    );
+    let end = plain.length - 1;
+    while (end > 0 && plain[end] === 0) end--;
+    expect(plain[end]).toBe(2); // last-record delimiter
+    return JSON.parse(new TextDecoder().decode(plain.slice(0, end)));
+  };
+  return { open };
+}
+
+describe('reply pushes', () => {
+  let w: World;
+  let phone: Actor;
+  const calls: { url: string; init: RequestInit }[] = [];
+
+  beforeEach(async () => {
+    calls.length = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(null, { status: 201 });
+    }) as never);
+    w = await claimRelay();
+    await declare(w.owner);
+    phone = await pairDevice(w);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Sends the new-question push first, so only what follows is counted. */
+  async function asked(opts?: Parameters<typeof ask>[1]) {
+    const { questionId } = await ask(w, opts);
+    await runDue('notify_new');
+    calls.length = 0;
+    return questionId;
+  }
+
+  it('pushes the same content-free notice as a new question when an agent message expects a reply', async () => {
+    const s = await subscriber(phone);
+    const questionId = await asked();
+    const msg = await say(w, w.owner, questionId, { expectsReply: true, text: 'Which footer?' });
+    expect(msg.res.status).toBe(201);
+    await runDue('notify_reply');
+    expect(calls).toHaveLength(1);
+    const h = calls[0]!.init.headers as Record<string, string>;
+    expect(h.Urgency).toBe('high');
+    expect(h.Topic).toHaveLength(32);
+    const payload = await s.open(calls[0]!.init.body as Uint8Array);
+    // A type and the question id, exactly: no message id, no text, nothing about the pane.
+    expect(payload).toEqual({ type: 'decision-reply', question_id: questionId });
+    expect(PushPayload.safeParse(payload).success).toBe(true);
+    expect(JSON.stringify(payload)).not.toContain(msg.messageId);
+
+    // An answered question that the agent asks about again pushes too.
+    expect((await act(w, phone, 'answer', questionId, 0)).res.status).toBe(201);
+    calls.length = 0;
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    expect(calls).toHaveLength(1);
+    expect(await s.open(calls[0]!.init.body as Uint8Array)).toEqual({
+      type: 'decision-reply',
+      question_id: questionId,
+    });
+  });
+
+  it('pushes nothing for an agent message that asks nothing, or for a human message', async () => {
+    await subscriber(phone);
+    const questionId = await asked();
+    expect((await say(w, w.owner, questionId)).res.status).toBe(201);
+    expect((await say(w, phone, questionId)).res.status).toBe(201);
+    expect(await pending('notify_reply')).toEqual([]);
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+  });
+
+  /** Quiet hours from an hour ago to an hour from now (UTC), so the hold is certain whenever the test runs. */
+  const quiet = (enabled: boolean) => {
+    const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+    return inRoom((room) =>
+      room.setMeta(
+        'settings',
+        JSON.stringify({
+          quiet_hours: {
+            enabled,
+            start: hhmm(Date.now() - 3_600_000),
+            end: hhmm(Date.now() + 3_600_000),
+            time_zone: 'UTC',
+          },
+        }),
+      ),
+    );
+  };
+  const replyJobs = async (questionId: string) =>
+    (await pending('notify_reply')).filter((j) => j.question_id === questionId);
+
+  it('holds a reply push through quiet hours, and sends it after', async () => {
+    const s = await subscriber(phone);
+    const questionId = await asked();
+    await quiet(true);
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+    const [held] = await replyJobs(questionId);
+    expect(held!.status).toBe('pending');
+    expect(held!.run_at).toBeGreaterThan(Date.now() + 30 * 60_000);
+    await quiet(false);
+    await runDue('notify_reply');
+    expect(calls).toHaveLength(1);
+    expect(await s.open(calls[0]!.init.body as Uint8Array)).toEqual({
+      type: 'decision-reply',
+      question_id: questionId,
+    });
+  });
+
+  it('drops a held reply push once the person has answered it, in the thread or otherwise', async () => {
+    await subscriber(phone);
+    // The person writes back.
+    const wroteBack = await asked();
+    await quiet(true);
+    await say(w, w.owner, wroteBack, { expectsReply: true });
+    await say(w, phone, wroteBack);
+    // The person confirms the model's answer: a human action after the request, though it cancels no push job.
+    const proxied = await asked({ requirement: 'proxy-ok' });
+    const proxy = await act(w, w.owner, 'proxy-answer', proxied, 0, {
+      content: {
+        selected_option_ids: ['approve'],
+        model_id: 'm',
+        prompt_template_version: '1',
+        confidence: 0.9,
+      },
+    });
+    expect(proxy.res.status).toBe(201);
+    await say(w, w.owner, proxied, { expectsReply: true });
+    // Run it into its quiet-hour deferral first, so the runtime's own alarm cannot settle it early.
+    await runDue('notify_reply');
+    const [deferred] = await replyJobs(proxied);
+    expect(deferred).toMatchObject({ status: 'pending' });
+    expect(deferred!.run_at).toBeGreaterThan(Date.now() + 30 * 60_000);
+    const confirm = await act(w, phone, 'confirm-proxy', proxied, 1, {
+      content: null,
+      confirmsActionId: proxy.signed.record.action_id,
+    });
+    expect(confirm.res.status).toBe(201);
+    expect((await replyJobs(proxied)).map((j) => j.status)).toEqual(['pending']);
+    // The agent withdraws its request with a message that asks nothing.
+    const withdrawn = await asked();
+    await say(w, w.owner, withdrawn, { expectsReply: true });
+    await say(w, w.owner, withdrawn, { expectsReply: false });
+
+    await quiet(false);
+    calls.length = 0;
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+    for (const q of [wroteBack, proxied, withdrawn])
+      expect((await replyJobs(q)).map((j) => j.status)).toEqual(['done']);
+  });
+
+  it('keeps one reply push per question, and a cancelled question takes it along', async () => {
+    await subscriber(phone);
+    const twice = await asked();
+    await quiet(true);
+    await say(w, w.owner, twice, { expectsReply: true });
+    await say(w, w.owner, twice, { expectsReply: true });
+    expect((await replyJobs(twice)).map((j) => j.status).sort()).toEqual(['cancelled', 'pending']);
+    expect((await act(w, w.owner, 'cancel', twice, 0)).res.status).toBe(201);
+    expect((await replyJobs(twice)).map((j) => j.status)).toEqual(['cancelled', 'cancelled']);
+    await quiet(false);
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
   });
 });

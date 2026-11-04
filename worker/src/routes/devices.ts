@@ -4,6 +4,7 @@ import {
   LIMITS,
   RevokeDeviceBody,
   RotateEpochBody,
+  SocketTicketBody,
   type DeviceCert,
   type EpochGrant,
 } from '@daintreehq/decisions-protocol';
@@ -30,6 +31,7 @@ export const listDevices: Handler = async (room) => {
       last_ack_seq: r.last_ack_seq,
       cert: JSON.parse(r.cert_json) as DeviceCert,
       push_enabled: Boolean(r.push_enabled),
+      features: storedFeatures(r.features),
     })),
   });
 };
@@ -105,10 +107,39 @@ export const enrollHost: Handler = async (room, c) => {
   return json(201, { device_id: cert.device_id });
 };
 
+const storedFeatures = (raw: string | null | undefined): string[] => {
+  try {
+    const v = JSON.parse(raw ?? '[]') as unknown;
+    return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+/** The features a device declared on its latest socket ticket (section 19); empty for a 0.3.0 client. */
+export const deviceFeatures = (room: Room, deviceId: string): string[] =>
+  storedFeatures(room.getDevice(deviceId)?.features);
+
+/**
+ * Today's phone app sends `{}`, so `protocol_version` stays optional here; a declared feature list must be
+ * well formed. No declaration, the 0.3.0 baseline, also clears what the device declared before.
+ */
+const TicketBody = SocketTicketBody.extend({
+  protocol_version: SocketTicketBody.shape.protocol_version.optional(),
+});
+
 export const socketTicket: Handler = async (room, c) => {
-  room.hit(`ticket:${c.auth!.deviceId}`, 30, 60_000);
+  const auth = c.auth!;
+  room.hit(`ticket:${auth.deviceId}`, 30, 60_000);
+  const declared = c.req.body.trim() === '' ? undefined : c.body(TicketBody).features;
+  const features = [...new Set(declared ?? [])].sort();
   const ttl = LIMITS.wsTicketTtlMs;
-  const ticket = await room.mintTicket('ws', c.auth!.deviceId, {}, ttl);
+  const ticket = await room.mintTicket('ws', auth.deviceId, { features }, ttl);
+  room.run(
+    `UPDATE devices SET features = ? WHERE device_id = ?`,
+    JSON.stringify(features),
+    auth.deviceId,
+  );
   return json(200, { ticket, expires_at: iso(nowMs() + ttl), ws_path: '/api/v1/socket' });
 };
 

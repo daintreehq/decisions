@@ -707,6 +707,8 @@ export const deleteQuestion: Handler = async (room, c) => {
     room.cancelJobs({ questionId: id });
     room.run(`DELETE FROM actions WHERE question_id = ?`, id);
     room.run(`DELETE FROM deliveries WHERE question_id = ?`, id);
+    room.run(`DELETE FROM messages WHERE question_id = ?`, id);
+    room.run(`DELETE FROM message_deliveries WHERE question_id = ?`, id);
     room.run(`DELETE FROM events WHERE question_id = ?`, id);
     room.run(`DELETE FROM questions WHERE question_id = ?`, id);
     room.schedule({

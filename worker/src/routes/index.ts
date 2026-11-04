@@ -6,6 +6,7 @@ import * as attachments from './attachments.js';
 import * as deliveries from './deliveries.js';
 import * as devices from './devices.js';
 import * as events from './events.js';
+import * as messages from './messages.js';
 import * as pairing from './pairing.js';
 import * as push from './push.js';
 import * as questions from './questions.js';
@@ -64,6 +65,9 @@ export const ROUTES: Route[] = [
   r('POST', `/questions/${ID}/proxy-abstain`, 'signed', questions.proxyAbstain, DESKTOP_ROLES),
   r('POST', `/questions/${ID}/cancel`, 'signed', questions.cancel, DESKTOP_ROLES),
   r('POST', `/questions/${ID}/reopen`, 'signed', questions.reopen, OWNER),
+  // Human messages need a phone or tablet and agent messages the publishing desktop; the handler checks which.
+  r('POST', `/questions/${ID}/messages`, 'signed', messages.postMessage, ANY),
+  r('GET', `/questions/${ID}/messages`, 'signed', messages.listMessages, ANY),
 
   r('POST', '/attachments/reservations', 'signed', attachments.reserve, DESKTOP_ROLES),
   r('POST', `/attachments/${ID}/complete`, 'signed', attachments.complete, DESKTOP_ROLES),
@@ -77,6 +81,7 @@ export const ROUTES: Route[] = [
   r('POST', '/deliveries/received', 'signed', deliveries.received, DESKTOP_ROLES),
   r('POST', '/deliveries/terminal', 'signed', deliveries.terminal, DESKTOP_ROLES),
   r('POST', '/deliveries/failed', 'signed', deliveries.failed, DESKTOP_ROLES),
+  r('POST', '/deliveries/messages', 'signed', messages.messageReceipt, DESKTOP_ROLES),
 
   r('GET', '/push/config', 'signed', push.pushConfig, ANY),
   r('GET', '/push/subscriptions', 'signed', push.listSubscriptions, HUMAN_ROLES),

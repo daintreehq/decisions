@@ -29,6 +29,7 @@ export const diagnostics: Handler = async (room) => {
       actions: count('actions'),
       events: count('events'),
       deliveries: count('deliveries'),
+      messages: count('messages'),
     },
     jobs: {
       pending: pending?.n ?? 0,
@@ -67,6 +68,8 @@ export const deleteData: Handler = async (room, c) => {
     for (const t of [
       'actions',
       'deliveries',
+      'messages',
+      'message_deliveries',
       'questions',
       'attachments',
       'events',
