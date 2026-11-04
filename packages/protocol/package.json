@@ -13,6 +13,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./fixtures": {
+      "@daintreehq/source": "./src/fixtures.ts",
+      "types": "./dist/fixtures.d.ts",
+      "default": "./dist/fixtures.js"
+    },
     "./openapi.json": "./openapi.json",
     "./schemas.json": "./schemas.json",
     "./package.json": "./package.json"

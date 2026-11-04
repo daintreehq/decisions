@@ -17,7 +17,10 @@ import {
   Sha256Hex,
   SettingsBody,
   ActionRecord,
+  FeatureList,
 } from './schema.js';
+import { SnapshotRefresh, SnapshotSharing } from './snapshot.js';
+import { MessageDeliveryInfo, MessageEntry } from './thread.js';
 import { PROTOCOL_VERSION } from './version.js';
 
 /* ---------- REST responses ---------- */
@@ -109,6 +112,11 @@ export const DeviceInfo = z.object({
   /** Owner-signed certificate: clients verify historical signatures against it, even for revoked devices. */
   cert: DeviceCert,
   push_enabled: z.boolean(),
+  /**
+   * The features this device declared on its latest socket ticket (section 19); absent or empty for a 0.3.0
+   * client. A phone offers messages, images or snapshot refresh only when the question's publishing desktop has.
+   */
+  features: FeatureList.optional(),
 });
 export type DeviceInfo = z.infer<typeof DeviceInfo>;
 
@@ -344,6 +352,19 @@ export const EventData = {
     status: z.enum(['needs-attention', 'delivery-uncertain']),
     error_code: z.string(),
   }),
+  /** `decision.message.posted`. `question_revision` on the event is null: a message has no revision. */
+  messagePosted: MessageEntry.extend({ target_host_id: Id }),
+  /** `delivery.message`: a human message's delivery changed. */
+  messageDelivery: MessageDeliveryInfo.extend({ message_id: Id, target_host_id: Id }),
+  /** `decision.snapshot.updated`: a hint only. Fetch `GET /questions/{id}/snapshot` for the content. */
+  snapshotUpdated: z.object({
+    snapshot_id: Id,
+    observed_at: IsoTime,
+    sharing: SnapshotSharing,
+    target_host_id: Id,
+  }),
+  /** `decision.snapshot.refresh_requested`: sent to the publishing desktop, which answers with a new snapshot. */
+  snapshotRefreshRequested: SnapshotRefresh.extend({ target_host_id: Id }),
 } as const;
 
 export { Sha256Hex };
