@@ -61,23 +61,52 @@ const pending = (kind?: string) =>
     ),
   );
 
+/**
+ * Waits for the room's own alarm runs to finish, then checks that the one alarm is set at the earliest pending
+ * job. workerd fires a due alarm by itself, and while that handler runs `getAlarm()` reads null until the
+ * handler sets the next alarm, so a single read can land mid-run. The alarm and the jobs are read together.
+ */
+async function expectAlarmAtEarliestJob() {
+  await vi.waitFor(
+    async () => {
+      const { alarm, next } = await inRoom(async (room, state) => ({
+        next: room.q1<{ m: number | null }>(
+          `SELECT MIN(run_at) AS m FROM scheduled_jobs WHERE status = 'pending'`,
+        )!.m,
+        alarm: await state.storage.getAlarm(),
+      }));
+      expect(next).toBeGreaterThan(Date.now());
+      expect(alarm).toBe(next);
+    },
+    { timeout: 5000, interval: 20 },
+  );
+}
+
 describe('push, reminders and expiry', () => {
   let w: World;
   let phone: Actor;
   const calls: { url: string; init: RequestInit }[] = [];
   let status = 201;
+  // Holds every push send while true, stalling the alarm run that makes it. A flag rather than a promise: the
+  // send runs in the Durable Object's context, and a promise settled across contexts crashes workerd.
+  let held = false;
 
   beforeEach(async () => {
     calls.length = 0;
     status = 201;
+    held = false;
     vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
       calls.push({ url: String(url), init });
+      while (held) await new Promise((r) => setTimeout(r, 5));
       return new Response(null, { status });
     }) as never);
     w = await claimRelay();
     phone = await pairDevice(w);
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    held = false;
+    vi.restoreAllMocks();
+  });
 
   it('rejects subscriptions to anything but a known push service (SSRF)', async () => {
     const base = await subscription();
@@ -164,9 +193,14 @@ describe('push, reminders and expiry', () => {
 
   it('retries transient push failures with backoff instead of dropping the notification', async () => {
     await subscribe(phone);
-    await ask(w);
     status = 503;
-    await runDue('notify_new');
+    await ask(w);
+    // The notify_new is due at once, so the room's own alarm makes the first attempt. Running it by hand
+    // as well could make a second one.
+    await vi.waitFor(
+      async () => expect((await pending('notify_new'))[0]?.attempt_count).toBe(1),
+      { timeout: 5000, interval: 20 },
+    );
     const [job] = await pending('notify_new');
     expect(job).toMatchObject({ status: 'pending', attempt_count: 1 });
     expect(job!.run_at).toBeGreaterThan(Date.now());
@@ -266,16 +300,43 @@ describe('push, reminders and expiry', () => {
   });
 
   it('keeps exactly one alarm scheduled for the earliest pending job', async () => {
-    await ask(w);
-    await runDurableObjectAlarm(stub()); // flush work that is due right now (alarms also fire on their own)
-    const alarm = await inRoom((_r, state) => state.storage.getAlarm());
-    const next = await inRoom((room) =>
-      room.q1<{ m: number }>(
-        `SELECT MIN(run_at) AS m FROM scheduled_jobs WHERE status = 'pending'`,
-      )!,
+    await ask(w); // its notify_new is due now, so the room's own alarm fires and runs it
+    await expectAlarmAtEarliestJob();
+    expect((await pending('notify_new')).map((j) => j.status)).toEqual(['done']);
+  });
+
+  it('keeps the alarm a transaction sets while an alarm run is in flight', async () => {
+    await subscribe(phone);
+    held = true;
+    let soon = 0;
+    try {
+      const { questionId } = await ask(w);
+      // The room's own alarm fires for the notify_new and stalls in its push send.
+      await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5000 });
+      // Until a running handler sets the next alarm, workerd reports none, so the plugin's hand-run does
+      // nothing and an immediate read sees null.
+      expect(await inRoom((_r, state) => state.storage.getAlarm())).toBeNull();
+      expect(await runDurableObjectAlarm(stub())).toBe(false);
+      // A transaction withdraws the job being run and schedules one shortly after, so it sets the alarm the
+      // handler's own refresh then finds already stored and leaves alone.
+      soon = Date.now() + 500;
+      await inRoom((room) =>
+        room.tx(() => {
+          room.cancelJobs({ questionId });
+          room.schedule({ kind: 'purge', runAt: soon });
+        }),
+      );
+      expect(await inRoom((_r, state) => state.storage.getAlarm())).toBe(soon);
+    } finally {
+      held = false;
+    }
+    // The handler finishing does not take that alarm with it: the job still runs.
+    await vi.waitFor(
+      async () =>
+        expect((await pending('purge')).find((j) => j.run_at === soon)?.status).toBe('done'),
+      { timeout: 5000, interval: 20 },
     );
-    expect(next!.m).toBeGreaterThan(Date.now());
-    expect(alarm).toBe(next!.m);
+    await expectAlarmAtEarliestJob();
   });
 });
 
