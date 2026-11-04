@@ -125,13 +125,21 @@ async function pushJob(
  * Whether an agent message still waits on the person (`threadAwaitsHuman`): a reply push deferred by quiet hours
  * or a retry is dropped once the person has written or answered since, or the thread closed.
  */
-function threadAwaitsPerson(room: Room, questionId: string, status: QuestionRow['status']): boolean {
+function threadAwaitsPerson(
+  room: Room,
+  questionId: string,
+  status: QuestionRow['status'],
+): boolean {
   const messages = room
     .q<{ side: MessageSide; expects_reply: number; event_seq: number }>(
       `SELECT side, expects_reply, event_seq FROM messages WHERE question_id = ?`,
       questionId,
     )
-    .map((m) => ({ side: m.side, expects_reply: Boolean(m.expects_reply), event_seq: m.event_seq }));
+    .map((m) => ({
+      side: m.side,
+      expects_reply: Boolean(m.expects_reply),
+      event_seq: m.event_seq,
+    }));
   const lastHuman = room.q1<{ s: number | null }>(
     `SELECT MAX(event_seq) AS s FROM actions WHERE question_id = ? AND provenance = 'human'`,
     questionId,

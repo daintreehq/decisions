@@ -391,7 +391,8 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     path: '/deliveries/messages',
     auth: 'signed',
     roles: DESKTOPS,
-    summary: 'The publishing desktop reports one human message received, typed, or needing attention',
+    summary:
+      'The publishing desktop reports one human message received, typed, or needing attention',
     request: MessageReceiptBody,
     response: ok,
   },

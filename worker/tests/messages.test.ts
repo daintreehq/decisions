@@ -99,9 +99,9 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     expect(unsigned.status).toBe(401);
     const lost = await pairDevice(w, 'phone', 'Lost phone');
     const rotation = await buildRotation(w, [phone, host]);
-    expect((await w.owner.call('POST', `/api/v1/devices/${lost.id}/revoke`, rotation.body)).status).toBe(
-      200,
-    );
+    expect(
+      (await w.owner.call('POST', `/api/v1/devices/${lost.id}/revoke`, rotation.body)).status,
+    ).toBe(200);
     await refused(say(w, lost, questionId), 401);
 
     expect(await thread(phone, questionId)).toEqual([]);
@@ -159,7 +159,10 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     const oversize = await phone.call('POST', `/api/v1/questions/${questionId}/messages`, {
       ...big.body,
       idempotency_key: newId(),
-      message: { ...big.body.message, envelope: { ...big.envelope, ciphertext: 'A'.repeat(184_321) } },
+      message: {
+        ...big.body.message,
+        envelope: { ...big.envelope, ciphertext: 'A'.repeat(184_321) },
+      },
     });
     expect(oversize.status).toBe(400);
     // Unknown questions.
@@ -198,11 +201,7 @@ describe('idempotency', () => {
     expect(first.res.status).toBe(201);
 
     // Same key, same body.
-    const again = await phone.call(
-      'POST',
-      `/api/v1/questions/${questionId}/messages`,
-      first.body,
-    );
+    const again = await phone.call('POST', `/api/v1/questions/${questionId}/messages`, first.body);
     expect(again.status).toBe(201);
     expect(again.json).toEqual(first.res.json);
     // Same record under a fresh key.
@@ -317,7 +316,12 @@ describe('ordering', () => {
       undefined,
       'after=7',
     );
-    expect(tail.json).toEqual({ question_id: questionId, messages: [], next_after: 7, has_more: false });
+    expect(tail.json).toEqual({
+      question_id: questionId,
+      messages: [],
+      next_after: 7,
+      has_more: false,
+    });
     const bad = await phone.call(
       'GET',
       `/api/v1/questions/${questionId}/messages`,
@@ -401,7 +405,11 @@ describe('question states', () => {
 
     const expiring = (await ask(w)).questionId;
     await inRoom((room) =>
-      room.run(`UPDATE questions SET expires_at = ? WHERE question_id = ?`, Date.now() - 1, expiring),
+      room.run(
+        `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
+        Date.now() - 1,
+        expiring,
+      ),
     );
     for (const r of await bothSides(w, phone, expiring)) {
       expect(r.status).toBe(410);
@@ -481,8 +489,12 @@ describe('message receipts (section 16.4)', () => {
     // A ledger acknowledgement never stands in for an explicit receipt.
     const high = (await modernEvents(w.owner)).at(-1)!.seq;
     expect(
-      (await w.owner.call('POST', '/api/v1/deliveries/received', { protocol_version: 1, seq: high }))
-        .status,
+      (
+        await w.owner.call('POST', '/api/v1/deliveries/received', {
+          protocol_version: 1,
+          seq: high,
+        })
+      ).status,
     ).toBe(200);
     expect((await deliveryOf(phone, questionId, one.messageId)).status).toBe('relay-queued');
 
@@ -542,7 +554,9 @@ describe('message receipts (section 16.4)', () => {
     });
 
     // The phone sees the same changes as `delivery.message` events, in order.
-    const deliveries = (await modernEvents(phone)).filter((e) => e.event_type === 'delivery.message');
+    const deliveries = (await modernEvents(phone)).filter(
+      (e) => e.event_type === 'delivery.message',
+    );
     expect(deliveries.map((e) => [e.data.message_id, e.data.status])).toEqual([
       [one.messageId, 'received'],
       [one.messageId, 'terminal-delivered'],

@@ -46,7 +46,9 @@ interface MessageDeliveryRow {
   error_code: string | null;
 }
 
-const receiptOf = (m: Pick<MessageRow, 'question_id' | 'message_id' | 'message_seq' | 'event_seq' | 'committed_at'>) => ({
+const receiptOf = (
+  m: Pick<MessageRow, 'question_id' | 'message_id' | 'message_seq' | 'event_seq' | 'committed_at'>,
+) => ({
   question_id: m.question_id,
   message_id: m.message_id,
   message_seq: m.message_seq,
@@ -74,8 +76,7 @@ export const postMessage: Handler = async (room, c) => {
   // Phone images (section 17) need upload binding this relay does not implement yet, and it does not advertise
   // `phone-images-v1`: a message naming images could never have them.
   if (record.attachment_ids.length) throw bad('this relay does not accept phone images yet');
-  if (envelope.key_epoch > room.currentEpoch())
-    throw bad('envelope uses an unknown key epoch');
+  if (envelope.key_epoch > room.currentEpoch()) throw bad('envelope uses an unknown key epoch');
   if ((await sha256Hex(canonicalize(envelope))) !== record.envelope_digest)
     throw bad('envelope digest mismatch');
   const signer = room.getDevice(auth.deviceId)!;
@@ -100,11 +101,17 @@ export const postMessage: Handler = async (room, c) => {
       return { status: prior.status, body: prior.response_json };
     }
     // The same record under its message id is a retry, recognised before the state and quota checks.
-    const dup = room.q1<MessageRow>(`SELECT * FROM messages WHERE message_id = ?`, record.message_id);
+    const dup = room.q1<MessageRow>(
+      `SELECT * FROM messages WHERE message_id = ?`,
+      record.message_id,
+    );
     if (dup) {
       const stored = JSON.parse(dup.record_json) as Record<string, unknown>;
       if (dup.question_id !== qid || unsigned(stored) !== unsigned(record)) {
-        throw new ApiError('idempotency_collision', 'message id already used by a different message');
+        throw new ApiError(
+          'idempotency_collision',
+          'message id already used by a different message',
+        );
       }
       return json(200, receiptOf(dup));
     }

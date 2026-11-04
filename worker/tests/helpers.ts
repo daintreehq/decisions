@@ -454,7 +454,10 @@ export async function uploadImage(
 export { sha256Hex, bytesToBase64Url, type PairingInvitePayload };
 
 /** Declares `features` the way a client does, on a socket ticket; the relay records it for the device. */
-export async function declare(a: Actor, features: string[] = ['thread-messages-v1']): Promise<string> {
+export async function declare(
+  a: Actor,
+  features: string[] = ['thread-messages-v1'],
+): Promise<string> {
   const r = await a.call('POST', '/api/v1/socket-ticket', {
     protocol_version: PROTOCOL_VERSION,
     features,

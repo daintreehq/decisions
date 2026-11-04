@@ -131,8 +131,8 @@ const TicketBody = SocketTicketBody.extend({
 export const socketTicket: Handler = async (room, c) => {
   const auth = c.auth!;
   room.hit(`ticket:${auth.deviceId}`, 30, 60_000);
-  const body = c.req.body.trim() === '' ? {} : c.body(TicketBody);
-  const features = [...new Set(body.features ?? [])].sort();
+  const declared = c.req.body.trim() === '' ? undefined : c.body(TicketBody).features;
+  const features = [...new Set(declared ?? [])].sort();
   const ttl = LIMITS.wsTicketTtlMs;
   const ticket = await room.mintTicket('ws', auth.deviceId, { features }, ttl);
   room.run(
