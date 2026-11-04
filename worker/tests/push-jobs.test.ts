@@ -613,6 +613,11 @@ describe('reply pushes', () => {
     });
     expect(proxy.res.status).toBe(201);
     await say(w, w.owner, proxied, { expectsReply: true });
+    // Run it into its quiet-hour deferral first, so the runtime's own alarm cannot settle it early.
+    await runDue('notify_reply');
+    const [deferred] = await replyJobs(proxied);
+    expect(deferred).toMatchObject({ status: 'pending' });
+    expect(deferred!.run_at).toBeGreaterThan(Date.now() + 30 * 60_000);
     const confirm = await act(w, phone, 'confirm-proxy', proxied, 1, {
       content: null,
       confirmsActionId: proxy.signed.record.action_id,
