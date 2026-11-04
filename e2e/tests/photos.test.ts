@@ -305,7 +305,9 @@ describe.skipIf(!chromiumPath)('photos from the composer, end to end', () => {
     const plus = page.locator('.dock').getByRole('button', { name: 'Add photos' });
     expect(await plus.getAttribute('aria-disabled')).toBe('true');
     await page.locator('.dock .composer-lane').getByRole('button', { name: 'Dismiss' }).click();
-    await plus.click();
+    // Marked unavailable for assistive tech, yet still answers a press with the reason (never a silent no-op), so the
+    // press is forced past Playwright's own enabled check.
+    await plus.click({ force: true });
     await page.locator('.dock .composer-lane', { hasText: 'Up to 4 photos per answer.' }).waitFor();
     expect(await page.locator('dialog.attach-sheet[open]').count()).toBe(0);
   });
