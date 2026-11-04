@@ -244,8 +244,8 @@ function SidebarContent({
 /**
  * The floating menu button (below 1100px): a round 48px button over the content, top-left inside the safe area.
  * When the closed sidebar is hiding app state that needs attention (no network, a relay that has stopped answering,
- * an update to restart into) it carries a small dot; on pages that do not count waiting work themselves (History,
- * Settings) it carries the waiting count. Either way its name says so.
+ * an update to restart into) it carries a small dot; on pages that do not count waiting work themselves (a question,
+ * History, Settings) it carries the waiting count. Either way its name says so.
  */
 export function MenuButton() {
   const open = useSidebarOpen();
@@ -253,11 +253,8 @@ export function MenuButton() {
   const route = useRoute();
   const all = useQuestions();
   const now = useNow();
-  // Waiting work, where the page itself does not already count it (Home's scopes, a question's All Q&A).
-  const waiting =
-    route.name === 'inbox' || route.name === 'question'
-      ? 0
-      : all.filter((v) => needsAction(v, now)).length;
+  // Waiting work, where the page itself does not already count it (Home's scopes do).
+  const waiting = route.name === 'inbox' ? 0 : all.filter((v) => needsAction(v, now)).length;
   const name =
     attention === 'offline'
       ? 'Menu, offline'

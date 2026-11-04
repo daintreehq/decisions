@@ -10,7 +10,6 @@ export interface VoicePrefs {
   consent: boolean;
   transcription: 'xai' | 'openai';
   correction: 'anthropic' | 'openai' | 'off';
-  mode: 'tap' | 'hold';
 }
 
 export interface LocalPrefs {
@@ -21,7 +20,7 @@ export interface LocalPrefs {
 
 export const DEFAULT_PREFS: LocalPrefs = {
   theme: 'system',
-  voice: { consent: false, transcription: 'xai', correction: 'anthropic', mode: 'tap' },
+  voice: { consent: false, transcription: 'xai', correction: 'anthropic' },
   dismissedInstall: false,
 };
 

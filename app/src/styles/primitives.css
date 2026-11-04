@@ -191,8 +191,10 @@ select {
   background-repeat: no-repeat;
   cursor: pointer;
 }
+/* Placeholders carry real instructions ("Type or hold to talk"), so they owe text contrast: text-secondary meets
+   4.5:1 on every input surface in both themes, where the placeholder token falls short on Daintree. */
 ::placeholder {
-  color: var(--text-placeholder);
+  color: var(--text-2);
   opacity: 1;
 }
 textarea {

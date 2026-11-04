@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
 /**
- * Whether the Questions & answers navigator sheet is open. The dock's All Q&A and Ctrl/⌘+K open it. Callers that
+ * Whether the Questions & answers navigator sheet is open. Ctrl/⌘+K opens it. Callers that
  * are recording stop first.
  */
 let open = false;

@@ -127,7 +127,7 @@ describe.skipIf(!chromiumPath)(
       const item = page.getByText(question).first();
       await item.waitFor({ timeout: 30_000 });
       await item.click();
-      await page.getByRole('radio', { name: choice }).check();
+      await page.getByRole('radio', { name: choice }).first().check();
       await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
     }
 

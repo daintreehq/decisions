@@ -141,11 +141,11 @@ function facetCounts(
 /* ---------------- the panel ---------------- */
 
 /**
- * Every question in one list: Home's list (`page`, at `/`) and a sheet over a question (`sheet`, opened by the dock's
- * All Q&A or Ctrl/⌘+K). Needs you comes first, then delivery problems and model answers to review, then everything
- * else by day; one search and one filter (computer and project, in a sheet) apply to all of it. On phones and
- * tablets Home's tools are round buttons floating top-right, beside the menu button, so the list starts at the top
- * of the screen; in the wide column and the sheet they sit above the list.
+ * Every question in one list: Home's list (`page`, at `/`) and a sheet over a question (`sheet`, opened by Ctrl/⌘+K).
+ * Needs you comes first, then delivery problems and model answers to review, then everything else by day; one search
+ * and one filter (computer and project, in a sheet) apply to all of it. On phones and tablets Home's tools are round
+ * buttons floating top-right, beside the menu button, so the list starts at the top of the screen; in the wide column
+ * and the sheet they sit above the list.
  */
 export function NavigatorPanel({
   presentation,

@@ -15,7 +15,7 @@ const h = vi.hoisted(() => ({
   prefs: {
     theme: 'system',
     dismissedInstall: false,
-    voice: { consent: true, transcription: 'xai', correction: 'anthropic', mode: 'tap' },
+    voice: { consent: true, transcription: 'xai', correction: 'anthropic' },
   },
 }));
 vi.mock('../src/app/controller.js', () => ({
@@ -45,7 +45,7 @@ import {
 } from '../src/features/voice/dictation.js';
 import type { CorrectionOutcome } from '../src/features/voice/correction.js';
 import { composeShape, verdict } from '../src/domain/compose.js';
-import { DictateButton } from '../src/components/workspace/AnswerDock.js';
+import { DictateButton, HOLD_MS } from '../src/components/workspace/Composer.js';
 
 interface FakeClient {
   opts: Record<string, (...a: unknown[]) => void>;
@@ -159,7 +159,7 @@ beforeEach(() => {
   h.stored.clear();
   h.saveGate = null;
   h.stallTicket = false;
-  h.prefs.voice = { consent: true, transcription: 'xai', correction: 'anthropic', mode: 'tap' };
+  h.prefs.voice = { consent: true, transcription: 'xai', correction: 'anthropic' };
 });
 
 describe('words land live, at the caret, and only finalized words', () => {
@@ -468,36 +468,79 @@ describe('the Dictate button', () => {
     escArmed: false,
   } as const;
 
-  it('stays pressable while starting so a hold-to-talk release can reach it', () => {
+  const press = (btn: Element, type: 'pointerdown' | 'pointerup') =>
+    act(() => void btn.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0 })));
+
+  it('starts on the press; a quick tap leaves it running, and the next tap stops it', () => {
+    const onToggle = vi.fn();
     const onHoldEnd = vi.fn();
-    act(() =>
-      root.render(
-        createElement(DictateButton, {
-          dict: { ...idle, phase: 'starting' },
-          holdMode: true,
-          fieldLabel: 'answer',
-          onToggle: () => undefined,
-          onHoldStart: () => undefined,
-          onHoldEnd,
-        }),
-      ),
-    );
-    const btn = host.querySelector('button')!;
-    expect(btn.disabled).toBe(false);
-    expect(btn.getAttribute('aria-label')).toBe('Cancel dictation');
-    act(() => void btn.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })));
-    expect(onHoldEnd).toHaveBeenCalled();
+    const clock = vi.spyOn(Date, 'now');
+    const show = (phase: 'idle' | 'starting' | 'recording') =>
+      act(() =>
+        root.render(
+          createElement(DictateButton, {
+            dict: { ...idle, phase, micLive: phase === 'recording' },
+            fieldLabel: 'answer',
+            onToggle,
+            onHoldEnd,
+          }),
+        ),
+      );
+    const btn = () => host.querySelector('button')!;
+    show('idle');
+    expect(btn().getAttribute('aria-label')).toBe('Dictate answer');
+    clock.mockReturnValue(1_000);
+    press(btn(), 'pointerdown');
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    show('starting');
+    expect(btn().disabled).toBe(false);
+    expect(btn().getAttribute('aria-label')).toBe('Cancel dictation');
+    clock.mockReturnValue(1_000 + HOLD_MS - 50);
+    press(btn(), 'pointerup');
+    expect(onHoldEnd).not.toHaveBeenCalled();
+    show('recording');
+    clock.mockReturnValue(5_000);
+    press(btn(), 'pointerdown');
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    press(btn(), 'pointerup');
+    expect(onToggle).toHaveBeenCalledTimes(2);
+    clock.mockRestore();
   });
 
-  it('is Stop, not Send, while recording', () => {
+  it('held past the threshold, letting go stops it', () => {
+    const onToggle = vi.fn();
+    const onHoldEnd = vi.fn();
+    const clock = vi.spyOn(Date, 'now');
+    const show = (phase: 'idle' | 'recording') =>
+      act(() =>
+        root.render(
+          createElement(DictateButton, {
+            dict: { ...idle, phase, micLive: phase === 'recording' },
+            fieldLabel: 'note',
+            onToggle,
+            onHoldEnd,
+          }),
+        ),
+      );
+    show('idle');
+    clock.mockReturnValue(1_000);
+    press(host.querySelector('button')!, 'pointerdown');
+    show('recording');
+    clock.mockReturnValue(1_000 + HOLD_MS + 400);
+    press(host.querySelector('button')!, 'pointerup');
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onHoldEnd).toHaveBeenCalledTimes(1);
+    clock.mockRestore();
+  });
+
+  it('is Stop, not Send, while recording, and toggles from the keyboard', () => {
+    const onToggle = vi.fn();
     act(() =>
       root.render(
         createElement(DictateButton, {
           dict: { ...idle, phase: 'recording', micLive: true, startedAt: Date.now() },
-          holdMode: false,
           fieldLabel: 'answer',
-          onToggle: () => undefined,
-          onHoldStart: () => undefined,
+          onToggle,
           onHoldEnd: () => undefined,
         }),
       ),
@@ -506,6 +549,8 @@ describe('the Dictate button', () => {
     expect(btn.getAttribute('aria-label')).toBe('Stop dictation');
     expect(btn.getAttribute('aria-pressed')).toBe('true');
     expect(host.textContent).not.toMatch(/Send/);
+    act(() => void btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })));
+    expect(onToggle).toHaveBeenCalledTimes(1);
   });
 });
 

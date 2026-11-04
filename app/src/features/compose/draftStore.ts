@@ -4,8 +4,8 @@ import { draftRowId, type Draft } from '../../data/outbox.js';
 import type { ComposeMode, FieldId } from '../../domain/compose.js';
 
 /**
- * The one in-memory home of every open draft, outside React, so the composer, the editor sheet and the dictation
- * owner all edit the same text, and words that land after the workspace unmounted (Stop & questions, then another
+ * The one in-memory home of every open draft, outside React, so the composer and the dictation owner all edit the
+ * same text, and words that land after the workspace unmounted (leaving mid-dictation for another
  * question) still reach the draft they belong to and nothing else.
  *
  * A draft is keyed by question and mode, and bound to the revision it was reviewed against. Two counters guard late

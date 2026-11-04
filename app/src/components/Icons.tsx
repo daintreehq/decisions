@@ -84,14 +84,6 @@ export const StopIcon = ({ size = 16 }: P) => (
   </svg>
 );
 export const SendIcon = icon('M12 19V5M5 12l7-7 7 7');
-export const KeyboardIcon = icon(
-  'M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10',
-);
-/** All Q&A: messages-square. */
-export const QuestionsIcon = icon(
-  'M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2zM18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1',
-  20,
-);
 export const FilesIcon = icon(
   'M18 22H4a2 2 0 0 1-2-2V6M22 13l-1.3-1.3a2.4 2.4 0 0 0-3.4 0L12 17M8 2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM13 8h.01',
 );

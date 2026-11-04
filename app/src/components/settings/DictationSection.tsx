@@ -40,7 +40,7 @@ export function voiceOptions(info: {
   return { speech, cleanup };
 }
 
-/** The index summary: "Tap to start · Cleanup on". */
+/** The index summary: "On · Cleanup on". */
 export function dictationSummary(
   v: VoicePrefs,
   info: { voice: { xai: boolean; openai: boolean } } | null,
@@ -48,7 +48,7 @@ export function dictationSummary(
   if (!info) return '';
   if (!info.voice.xai && !info.voice.openai) return 'Not set up';
   if (!v.consent) return 'Off';
-  return `${v.mode === 'hold' ? 'Hold to talk' : 'Tap to start'} · Cleanup ${v.correction === 'off' ? 'off' : 'on'}`;
+  return `On · Cleanup ${v.correction === 'off' ? 'off' : 'on'}`;
 }
 
 function Seg<T extends string>({
@@ -149,34 +149,6 @@ export function DictationSection() {
           />
           {v.consent && (
             <>
-              <div className="s-row stacked">
-                <div className="s-row-text">
-                  <span className="s-row-label" id={`${id}-m`}>
-                    Dictate button
-                  </span>
-                </div>
-                <div className="s-radios" role="radiogroup" aria-labelledby={`${id}-m`}>
-                  {(
-                    [
-                      ['tap', 'Tap to start', 'Tap Dictate, talk, then tap Stop'],
-                      ['hold', 'Hold to talk', 'Hold Dictate while you talk; letting go stops it'],
-                    ] as const
-                  ).map(([mode, label, example]) => (
-                    <label key={mode} className={`s-radio${v.mode === mode ? ' on' : ''}`}>
-                      <input
-                        type="radio"
-                        name={`${id}-mode`}
-                        checked={v.mode === mode}
-                        onChange={() => set({ mode })}
-                      />
-                      <span>
-                        <span className="s-radio-label">{label}</span>
-                        <span className="s-row-desc">{example}</span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
               <Row
                 label="Speech to text"
                 labelId={`${id}-s`}

@@ -1,9 +1,10 @@
 import { useEffect, type RefObject } from 'react';
 
 /**
- * Keeps the workspace (and so the editor, Send and Stop) above an on-screen keyboard. The keyboard is inferred only
+ * Keeps the workspace (and so the composer, Send and Stop) above an on-screen keyboard. The keyboard is inferred only
  * when a text field in the workspace has focus and the page is not zoomed, never from height alone (pinch zoom
- * shrinks the visual viewport too). It sets `--vv-h` and `--vv-top` and `data-kb` on the workspace root, and
+ * shrinks the visual viewport too). Once raised, the constraint holds until the viewport itself recovers: focus moving
+ * to the mic or Send while the keyboard is still closing must not drop the composer under it. It sets `--vv-h` and `--vv-top` and `data-kb` on the workspace root, and
  * `--vv-top` on the shell too, so the floating menu button stays in the raised header's leading slot.
  */
 export function useKeyboardInset(root: RefObject<HTMLElement | null>): void {
@@ -25,7 +26,8 @@ export function useKeyboardInset(root: RefObject<HTMLElement | null>): void {
               /^(text|search|)$/.test((active as HTMLInputElement).type)));
         const inset = window.innerHeight - vv.height - vv.offsetTop;
         const zoomed = Math.abs(vv.scale - 1) > 0.01;
-        if (typing && !zoomed && inset > 80) {
+        const raised = 'kb' in el.dataset;
+        if ((typing || raised) && !zoomed && inset > 80) {
           el.dataset.kb = '';
           el.style.setProperty('--vv-h', `${vv.height}px`);
           el.style.setProperty('--vv-top', `${vv.offsetTop}px`);
