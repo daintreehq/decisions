@@ -6587,19 +6587,151 @@
         }
       }
     },
-    "/api/v1/attachments/{id}/content": {
-      "put": {
-        "summary": "Stream ciphertext to private R2 (X-Content-Sha256 header)",
-        "operationId": "put_attachments_id_content",
+    "/api/v1/questions/{id}/images/reservations": {
+      "post": {
+        "summary": "Reserve a phone image for one answer or message on an existing question (section 17; the question's publishing desktop must declare phone-images-v1)",
+        "operationId": "post_questions_id_images_reservations",
         "security": [
           {
             "DecisionsSig": []
           }
         ],
         "x-roles": [
-          "owner-desktop",
-          "desktop-host"
+          "phone",
+          "tablet"
         ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "attachment_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "upload_path": {
+                      "type": "string"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "attachment_id",
+                    "upload_path",
+                    "expires_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "idempotency_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  "binding": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "answer",
+                          "message"
+                        ]
+                      },
+                      "record_id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "record_id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "ciphertext_bytes": {
+                    "type": "integer",
+                    "minimum": 29,
+                    "maximum": 10485824
+                  },
+                  "sha256_ciphertext": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "mime_category": {
+                    "type": "string",
+                    "const": "image"
+                  }
+                },
+                "required": [
+                  "idempotency_key",
+                  "protocol_version",
+                  "attachment_id",
+                  "binding",
+                  "ciphertext_bytes",
+                  "sha256_ciphertext",
+                  "mime_category"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attachments/{id}/content": {
+      "put": {
+        "summary": "Stream ciphertext to private R2 (X-Content-Sha256 header): question images by the reserving desktop, phone images by the reserving phone or tablet",
+        "operationId": "put_attachments_id_content",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": "any",
         "responses": {
           "200": {
             "description": "Streaming (binary-upload)"
@@ -6627,7 +6759,7 @@
         ]
       },
       "get": {
-        "summary": "Download ciphertext",
+        "summary": "Download ciphertext: a question image once available, a phone image once a committed answer or message lists it and until its retention ends",
         "operationId": "get_attachments_id_content",
         "security": [
           {
@@ -6664,17 +6796,14 @@
     },
     "/api/v1/attachments/{id}/complete": {
       "post": {
-        "summary": "Verify the stored object and publish it",
+        "summary": "Verify the stored object and publish it (question images, by the reserving desktop), or mark a phone image ready to bind (by the reserving phone or tablet)",
         "operationId": "post_attachments_id_complete",
         "security": [
           {
             "DecisionsSig": []
           }
         ],
-        "x-roles": [
-          "owner-desktop",
-          "desktop-host"
-        ],
+        "x-roles": "any",
         "responses": {
           "200": {
             "description": "Success"

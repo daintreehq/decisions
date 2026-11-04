@@ -419,17 +419,34 @@ nonce for every upload.
 1. `POST /questions/{id}/images/reservations` (phone, tablet) `PhoneImageReserveBody {protocol_version,
 idempotency_key, attachment_id, binding: {kind: "answer" | "message", record_id}, ciphertext_bytes,
 sha256_ciphertext, mime_category: "image"}` → `AttachmentReservation`. `record_id` is the `action_id` or
-   `message_id` the image will be signed into. The question must exist and take messages (section 16).
+   `message_id` the image will be signed into. The question must exist and take messages (section 16), or the
+   relay answers `404 not_found`, `410 expired` or `409 invalid_state`; it is also `409 invalid_state` when the
+   publishing desktop does not declare `phone-images-v1`. A retry with the same `idempotency_key` and body on the
+   same question returns the original reservation; the same key on another question is
+   `409 idempotency_collision`.
 2. `PUT /attachments/{id}/content` and `POST /attachments/{id}/complete`, as for question attachments, by the same
-   device.
+   device. The reservation's kind decides the role: a desktop is refused a phone image's upload or completion
+   (`403 forbidden`), as a phone or tablet is a question attachment's. Completion also checks the stored object's
+   SHA-256 against the reservation and publishes nothing: there is no `attachment.available` event for a phone
+   image.
 3. The signer lists the ids in the signed record (`ActionRecord.attachment_ids` on an `answer` or `override`, or
    `MessageRecord.attachment_ids`) and the same images in the encrypted content. At commit the relay requires every
    listed id to be completed, reserved by the signer for this question and exactly this `binding`, and not yet bound;
-   it binds them all or commits nothing. An image binds once.
+   it binds them all or commits nothing (`400 validation_error`). An image binds once, and one past its orphan
+   deadline (below) no longer binds. At commit the publishing desktop must still declare `phone-images-v1`, or it
+   would be sent nothing it could deliver (`409 invalid_state`).
 4. Readers check `imagesMatchRecord`, then the downloaded image's size, MIME and `sha256`. A reader that cannot fetch
    or verify an image still shows the answer or message, and shows that image as unavailable. A desktop types the
    words with each image's local path, or its reason for being unavailable, into the asking pane (integration spec
-   section 6.4); plaintext images exist only on the phone and the host's disk.
+   section 6.4); plaintext images exist only on the phone and the host's disk. The relay sees only ciphertext: it
+   proves the bytes are the ones reserved (R2 checks the digest while streaming, and completion checks it again),
+   and that the record lists only images it bound, but a plaintext digest that does not match its image is caught
+   by the reader.
+
+**Reading.** `GET /attachments/{id}/content` serves a phone image to any active paired device once a committed
+answer or message lists it, and until its retention ends; before that, after it, and for an image nothing listed,
+it is `404 not_found`, even for the phone that uploaded it. `GET /questions/{id}` lists only the question's own
+attachments: phone images are listed by the records that reference them.
 
 `ActionRecord.attachment_ids` is optional with no default, so records signed without it verify exactly as before.
 Phone images never join the question's attachments or `reviewed_attachment_digests`, and never count as approval
@@ -438,7 +455,9 @@ validation_error`).
 
 **Limits.** 10 MiB per image; 4 per answer or message; 16 per question over its lifetime, reserved or bound; 64 MiB of
 ciphertext per question; 8 unbound reservations per device. These are separate from the desktop's question-image
-budgets (section 9).
+budgets (section 9). The per-question budgets count every phone image ever reserved on the question, so collecting
+orphans never refills them; the per-device budget counts reservations not yet bound, completed or not. Over a
+budget the relay answers `413 payload_too_large`, or `429 rate_limited` for the per-device one.
 
 **Retention.** An image no committed record references (reserved, uploaded or completed) is deleted 2 hours after its
 reservation (`phoneImageOrphanMs`). A bound image is kept for the attachment retention period

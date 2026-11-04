@@ -48,6 +48,7 @@ export type JobKind =
   | 'expire'
   | 'delete_attachments'
   | 'gc_orphan'
+  | 'delete_phone_image'
   | 'purge';
 
 export type Settings = Omit<SettingsBody, 'protocol_version'>;

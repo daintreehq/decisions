@@ -17,6 +17,7 @@ import {
   PairingCandidateBody,
   PairingInvitationBody,
   PairingRejectBody,
+  PhoneImageReserveBody,
   PushSubscribeBody,
   RevokeDeviceBody,
   RotateEpochBody,
@@ -331,19 +332,32 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     status: 201,
   },
   {
+    method: 'POST',
+    path: '/questions/{id}/images/reservations',
+    auth: 'signed',
+    roles: HUMANS,
+    summary:
+      "Reserve a phone image for one answer or message on an existing question (section 17; the question's publishing desktop must declare phone-images-v1)",
+    request: PhoneImageReserveBody,
+    response: AttachmentReservation,
+    status: 201,
+  },
+  {
     method: 'PUT',
     path: '/attachments/{id}/content',
     auth: 'signed',
-    roles: DESKTOPS,
-    summary: 'Stream ciphertext to private R2 (X-Content-Sha256 header)',
+    roles: 'any',
+    summary:
+      'Stream ciphertext to private R2 (X-Content-Sha256 header): question images by the reserving desktop, phone images by the reserving phone or tablet',
     streaming: 'binary-upload',
   },
   {
     method: 'POST',
     path: '/attachments/{id}/complete',
     auth: 'signed',
-    roles: DESKTOPS,
-    summary: 'Verify the stored object and publish it',
+    roles: 'any',
+    summary:
+      'Verify the stored object and publish it (question images, by the reserving desktop), or mark a phone image ready to bind (by the reserving phone or tablet)',
     request: AttachmentCompleteBody,
   },
   {
@@ -351,7 +365,8 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     path: '/attachments/{id}/content',
     auth: 'signed',
     roles: 'any',
-    summary: 'Download ciphertext',
+    summary:
+      'Download ciphertext: a question image once available, a phone image once a committed answer or message lists it and until its retention ends',
     streaming: 'binary-download',
   },
   {

@@ -6,13 +6,7 @@ import {
   legacyPhoneCatchUp,
   legacySocketReceive,
 } from '@daintreehq/decisions-protocol/fixtures';
-import {
-  encryptEnvelope,
-  envelopeDigest,
-  newId,
-  nowIso,
-  signObject,
-} from '@daintreehq/decisions-crypto';
+import { newId } from '@daintreehq/decisions-crypto';
 import {
   act,
   ask,
@@ -23,6 +17,7 @@ import {
   pairDevice,
   raw,
   say,
+  uploadPhoneImage,
   type Actor,
 } from './helpers.js';
 import {
@@ -163,7 +158,11 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     const info = await raw('GET', '/api/v1/info');
     expect(info.status).toBe(200);
     expect(info.json.name).toBe('daintree-decisions');
-    expect(info.json.features).toEqual(['pane-snapshots-v1', 'thread-messages-v1']);
+    expect(info.json.features).toEqual([
+      'pane-snapshots-v1',
+      'phone-images-v1',
+      'thread-messages-v1',
+    ]);
   });
 
   it('pages events and holds a socket while messages flow, without a parse failure (issue #32)', async () => {
@@ -306,44 +305,106 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     for (const s of [desktop, handset, watching]) s.close();
   });
 
-  it('refuses an answer that references phone images, which this relay cannot bind yet', async () => {
+  it('never sends a 0.3.0 client an answer or message that carries phone images (issue #33)', async () => {
     const w = await claimRelay();
+    // The publishing desktop takes images; a Daintree Host and a phone still on 0.3.0 declare nothing.
+    await declare(w.owner, ['phone-images-v1', 'thread-messages-v1']);
     const phone = await pairDevice(w);
+    const oldPhone = await pairDevice(w, 'phone', 'Old iPhone');
+    const { host } = await enrollHost(w);
+    const tablet = await pairDevice(w, 'tablet', 'Threads-only tablet');
     const { questionId } = await ask(w);
-    const envelope = await encryptEnvelope({
-      epochKey: phone.epoch ?? w.epoch,
-      installationId: w.installationId,
-      questionId,
-      recordId: newId(),
-      recordType: 'answer',
-      revision: 1,
-      senderDeviceId: phone.id,
-      purpose: 'answer-content',
-      plaintext: { selected_option_ids: ['approve'], images: [] },
+    // Sockets held open while the images commit: the two 0.3.0 clients, one that knows threads only, and one that
+    // knows both.
+    const legacyTicket = async (a: Actor) =>
+      (await a.call('POST', '/api/v1/socket-ticket', { protocol_version: PROTOCOL_VERSION })).json
+        .ticket as string;
+    const live = {
+      host: await hold(await legacyTicket(host)),
+      oldPhone: await hold(await legacyTicket(oldPhone)),
+      threads: await hold(await declare(tablet, ['thread-messages-v1'])),
+      modern: await hold(await declare(phone, ['phone-images-v1', 'thread-messages-v1'])),
+    };
+    for (const sock of Object.values(live)) {
+      await sock.until((f) => f.t === 'hello');
+      await sock.sync(0);
+    }
+    const actionId = newId();
+    const forAnswer = await uploadPhoneImage(w, phone, questionId, {
+      kind: 'answer',
+      record_id: actionId,
     });
-    const record = await signObject(phone.keys.signing.privateKey, {
-      v: PROTOCOL_VERSION,
-      type: 'action' as const,
-      action: 'answer' as const,
-      installation_id: w.installationId,
-      question_id: questionId,
-      action_id: newId(),
-      expected_revision: 0,
-      created_at: nowIso(),
-      envelope_digest: await envelopeDigest(envelope),
-      confirms_action_id: null,
-      expires_at: null,
-      attachment_ids: [newId()],
-      signer_device_id: phone.id,
+    expect(forAnswer.complete!.status).toBe(200);
+    const answered = await act(w, phone, 'answer', questionId, 0, {
+      actionId,
+      attachmentIds: [forAnswer.attachmentId],
+      content: {
+        selected_option_ids: ['approve'],
+        text: 'see the screenshot',
+        images: [forAnswer.ref],
+      },
     });
-    const res = await phone.call('POST', `/api/v1/questions/${questionId}/answer`, {
-      protocol_version: PROTOCOL_VERSION,
-      idempotency_key: newId(),
-      action: { record, envelope },
+    expect(answered.res.status).toBe(201);
+    const messageId = newId();
+    const forMessage = await uploadPhoneImage(w, phone, questionId, {
+      kind: 'message',
+      record_id: messageId,
     });
-    expect(res.status).toBe(400);
-    expect(res.json.code).toBe('validation_error');
-    // The question is still open: nothing was committed.
-    expect((await phone.call('GET', `/api/v1/questions/${questionId}`)).json.status).toBe('open');
+    const said = await say(w, phone, questionId, {
+      messageId,
+      attachmentIds: [forMessage.attachmentId],
+      images: [forMessage.ref],
+    });
+    expect(said.res.status).toBe(201);
+    // Another question after them, so the hidden events sit mid-stream.
+    const sentinel = await ask(w);
+    expect(sentinel.res.status).toBe(201);
+
+    const all = (
+      await w.owner.call(
+        'GET',
+        '/api/v1/events',
+        undefined,
+        'after=0&limit=100&features=phone-images-v1,thread-messages-v1',
+      )
+    ).json.events as { seq: number; event_type: string }[];
+    const imageSeqs = [answered.res.json.event_seq, said.res.json.event_seq];
+    expect(all.map((e) => e.seq)).toEqual(expect.arrayContaining(imageSeqs));
+    // Live frames: only the socket that declared images got them, and the 0.3.0 sockets parse every frame.
+    for (const [name, sock] of Object.entries(live)) {
+      await sock.until((f) => f.t === 'event' && f.event.seq === sentinel.res.json.event_seq);
+      const seen = sock.parsed().flatMap((f) => (f.t === 'event' ? [f.event.seq as number] : []));
+      for (const seq of imageSeqs)
+        expect([name, seq, seen.includes(seq)]).toEqual([name, seq, name === 'modern']);
+    }
+    for (const sock of [live.host, live.oldPhone])
+      expect(legacySocketReceive(sock.frames).dropped).toEqual([]);
+    for (const sock of Object.values(live)) sock.close();
+    const visible = all.filter(
+      (e) => !imageSeqs.includes(e.seq) && e.event_type !== 'decision.message.posted',
+    );
+    const pages = (a: Actor) => async (after: number) =>
+      (await a.call('GET', '/api/v1/events', undefined, `after=${after}&limit=2`)).json;
+    for (const a of [host, oldPhone, w.owner]) {
+      const desktop = await legacyDesktopCatchUp(pages(a));
+      expect(desktop.events.map((e) => e.seq)).toEqual(visible.map((e) => e.seq));
+      const handset = await legacyPhoneCatchUp(pages(a));
+      expect(handset.events.map((e) => e.seq)).toEqual(visible.map((e) => e.seq));
+      const { accepted, dropped } = legacySocketReceive(await socketReplay(a, 0));
+      expect(dropped).toEqual([]);
+      const seqs = accepted.flatMap((f) => (f.t === 'event' ? [f.event.seq] : []));
+      expect(seqs).toEqual(visible.map((e) => e.seq));
+    }
+    // Threads alone do not unlock them: an image-bearing answer also needs the image feature.
+    const threadsOnly = (
+      await host.call(
+        'GET',
+        '/api/v1/events',
+        undefined,
+        'after=0&limit=100&features=thread-messages-v1',
+      )
+    ).json.events as { seq: number }[];
+    expect(threadsOnly.map((e) => e.seq)).not.toContain(answered.res.json.event_seq);
+    expect(threadsOnly.map((e) => e.seq)).not.toContain(said.res.json.event_seq);
   });
 });

@@ -1,4 +1,4 @@
-import { ApiError, DESKTOP_ROLES, LIMITS, VoiceCorrectBody } from '@daintreehq/decisions-protocol';
+import { ApiError, LIMITS, VoiceCorrectBody } from '@daintreehq/decisions-protocol';
 import type { DecisionRoom } from './decision-room.js';
 import { WORKER_VERSION, type Env } from './env.js';
 import { securityHeaders } from './security/headers.js';
@@ -156,7 +156,8 @@ async function handleAttachment(
         requestId,
       );
     }
-    const auth = await stub.authorizeStream({ ...base, declaredBodySha256: sha }, DESKTOP_ROLES);
+    // Desktops upload question images and phones upload phone images: the reservation's kind decides the role.
+    const auth = await stub.authorizeStream({ ...base, declaredBodySha256: sha });
     if (!auth.ok) return apiResponse(auth.status, auth.body, url);
     const slot = await stub.attachmentForUpload(attachmentId, auth.value, len, sha);
     if (!slot.ok) return apiResponse(slot.status, slot.body, url);

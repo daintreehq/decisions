@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -238,6 +238,20 @@ const V3 = [
     WHERE retain_until IS NOT NULL`,
 ];
 
+/**
+ * Phone images (docs/protocol.md section 17) share the `attachments` table with the desktop's question images.
+ * `kind` tells them apart; every row from before is a question image. A phone image is reserved for exactly one
+ * answer or message (`binding_kind`, `binding_record_id`), and `bound_at` is when the record that lists it
+ * committed: its retention runs from then, whatever the question does later.
+ */
+const V4 = [
+  `ALTER TABLE attachments ADD COLUMN kind TEXT NOT NULL DEFAULT 'question' CHECK(kind IN ('question','phone'))`,
+  `ALTER TABLE attachments ADD COLUMN binding_kind TEXT CHECK(binding_kind IN ('answer','message'))`,
+  `ALTER TABLE attachments ADD COLUMN binding_record_id TEXT`,
+  `ALTER TABLE attachments ADD COLUMN bound_at INTEGER`,
+  `CREATE INDEX IF NOT EXISTS attachments_creator_unbound_idx ON attachments(creator_device_id, bound)`,
+];
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -249,6 +263,7 @@ export function migrate(sql: SqlStorage): void {
   if (current < 1) for (const stmt of V1) sql.exec(stmt);
   if (current < 2) for (const stmt of V2) sql.exec(stmt);
   if (current < 3) for (const stmt of V3) sql.exec(stmt);
+  if (current < 4) for (const stmt of V4) sql.exec(stmt);
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),
