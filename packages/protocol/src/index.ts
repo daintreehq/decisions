@@ -8,5 +8,8 @@ export * from './auth.js';
 export * from './signing.js';
 export * from './policy.js';
 export * from './state.js';
+export * from './thread.js';
+export * from './snapshot.js';
+export * from './features.js';
 export * from './api.js';
 export * from './routes.js';

@@ -22,6 +22,7 @@ import {
   RotateEpochBody,
   SetupClaimBody,
   SettingsBody,
+  SocketTicketBody,
   VoiceCorrectBody,
   VoiceSessionBody,
 } from './schema.js';
@@ -144,6 +145,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     auth: 'signed',
     roles: 'any',
     summary: 'Single-use 30 second ticket for the WebSocket',
+    request: SocketTicketBody,
     response: SocketTicketResponse,
   },
   {
@@ -574,6 +576,8 @@ export function buildOpenApi(version = '0.1.0'): Record<string, unknown> {
 export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
   const s = await import('./schema.js');
   const api = await import('./api.js');
+  const thread = await import('./thread.js');
+  const snap = await import('./snapshot.js');
   const pick = {
     DeviceCert: s.DeviceCert,
     EpochGrant: s.EpochGrant,
@@ -586,6 +590,23 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
     LedgerEvent: s.LedgerEvent,
     ServerFrame: api.ServerFrame,
     ClientFrame: api.ClientFrame,
+    /* Extensions (docs/protocol.md sections 16-19). Their routes join the manifest when the relay serves them. */
+    ProtocolFeature: s.ProtocolFeature,
+    PhoneImageReference: s.PhoneImageReference,
+    PhoneImageReserveBody: s.PhoneImageReserveBody,
+    MessageRecord: thread.MessageRecord,
+    HumanMessageContentV1: thread.HumanMessageContentV1,
+    AgentMessageContentV1: thread.AgentMessageContentV1,
+    MessageBody: thread.MessageBody,
+    MessageReceipt: thread.MessageReceipt,
+    MessagesPage: thread.MessagesPage,
+    MessageReceiptBody: thread.MessageReceiptBody,
+    PushPayload: thread.PushPayload,
+    PaneSnapshotRecord: snap.PaneSnapshotRecord,
+    PaneSnapshotContentV1: snap.PaneSnapshotContentV1,
+    PaneSnapshotBody: snap.PaneSnapshotBody,
+    SnapshotRefreshBody: snap.SnapshotRefreshBody,
+    PaneSnapshotResponse: snap.PaneSnapshotResponse,
   };
   return Object.fromEntries(Object.entries(pick).map(([k, v]) => [k, jsonSchema(v as z.ZodType)]));
 }

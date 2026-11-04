@@ -75,6 +75,14 @@
                         "openai"
                       ],
                       "additionalProperties": false
+                    },
+                    "features": {
+                      "maxItems": 16,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                      }
                     }
                   },
                   "required": [
@@ -1280,6 +1288,34 @@
               }
             }
           }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "features": {
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                    }
+                  }
+                },
+                "required": [
+                  "protocol_version"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
         }
       }
     },
@@ -1375,7 +1411,11 @@
                               "attachment.available",
                               "delivery.received",
                               "delivery.terminal_delivered",
-                              "delivery.needs_attention"
+                              "delivery.needs_attention",
+                              "decision.message.posted",
+                              "delivery.message",
+                              "decision.snapshot.updated",
+                              "decision.snapshot.refresh_requested"
                             ]
                           },
                           "occurred_at": {
@@ -1725,7 +1765,9 @@
                             "enum": [
                               "question-content",
                               "answer-content",
-                              "history-export"
+                              "history-export",
+                              "message-content",
+                              "snapshot-content"
                             ]
                           },
                           "nonce": {
@@ -2184,7 +2226,9 @@
                               "enum": [
                                 "question-content",
                                 "answer-content",
-                                "history-export"
+                                "history-export",
+                                "message-content",
+                                "snapshot-content"
                               ]
                             },
                             "nonce": {
@@ -2387,6 +2431,14 @@
                                   }
                                 ]
                               },
+                              "attachment_ids": {
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                }
+                              },
                               "signer_device_id": {
                                 "type": "string",
                                 "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -2442,7 +2494,9 @@
                                     "enum": [
                                       "question-content",
                                       "answer-content",
-                                      "history-export"
+                                      "history-export",
+                                      "message-content",
+                                      "snapshot-content"
                                     ]
                                   },
                                   "nonce": {
@@ -2923,6 +2977,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -2978,7 +3040,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -3253,6 +3317,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -3308,7 +3380,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -3583,6 +3657,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -3638,7 +3720,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -3913,6 +3997,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -3968,7 +4060,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -4243,6 +4337,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -4298,7 +4400,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -4573,6 +4677,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -4628,7 +4740,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -4902,6 +5016,14 @@
                               }
                             ]
                           },
+                          "attachment_ids": {
+                            "maxItems": 4,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            }
+                          },
                           "signer_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -4957,7 +5079,9 @@
                                 "enum": [
                                   "question-content",
                                   "answer-content",
-                                  "history-export"
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
                                 ]
                               },
                               "nonce": {
@@ -5448,6 +5572,14 @@
                           },
                           "push_enabled": {
                             "type": "boolean"
+                          },
+                          "features": {
+                            "maxItems": 16,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                            }
                           }
                         },
                         "required": [

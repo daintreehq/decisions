@@ -41,6 +41,16 @@ export type DeliveryStatus = z.infer<typeof DeliveryStatus>;
 export const Provenance = z.enum(['human', 'proxy']);
 export type Provenance = z.infer<typeof Provenance>;
 
+/**
+ * Opt-in protocol extensions (docs/protocol.md section 19). A client declares the ones it understands; the relay
+ * sends it nothing that needs a feature it did not declare. Received lists use `FeatureToken`, so a newer peer's
+ * unknown features never fail a parse; they are ignored.
+ */
+export const ProtocolFeature = z.enum(['thread-messages-v1', 'phone-images-v1', 'pane-snapshots-v1']);
+export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
+export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
+export const FeatureList = z.array(FeatureToken).max(LIMITS.featuresPerDeclaration);
+
 /* ---------- keys, certificates, grants ---------- */
 
 /** Uncompressed SEC1 P-256 point (65 bytes) = 87 base64url chars. */
@@ -86,7 +96,13 @@ export type EpochGrant = z.infer<typeof EpochGrant>;
 
 /* ---------- encrypted envelope ---------- */
 
-export const EnvelopePurpose = z.enum(['question-content', 'answer-content', 'history-export']);
+export const EnvelopePurpose = z.enum([
+  'question-content',
+  'answer-content',
+  'history-export',
+  'message-content',
+  'snapshot-content',
+]);
 export type EnvelopePurpose = z.infer<typeof EnvelopePurpose>;
 
 export const EnvelopeAad = z.strictObject({
@@ -164,10 +180,27 @@ export const ActionRecord = z
     confirms_action_id: Id.nullable(),
     /** reopen: new deadline. */
     expires_at: IsoTime.nullable(),
+    /**
+     * answer/override only: the phone images the encrypted answer references (section 17). Optional with no
+     * default, so a record signed without it parses, canonicalises and verifies exactly as before.
+     */
+    attachment_ids: z.array(Id).max(LIMITS.phoneImagesPerContent).optional(),
     signer_device_id: Id,
     signature: SigB64,
   })
   .superRefine((r, ctx) => {
+    if (r.attachment_ids !== undefined) {
+      if (r.action !== 'answer' && r.action !== 'override') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['attachment_ids'],
+          message: 'only a human answer can reference phone images',
+        });
+      }
+      if (new Set(r.attachment_ids).size !== r.attachment_ids.length) {
+        ctx.addIssue({ code: 'custom', path: ['attachment_ids'], message: 'duplicate image id' });
+      }
+    }
     if (ANSWER_ACTIONS.includes(r.action) && r.envelope_digest === null) {
       ctx.addIssue({
         code: 'custom',
@@ -214,11 +247,14 @@ export const OptionSchema = z.object({
   description: z.string().max(LIMITS.optionDescriptionChars).optional(),
 });
 
+export const ImageMime = z.enum(['image/png', 'image/jpeg', 'image/webp']);
+export type ImageMime = z.infer<typeof ImageMime>;
+
 export const AttachmentDescriptor = z.object({
   attachment_id: Id,
   role: z.enum(['before', 'after', 'reference', 'other']).default('other'),
   alt: z.string().max(500).optional(),
-  mime: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  mime: ImageMime,
   size: z.number().int().min(1).max(LIMITS.attachmentBytes),
   /** SHA-256 hex of the plaintext image; approvals bind to this. */
   sha256: Sha256Hex,
@@ -246,7 +282,32 @@ export const DecisionContentV1 = z.object({
 });
 export type DecisionContentV1 = z.infer<typeof DecisionContentV1>;
 
-export const HumanAnswerContentV1 = z.object({
+/**
+ * An image a phone uploaded after the question existed, referenced from human answer or message content
+ * (section 17). Encrypted like a question attachment (`attachmentAadString`, `attachmentKeyInfo`); `sha256` is
+ * the plaintext digest that identifies it. The signed record lists the same `attachment_id`s, so the relay can
+ * bind each upload to exactly one answer or message without reading the content.
+ */
+export const PhoneImageReference = z.object({
+  attachment_id: Id,
+  mime: ImageMime,
+  size: z.number().int().min(1).max(LIMITS.phoneImageBytes),
+  sha256: Sha256Hex,
+  nonce: NonceB64,
+  key_epoch: z.number().int().min(1),
+  alt: z.string().max(500).optional(),
+});
+export type PhoneImageReference = z.infer<typeof PhoneImageReference>;
+
+export const PhoneImageReferences = z
+  .array(PhoneImageReference)
+  .max(LIMITS.phoneImagesPerContent)
+  .refine(
+    (list) => new Set(list.map((i) => i.attachment_id)).size === list.length,
+    'duplicate image id',
+  );
+
+const AnswerContentBase = z.object({
   content_version: z.literal(1).default(1),
   selected_option_ids: z
     .array(z.string().max(LIMITS.optionIdChars))
@@ -262,9 +323,15 @@ export const HumanAnswerContentV1 = z.object({
   /** override / confirm: why. */
   reason: z.string().max(2_000).optional(),
 });
+
+export const HumanAnswerContentV1 = AnswerContentBase.extend({
+  /** Phone images; their ids equal the signed action record's `attachment_ids` (section 17). */
+  images: PhoneImageReferences.optional(),
+});
 export type HumanAnswerContentV1 = z.infer<typeof HumanAnswerContentV1>;
 
-export const ProxyAnswerContentV1 = HumanAnswerContentV1.extend({
+/** A proxy (model) answer never carries phone images. */
+export const ProxyAnswerContentV1 = AnswerContentBase.extend({
   model_id: z.string().max(120),
   prompt_template_version: z.string().max(60),
   confidence: z.number().min(0).max(1),
@@ -293,8 +360,34 @@ export const EventType = z.enum([
   'delivery.received',
   'delivery.terminal_delivered',
   'delivery.needs_attention',
+  /* Feature-gated (section 19): never sent to a client that did not declare the feature. */
+  'decision.message.posted',
+  'delivery.message',
+  'decision.snapshot.updated',
+  'decision.snapshot.refresh_requested',
 ]);
 export type EventType = z.infer<typeof EventType>;
+
+/** The event types a 0.3.0 client knows. Every other type needs a declared feature. */
+export const LEGACY_EVENT_TYPES = [
+  'decision.created',
+  'decision.answer.committed',
+  'decision.answer.overridden',
+  'decision.proxy.committed',
+  'decision.proxy.abstained',
+  'decision.proxy.confirmed',
+  'decision.cancelled',
+  'decision.expired',
+  'decision.reopened',
+  'decision.deleted',
+  'device.approved',
+  'device.revoked',
+  'device.key_rotated',
+  'attachment.available',
+  'delivery.received',
+  'delivery.terminal_delivered',
+  'delivery.needs_attention',
+] as const satisfies readonly EventType[];
 
 export const LedgerEvent = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
@@ -406,6 +499,40 @@ export const AttachmentReserveBody = Idem.extend({
 });
 
 export const AttachmentCompleteBody = z.object({ protocol_version: z.literal(PROTOCOL_VERSION) });
+
+/** The one answer or message a phone image is reserved for: the action id or message id it will be signed into. */
+export const PhoneImageBinding = z.object({
+  kind: z.enum(['answer', 'message']),
+  record_id: Id,
+});
+export type PhoneImageBinding = z.infer<typeof PhoneImageBinding>;
+
+/**
+ * `POST /questions/{id}/images/reservations` (phone, tablet; section 17). The question must exist and take
+ * messages. The upload and completion reuse `PUT /attachments/{id}/content` and `POST /attachments/{id}/complete`.
+ */
+export const PhoneImageReserveBody = Idem.extend({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  attachment_id: Id,
+  binding: PhoneImageBinding,
+  ciphertext_bytes: z
+    .number()
+    .int()
+    .min(29)
+    .max(LIMITS.phoneImageBytes + 64),
+  sha256_ciphertext: Sha256Hex,
+  mime_category: z.literal('image'),
+});
+
+/**
+ * `POST /socket-ticket`. `features` declares the extensions this client understands; the socket gets only the
+ * events they allow, and the relay records them as the device's advertised features (section 19). A body without
+ * `features` (every 0.3.0 client) is the baseline.
+ */
+export const SocketTicketBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  features: FeatureList.optional(),
+});
 
 export const PushSubscribeBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
@@ -547,5 +674,7 @@ export const InfoResponse = z.object({
     anthropic: z.boolean(),
     openai: z.boolean(),
   }),
+  /** Extensions this relay implements (section 19). Absent means none. */
+  features: FeatureList.optional(),
 });
 export type InfoResponse = z.infer<typeof InfoResponse>;

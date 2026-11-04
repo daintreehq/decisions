@@ -345,6 +345,9 @@ function actionHandler(kind: ActionKind): Handler {
     ) {
       throw bad('record does not belong to the authenticated device');
     }
+    // Phone images (docs/protocol.md section 17) need upload binding this relay does not implement yet, and it
+    // does not advertise `phone-images-v1`: an answer naming images could never have them.
+    if (record.attachment_ids?.length) throw bad('this relay does not accept phone images yet');
     const afterRevision = BUMPS.has(kind) ? record.expected_revision + 1 : record.expected_revision;
     if (envelope) {
       checkEnvelopeBinding(

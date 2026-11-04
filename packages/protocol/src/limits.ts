@@ -34,7 +34,49 @@ export const LIMITS = {
   nonceTtlMs: 10 * 60 * 1000,
   /** A finite question expiry is at most this far after the relay receives the question (or its reopen). */
   maxQuestionExpiryMs: 366 * 24 * 60 * 60 * 1000,
+
+  /* ---- thread messages (docs/protocol.md section 16) ---- */
+  /** Message text, UTF-8 bytes: the same budget as an answer's text, since saying more after answering is a message. */
+  messageTextBytes: 16 * 1024,
+  /** Lifetime messages per question, both sides together; reopening does not reset it. */
+  messagesPerQuestion: 200,
+  /** Messages per `GET /questions/{id}/messages` page. */
+  messagePageSize: 50,
+
+  /* ---- phone images (section 17) ---- */
+  /** One phone image, plaintext bytes. */
+  phoneImageBytes: 10 * 1024 * 1024,
+  /** Images one answer or one message may reference. */
+  phoneImagesPerContent: 4,
+  /** Lifetime phone images per question, reserved or bound; separate from the desktop's question images. */
+  phoneImagesPerQuestion: 16,
+  /** Ciphertext bytes of all phone images on one question, reserved or bound. */
+  phoneImageTotalBytes: 64 * 1024 * 1024,
+  /** Reservations one device may hold that no committed answer or message references yet. */
+  phoneImageUnboundPerDevice: 8,
+  /** An unbound phone image (reserved, uploaded or completed) is deleted this long after its reservation. */
+  phoneImageOrphanMs: 2 * 60 * 60 * 1000,
+
+  /* ---- pane snapshots (section 18) ---- */
+  snapshotPaneTitleChars: 240,
+  /** Newest terminal lines a snapshot carries. */
+  snapshotTerminalLines: 200,
+  /** UTF-8 bytes of the terminal lines joined with `\n`. */
+  snapshotTerminalBytes: 32 * 1024,
+  /** A snapshot observed longer ago than this is stale. */
+  snapshotFreshMs: 60 * 1000,
+  /** A refresh with no new snapshot after this long is stale; the relay sets `deadline_at` from it. */
+  snapshotRefreshTimeoutMs: 15 * 1000,
+  /** The relay deletes a stored snapshot's ciphertext this long after it was observed. */
+  snapshotRetentionMs: 24 * 60 * 60 * 1000,
+  /** Refresh requests per human device per minute, across questions. */
+  snapshotRefreshesPerDeviceMinute: 6,
+
+  /* ---- feature negotiation (section 19) ---- */
+  /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */
+  featuresPerDeclaration: 16,
 } as const;
+
 
 export const DEFAULTS = {
   questionExpiryMs: 7 * 24 * 60 * 60 * 1000,
