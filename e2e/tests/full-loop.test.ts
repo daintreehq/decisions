@@ -233,8 +233,8 @@ describe.skipIf(!chromiumPath)(
       try {
         // the phone learns about the real terminal delivery over its own live socket
         await page
-          .locator('.dock .stage')
-          .filter({ hasText: 'Delivered to the agent’s terminal' })
+          .locator('.ws .receipt')
+          .filter({ hasText: 'Typed into the terminal' })
           .waitFor({ timeout: 20_000 });
       } catch (e) {
         await page.screenshot({

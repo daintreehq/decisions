@@ -66,12 +66,12 @@ function Delivery({ v, a }: { v: QuestionView; a: ActionView }) {
     },
   ];
   if (d?.status === 'terminal-delivered')
-    steps.push({ label: 'Delivered to the agent’s terminal', tick: 'done' });
+    steps.push({ label: 'Typed into the terminal', tick: 'done' });
   else if (d?.status === 'needs-attention')
     steps.push({ label: 'Needs attention on your computer', tick: 'warn' });
   else if (d?.status === 'delivery-uncertain')
     steps.push({ label: 'Delivery couldn’t be confirmed', tick: 'warn' });
-  else if (received) steps.push({ label: 'Not yet delivered to the terminal', tick: 'wait' });
+  else if (received) steps.push({ label: 'Not yet typed into the terminal', tick: 'wait' });
   const last = steps[steps.length - 1]!;
   return (
     <details className="tl-delivery">

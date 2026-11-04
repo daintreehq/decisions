@@ -169,30 +169,6 @@
 .fx-files {
   margin: 16px 0 20px;
 }
-.fx-files-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: var(--tap-min);
-  margin-bottom: 4px;
-}
-.fx-files-title {
-  margin: 0;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-2);
-}
-.fx-files-n {
-  letter-spacing: 0.02em;
-}
-.fx-allfiles {
-  min-height: var(--tap-min);
-  margin-right: -10px;
-  color: var(--text);
-}
 .fx-inline-stage {
   --fs-gap: 16px;
   height: clamp(240px, 38svh, 320px);
@@ -250,6 +226,46 @@
 }
 .fx-files-meta .fx-meta-btn:last-child {
   margin-right: -10px;
+}
+/* The thumbnails scroll; All files stays at the strip's end. */
+.fx-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fx-strip-row > .fx-strip {
+  flex: 1;
+  min-width: 0;
+}
+.fx-strip-all {
+  font: inherit;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .fx-strip-all:hover {
+    background: var(--hover);
+  }
+}
+/* Its label's edge lines up with Enlarge above it. */
+.fx-strip-all:last-child {
+  margin-right: -12px;
+}
+.fx-strip-all:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 .fx-strip {
   display: flex;

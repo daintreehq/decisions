@@ -490,11 +490,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await typeAnswer('Inbox reads better in the sidebar.');
     await page.getByRole('button', { name: 'Send decision' }).click();
     await page
-      .locator('.dock .stage')
-      .filter({ hasText: 'Delivered to the agent' })
+      .locator('.ws .receipt')
+      .filter({ hasText: 'Typed into the terminal' })
       .waitFor({ timeout: 30_000 });
     await shot('15-detail-answered');
-    await page.locator('.dock').getByRole('button', { name: 'Change answer' }).click();
+    await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+    await page.getByRole('menuitem', { name: 'Change answer' }).click();
     await page.getByRole('radio', { name: /Keep Canopy/ }).check();
     await typeAnswer('Canopy is the brand name; keep it.');
     await shot('16-detail-override');
@@ -534,7 +535,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByText('Should the changelog entry').first().waitFor({ timeout: 30_000 });
     await shot('19-inbox-proxy-tab');
     await page.getByText('Should the changelog entry').first().click();
-    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .msg.model').waitFor({ timeout: 30_000 });
     await shot('14-detail-proxy', { full: true });
 
     // Wait out the short-lived question's expiry (usually already past by now).
@@ -741,7 +742,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await filesReady();
     await shot('27-detail-approval-dark', { full: true });
     await page.goto(`${relay.origin}/q/${ids.proxy}`);
-    await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
+    await page.locator('.ws .msg.model').waitFor({ timeout: 30_000 });
     await shot('28-detail-proxy-dark', { full: true });
     await page.goto(relay.origin + '/settings');
     await page.getByRole('link', { name: /Quiet hours & reminders/ }).waitFor();
@@ -1131,17 +1132,15 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
         await filesReady();
         await shot(`40-ws-approval-${tag}`);
         await openId('answered');
-        await page.locator('.dock .stage').waitFor({ timeout: 30_000 });
+        await page.locator('.ws .receipt').waitFor({ timeout: 30_000 });
         await shot(`40-ws-answered-${tag}`);
-        await page
-          .locator('.dock')
-          .getByRole('button', { name: /Change answer|Resume correction/ })
-          .click();
+        await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+        await page.getByRole('menuitem', { name: /Change answer|Resume correction/ }).click();
         await page.locator('#ws-correction').waitFor();
         await shot(`40-ws-correction-${tag}`);
         await page.locator('#ws-correction').getByRole('button', { name: 'Cancel' }).click();
         await openId('proxy');
-        await page.locator('.answer-card.model').waitFor({ timeout: 30_000 });
+        await page.locator('.ws .msg.model').waitFor({ timeout: 30_000 });
         await shot(`40-ws-model-${tag}`);
         await openId('expired');
         await shot(`40-ws-expired-${tag}`);
@@ -1158,7 +1157,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));
     await page.getByRole('radio', { name: /^Warn/ }).check();
     await page.getByRole('button', { name: 'Send answer' }).click();
-    await page.locator('.dock .stage').waitFor({ timeout: 10_000 });
+    await page.locator('.ws .receipt').waitFor({ timeout: 10_000 });
     await shot('40-ws-queued-offline');
     conflictArmed = true;
     // The model passed on it when it was asked; let it look again now.

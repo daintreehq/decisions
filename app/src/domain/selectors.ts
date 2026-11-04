@@ -111,7 +111,7 @@ export const DELIVERY_LABELS: Record<DeliveryStep, string> = {
   sending: 'Sending…',
   confirmed: 'Saved on your relay',
   desktop: 'Received by your computer',
-  terminal: 'Delivered to the agent’s terminal',
+  terminal: 'Typed into the terminal',
   attention: 'Needs attention on your computer',
 };
 

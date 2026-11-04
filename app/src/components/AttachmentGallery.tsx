@@ -262,21 +262,11 @@ export function AttachmentGallery({
 
   return (
     <section className="fx-files" aria-labelledby={`${uid}-h`}>
-      <div className="fx-files-head">
-        <h2 className="fx-files-title" id={`${uid}-h`}>
-          Files <span className="fx-files-n tabular">· {n}</span>
-        </h2>
-        {n > 1 && (
-          <button
-            type="button"
-            className="btn ghost small fx-allfiles"
-            onClick={() => setAllFiles(true)}
-          >
-            <GridIcon size={16} />
-            All files
-          </button>
-        )}
-      </div>
+      {/* The count is in the meta row ("1 of 2"), and All files ends the strip, so the heading is for assistive
+          tech only: the stage starts right under the question. */}
+      <h2 className="sr-only" id={`${uid}-h`}>
+        Files, {n}
+      </h2>
 
       <FileStage
         ref={stage}
@@ -330,32 +320,44 @@ export function AttachmentGallery({
       </div>
 
       {n > 1 && (
-        <div ref={strip} className="fx-strip" role="tablist" aria-label="Files" onKeyDown={tabKey}>
-          {items.map((it) => {
-            const ri = results[it.d.attachment_id];
-            const st = statusOf(ri);
-            const on = it.index === active;
-            return (
-              <button
-                key={it.key}
-                type="button"
-                role="tab"
-                id={tabId(it.index)}
-                aria-selected={on}
-                aria-controls={panelId}
-                tabIndex={it.index === focusTab ? 0 : -1}
-                className={`fx-thumb${on ? ' is-active' : ''} is-${st}`}
-                aria-label={`${it.label}, file ${it.index + 1} of ${n}${st === 'ready' ? '' : `, ${STATUS_SHORT[st]}`}`}
-                onClick={() => select(it.index)}
-              >
-                {ri?.ok ? (
-                  <img src={ri.image.url} alt="" draggable={false} />
-                ) : (
-                  <StatusGlyph status={st} />
-                )}
-              </button>
-            );
-          })}
+        <div className="fx-strip-row">
+          <div
+            ref={strip}
+            className="fx-strip"
+            role="tablist"
+            aria-label="Files"
+            onKeyDown={tabKey}
+          >
+            {items.map((it) => {
+              const ri = results[it.d.attachment_id];
+              const st = statusOf(ri);
+              const on = it.index === active;
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  role="tab"
+                  id={tabId(it.index)}
+                  aria-selected={on}
+                  aria-controls={panelId}
+                  tabIndex={it.index === focusTab ? 0 : -1}
+                  className={`fx-thumb${on ? ' is-active' : ''} is-${st}`}
+                  aria-label={`${it.label}, file ${it.index + 1} of ${n}${st === 'ready' ? '' : `, ${STATUS_SHORT[st]}`}`}
+                  onClick={() => select(it.index)}
+                >
+                  {ri?.ok ? (
+                    <img src={ri.image.url} alt="" draggable={false} />
+                  ) : (
+                    <StatusGlyph status={st} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <button type="button" className="fx-strip-all" onClick={() => setAllFiles(true)}>
+            <GridIcon size={18} />
+            <span>All files</span>
+          </button>
         </div>
       )}
 
