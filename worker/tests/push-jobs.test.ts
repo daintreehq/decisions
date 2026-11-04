@@ -62,9 +62,10 @@ const pending = (kind?: string) =>
   );
 
 /**
- * Waits for the room's own alarm runs to finish, then checks that the one alarm is set at the earliest pending
- * job. workerd fires a due alarm by itself, and while that handler runs `getAlarm()` reads null until the
- * handler sets the next alarm, so a single read can land mid-run. The alarm and the jobs are read together.
+ * Polls until the room's alarm is set at the earliest pending job and that job lies in the future. workerd
+ * fires a due alarm by itself, and while that handler runs `getAlarm()` reads null until the handler sets the
+ * next alarm, so a single read can land mid-run. Each poll reads the alarm and the jobs together; a lost alarm
+ * never matches, and the wait times out on the last mismatch.
  */
 async function expectAlarmAtEarliestJob() {
   await vi.waitFor(
@@ -318,14 +319,16 @@ describe('push, reminders and expiry', () => {
       expect(await inRoom((_r, state) => state.storage.getAlarm())).toBeNull();
       expect(await runDurableObjectAlarm(stub())).toBe(false);
       // A transaction withdraws the job being run and schedules one shortly after, so it sets the alarm the
-      // handler's own refresh then finds already stored and leaves alone.
-      soon = Date.now() + 500;
-      await inRoom((room) =>
-        room.tx(() => {
+      // handler's own refresh then finds already stored and leaves alone. The time is taken inside the object,
+      // so the alarm is stored before it passes.
+      soon = await inRoom(async (room) => {
+        const at = Date.now() + 500;
+        await room.tx(() => {
           room.cancelJobs({ questionId });
-          room.schedule({ kind: 'purge', runAt: soon });
-        }),
-      );
+          room.schedule({ kind: 'purge', runAt: at });
+        });
+        return at;
+      });
       expect(await inRoom((_r, state) => state.storage.getAlarm())).toBe(soon);
     } finally {
       held = false;
