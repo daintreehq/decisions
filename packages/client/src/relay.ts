@@ -15,6 +15,7 @@ import {
   type InfoResponse,
   type MessageBody,
   type MessageReceipt,
+  type PaneSnapshotBody,
   type PendingPairing,
   type ProtocolFeature,
   type QuestionDetail,
@@ -51,6 +52,8 @@ export interface RequestOptions {
   /** `raw` only: refuse a body larger than this many bytes (`payload_too_large`) without reading the rest. */
   maxBytes?: number;
   retry?: boolean;
+  /** Abort an attempt that has not answered within this long (a network error). */
+  timeoutMs?: number;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -194,6 +197,7 @@ export class RelayClient {
             ...(opts.rawBody ? { 'content-type': 'application/octet-stream' } : {}),
           },
           body: (opts.rawBody as unknown as BodyInit | undefined) ?? bodyText,
+          ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
         });
       } catch (e) {
         const err = new RelayError('network_error', (e as Error).message || 'network error', 0);
@@ -201,8 +205,15 @@ export class RelayClient {
         await this.sleep(backoffMs(attempt++));
         continue;
       }
-      if (res.ok && opts.raw) return (await readRaw(res, opts.maxBytes)) as T;
-      const text = await res.text();
+      let text: string;
+      try {
+        if (res.ok && opts.raw) return (await readRaw(res, opts.maxBytes)) as T;
+        text = await res.text();
+      } catch (e) {
+        if (e instanceof RelayError) throw e;
+        // The body broke off (a reset, or `timeoutMs` running out after the headers): a network error.
+        throw new RelayError('network_error', (e as Error).message || 'network error', 0);
+      }
       if (res.ok) return (text ? JSON.parse(text) : {}) as T;
       const err = RelayError.fromBody(res.status, text);
       if (err.code === 'not_authenticated' && !skewRetried) {
@@ -228,8 +239,11 @@ export class RelayClient {
     const res = await this.f(`${this.origin}/health`);
     return (await res.json()) as { ok: boolean };
   }
-  async info(): Promise<InfoResponse> {
-    const res = await this.f(`${this.origin}${API_PREFIX}/info`);
+  async info(timeoutMs?: number): Promise<InfoResponse> {
+    const res = await this.f(
+      `${this.origin}${API_PREFIX}/info`,
+      timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : undefined,
+    );
     if (!res.ok) throw RelayError.fromBody(res.status, await res.text());
     return (await res.json()) as InfoResponse;
   }
@@ -339,6 +353,19 @@ export class RelayClient {
         retry: false,
       },
     );
+  }
+
+  /* ---- pane snapshots (section 18) ---- */
+  /**
+   * Replace the question's snapshot. Never retried here: the snapshot publisher owns the timing, so a stopped
+   * bridge leaves no sleeping retry behind.
+   */
+  putSnapshot(questionId: string, body: PaneSnapshotBody, timeoutMs?: number): Promise<unknown> {
+    return this.request('PUT', `${API_PREFIX}/questions/${questionId}/snapshot`, {
+      body,
+      retry: false,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    });
   }
 
   /* ---- pairing ---- */

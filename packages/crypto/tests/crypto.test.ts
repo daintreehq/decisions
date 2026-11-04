@@ -6,6 +6,7 @@ import {
   QuestionRecord as QuestionSchema,
   SignedAction,
   SignedMessage,
+  SignedPaneSnapshot,
   bytesToBase64Url,
   parseAuthHeader,
 } from '@daintreehq/decisions-protocol';
@@ -13,6 +14,7 @@ import {
   buildSignedAction,
   buildSignedMessage,
   buildSignedQuestion,
+  buildSignedSnapshot,
   createEpochGrant,
   decodeInvite,
   decryptAttachment,
@@ -365,6 +367,57 @@ describe('envelopes', () => {
       envelope: env,
     });
     expect(quiet.record.expects_reply).toBe(false);
+  });
+  it('signed pane snapshots bind their envelope, and sharing off carries none', async () => {
+    const w = await world();
+    const pub = w.ownerKeys.signing.publicKey;
+    const snapshotId = newId();
+    const observedAt = '2026-11-04T10:00:00.000Z';
+    const env = await encryptEnvelope({
+      epochKey: await importEpochKey(generateEpochKeyBytes(), 1, false),
+      installationId: INST,
+      questionId: 'question01',
+      recordId: snapshotId,
+      recordType: 'pane.snapshot',
+      revision: 0,
+      senderDeviceId: w.ownerId,
+      purpose: 'snapshot-content',
+      plaintext: { content_version: 1, observed_at: observedAt },
+    });
+    const base = {
+      installationId: INST,
+      questionId: 'question01',
+      signerDeviceId: w.ownerId,
+      signingKey: w.ownerKeys.signing.privateKey,
+      questionRevision: 2,
+      observedAt,
+    };
+    const on = await buildSignedSnapshot({ ...base, envelope: env });
+    expect(SignedPaneSnapshot.safeParse(on).success).toBe(true);
+    expect(on.record).toMatchObject({
+      snapshot_id: snapshotId,
+      sharing: 'on',
+      question_revision: 2,
+    });
+    expect(await verifyRecordAndEnvelope(on.record, on.envelope, pub)).toBe(true);
+    expect(
+      await verifyRecordAndEnvelope(
+        on.record,
+        { ...env, nonce: bytesToBase64Url(randomBytes(12)) },
+        pub,
+      ),
+    ).toBe(false);
+    expect(
+      (await buildSignedSnapshot({ ...base, envelope: env, snapshotId })).record.snapshot_id,
+    ).toBe(snapshotId);
+    await expect(
+      buildSignedSnapshot({ ...base, envelope: env, snapshotId: newId() }),
+    ).rejects.toThrow(/record_id/);
+    const off = await buildSignedSnapshot({ ...base, envelope: null });
+    expect(SignedPaneSnapshot.safeParse(off).success).toBe(true);
+    expect(off.record).toMatchObject({ sharing: 'off', envelope_digest: null });
+    expect(await verifyRecordAndEnvelope(off.record, null, pub)).toBe(true);
+    expect(await verifyRecordAndEnvelope(off.record, env, pub)).toBe(false);
   });
 });
 

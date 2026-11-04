@@ -5,10 +5,11 @@ import {
   type DecisionContentV1,
   type LedgerEvent,
   type QuestionStatus,
+  type SnapshotRefresh,
 } from '@daintreehq/decisions-protocol';
 import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
-import type { BridgeContext } from './context.js';
+import { hostRef, type BridgeContext } from './context.js';
 import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';
 import { Mutex, TransientError } from './mutex.js';
 import { gateAllowsText } from './policy.js';
@@ -17,6 +18,10 @@ import type { QuestionRow } from './types.js';
 export interface InboxCallbacks {
   /** This device was revoked: stop all delivery. */
   onRevokedSelf(): void;
+  /** A phone asked for a fresh snapshot of one of this device's questions. Must return without waiting. */
+  onSnapshotRefresh?(row: QuestionRow, refresh: SnapshotRefresh): void;
+  /** One of this device's questions expired, was cancelled or was deleted. Must return without waiting. */
+  onQuestionClosed?(questionId: string): void;
 }
 
 /**
@@ -229,10 +234,21 @@ export class Inbox {
             remote_event_seq: ev.seq,
             answers_json: serializeAnswers(entries),
           });
+          this.cb.onQuestionClosed?.(row.question_id);
           return false;
         }
         case 'decision.expired':
           return this.applyExpired(ev, row);
+        case 'decision.snapshot.refresh_requested': {
+          // A relay hint, not a signed request: at most it asks this desktop to look at its own pane again.
+          const d = EventData.snapshotRefreshRequested.safeParse(ev.data);
+          if (!d.success) return this.reject(row, 'malformed-event');
+          if (d.data.target_host_id !== (await hostRef(row.origin.host_id)))
+            return this.reject(row, 'refresh-for-another-host');
+          const { target_host_id: _host, ...refresh } = d.data;
+          this.cb.onSnapshotRefresh?.(row, refresh);
+          return false;
+        }
         default:
           return false;
       }
@@ -266,6 +282,7 @@ export class Inbox {
       question_id: row.question_id,
       requirement: row.requirement,
     });
+    this.cb.onQuestionClosed?.(row.question_id);
     return true;
   }
 
@@ -329,6 +346,7 @@ export class Inbox {
           question_id: row.question_id,
           result: 'relay',
         });
+        this.cb.onQuestionClosed?.(row.question_id);
         return false;
       }
       case 'reopen':

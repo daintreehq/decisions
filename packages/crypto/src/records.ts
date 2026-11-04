@@ -1,11 +1,13 @@
 import {
   PROTOCOL_VERSION,
+  SNAPSHOT_RECORD_TYPE,
   type ActionKind,
   type ActionRecord,
   MESSAGE_RECORD_TYPE,
   type CryptoEnvelope,
   type MessageRecord,
   type MessageSide,
+  type PaneSnapshotRecord,
   type QuestionRecord,
   type Requirement,
 } from '@daintreehq/decisions-protocol';
@@ -129,6 +131,44 @@ export async function buildSignedMessage(i: BuildMessageInput): Promise<{
     signer_device_id: i.signerDeviceId,
   })) as MessageRecord;
   return { record, envelope: i.envelope };
+}
+
+export interface BuildSnapshotInput {
+  installationId: string;
+  questionId: string;
+  signerDeviceId: string;
+  signingKey: CryptoKey;
+  /** The question revision the desktop saw. */
+  questionRevision: number;
+  observedAt: string;
+  /** The `snapshot-content` envelope, or null for a `sharing: "off"` record. */
+  envelope: CryptoEnvelope | null;
+  /** Must equal the envelope's `record_id`; taken from the envelope when omitted. */
+  snapshotId?: string;
+}
+
+/** A signed `PaneSnapshotRecord` (docs/protocol.md section 18): shared with an envelope, or sharing off without. */
+export async function buildSignedSnapshot(i: BuildSnapshotInput): Promise<{
+  record: PaneSnapshotRecord;
+  envelope: CryptoEnvelope | null;
+}> {
+  const envelope = i.envelope ?? null;
+  // The envelope's record id is the snapshot id (docs/protocol.md section 18): never sign a pair that disagrees.
+  if (envelope && i.snapshotId !== undefined && i.snapshotId !== envelope.record_id)
+    throw new Error("snapshotId must equal the envelope's record_id");
+  const record = (await signObject(i.signingKey, {
+    v: PROTOCOL_VERSION,
+    type: SNAPSHOT_RECORD_TYPE,
+    installation_id: i.installationId,
+    question_id: i.questionId,
+    snapshot_id: envelope?.record_id ?? i.snapshotId ?? newId(),
+    question_revision: i.questionRevision,
+    observed_at: i.observedAt,
+    sharing: envelope ? ('on' as const) : ('off' as const),
+    envelope_digest: envelope ? await envelopeDigest(envelope) : null,
+    signer_device_id: i.signerDeviceId,
+  })) as PaneSnapshotRecord;
+  return { record, envelope };
 }
 
 /** Verifies the record signature and that the envelope is the one the signer committed to. */
