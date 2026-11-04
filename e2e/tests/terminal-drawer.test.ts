@@ -17,6 +17,7 @@ import {
   type TerminalSink,
   type TerminalTarget,
 } from '@daintreehq/decisions-client';
+import { API_PREFIX } from '@daintreehq/decisions-protocol';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
 /**
@@ -163,6 +164,23 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
     expect(await bridge.publishSnapshot(ids.shared!, FIXTURE)).toBe('queued');
     expect(await bridge.publishSnapshot(ids.asleep!, FIXTURE)).toBe('queued');
     await bridge.clearSnapshots(ids.unshared!);
+    // The desktop queues and spaces its sends: wait until the relay holds each snapshot, so a test's own refresh
+    // request never meets the first publication still on its way.
+    const onRelay = (id: string, sharing: 'on' | 'off') =>
+      until(
+        async () => {
+          const r = await client.request<{ snapshot: { record: { sharing: string } } | null }>(
+            'GET',
+            `${API_PREFIX}/questions/${id}/snapshot`,
+          );
+          return r.snapshot?.record.sharing === sharing;
+        },
+        20_000,
+        `the relay to hold the ${sharing === 'on' ? 'shared' : 'sharing-off'} snapshot`,
+      );
+    await onRelay(ids.shared!, 'on');
+    await onRelay(ids.asleep!, 'on');
+    await onRelay(ids.unshared!, 'off');
   });
 
   afterAll(async () => {
@@ -220,8 +238,13 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
 
   it('says when terminal sharing is off on the computer', async () => {
     await go('unshared');
-    expect(await page.locator('#terminal-button').getAttribute('aria-label')).toBe(
-      'Terminal, not shared',
+    // The button's name follows the snapshot, which the page reads once it has loaded.
+    await until(
+      async () =>
+        (await page.locator('#terminal-button').getAttribute('aria-label')) ===
+        'Terminal, not shared',
+      20_000,
+      'the button to say sharing is off',
     );
     await openDrawer();
     await drawer().getByRole('heading', { name: 'Not shared' }).waitFor({ timeout: 20_000 });

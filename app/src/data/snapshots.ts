@@ -119,6 +119,11 @@ export class SnapshotStore {
   lastAttempt(questionId: string): { n: number; outcome?: RefreshOutcome } | undefined {
     return this.attempts.get(questionId);
   }
+  /**
+   * This phone's accepted refresh request per question, until a snapshot received after it answers it. A read that
+   * the relay served before the request existed says "no refresh", and must not wipe the deadline out.
+   */
+  private asked = new Map<string, { requestedAt: number; deadline: string }>();
   /** Refresh requests on their way to the relay, so the drawer says it is asking from the tap, not the reply. */
   private requesting = new Set<string>();
   isRequesting(questionId: string): boolean {
@@ -169,12 +174,16 @@ export class SnapshotStore {
     const answered =
       !!cur?.observation &&
       Date.parse(cur.observation.receivedAt) >= Date.parse(r.data.requested_at);
-    if (!answered)
+    if (!answered) {
+      this.asked.set(questionId, {
+        requestedAt: Date.parse(r.data.requested_at),
+        deadline: r.data.deadline_at,
+      });
       this.replace(questionId, {
         observation: cur?.observation ?? null,
         refreshDeadline: r.data.deadline_at,
       });
-    else this.emitDetail();
+    } else this.emitDetail();
     return 'asked';
   }
 
@@ -280,6 +289,12 @@ export class SnapshotStore {
   private replace(id: string, next: SnapshotState | undefined) {
     const prev = this.states.get(id);
     const before = this.shown(prev);
+    const ask = this.asked.get(id);
+    if (ask) {
+      if (!next || (next.observation && Date.parse(next.observation.receivedAt) >= ask.requestedAt))
+        this.asked.delete(id); // answered, or the snapshot was cleared
+      else if (!next.refreshDeadline) next = { ...next, refreshDeadline: ask.deadline };
+    }
     // The same observation keeps having missed a refresh: a new request's deadline does not make it current again.
     if (next && prev?.observation && next.observation?.snapshotId === prev.observation.snapshotId) {
       const missed =
@@ -330,6 +345,7 @@ export class SnapshotStore {
     this.queue = [];
     this.again.clear();
     this.attempts.clear();
+    this.asked.clear();
     this.requesting.clear();
     this.emit();
   }
