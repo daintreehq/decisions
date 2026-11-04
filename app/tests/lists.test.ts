@@ -32,6 +32,7 @@ function q(
     revision: 0,
     requirement: 'human-required',
     targetHostId: 'h',
+    originatingDeviceId: 'd',
     createdAt: iso(NOW - 2 * H),
     expiresAt: null,
     proxyAbstained: false,

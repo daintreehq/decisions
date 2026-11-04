@@ -6,10 +6,11 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { useNow, useQuestions } from '../app/hooks.js';
+import { useAgentStates, useNow, useQuestions } from '../app/hooks.js';
 import { useLayer } from '../app/layers.js';
 import { Link, usePath, useRoute } from '../app/router.js';
 import { closeSidebar, openSidebar, useSidebarOpen } from '../app/sidebar.js';
+import type { AgentStateView } from '../domain/agentState.js';
 import type { QuestionView } from '../domain/model.js';
 import { hiddenQuestionText, needsAction, needsYou, originParts } from '../domain/selectors.js';
 import { previewText } from '../lib/safe-text.js';
@@ -20,6 +21,7 @@ import {
   UpdateAffordance,
   useShellAttention,
 } from './AppStatus.js';
+import { AgentStateMark } from './AgentState.js';
 import { CloseIcon, MenuIcon } from './Icons.js';
 import { NavGlyph, type Destination } from './NavGlyphs.js';
 
@@ -74,9 +76,41 @@ function useRecent(currentId: string | undefined, hold: boolean): QuestionView[]
   }, [ids, all, fresh]);
 }
 
-function RecentRow({ v, now, current }: { v: QuestionView; now: number; current: boolean }) {
+/**
+ * Which Recent rows give room to an agent state. Only a fresh observation earns room in a one-line row (an old one
+ * is left to Home, which can say how old). Like the rows' order, the room is held while the sidebar is in use: a
+ * state that goes stale leaves its slot empty, and one that arrives in a row without a slot waits for the next
+ * time the sidebar opens, so no question re-truncates under a finger.
+ */
+function useStateSlots(
+  recent: QuestionView[],
+  agentOf: (v: QuestionView) => AgentStateView | null,
+  hold: boolean,
+): ReadonlySet<string> {
+  const live = new Set(recent.filter((v) => agentOf(v)?.fresh === 'fresh').map((v) => v.id));
+  const held = useRef<Set<string> | null>(null);
+  if (!hold) held.current = null;
+  else if (!held.current) held.current = live;
+  return held.current ?? live;
+}
+
+function RecentRow({
+  v,
+  now,
+  current,
+  agent,
+  slot,
+}: {
+  v: QuestionView;
+  now: number;
+  current: boolean;
+  agent: AgentStateView | null;
+  /** The row has room for a state (see `useStateSlots`). */
+  slot: boolean;
+}) {
   const { project } = originParts(v);
   const waiting = needsYou(v, now);
+  const shown = slot && agent?.fresh === 'fresh' ? agent : null;
   // The whole question as one plain line: the CSS ellipsis truncates what is seen, never what is read out.
   const text = v.content
     ? previewText(v.content.question, Number.POSITIVE_INFINITY)
@@ -96,6 +130,9 @@ function RecentRow({ v, now, current }: { v: QuestionView; now: number; current:
           <span className="sr-only">, </span>
           {project}
         </span>
+        {slot && (
+          <span className="side-q-state">{shown && <AgentStateMark a={shown} age={false} />}</span>
+        )}
       </Link>
     </li>
   );
@@ -124,6 +161,8 @@ function SidebarContent({
   const all = useQuestions();
   const now = useNow();
   const recent = useRecent(currentId, hold);
+  const agentOf = useAgentStates();
+  const slots = useStateSlots(recent, agentOf, hold);
   const recentId = useId();
   const waiting = all.filter((v) => needsAction(v, now)).length;
   return (
@@ -178,7 +217,14 @@ function SidebarContent({
           {recent.length > 0 ? (
             <ul className="side-qlist">
               {recent.map((v) => (
-                <RecentRow key={v.id} v={v} now={now} current={v.id === currentId} />
+                <RecentRow
+                  key={v.id}
+                  v={v}
+                  now={now}
+                  current={v.id === currentId}
+                  agent={agentOf(v)}
+                  slot={slots.has(v.id)}
+                />
               ))}
             </ul>
           ) : (

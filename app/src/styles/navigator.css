@@ -316,6 +316,7 @@
 }
 .qrow-meta {
   display: flex;
+  align-items: baseline;
   flex-wrap: wrap;
   gap: 2px 0;
   margin-top: 2px;
@@ -334,6 +335,22 @@
 .qrow-meta .m.warn {
   color: var(--warning-text);
   font-weight: 500;
+}
+/*
+ * The agent's state ends the line in a slot as wide as the longest word (Directing): it fills what the line has
+ * left and never more than it reserves, so going stale (which adds an age) or changing word redraws it without
+ * wrapping. Its own dot separates it from the item before, so no middle dot.
+ */
+.qrow-meta .m.agent {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 5.6em;
+}
+.qrow-meta .m + .m.agent {
+  margin-left: 12px;
+}
+.qrow-meta .m + .m.agent::before {
+  content: none;
 }
 .qrow .skeleton-row {
   grid-column: 1 / -1;

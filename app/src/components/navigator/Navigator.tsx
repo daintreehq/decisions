@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { app } from '../../app/controller.js';
-import { useApp, useNow, useQuestions } from '../../app/hooks.js';
+import { useAgentStates, useApp, useInteracting, useNow, useQuestions } from '../../app/hooks.js';
 import {
   resolvePersistedFilters,
   rowClick,
@@ -28,6 +28,7 @@ import {
   type NeedsSort,
   type Scope,
 } from '../../domain/lists.js';
+import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import { currentSubscription, isIos, isStandalone, pushSupport } from '../../features/push.js';
 import { CloseIcon, OfflineIcon, SearchIcon, SuccessIcon } from '../Icons.js';
@@ -177,6 +178,18 @@ export function NavigatorPanel({
   const snap = useApp();
   const all = useQuestions();
   const now = useNow();
+  const agentOf = useAgentStates();
+  const interacting = useInteracting();
+  // What each row last showed of its agent. A mark that would appear or disappear changes the row's height, so it
+  // waits while the person is touching or scrolling; a mark already on a row updates at once.
+  const placed = useRef(new Map<string, AgentStateView | null>());
+  const agentFor = (v: QuestionView): AgentStateView | null => {
+    const next = agentOf(v);
+    const had = placed.current.get(v.id);
+    const shown = interacting && placed.current.has(v.id) && !had !== !next ? (had ?? null) : next;
+    placed.current.set(v.id, shown);
+    return shown;
+  };
   const nav = useNavState().questions;
   const query = useDebounced(nav.query, 200);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -353,6 +366,7 @@ export function NavigatorPanel({
                 selected={id === currentId}
                 showStatusWord={nav.scope === 'all'}
                 extras={{ draft: drafts.has(id), pending: pending(id) }}
+                agent={agentFor(v)}
                 onOpen={onOpen}
               />
             );

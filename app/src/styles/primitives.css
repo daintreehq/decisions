@@ -868,3 +868,64 @@ kbd {
   border: 1px solid var(--line-subtle);
   color: var(--text-2);
 }
+
+/*
+ * The asking agent's observed state on a row (AgentStateMark): a small dot and Daintree's word. Colour is on the dot
+ * only. Stale steps down instead of fading: a hollow neutral ring, the word in secondary text.
+ */
+.agent-state {
+  display: inline-flex;
+  /* The word sits on the line's baseline like the text around it; the dot centres on the word. */
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.agent-dot {
+  flex: none;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+.agent-state[data-tone='working'] .agent-dot {
+  background: var(--working);
+}
+.agent-state[data-tone='waiting'] .agent-dot {
+  background: var(--waiting);
+}
+.agent-state[data-fresh='stale'] .agent-dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px var(--text-2);
+}
+.agent-label {
+  flex: none;
+  color: var(--text);
+  font-weight: 500;
+}
+/* Stale keeps the word's weight (and so its width); only the colour steps down. */
+.agent-state[data-fresh='stale'] .agent-label {
+  color: var(--text-2);
+}
+/* The age gives way first when the line is short; the word never does. */
+.agent-age {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: -1px;
+  color: var(--text-2);
+}
+@media (forced-colors: active) {
+  .agent-dot,
+  .agent-state[data-tone] .agent-dot {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+  .agent-state[data-fresh='stale'] .agent-dot {
+    background: none;
+    box-shadow: inset 0 0 0 1.5px CanvasText;
+  }
+}

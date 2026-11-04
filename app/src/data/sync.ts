@@ -2,8 +2,10 @@ import {
   EventsPage,
   ServerFrame,
   SocketTicketResponse,
+  formatFeatures,
   type ClientFrame,
   type LedgerEvent,
+  type ProtocolFeature,
 } from '@daintreehq/decisions-protocol';
 import type { Db } from './db.js';
 import { RelayError } from './relay.js';
@@ -38,6 +40,13 @@ export interface SyncDeps {
   onSynced?: (at: number) => void;
   onRevoked?: () => void;
   onError?: (e: unknown) => void;
+  /**
+   * The extensions this app declares (docs/protocol.md section 19), read at each socket ticket and events page.
+   * Only features the relay advertises in `GET /info` belong here; an empty list is the 0.3.0 baseline.
+   */
+  features?: () => readonly ProtocolFeature[];
+  /** The relay's clock, from each socket `hello`. */
+  onServerTime?: (iso: string) => void;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
@@ -68,8 +77,19 @@ export class SyncEngine {
   private replaying = false;
   private queue: Promise<void> = Promise.resolve();
   private catchingUp: Promise<void> | null = null;
+  /**
+   * Which connection attempt is current. A newer attempt (a redeclaration, a kick while connecting) supersedes the
+   * older one: its ticket is dropped and its socket can never schedule a reconnect, so one device never holds two
+   * sockets that keep replacing each other.
+   */
+  private generation = 0;
 
   constructor(private readonly d: SyncDeps) {}
+
+  /** Started and not stopped (or revoked). */
+  get running(): boolean {
+    return !this.stopped;
+  }
 
   private timer(fn: () => void, ms: number) {
     return (this.d.setTimer ?? ((f, m) => setTimeout(f, m)))(fn, ms);
@@ -93,6 +113,7 @@ export class SyncEngine {
 
   stop(): void {
     this.stopped = true;
+    this.generation++;
     this.untimer(this.reconnectTimer);
     this.untimer(this.pingTimer);
     this.untimer(this.pollTimer);
@@ -107,6 +128,29 @@ export class SyncEngine {
       }
     }
     this.set('idle');
+  }
+
+  /** The declared features changed: the socket's ticket carries them, so open a new socket. */
+  redeclare(): void {
+    if (this.stopped) return;
+    const ws = this.ws;
+    this.ws = null;
+    this.untimer(this.pingTimer);
+    if (ws) {
+      ws.onclose = ws.onmessage = ws.onerror = ws.onopen = null;
+      try {
+        ws.close(1000, 'redeclare');
+      } catch {
+        /* already closed */
+      }
+    }
+    this.untimer(this.reconnectTimer);
+    this.attempt = 0;
+    this.connect();
+  }
+
+  private declared(): ProtocolFeature[] {
+    return [...(this.d.features?.() ?? [])];
   }
 
   /** Called on visibilitychange→visible and `online`: reconnect if needed and always re-sync. */
@@ -129,13 +173,17 @@ export class SyncEngine {
 
   private connect(): void {
     if (this.stopped) return;
+    const gen = ++this.generation;
     this.set(this.conn === 'live' ? 'live' : 'connecting');
     void (async () => {
       try {
         const t = SocketTicketResponse.parse(
-          await this.d.relay.json('POST', '/socket-ticket', { body: {} }),
+          await this.d.relay.json('POST', '/socket-ticket', {
+            // A body without `features` is the 0.3.0 baseline, exactly what this app sent before.
+            body: this.declared().length ? { features: this.declared() } : {},
+          }),
         );
-        if (this.stopped) return;
+        if (this.stopped || gen !== this.generation) return;
         const base = this.d.origin.replace(/^http/, 'ws');
         const path = t.ws_path.includes('ticket=')
           ? t.ws_path
@@ -154,7 +202,9 @@ export class SyncEngine {
         ws.onmessage = (ev) => this.onMessage(ev.data);
         ws.onerror = () => undefined;
         ws.onclose = (ev) => {
-          if (this.ws === ws) this.ws = null;
+          // A superseded socket closing (the relay replaced it, or a redeclaration closed it) changes nothing.
+          if (this.ws !== ws) return;
+          this.ws = null;
           this.untimer(this.pingTimer);
           if (ev.code === 4401) {
             this.stopped = true;
@@ -165,6 +215,7 @@ export class SyncEngine {
           this.scheduleReconnect();
         };
       } catch (e) {
+        if (gen !== this.generation) return;
         if (e instanceof RelayError && (e.status === 401 || e.status === 403)) {
           this.d.onError?.(e);
           this.stopped = true;
@@ -220,6 +271,7 @@ export class SyncEngine {
     const f = frame.data;
     switch (f.t) {
       case 'hello':
+        this.d.onServerTime?.(f.server_time);
         this.set('live');
         this.untimer(this.pollTimer);
         this.pollTimer = null;
@@ -290,7 +342,13 @@ export class SyncEngine {
   private async catchUpNow(): Promise<void> {
     for (;;) {
       const page = EventsPage.parse(
-        await this.d.relay.json('GET', '/events', { query: { after: this.cursor, limit: 100 } }),
+        await this.d.relay.json('GET', '/events', {
+          query: {
+            after: this.cursor,
+            limit: 100,
+            features: this.declared().length ? formatFeatures(this.declared()) : undefined,
+          },
+        }),
       );
       const fresh = page.events.filter((e) => e.seq > this.cursor).sort((a, b) => a.seq - b.seq);
       if (fresh.length || page.next_after > this.cursor) {
