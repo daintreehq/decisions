@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { runDurableObjectAlarm } from 'cloudflare:test';
 import { LIMITS, PROTOCOL_VERSION, PaneSnapshotResponse } from '@daintreehq/decisions-protocol';
-import { decryptEnvelope, newId, signObject } from '@daintreehq/decisions-crypto';
+import {
+  decryptEnvelope,
+  generateEpochKeyBytes,
+  importEpochKey,
+  newId,
+  signObject,
+} from '@daintreehq/decisions-crypto';
+import { SNAPSHOT_FIXTURE } from '@daintreehq/decisions-protocol/fixtures';
+import { buildRotation } from './devices.helpers.js';
 import {
   act,
   ask,
@@ -9,6 +17,7 @@ import {
   events,
   inRoom,
   pairDevice,
+  settle,
   stub,
   type Actor,
   type World,
@@ -24,6 +33,7 @@ import {
   publish,
   putSnapshot,
   refresh,
+  resign,
 } from './snapshots.helpers.js';
 
 const asHost = (w: World, host: Actor): World => ({ ...w, owner: host });
@@ -138,21 +148,71 @@ describe('writing pane snapshots (docs/protocol.md section 18)', () => {
     expect((await putSnapshot(publisher, questionId, { ...snap, envelope: null })).status).toBe(
       400,
     );
+    // ciphertext changed under an intact record and bindings: only the digest catches it
+    const c = snap.envelope!.ciphertext;
+    const altered = { ...snap.envelope!, ciphertext: (c[0] === 'A' ? 'B' : 'A') + c.slice(1) };
+    const digest = await putSnapshot(publisher, questionId, { ...snap, envelope: altered });
+    expect(digest.json).toMatchObject({
+      code: 'validation_error',
+      message: 'envelope digest mismatch',
+    });
+    // a validly signed record that claims another signer or installation
+    const other = await enrollHost(w, 'Other Host');
+    const claimed = await buildSnapshot(w, other, questionId);
+    const asOther = await resign(publisher, claimed.record, claimed.envelope);
+    expect((await putSnapshot(publisher, questionId, asOther)).json.message).toBe(
+      'record does not belong to the authenticated device',
+    );
+    const foreign = await buildSnapshot(w, publisher, questionId, { installationId: newId() });
+    expect((await putSnapshot(publisher, questionId, foreign)).json.message).toBe(
+      'record does not belong to the authenticated device',
+    );
+    // an envelope sealed to an epoch the relay has not issued
+    const future = await importEpochKey(generateEpochKeyBytes(), w.epoch.epoch + 1, false);
+    const sealed = await buildSnapshot(w, publisher, questionId, { epoch: future });
+    expect((await putSnapshot(publisher, questionId, sealed)).json.message).toBe(
+      'envelope uses an unknown key epoch',
+    );
     // nothing was stored
     expect(await snapshotRows()).toHaveLength(0);
   });
 
-  it('caps the size of what it stores', async () => {
-    const { w, publisher, questionId } = await setup();
+  it('caps the size of what it stores, and accepts the largest valid snapshot', async () => {
+    const { w, phone, publisher, questionId } = await setup();
     const snap = await buildSnapshot(w, publisher, questionId);
-    const big = {
-      ...snap,
-      envelope: { ...snap.envelope!, ciphertext: 'A'.repeat(LIMITS.snapshotCiphertextChars + 1) },
-    };
-    const res = await putSnapshot(publisher, questionId, big);
-    expect(res.status).toBe(413);
-    expect(res.json.code).toBe('payload_too_large');
+    // Correctly digested and signed, so size is the only defect: just over the cap, and over the general
+    // envelope cap the body schema enforces.
+    for (const chars of [LIMITS.snapshotCiphertextChars + 1, LIMITS.envelopeCiphertextChars + 1]) {
+      const big = await resign(publisher, snap.record, {
+        ...snap.envelope!,
+        ciphertext: 'A'.repeat(chars),
+      });
+      const res = await putSnapshot(publisher, questionId, big);
+      expect(res.status, `${chars} chars`).toBe(413);
+      expect(res.json.code).toBe('payload_too_large');
+    }
     expect(await snapshotRows()).toHaveLength(0);
+
+    const lines = LIMITS.snapshotTerminalLines;
+    const perLine = Math.floor((LIMITS.snapshotTerminalBytes - (lines - 1)) / lines);
+    const observedAt = new Date().toISOString();
+    const largest = await buildSnapshot(w, publisher, questionId, {
+      observedAt,
+      content: {
+        ...SNAPSHOT_FIXTURE.content,
+        observed_at: observedAt,
+        pane_title: '"'.repeat(LIMITS.snapshotPaneTitleChars),
+        terminal_lines: Array.from({ length: lines }, () => '"'.repeat(perLine)),
+      },
+    });
+    expect(largest.envelope!.ciphertext.length).toBeGreaterThan(80 * 1024);
+    expect((await putSnapshot(publisher, questionId, largest)).status).toBe(200);
+    const read = (await getSnapshot(phone, questionId)).json;
+    const content = await decryptEnvelope<{ terminal_lines: string[] }>(
+      read.snapshot.envelope,
+      phone.epochs,
+    );
+    expect(content.terminal_lines).toHaveLength(lines);
   });
 
   it('accepts only the current revision and a strictly later observed_at, within the clock allowance', async () => {
@@ -308,7 +368,7 @@ describe('refresh requests', () => {
     const frame = await hostSocket.waitFor(
       (f) => f.t === 'event' && f.event.event_type === 'decision.snapshot.refresh_requested',
     );
-    expect(frame.event.data).toMatchObject({ ...asked.json, target_host_id: 'host_aaaaaaaa' });
+    expect(frame.event.data).toEqual({ ...asked.json, target_host_id: 'host_aaaaaaaa' });
     // The host can also find it on its feed and on the snapshot route.
     expect(
       (await eventsWith(publisher, SNAPSHOTS)).filter(
@@ -558,12 +618,237 @@ describe('delete, export and push', () => {
     const { w, phone, publisher, questionId } = await setup();
     const jobsBefore = await inRoom((room) => room.q(`SELECT job_id FROM scheduled_jobs`));
     const snap = await publish(w, publisher, questionId);
-    await refresh(phone, questionId);
+    const asked = (await refresh(phone, questionId)).json;
+    // While a shared snapshot and a refresh are both held, the question's details name neither.
+    const detail = await phone.call('GET', `/api/v1/questions/${questionId}`);
+    expect(detail.status).toBe(200);
+    for (const held of [
+      snap.snap.record.snapshot_id,
+      snap.snap.envelope!.ciphertext,
+      snap.snap.record.signature,
+      asked.refresh_id,
+    ])
+      expect(detail.text).not.toContain(held);
+    expect(Object.keys(detail.json)).not.toContain('snapshot');
     await publish(w, publisher, questionId, { sharing: 'off', at: 1 });
     const jobsAfter = await inRoom((room) => room.q(`SELECT job_id FROM scheduled_jobs`));
     expect(jobsAfter).toEqual(jobsBefore);
-    const detail = await phone.call('GET', `/api/v1/questions/${questionId}`);
-    expect(detail.text).not.toContain(snap.snap.record.snapshot_id);
-    expect(detail.text).not.toContain(snap.snap.envelope!.ciphertext);
+  });
+});
+
+describe('edge cases', () => {
+  it('refuses a refresh once the publishing desktop is revoked', async () => {
+    const { w, phone, publisher: host, questionId } = await setup({ host: true });
+    expect((await refresh(phone, questionId)).status).toBe(200);
+    const rot = await buildRotation(w, [phone]);
+    expect((await w.owner.call('POST', `/api/v1/devices/${host.id}/revoke`, rot.body)).status).toBe(
+      200,
+    );
+    await inRoom((room) => room.run(`UPDATE question_snapshots SET refresh_json = NULL`));
+    const res = await refresh(phone, questionId);
+    expect(res.json.code).toBe('invalid_state');
+  });
+
+  it('binds refresh retries to their question and replays them without asking again', async () => {
+    const { w, phone, publisher, questionId: a } = await setup();
+    const { questionId: b } = await ask(w);
+    const key = newId();
+    const first = await refresh(phone, a, key);
+    expect(first.status).toBe(200);
+    // The same key and body on another question is a different command.
+    expect((await refresh(phone, b, key)).json.code).toBe('idempotency_collision');
+    expect((await getSnapshot(phone, b)).json.refresh).toBeNull();
+    // After the desktop fulfils it, the retry answers with the original receipt and asks nothing.
+    expect((await publish(w, publisher, a)).res.status).toBe(200);
+    const hintsBefore = await eventsWith(publisher, SNAPSHOTS);
+    const retry = await refresh(phone, a, key);
+    expect(retry.json).toEqual(first.json);
+    expect((await getSnapshot(phone, a)).json.refresh).toBeNull();
+    expect(await eventsWith(publisher, SNAPSHOTS)).toEqual(hintsBefore);
+  });
+
+  it('limits refreshes per device across questions, not per question or globally', async () => {
+    const { w, phone, questionId: x } = await setup();
+    const { questionId: y } = await ask(w);
+    const tablet = await pairDevice(w, 'tablet', 'Tablet');
+    for (let i = 0; i < LIMITS.snapshotRefreshesPerDeviceMinute; i++) {
+      expect((await refresh(phone, x)).status).toBe(200);
+    }
+    expect((await refresh(phone, y)).status).toBe(429);
+    expect((await refresh(tablet, x)).status).toBe(200);
+  });
+
+  it('clears one question without touching another', async () => {
+    const { w, phone, publisher, questionId: a } = await setup();
+    const { questionId: b } = await ask(w);
+    for (const q of [a, b]) {
+      expect((await publish(w, publisher, q, { at: -1000 })).res.status).toBe(200);
+      expect((await refresh(phone, q)).status).toBe(200);
+    }
+    const before = (await getSnapshot(phone, b)).json;
+    const hintsOfB = async () =>
+      (await eventsWith(phone, SNAPSHOTS))
+        .filter((e) => e.question_id === b && e.event_type.startsWith('decision.snapshot.'))
+        .map((e) => e.seq);
+    const seqs = await hintsOfB();
+    expect(seqs).toHaveLength(2);
+    // fulfilling, cancelling, expiring and deleting `a`
+    expect((await publish(w, publisher, a)).res.status).toBe(200);
+    expect((await act(w, w.owner, 'cancel', a, 0)).res.status).toBe(201);
+    const { questionId: c } = await ask(w);
+    await publish(w, publisher, c);
+    await inRoom((room) =>
+      room.run(`UPDATE questions SET expires_at = ? WHERE question_id = ?`, Date.now() - 1, c),
+    );
+    expect((await getSnapshot(phone, c)).json.snapshot).toBeNull();
+    expect((await w.owner.call('DELETE', `/api/v1/questions/${a}`)).status).toBe(200);
+    expect((await getSnapshot(phone, b)).json).toEqual(before);
+    expect(await hintsOfB()).toEqual(seqs);
+  });
+
+  it('keeps the snapshot and refresh through an answer, and a reopen starts empty', async () => {
+    const { w, phone, publisher, questionId } = await setup();
+    const snap = await publish(w, publisher, questionId);
+    const asked = (await refresh(phone, questionId)).json;
+    expect((await act(w, phone, 'answer', questionId, 0)).res.status).toBe(201);
+    const kept = (await getSnapshot(phone, questionId)).json;
+    expect(kept.snapshot.record.snapshot_id).toBe(snap.snap.record.snapshot_id);
+    expect(kept.refresh).toEqual(asked);
+
+    // A closed question that somehow still holds state is emptied by the reopen itself.
+    const { questionId: closed } = await ask(w);
+    expect((await act(w, w.owner, 'cancel', closed, 0)).res.status).toBe(201);
+    await inRoom((room) =>
+      room.run(
+        `INSERT INTO question_snapshots (question_id, snapshot_id, record_json, envelope_json, received_at, refresh_json)
+         VALUES (?, 'snap_left0001', '{}', '{}', ?, '{}')`,
+        closed,
+        Date.now(),
+      ),
+    );
+    expect((await act(w, w.owner, 'reopen', closed, 0, { content: null })).res.status).toBe(201);
+    const row = await inRoom((room) =>
+      room.q1<Record<string, unknown>>(
+        `SELECT * FROM question_snapshots WHERE question_id = ?`,
+        closed,
+      ),
+    );
+    expect(row).toMatchObject({ record_json: null, envelope_json: null, refresh_json: null });
+  });
+
+  it('keeps sharing off across a reopen, and the order watermark across retention', async () => {
+    const { w, phone, publisher, questionId } = await setup();
+    expect(
+      (await publish(w, publisher, questionId, { sharing: 'off', at: -1000 })).res.status,
+    ).toBe(200);
+    expect((await act(w, w.owner, 'cancel', questionId, 0)).res.status).toBe(201);
+    expect((await act(w, w.owner, 'reopen', questionId, 0, { content: null })).res.status).toBe(
+      201,
+    );
+    expect((await getSnapshot(phone, questionId)).json.snapshot).toBeNull();
+    expect((await refresh(phone, questionId)).json.code).toBe('invalid_state');
+    const t = Date.now() - 500;
+    expect(
+      (
+        await publish(w, publisher, questionId, {
+          revision: 1,
+          observedAt: new Date(t).toISOString(),
+        })
+      ).res.status,
+    ).toBe(200);
+    expect((await refresh(phone, questionId)).status).toBe(200);
+
+    // Retention removes the snapshot and the refresh waiting on it, but not the watermark.
+    await inRoom((room) =>
+      room.run(`UPDATE question_snapshots SET retain_until = ?`, Date.now() - 1),
+    );
+    await runDurableObjectAlarm(stub());
+    expect((await getSnapshot(phone, questionId)).json).toMatchObject({
+      snapshot: null,
+      refresh: null,
+    });
+    expect(
+      (await eventsWith(phone, SNAPSHOTS))
+        .map((e) => e.event_type)
+        .filter((t) => t.startsWith('decision.snapshot.')),
+    ).toEqual(['decision.snapshot.updated']);
+    const replayed = await publish(w, publisher, questionId, {
+      revision: 1,
+      observedAt: new Date(t).toISOString(),
+    });
+    expect(replayed.res.status).toBe(409);
+  });
+
+  it('returns nothing for a closed question even if a row survived', async () => {
+    const { w, phone, publisher, questionId } = await setup();
+    await publish(w, publisher, questionId);
+    await refresh(phone, questionId);
+    for (const status of ['cancelled', 'expired']) {
+      await inRoom((room) =>
+        room.run(`UPDATE questions SET status = ? WHERE question_id = ?`, status, questionId),
+      );
+      expect((await getSnapshot(phone, questionId)).json).toEqual({
+        question_id: questionId,
+        snapshot: null,
+        received_at: null,
+        refresh: null,
+      });
+    }
+  });
+
+  it('retires the requested snapshot on read even past the sweep budget', async () => {
+    const { w, phone, publisher, questionId } = await setup();
+    await publish(w, publisher, questionId);
+    const now = Date.now();
+    await inRoom((room) => {
+      // 2050 overdue rows ahead of it: more than one read's bounded sweep retires.
+      for (let i = 0; i < 2050; i++) {
+        room.run(
+          `INSERT INTO question_snapshots (question_id, record_json, envelope_json, received_at, retain_until)
+           VALUES (?, '{}', '{}', ?, ?)`,
+          `q_backlog${String(i).padStart(5, '0')}`,
+          now,
+          now - 1_000_000 + i,
+        );
+      }
+      room.run(
+        `UPDATE question_snapshots SET retain_until = ? WHERE question_id = ?`,
+        now - 1,
+        questionId,
+      );
+    });
+    expect((await getSnapshot(phone, questionId)).json.snapshot).toBeNull();
+  });
+
+  it('sets the alarm to the earliest deadline and moves it when that snapshot goes', async () => {
+    const { w, publisher, questionId: a } = await setup();
+    const { questionId: b } = await ask(w);
+    await inRoom((room) => room.run(`UPDATE scheduled_jobs SET status = 'done'`));
+    await publish(w, publisher, a);
+    await publish(w, publisher, b);
+    const deadline = async (q: string) =>
+      (await inRoom((room) =>
+        room.q1<{ r: number }>(
+          `SELECT retain_until AS r FROM question_snapshots WHERE question_id = ?`,
+          q,
+        ),
+      ))!.r;
+    const alarm = () => inRoom((_room, state) => state.storage.getAlarm());
+    expect(await alarm()).toBe(await deadline(a));
+    // An earlier job wins.
+    await inRoom((room) => {
+      room.run(
+        `INSERT INTO scheduled_jobs (job_id, kind, payload, run_at) VALUES (?, 'purge', '{}', ?)`,
+        newId(),
+        Date.now() + 3_600_000,
+      );
+    });
+    await publish(w, publisher, b, { at: 1 });
+    expect(await alarm()).toBeLessThan(await deadline(a));
+    await inRoom((room) => room.run(`UPDATE scheduled_jobs SET status = 'done'`));
+    // Deleting the question with the earliest deadline moves the alarm to the next one.
+    expect((await w.owner.call('DELETE', `/api/v1/questions/${a}`)).status).toBe(200);
+    await settle(); // the deletion's own attachment cleanup runs first
+    expect(await alarm()).toBe(await deadline(b));
   });
 });

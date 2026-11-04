@@ -529,8 +529,9 @@ question's snapshot state entirely; otherwise the relay keeps only the order wat
 terminal text, and readers fetch the current snapshot, so replaying an old hint shows the latest one. Their
 `question_revision` is null. The relay keeps only the latest hint of each type per question: a new one removes the
 one before, an accepted snapshot removes the refresh hint it fulfils, and closing, reopening or deleting the question
-removes both, so the ledger holds no history of snapshots. When retention removes a snapshot, the relay appends a
-`decision.snapshot.updated` hint naming it (with a null `origin_device_id`), and a reader that fetches finds none.
+removes both, so the ledger holds no history of snapshots. When retention removes a snapshot (with any refresh waiting on it),
+the relay appends a `decision.snapshot.updated` hint naming it (with a null `origin_device_id`), and a reader that
+fetches finds none.
 Snapshots never trigger a push, and no snapshot field fits a `PushPayload`.
 
 | Route                                   | Role                   | Notes                                                     |

@@ -96,9 +96,40 @@ export function nextSnapshotRetention(room: Room): number | null {
 }
 
 /**
- * Removes every snapshot the relay received more than `LIMITS.snapshotRetentionMs` ago, and tells readers with a
- * hint so they drop what they show. Runs from the alarm and before every snapshot read, so a late alarm never
- * exposes overdue ciphertext.
+ * Removes the question's snapshot if the relay received it more than `LIMITS.snapshotRetentionMs` ago, with any
+ * refresh waiting on it, and tells readers with a hint so they drop what they show. Must run inside `room.tx`.
+ */
+export function retireSnapshotIfDue(room: Room, questionId: string, t = nowMs()): void {
+  const row = snapshotRow(room, questionId);
+  if (!row || row.retain_until === null || row.retain_until > t) return;
+  const gone = storedSnapshot(row);
+  room.run(
+    `UPDATE question_snapshots SET snapshot_id = NULL, record_json = NULL, envelope_json = NULL,
+       received_at = NULL, retain_until = NULL, refresh_json = NULL WHERE question_id = ?`,
+    questionId,
+  );
+  room.run(
+    `DELETE FROM events WHERE question_id = ? AND event_type = 'decision.snapshot.refresh_requested'`,
+    questionId,
+  );
+  room.markAlarmDirty();
+  const q = room.q1<{ target_host_id: string }>(
+    `SELECT target_host_id FROM questions WHERE question_id = ?`,
+    questionId,
+  );
+  if (!q || !gone) return;
+  emitSnapshotHint(room, 'decision.snapshot.updated', questionId, null, {
+    snapshot_id: gone.record.snapshot_id,
+    observed_at: gone.record.observed_at,
+    sharing: gone.record.sharing,
+    target_host_id: q.target_host_id,
+  });
+}
+
+/**
+ * Retires every overdue snapshot in bounded batches. Runs from the alarm and before snapshot reads; a read also
+ * retires its own question in its final transaction, so a late alarm or a long backlog never exposes overdue
+ * ciphertext.
  */
 export async function sweepSnapshotRetention(room: Room): Promise<void> {
   for (let i = 0; i < 40; i++) {
@@ -109,28 +140,7 @@ export async function sweepSnapshotRetention(room: Room): Promise<void> {
     if (due.length === 0) return;
     await room.tx(() => {
       const t = nowMs();
-      for (const { question_id } of due) {
-        const row = snapshotRow(room, question_id);
-        if (!row || row.retain_until === null || row.retain_until > t) continue;
-        const gone = storedSnapshot(row);
-        room.run(
-          `UPDATE question_snapshots SET snapshot_id = NULL, record_json = NULL, envelope_json = NULL,
-             received_at = NULL, retain_until = NULL WHERE question_id = ?`,
-          question_id,
-        );
-        room.markAlarmDirty();
-        const q = room.q1<{ target_host_id: string }>(
-          `SELECT target_host_id FROM questions WHERE question_id = ?`,
-          question_id,
-        );
-        if (!q || !gone) continue;
-        emitSnapshotHint(room, 'decision.snapshot.updated', question_id, null, {
-          snapshot_id: gone.record.snapshot_id,
-          observed_at: gone.record.observed_at,
-          sharing: gone.record.sharing,
-          target_host_id: q.target_host_id,
-        });
-      }
+      for (const { question_id } of due) retireSnapshotIfDue(room, question_id, t);
     });
   }
 }

@@ -12,6 +12,7 @@ import { newId, sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
 import { deviceHasFeature } from '../room/features.js';
 import {
   emitSnapshotHint,
+  retireSnapshotIfDue,
   snapshotRow,
   storedRefresh,
   storedSnapshot,
@@ -54,9 +55,23 @@ function liveQuestion(
 
 /* ---------------- PUT /questions/{id}/snapshot ---------------- */
 
+/** The snapshot cap is checked before the body schema, whose general envelope cap would answer 400 instead. */
+function assertCiphertextFits(text: string): void {
+  let ciphertext: unknown;
+  try {
+    ciphertext = (JSON.parse(text) as { snapshot?: { envelope?: { ciphertext?: unknown } } })
+      ?.snapshot?.envelope?.ciphertext;
+  } catch {
+    return; // the schema reports malformed JSON
+  }
+  if (typeof ciphertext === 'string' && ciphertext.length > LIMITS.snapshotCiphertextChars)
+    throw new ApiError('payload_too_large', 'snapshot ciphertext too large');
+}
+
 export const putSnapshot: Handler = async (room, c) => {
   const auth = c.auth!;
   const qid = c.params[0]!;
+  assertCiphertextFits(c.req.body);
   const body = c.body(PaneSnapshotBody);
   const { record, envelope } = body.snapshot;
   const bad = (m: string) => new ApiError('validation_error', m);
@@ -68,8 +83,6 @@ export const putSnapshot: Handler = async (room, c) => {
   if (observedAt > nowMs() + LIMITS.requestSkewMs)
     throw bad('observed_at is too far ahead of relay time');
   if (envelope) {
-    if (envelope.ciphertext.length > LIMITS.snapshotCiphertextChars)
-      throw new ApiError('payload_too_large', 'snapshot ciphertext too large');
     if (envelope.key_epoch > room.currentEpoch()) throw bad('envelope uses an unknown key epoch');
     if ((await sha256Hex(canonicalize(envelope))) !== record.envelope_digest)
       throw bad('envelope digest mismatch');
@@ -154,16 +167,22 @@ export const getSnapshot: Handler = async (room, c) => {
   await sweepExpired(room);
   await sweepSnapshotRetention(room);
   const qid = c.params[0]!;
-  const q = room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, qid);
-  if (!q) throw new ApiError('not_found', 'no such question');
-  const row = isThreadClosedStatus(q.status) ? undefined : snapshotRow(room, qid);
-  const snapshot = storedSnapshot(row);
-  return json(200, {
-    question_id: qid,
-    snapshot,
-    received_at: snapshot && row?.received_at != null ? iso(row.received_at) : null,
-    refresh: storedRefresh(row),
-  } satisfies PaneSnapshotResponse);
+  // The sweeps are bounded and awaited: settle this question's expiry and retention in the final section.
+  return room.tx((): ApiResponse => {
+    const q = room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, qid);
+    if (!q) throw new ApiError('not_found', 'no such question');
+    const t = nowMs();
+    const closed = isThreadClosedStatus(q.status) || expireQuestionNow(room, q);
+    if (!closed) retireSnapshotIfDue(room, qid, t);
+    const row = closed ? undefined : snapshotRow(room, qid);
+    const snapshot = storedSnapshot(row);
+    return json(200, {
+      question_id: qid,
+      snapshot,
+      received_at: snapshot && row?.received_at != null ? iso(row.received_at) : null,
+      refresh: storedRefresh(row),
+    } satisfies PaneSnapshotResponse);
+  });
 };
 
 /* ---------------- POST /questions/{id}/snapshot/refresh ---------------- */

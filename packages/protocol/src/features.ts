@@ -93,7 +93,8 @@ export function isEventVisible(
  * - `has_more` is true only when another visible event is left, so a page that says "more" is never empty;
  * - a page that ends the stream advances `next_after` to `highWater`, over any hidden events in between;
  * - a page cut by `limit` or `maxBytes` stops at its last event, and never skips a visible one.
- * The socket's `caught_up` frame carries `next_after` as `high_water` and the same `has_more`.
+ * The socket's `caught_up` frame carries `next_after` as `high_water` and the same `has_more`. `size` measures
+ * one event against `maxBytes` (default: its JSON length); a socket counts the whole frame it sends.
  */
 export function buildEventsPage(i: {
   after: number;
@@ -102,7 +103,9 @@ export function buildEventsPage(i: {
   features: ReadonlySet<ProtocolFeature>;
   limit: number;
   maxBytes: number;
+  size?: (ev: LedgerEvent) => number;
 }): EventsPage {
+  const measure = i.size ?? ((ev: LedgerEvent) => JSON.stringify(ev).length);
   const page: LedgerEvent[] = [];
   let bytes = 0;
   let full = false;
@@ -114,7 +117,7 @@ export function buildEventsPage(i: {
       hasMore = true;
       break;
     }
-    const size = JSON.stringify(ev).length;
+    const size = measure(ev);
     if (page.length > 0 && bytes + size > i.maxBytes) {
       hasMore = true;
       break;

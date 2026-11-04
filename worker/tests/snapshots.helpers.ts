@@ -12,7 +12,9 @@ import {
   issueDeviceCert,
   newId,
   signObject,
+  type EpochKey,
 } from '@daintreehq/decisions-crypto';
+import type { CryptoEnvelope } from '@daintreehq/decisions-protocol';
 import { Actor, type World } from './helpers.js';
 
 /** Enrolls a `desktop-host` (another Daintree Host) and returns it with the epoch key it was granted. */
@@ -75,6 +77,10 @@ export interface SnapshotOpts {
   sharing?: 'on' | 'off';
   snapshotId?: string;
   content?: Record<string, unknown>;
+  /** Encrypt under this epoch key instead of the signer's latest. */
+  epoch?: EpochKey;
+  /** Claim this installation in the record and the envelope. */
+  installationId?: string;
 }
 
 /** Encrypts and signs a pane snapshot exactly as a desktop would. */
@@ -87,11 +93,12 @@ export async function buildSnapshot(
   const snapshotId = o.snapshotId ?? newId();
   const observedAt = o.observedAt ?? new Date().toISOString();
   const sharing = o.sharing ?? 'on';
+  const installationId = o.installationId ?? w.installationId;
   const envelope =
     sharing === 'on'
       ? await encryptEnvelope({
-          epochKey: signer.epoch ?? w.epoch,
-          installationId: w.installationId,
+          epochKey: o.epoch ?? signer.epoch ?? w.epoch,
+          installationId,
           questionId,
           recordId: snapshotId,
           recordType: 'pane.snapshot',
@@ -104,7 +111,7 @@ export async function buildSnapshot(
   const record = await signObject(signer.keys.signing.privateKey, {
     v: PROTOCOL_VERSION,
     type: 'pane.snapshot' as const,
-    installation_id: w.installationId,
+    installation_id: installationId,
     question_id: questionId,
     snapshot_id: snapshotId,
     question_revision: o.revision ?? 0,
@@ -114,6 +121,22 @@ export async function buildSnapshot(
     signer_device_id: signer.id,
   });
   return { record, envelope };
+}
+
+/** Signs `record` again with `signer`'s key, its digest recomputed for `envelope`: a valid signature on any fields. */
+export async function resign(
+  signer: Actor,
+  record: Record<string, unknown>,
+  envelope: CryptoEnvelope | null,
+) {
+  const { signature: _signature, ...unsigned } = record;
+  return {
+    record: await signObject(signer.keys.signing.privateKey, {
+      ...unsigned,
+      envelope_digest: envelope ? await envelopeDigest(envelope) : null,
+    }),
+    envelope,
+  } as Awaited<ReturnType<typeof buildSnapshot>>;
 }
 
 export async function putSnapshot(

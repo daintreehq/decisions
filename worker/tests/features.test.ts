@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { exports } from 'cloudflare:workers';
 import { EventsPage, InfoResponse, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { newId, signRequest } from '@daintreehq/decisions-crypto';
+import { legacyDesktopCatchUp, legacyPhoneCatchUp } from '@daintreehq/decisions-protocol/fixtures';
 import {
   ask,
   claimRelay,
@@ -372,5 +373,66 @@ describe('feature negotiation with pane snapshots (docs/protocol.md section 19)'
       );
       sock.close();
     }
+  });
+
+  it('treats a socket whose stored attachment predates features as the baseline', async () => {
+    const w = await claimRelay();
+    await declare(w.owner, SNAPSHOTS);
+    const { questionId } = await ask(w);
+    const sock = await openSocket(w.owner, SNAPSHOTS);
+    // A socket accepted before this release carries only its device and role.
+    await inRoom((_room, state) => {
+      for (const ws of state.getWebSockets()) {
+        const att = ws.deserializeAttachment() as { deviceId: string; role: string };
+        ws.serializeAttachment({ deviceId: att.deviceId, role: att.role });
+      }
+    });
+    await publish(w, w.owner, questionId);
+    const next = await ask(w);
+    await sock.waitFor((f) => f.t === 'event' && f.event.question_id === next.questionId);
+    sock.ws.send(JSON.stringify({ t: 'sync', after: 0 }));
+    await sock.waitFor((f) => f.t === 'caught_up');
+    expect(
+      sock.frames.some(
+        (f) => f.t === 'event' && f.event.event_type.startsWith('decision.snapshot.'),
+      ),
+    ).toBe(false);
+    expect(sock.frames.filter((f) => f.t === 'event').length).toBeGreaterThanOrEqual(3);
+    sock.close();
+  });
+
+  it('pages a 0.3.0 client one event at a time across hidden spans longer than a ledger batch', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const hidden = (n: number) =>
+      inRoom((room) => {
+        for (let i = 0; i < n; i++) {
+          room.run(
+            `INSERT INTO events (event_id, event_type, question_id, question_revision, origin_device_id, data, created_at)
+             VALUES (?, 'decision.snapshot.updated', NULL, NULL, NULL, '{}', ?)`,
+            newId(),
+            Date.now(),
+          );
+        }
+      });
+    await hidden(LIMITS.eventPageSize * 2 + 50);
+    await ask(w);
+    await hidden(LIMITS.eventPageSize + 20);
+    await ask(w);
+    await hidden(LIMITS.eventPageSize * 2);
+    const visible = (await events(w.owner)).map((e) => e.seq);
+    expect(visible).toHaveLength(3); // the phone's pairing and two questions
+    const pages = (a: Actor) => async (after: number) =>
+      (await a.call('GET', '/api/v1/events', undefined, `after=${after}&limit=1`)).json;
+    for (const run of [legacyDesktopCatchUp, legacyPhoneCatchUp]) {
+      const caught = await run(pages(phone));
+      expect(caught.events.map((e) => e.seq)).toEqual(visible);
+    }
+    // A hidden-only tail ends the stream at the high-water mark.
+    const tail = (await pages(phone)(visible.at(-1)!)) as any;
+    expect(tail.events).toEqual([]);
+    expect(tail.has_more).toBe(false);
+    expect(tail.next_after).toBe(tail.high_water_seq);
+    expect(tail.next_after).toBe(visible.at(-1)! + LIMITS.eventPageSize * 2);
   });
 });

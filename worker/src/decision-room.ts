@@ -639,15 +639,22 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
         }
         // Replay is bounded by events and bytes, and carries only what the socket declared it understands;
         // `has_more` tells the client to continue from `high_water`, which may skip events it is not sent.
+        // The byte bound counts each whole frame as sent.
+        const frames = new Map<number, string>();
         const page = this.eventsPage(
           f.after,
           knownFeatures(att.features),
           SYNC_MAX_EVENTS,
           SYNC_MAX_BYTES,
+          (ev) => {
+            const text = JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame);
+            frames.set(ev.seq, text);
+            return text.length;
+          },
         );
         for (const ev of page.events) {
           try {
-            ws.send(JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame));
+            ws.send(frames.get(ev.seq)!);
           } catch {
             return;
           }
@@ -732,6 +739,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     features: ReadonlySet<ProtocolFeature>,
     limit: number,
     maxBytes: number,
+    size?: (ev: LedgerEvent) => number,
   ): EventsPage {
     const highWater = this.highWater();
     return buildEventsPage({
@@ -741,6 +749,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
       features,
       limit,
       maxBytes,
+      ...(size ? { size } : {}),
     });
   }
 

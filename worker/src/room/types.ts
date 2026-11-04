@@ -85,6 +85,7 @@ export interface Room {
     features: ReadonlySet<ProtocolFeature>,
     limit: number,
     maxBytes: number,
+    size?: (ev: LedgerEvent) => number,
   ): EventsPage;
   cancelJobs(where: { questionId: string; kinds?: JobKind[] }): void;
   hit(key: string, limit: number, windowMs: number): void;
