@@ -58,13 +58,19 @@ export function sanitizeText(input: string, maxChars = MAX_COMMENT_CHARS): strin
   return s;
 }
 
-/** True when a host path can be typed verbatim: one line, no controls or escapes, within the byte budget. */
+// Every control, format (bidi marks, zero-width characters, soft hyphen) and line or paragraph separator.
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+/**
+ * True when a host path can be typed verbatim: one line of visible characters within the byte budget, with
+ * nothing `sanitizeText` would change (escapes, a block delimiter, surrounding space).
+ */
 export function isTypablePath(path: unknown): path is string {
   return (
     typeof path === 'string' &&
     path.length > 0 &&
     byteLen(path) <= MAX_IMAGE_PATH_BYTES &&
-    !path.includes('\n') &&
+    !INVISIBLE.test(path) &&
     sanitizeText(path, MAX_IMAGE_PATH_BYTES) === path
   );
 }
@@ -103,7 +109,8 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
   const fullReason =
     n.kind === 'answer' && n.correction && n.reason ? sanitizeText(n.reason, MAX_REASON_CHARS) : '';
   const fullQuestion = n.question ? sanitizeText(n.question, MAX_QUESTION_CHARS) : '';
-  const imageLines = n.kind === 'answer' ? formatImageLines(n.images ?? []) : [];
+  const images = n.kind === 'answer' ? (n.images ?? []) : [];
+  let imageLines = formatImageLines(images);
   const build = (c: string, reason: string, question = fullQuestion): string => {
     const lines: string[] = [BLOCK_START];
     const field = (name: string, value: string) => {
@@ -151,9 +158,9 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
   };
 
   // Enforce the UTF-8 byte budget on the whole block. Only free text is ever cut (the quoted question first,
-  // then the comment, then a correction's reason), never the metadata, the image lines, the delimiters or the
-  // instruction lines. Cutting a multi-line value also drops its continuation indent, so each pass re-measures
-  // the block.
+  // then the comment, then a correction's reason, and last the images' alt lines, whole), never the metadata,
+  // an image's path or reason, the delimiters or the instruction lines. Cutting a multi-line value also drops its
+  // continuation indent, so each pass re-measures the block.
   let q = fullQuestion;
   let c = comment;
   let r = fullReason;
@@ -167,6 +174,10 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
     if (q) q = shrink(q);
     else if (c) c = shrink(c);
     else r = shrink(r);
+    out = build(c, r, q);
+  }
+  if (byteLen(out) > MAX_BLOCK_BYTES && images.some((m) => m.alt)) {
+    imageLines = formatImageLines(images, { alt: false });
     out = build(c, r, q);
   }
   return out;
@@ -183,19 +194,21 @@ const TRUNCATED = ' …[truncated]';
  *
  * `image_N` is the host's path, which the agent can open; `image_N_unavailable` replaces it with the reason when
  * the image could not be fetched, checked or stored (`PhoneImageUnavailableReason`). `image_N_alt` follows only
- * when the person described the image, as one sanitised line. A path that is not safe to type verbatim
- * (`isTypablePath`) is listed as `store_failed` instead.
+ * when the person described the image, as one sanitised line (`MAX_IMAGE_ALT_CHARS`, then ` …[truncated]`
+ * when cut). A path that is not safe to type verbatim (`isTypablePath`) is listed as `store_failed` instead.
+ * `alt: false` leaves the alt lines out: the last resort of a block over its byte budget.
  */
-export function formatImageLines(images: readonly ResolvedPhoneImage[]): string[] {
+export function formatImageLines(
+  images: readonly ResolvedPhoneImage[],
+  o: { alt?: boolean } = {},
+): string[] {
   const lines: string[] = [];
   images.forEach((m, i) => {
     const n = i + 1;
-    const unavailable =
-      'path' in m ? (isTypablePath(m.path) ? null : 'store_failed') : m.unavailable;
-    lines.push(
-      unavailable === null ? `image_${n}: ${m.path}` : `image_${n}_unavailable: ${unavailable}`,
-    );
-    const alt = m.alt ? oneLine(m.alt, MAX_IMAGE_ALT_CHARS) : '';
+    if (!('path' in m)) lines.push(`image_${n}_unavailable: ${m.unavailable}`);
+    else if (isTypablePath(m.path)) lines.push(`image_${n}: ${m.path}`);
+    else lines.push(`image_${n}_unavailable: store_failed`);
+    const alt = o.alt !== false && m.alt ? oneLine(m.alt, MAX_IMAGE_ALT_CHARS) : '';
     if (alt) lines.push(`image_${n}_alt: ${alt}`);
   });
   return lines;

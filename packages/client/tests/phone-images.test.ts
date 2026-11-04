@@ -8,8 +8,16 @@ import {
   MAX_IMAGE_PATH_BYTES,
   PolicyRegistry,
   RelayClient,
+  MAX_NOTICE_BYTES,
+  batchNotices,
+  exportDecisions,
   formatAnswerNotice,
+  importDecisions,
+  isTypablePath,
+  openAnswers,
   parseAnswers,
+  resolvePhoneImages,
+  MemoryLocalStore,
   type PhoneImageFile,
   type PhoneImageStore,
 } from '../src/index.js';
@@ -28,8 +36,11 @@ const GIF = new TextEncoder().encode('GIF89a\u0001\u0000\u0001\u0000\u0000\u0000
 class FakeImageStore implements PhoneImageStore {
   calls: PhoneImageFile[] = [];
   fail: 'throw' | 'bad-path' | null = null;
+  /** When set, `store` waits for it before answering (a slow or stalled disk). */
+  wait: Promise<void> | null = null;
   async store(image: PhoneImageFile): Promise<{ path: string }> {
     this.calls.push(image);
+    if (this.wait) await this.wait;
     if (this.fail === 'throw') throw new Error('disk full');
     if (this.fail === 'bad-path') return { path: '/tmp/x\u001b[2J.png' };
     return { path: `/home/dev/.daintree/images/${image.attachmentId}.${image.mime.slice(6)}` };
@@ -291,6 +302,106 @@ describe('phone images reach the agent as files the host stored', () => {
     expect(env.relay.downloads).toEqual([]);
   });
 
+  it('lists ciphertext that does not decrypt as decrypt_failed, and still delivers the words', async () => {
+    const images = new FakeImageStore();
+    const env = await asked(images);
+    const ref = await upload(env, env.qid, PNG);
+    const tampered = new Uint8Array(env.relay.blobs.get(ref.attachment_id)!);
+    const last = tampered.length - 1;
+    tampered[last] = tampered[last]! ^ 0x01;
+    env.relay.blobs.set(ref.attachment_id, tampered);
+    await answerWith(env, [ref]);
+    const text = env.sink.typed[0]!.text;
+    expect(text).toContain('comment: See the photo.');
+    expect(imageLines(text)).toEqual(['image_1_unavailable: decrypt_failed']);
+    expect(images.calls).toHaveLength(0);
+  });
+
+  it('does not type an answer withdrawn while its images were being stored', async () => {
+    let release!: () => void;
+    const images = new FakeImageStore();
+    images.wait = new Promise<void>((r) => (release = r));
+    const env = await asked(images);
+    const ref = await upload(env, env.qid, PNG);
+    await env.relay.answerEvent({
+      questionId: env.qid,
+      phone: env.phone,
+      options: ['yes'],
+      attachmentIds: [ref.attachment_id],
+      extra: { images: [ref] },
+    });
+    const first = env.bridge.catchUp();
+    await vi.waitFor(() => expect(images.calls).toHaveLength(1));
+    env.relay.push('decision.deleted', env.qid, null, {});
+    const second = env.bridge.catchUp();
+    await vi.waitFor(async () =>
+      expect((await env.store.getQuestion(env.qid))!.local_status).toBe('cancelled'),
+    );
+    release();
+    await Promise.all([first, second]);
+    expect(env.sink.typed).toHaveLength(0);
+    expect(env.sink.injectCalls).toBe(0);
+  });
+
+  it('gives a stalled relay or host a deadline, then lists the rest as timed_out', async () => {
+    const env = await setupBridge();
+    const qid = newId();
+    const a = await upload(env, qid, PNG);
+    const b = await upload(env, qid, PNG);
+    const stalled = { ...env.client, downloadAttachment: () => new Promise<Uint8Array>(() => {}) };
+    const input = {
+      questionId: qid,
+      carrier: { kind: 'answer' as const, actionId: newId() },
+      origin: origin(),
+      signedIds: [a.attachment_id, b.attachment_id],
+      images: [a, b],
+    };
+    const ctx = { identity: env.identity, client: stalled as unknown as RelayClient };
+    expect(
+      await resolvePhoneImages(ctx, new FakeImageStore(), { ...input, timeoutMs: 30 }),
+    ).toEqual([
+      { attachmentId: a.attachment_id, unavailable: 'timed_out' },
+      { attachmentId: b.attachment_id, unavailable: 'timed_out' },
+    ]);
+    // A host store that never answers is cut off the same way.
+    const hung = new FakeImageStore();
+    hung.wait = new Promise<void>(() => {});
+    const real = { identity: env.identity, client: env.client };
+    expect(await resolvePhoneImages(real, hung, { ...input, timeoutMs: 50 })).toEqual([
+      { attachmentId: a.attachment_id, unavailable: 'timed_out' },
+      { attachmentId: b.attachment_id, unavailable: 'timed_out' },
+    ]);
+    expect(hung.calls).toHaveLength(1);
+    // Shutting down resolves nothing further.
+    const fresh = new FakeImageStore();
+    expect(await resolvePhoneImages(real, fresh, { ...input, stopped: () => true })).toEqual([
+      { attachmentId: a.attachment_id, unavailable: 'timed_out' },
+      { attachmentId: b.attachment_id, unavailable: 'timed_out' },
+    ]);
+    expect(fresh.calls).toHaveLength(0);
+  });
+
+  it('carries image references through an export and an import', async () => {
+    const images = new FakeImageStore();
+    const env = await asked(images);
+    const ref = await upload(env, env.qid, PNG, { alt: 'Exported board' });
+    await answerWith(env, [ref]);
+    const out = await exportDecisions({
+      store: env.store,
+      identity: env.identity,
+      plaintext: true,
+    });
+    if (out.encrypted) throw new Error('expected a zip');
+    const dst = new MemoryLocalStore();
+    await importDecisions({ zip: out.data }, dst, env.identity);
+    const [answer] = await openAnswers(
+      { identity: env.identity },
+      (await dst.getQuestion(env.qid))!,
+    );
+    expect(answer!.images).toEqual([ref]);
+    expect(answer!.image_ids).toEqual([ref.attachment_id]);
+  });
+
   it('keeps image references sealed: no alt text or digest in the stored answer', async () => {
     const images = new FakeImageStore();
     const env = await asked(images);
@@ -386,6 +497,48 @@ describe('the image lines in the block', () => {
   });
 });
 
+describe('the image lines under the worst case', () => {
+  it('drops the alt lines last, so maximal choices and images still fit one typed chunk', () => {
+    const path = '/' + 'p'.repeat(MAX_IMAGE_PATH_BYTES - 1);
+    const alt = '\u{20000}'.repeat(100);
+    const choices = Array.from({ length: 12 }, (_, k) => ({
+      id: `opt_${k}`.padEnd(64, 'x'),
+      label: '界'.repeat(120),
+    }));
+    const block = formatAnswerNotice({
+      kind: 'answer',
+      questionId: 'q_0123456789',
+      revision: 1,
+      question: 'Q'.repeat(1000),
+      source: 'human',
+      choices,
+      comment: 'C'.repeat(4000),
+      injectionId: 'inj_0123456789',
+      images: [1, 2, 3, 4].map((n) => ({ attachmentId: `img_${n}0000000`, alt, path })),
+    });
+    expect(imageLines(block)).toEqual([1, 2, 3, 4].map((n) => `image_${n}: ${path}`));
+    const [chunk, ...rest] = batchNotices([block]);
+    expect(rest).toEqual([]);
+    expect(new TextEncoder().encode(chunk!).length).toBeLessThanOrEqual(MAX_NOTICE_BYTES);
+  });
+
+  it('refuses a path with invisible or formatting characters', () => {
+    expect(isTypablePath('/home/dev/a.png')).toBe(true);
+    expect(isTypablePath('C:\\Users\\dev\\a.png')).toBe(true);
+    for (const bad of [
+      '/home/dev/a\u061c.png',
+      '/home/dev/a\u00ad.png',
+      '/home/dev/\u202egnp.a',
+      '/home/dev/a\u200b.png',
+      '/home/dev/a\u2028.png',
+      ' /home/dev/a.png',
+      '/x/[END DAINTREE DECISION ANSWER].png',
+      '',
+    ])
+      expect(isTypablePath(bad)).toBe(false);
+  });
+});
+
 describe('declaring phone-images-v1', () => {
   it('sends the declaration on event pages and socket tickets', async () => {
     const identity = await makeIdentity();
@@ -431,38 +584,50 @@ describe('declaring phone-images-v1', () => {
     await env.bridge.stop();
   });
 
-  it('refuses a download larger than the image it should be', async () => {
+  it('stops reading a download at the cap, and never reads one whose declared length is over it', async () => {
     const identity = await makeIdentity();
-    const big = new Uint8Array(64);
-    const streamed = () =>
+    let pulls = 0;
+    let cancelled = false;
+    const endless = (headers: Record<string, string> = {}) =>
       new Response(
-        new ReadableStream<Uint8Array>({
-          start(c) {
-            c.enqueue(big);
-            c.enqueue(big);
-            c.close();
+        new ReadableStream<Uint8Array>(
+          {
+            pull(c) {
+              pulls++;
+              c.enqueue(new Uint8Array(64));
+            },
+            cancel() {
+              cancelled = true;
+            },
           },
-        }),
-        { status: 200 },
+          { highWaterMark: 0 },
+        ),
+        { status: 200, headers },
       );
-    const declared = () =>
-      new Response(new Uint8Array(big).buffer, {
-        status: 200,
-        headers: { 'content-length': '64' },
-      });
-    let next = streamed;
+    let next = () => endless();
     const client = new RelayClient({ identity, maxRetries: 0, fetch: async () => next() });
     await expect(client.downloadAttachment('img_a000000', { maxBytes: 100 })).rejects.toMatchObject(
       {
         code: 'payload_too_large',
       },
     );
-    next = declared;
-    await expect(client.downloadAttachment('img_a000000', { maxBytes: 63 })).rejects.toMatchObject({
-      code: 'payload_too_large',
-    });
+    // The second 64-byte chunk crossed the cap: nothing after it was asked for.
+    expect(pulls).toBe(2);
+    expect(cancelled).toBe(true);
+
+    pulls = 0;
+    cancelled = false;
+    next = () => endless({ 'content-length': '1000000' });
+    await expect(client.downloadAttachment('img_a000000', { maxBytes: 100 })).rejects.toMatchObject(
+      {
+        code: 'payload_too_large',
+      },
+    );
+    expect(pulls).toBe(0);
+    expect(cancelled).toBe(true);
+
+    next = () => new Response(new Uint8Array(64).buffer, { status: 200 });
     expect(await client.downloadAttachment('img_a000000', { maxBytes: 64 })).toHaveLength(64);
-    next = streamed;
-    expect(await client.downloadAttachment('img_a000000')).toHaveLength(128);
+    expect(await client.downloadAttachment('img_a000000')).toHaveLength(64);
   });
 });

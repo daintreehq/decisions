@@ -46,7 +46,10 @@ export interface PhoneImageFile {
  * - It must be idempotent per `(questionId, attachmentId)`: a crash between storing and delivering calls it again
  *   for the same image, and it should return the same path rather than write a second copy.
  * - The path is typed into the pane as given, so it must be one line of at most `MAX_IMAGE_PATH_BYTES` UTF-8
- *   bytes with no control characters; anything else is reported as `store_failed`. It is also kept in the local
+ *   bytes with no control, format (bidi, zero-width) or separator characters and no surrounding space
+ *   (`isTypablePath`); anything else is reported as `store_failed`.
+ * - All of one answer's images get `PHONE_IMAGE_TIMEOUT_MS` together; a store still pending then is listed as
+ *   `timed_out`, and its late result is ignored. It is also kept in the local
  *   store, in clear, as delivery bookkeeping (so a retried delivery reuses the file), so it must not carry the
  *   alt text or other content.
  * - A rejection lists the image as unavailable (`store_failed`).
@@ -77,7 +80,9 @@ export type PhoneImageUnavailableReason =
   /** The host has no `PhoneImageStore`. */
   | 'no_image_store'
   /** The host's store rejected the image or returned a path that cannot be typed. */
-  | 'store_failed';
+  | 'store_failed'
+  /** Fetching, checking and storing the carrier's images ran past `PHONE_IMAGE_TIMEOUT_MS`. */
+  | 'timed_out';
 
 /** One image as the block lists it: the stored path, or why there is none. */
 export type ResolvedPhoneImage =
@@ -86,6 +91,12 @@ export type ResolvedPhoneImage =
 
 /** AES-GCM appends a 16-byte tag: the ciphertext is exactly this much longer than the image. */
 const GCM_TAG_BYTES = 16;
+
+/**
+ * How long one answer's or message's images may take, all together, before the rest are listed as `timed_out`:
+ * the words wait for them, and a stalled relay or host must not hold the words back for good.
+ */
+export const PHONE_IMAGE_TIMEOUT_MS = 30_000;
 
 export interface ResolvePhoneImagesInput {
   questionId: string;
@@ -97,6 +108,10 @@ export interface ResolvePhoneImagesInput {
   images: readonly PhoneImageReference[];
   /** Paths the host already returned for this carrier, by attachment id: reused without a fetch or a write. */
   stored?: ReadonlyMap<string, string>;
+  /** The budget for all of this carrier's images. Default `PHONE_IMAGE_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  /** True once the caller is shutting down: images not yet resolved are listed as `timed_out`. */
+  stopped?: () => boolean;
 }
 
 const withAlt = (alt: string | undefined) => (alt ? { alt } : {});
@@ -130,13 +145,17 @@ export async function resolvePhoneImages(
     ];
   }
   const out: ResolvedPhoneImage[] = [];
+  const deadline = Date.now() + (i.timeoutMs ?? PHONE_IMAGE_TIMEOUT_MS);
+  const over = () => Date.now() >= deadline || i.stopped?.() === true;
   for (const image of i.images) {
     const known = i.stored?.get(image.attachment_id);
     if (known !== undefined && isTypablePath(known)) {
       out.push({ attachmentId: image.attachment_id, ...withAlt(image.alt), path: known });
       continue;
     }
-    const r = await resolveOne(ctx, store, i, image);
+    const r = over()
+      ? 'timed_out'
+      : await within(resolveOne(ctx, store, i, image, over), deadline - Date.now());
     out.push(
       typeof r === 'string'
         ? { attachmentId: image.attachment_id, ...withAlt(image.alt), unavailable: r }
@@ -146,12 +165,28 @@ export async function resolvePhoneImages(
   return out;
 }
 
+type Outcome = PhoneImageUnavailableReason | { path: string };
+
+/** `p`, or `timed_out` once `ms` have passed; the timer never outlives the race. */
+async function within(p: Promise<Outcome>, ms: number): Promise<Outcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<Outcome>((resolve) => {
+    timer = setTimeout(() => resolve('timed_out'), Math.max(0, ms));
+  });
+  try {
+    return await Promise.race([p, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function resolveOne(
   ctx: Pick<BridgeContext, 'identity' | 'client' | 'refreshIdentity'>,
   store: PhoneImageStore | undefined,
   i: ResolvePhoneImagesInput,
   image: PhoneImageReference,
-): Promise<PhoneImageUnavailableReason | { path: string }> {
+  over: () => boolean,
+): Promise<Outcome> {
   // Nothing to hand it to: don't fetch an image only to drop it.
   if (!store) return 'no_image_store';
   let key = ctx.identity.epochs.get(image.key_epoch);
@@ -197,6 +232,8 @@ async function resolveOne(
   if (!sniffed) return 'unsupported_type';
   if (sniffed !== image.mime) return 'type_mismatch';
 
+  // A run that timed out may still finish in the background: it never hands the host a file nobody will list.
+  if (over()) return 'timed_out';
   let stored: { path: string };
   try {
     stored = await store.store({

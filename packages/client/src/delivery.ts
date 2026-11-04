@@ -383,6 +383,7 @@ export class DeliveryEngine {
         signedIds,
         images,
         stored,
+        stopped: () => this.stopped,
       });
       const fresh: { attachment_id: string; path: string }[] = [];
       for (const m of i.images) {
@@ -455,6 +456,16 @@ export class DeliveryEngine {
     if (!(await o.sink.isIdle(target))) {
       res.deferred++;
       return res;
+    }
+    // 0b. Every answer must still be one to type: fetching images takes time, and a cancellation, deletion or
+    //     another delivery may have settled one meanwhile. A later pass rebuilds the chunk without it.
+    for (const q of questions) {
+      const row = await ctx.store.getQuestion(q.question_id);
+      const live = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
+      if (chunk.some((i) => i.q.question_id === q.question_id && !live.has(i.entry.entry_id))) {
+        res.deferred++;
+        return res;
+      }
     }
     const now = ctx.now();
     // 1. Persist the intent BEFORE touching the terminal.

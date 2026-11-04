@@ -234,7 +234,7 @@ export async function openAnswerContent(
       ...(typeof c.confidence === 'number' ? { confidence: c.confidence } : {}),
       ...(typeof c.model_id === 'string' && c.model_id ? { model_id: c.model_id } : {}),
       ...(typeof c.reason === 'string' && c.reason ? { reason: c.reason } : {}),
-      ...openedImages(c),
+      ...answerImageFields(c),
     };
   }
   if (hasLegacyContent(e)) return legacyContent(e);
@@ -247,11 +247,13 @@ export async function openAnswerContent(
 const ImageIds = z.array(Id);
 
 /**
- * The image fields of opened answer content. A seal is authenticated, so these are what inbox stored; they are
- * parsed again all the same, because delivery hands them to the network and the host. A list that does not
- * parse is dropped, and the signed ids that remain make delivery report each of those images unavailable.
+ * The image fields of answer content, parsed: opened from a seal (which is authenticated, but delivery hands them
+ * to the network and the host) or read from an export being imported. A list that does not parse is dropped, and
+ * the signed ids that remain make delivery report each of those images unavailable.
  */
-function openedImages(c: Partial<AnswerContent>): Pick<AnswerContent, 'images' | 'image_ids'> {
+export function answerImageFields(
+  c: Partial<AnswerContent>,
+): Pick<AnswerContent, 'images' | 'image_ids'> {
   const images = PhoneImageReferences.safeParse(c.images ?? []).data ?? [];
   const ids = ImageIds.safeParse(c.image_ids ?? []).data ?? [];
   return {
