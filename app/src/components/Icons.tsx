@@ -163,6 +163,23 @@ export const TerminalIcon = icon(
   'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7 15l3-3-3-3M12 15h5',
   20,
 );
+/** Adding photos to the composer: Lucide's plus. */
+export const PlusIcon = icon('M5 12h14M12 5v14', 22);
+/** Taking a photo with the device's camera: Lucide's camera. */
+export const CameraIcon = ({ size = 20 }: P) => (
+  <Svg size={size}>
+    <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z" />
+    <circle cx="12" cy="13" r="3" />
+  </Svg>
+);
+/** Choosing photos from the library: Lucide's image (one picture; the stacked glyph is the question's files). */
+export const ImageIcon = ({ size = 20 }: P) => (
+  <Svg size={size}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="9" cy="9" r="2" />
+    <path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" />
+  </Svg>
+);
 /** Model provenance: Daintree's rotated-square decision node, small. */
 export const ModelIcon = icon('M12 3l9 9-9 9-9-9z');
 

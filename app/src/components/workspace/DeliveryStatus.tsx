@@ -60,6 +60,7 @@ export function Receipt({
   note,
   steps = true,
   subject,
+  label: words,
 }: {
   progress: DeliveryProgress;
   fromPhone: boolean;
@@ -68,11 +69,13 @@ export function Receipt({
   steps?: boolean;
   /** What is being delivered, for the words of a problem: "Your answer" (default), "Your follow-up". */
   subject?: string;
+  /** Words for a stage the steps don't name, such as photos still uploading before the answer can go. */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const tone = stageTone(progress);
-  const label = receiptLabel(progress);
+  const label = words ?? receiptLabel(progress);
   if (tone === 'attention')
     return (
       <div className="receipt attention" aria-live="off">

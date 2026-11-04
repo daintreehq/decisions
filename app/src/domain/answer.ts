@@ -3,6 +3,7 @@ import {
   HumanAnswerContentV1,
   PROTOCOL_VERSION,
   type ActionKind,
+  type PhoneImageReference,
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
@@ -34,10 +35,15 @@ export interface AnswerInput {
   reviewedDigests: string[];
   explicitApproval?: boolean;
   idempotencyKey?: string;
+  /** The photos going with it, already encrypted (docs/protocol.md section 17); answer and override only. */
+  images?: PhoneImageReference[];
+  /** The action's id, chosen beforehand when its photos must be reserved for it. */
+  actionId?: string;
 }
 
 export interface BuiltRequest {
   kind: HumanActionKind;
+  actionId: string;
   path: string;
   bodyText: string;
   idempotencyKey: string;
@@ -51,8 +57,9 @@ export interface BuiltRequest {
 export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> {
   const expectedRevision = i.expectedRevision;
   assertReviewable(i.view, expectedRevision, i.kind);
-  const actionId = newId();
+  const actionId = i.actionId ?? newId();
   const idempotencyKey = i.idempotencyKey ?? newId();
+  const images = i.kind === 'confirm-proxy' ? [] : (i.images ?? []);
   let envelope = null;
   let confirmsActionId: string | null = null;
 
@@ -68,6 +75,8 @@ export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> 
       reviewed_attachment_digests: i.reviewedDigests,
       explicit_approval: i.explicitApproval,
       reason: i.reason?.trim() ? i.reason : undefined,
+      // Left out when there are none, so an answer without photos is exactly what it always was.
+      ...(images.length ? { images } : {}),
     });
     envelope = await encryptEnvelope({
       epochKey: i.epochKey,
@@ -92,6 +101,7 @@ export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> 
     envelope,
     confirmsActionId,
     actionId,
+    ...(images.length ? { attachmentIds: images.map((m) => m.attachment_id) } : {}),
   });
   const body = ActionBody.parse({
     protocol_version: PROTOCOL_VERSION,
@@ -100,6 +110,7 @@ export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> 
   });
   return {
     kind: i.kind,
+    actionId,
     path: `/questions/${i.view.id}/${i.kind}`,
     bodyText: JSON.stringify(body),
     idempotencyKey,

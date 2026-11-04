@@ -183,6 +183,11 @@ export interface VerifiedAction {
   provenance: Provenance | null;
   signerRole: Role;
   content: AnswerContent | null;
+  /**
+   * A human answer's photos are exactly the ones its signed record lists (docs/protocol.md section 17). When they
+   * are not, the answer still stands and its photos show as unavailable; nothing of them is fetched.
+   */
+  imagesOk: boolean;
 }
 
 export async function verifyActionEvent(
@@ -220,6 +225,7 @@ export async function verifyActionEvent(
     return fail('signature or ciphertext does not match');
   }
   let content: AnswerContent | null = null;
+  let imagesOk = true;
   if (envelope) {
     let plain: unknown;
     try {
@@ -237,6 +243,11 @@ export async function verifyActionEvent(
     );
     if (!c.success) return fail('answer content is malformed');
     content = c.data;
+    if (provenance !== 'proxy')
+      imagesOk = imagesMatchRecord(
+        record.attachment_ids,
+        (c.data as HumanAnswerContentV1).images ?? [],
+      );
   }
   return {
     ok: true,
@@ -245,6 +256,7 @@ export async function verifyActionEvent(
       provenance: provenance === 'none' ? null : provenance,
       signerRole: signer.role,
       content,
+      imagesOk,
     },
   };
 }

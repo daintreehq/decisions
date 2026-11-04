@@ -55,7 +55,7 @@ export function Viewer({
   active: number;
   onActive: (index: number) => void;
   onClose: () => void;
-  onAllFiles: () => void;
+  onAllFiles?: () => void;
   onQuestion: () => void;
   onCompare?: () => void;
   focusFallback: () => HTMLElement | null | undefined;

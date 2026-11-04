@@ -3,6 +3,7 @@ import {
   MESSAGE_RECORD_TYPE,
   MessageBody,
   PROTOCOL_VERSION,
+  type PhoneImageReference,
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedMessage,
@@ -20,6 +21,10 @@ export interface MessageInput {
   epochKey: EpochKey;
   view: QuestionView;
   text: string;
+  /** The photos going with it, already encrypted (docs/protocol.md section 17). */
+  images?: PhoneImageReference[];
+  /** Chosen beforehand when its photos must be reserved for it. */
+  messageId?: string;
 }
 
 export interface BuiltMessage {
@@ -44,13 +49,14 @@ export class ThreadClosedError extends Error {
  */
 export async function buildMessageRequest(i: MessageInput): Promise<BuiltMessage> {
   if (!threadOpen(i.view)) throw new ThreadClosedError();
-  const messageId = newId();
+  const messageId = i.messageId ?? newId();
   const idempotencyKey = newId();
+  const images = i.images ?? [];
   const content = HumanMessageContentV1.parse({
     content_version: 1,
     side: 'human',
     text: i.text,
-    images: [],
+    images,
   });
   const envelope = await encryptEnvelope({
     epochKey: i.epochKey,
@@ -70,6 +76,7 @@ export async function buildMessageRequest(i: MessageInput): Promise<BuiltMessage
     side: 'human',
     signerDeviceId: i.deviceId,
     signingKey: i.signingKey,
+    attachmentIds: images.map((m) => m.attachment_id),
     envelope,
   });
   const body = MessageBody.parse({

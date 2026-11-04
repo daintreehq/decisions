@@ -45,6 +45,18 @@ export interface DraftRow {
   sealed: SealedBlob;
 }
 
+/**
+ * Photo bytes waiting to be sent, sealed under the device's cache key: a draft's chosen photos (plaintext inside the
+ * seal) and a queued answer's or follow-up's encrypted images. `owner` is the draft or outbox row they belong to, so
+ * they go when it goes.
+ */
+export interface BlobRow {
+  id: string;
+  owner: string;
+  createdAt: number;
+  sealed: SealedBlob;
+}
+
 export type UpgradeTx = IDBPTransaction<unknown, string[], 'versionchange'>;
 export type Migration = (db: IDBPDatabase<unknown>, tx: UpgradeTx) => void;
 
@@ -61,6 +73,11 @@ export const MIGRATIONS: Migration[] = [
     const outbox = db.createObjectStore('outbox', { keyPath: 'id' });
     outbox.createIndex('byCreated', 'createdAt');
     db.createObjectStore('drafts', { keyPath: 'questionId' });
+  },
+  // Photos attached to drafts and to queued answers and follow-ups (sealed bytes, kept beside their rows).
+  (db) => {
+    const blobs = db.createObjectStore('blobs', { keyPath: 'id' });
+    blobs.createIndex('byOwner', 'owner');
   },
 ];
 
@@ -194,5 +211,29 @@ export class Db {
   }
   async drafts(): Promise<DraftRow[]> {
     return (await this.raw.getAll('drafts')) as DraftRow[];
+  }
+
+  /* ----- photo bytes (sealed) ----- */
+
+  putBlob(row: BlobRow) {
+    return this.raw.put('blobs', row);
+  }
+  getBlob(id: string) {
+    return this.raw.get('blobs', id) as Promise<BlobRow | undefined>;
+  }
+  deleteBlob(id: string) {
+    return this.raw.delete('blobs', id);
+  }
+  /** Ids of every blob a draft or outbox row owns (no contents are read). */
+  async blobIds(owner: string): Promise<string[]> {
+    return (await this.raw.getAllKeysFromIndex('blobs', 'byOwner', owner)) as string[];
+  }
+  async deleteBlobs(owner: string): Promise<void> {
+    const tx = this.raw.transaction('blobs', 'readwrite');
+    const ids = (await tx.store.index('byOwner').getAllKeys(owner)) as string[];
+    await Promise.all([...ids.map((id) => tx.store.delete(id)), tx.done]);
+  }
+  async countBlobs(): Promise<number> {
+    return this.raw.count('blobs');
   }
 }

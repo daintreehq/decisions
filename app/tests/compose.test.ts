@@ -178,3 +178,40 @@ describe('evidence for approvals', () => {
     ).toBe(true);
   });
 });
+
+describe('photos', () => {
+  it('a photo is the answer where text would be, and a note beside a choice', () => {
+    expect(verdict(input({ photos: 1 }))).toMatchObject({ canSend: true, hasContent: true });
+    expect(verdict(input({ mode: 'message', photos: 2 }))).toMatchObject({ canSend: true });
+    const choice = content({ kind: 'choice', options: OPTIONS });
+    expect(verdict(input({ c: choice, photos: 1 }))).toMatchObject({
+      canSend: false,
+      hasContent: true,
+      hint: 'Choose an option',
+    });
+    expect(verdict(input({ c: choice, photos: 1, selected: ['yes'] })).canSend).toBe(true);
+    const mixed = content({ kind: 'mixed', options: OPTIONS });
+    expect(verdict(input({ c: mixed, photos: 1 })).canSend).toBe(true);
+  });
+
+  it('waits for a photo that is still being prepared', () => {
+    expect(verdict(input({ text: 'Here', photos: 1, preparing: true }))).toMatchObject({
+      canSend: false,
+      hint: 'Preparing your photo…',
+    });
+  });
+
+  it('a photo alone is not a correction', () => {
+    expect(
+      verdict(
+        input({
+          mode: 'correction',
+          text: 'same',
+          reason: 'why',
+          photos: 1,
+          current: { selected: [], text: 'same' },
+        }),
+      ),
+    ).toMatchObject({ canSend: false, hint: 'Change the answer to send a correction' });
+  });
+});
