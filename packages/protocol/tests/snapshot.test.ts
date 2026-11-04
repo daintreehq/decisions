@@ -227,12 +227,18 @@ describe('boundTerminalLines', () => {
     expect(boundTerminalLines('a\u001b]0;cut\u001b[1mb')).toEqual(['ab']);
     expect(boundTerminalLines('a\u0090cut\u009b31mb')).toEqual(['ab']);
   });
+  it('lets CAN and SUB cancel a control string, as a terminal does', () => {
+    expect(boundTerminalLines('a\u001b]title\u0018visible')).toEqual(['avisible']);
+    expect(boundTerminalLines('a\u001bPpayload\u001avisible')).toEqual(['avisible']);
+    expect(boundTerminalLines('a\u009dtitle\u0018visible')).toEqual(['avisible']);
+  });
   it('stays linear on hostile output full of unterminated control strings', () => {
     // quadratic stripping would take minutes here; linear takes milliseconds
     for (const intro of ['\u001bP', '\u001b]', '\u0090', '\u009d', '\u009b']) {
       const started = Date.now();
-      // the final string is terminated (ST), so the line after it survives
-      const lines = boundTerminalLines(('x' + intro).repeat(100_000) + '\u001b\\\nlast');
+      // no terminator anywhere: every string fails to find one, which a quadratic scan pays for to the end of the
+      // text; the closing CSI ends the last string, so the line after it survives
+      const lines = boundTerminalLines(('x' + intro).repeat(100_000) + '\u001b[0m\nlast');
       expect(Date.now() - started, JSON.stringify(intro)).toBeLessThan(2_000);
       expect(lines.at(-1)).toBe('last');
       expect(valid(lines)).toBe(true);

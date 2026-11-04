@@ -201,12 +201,12 @@ export function snapshotFreshness(i: {
 /**
  * Terminal escape sequences, 7-bit (ESC) and 8-bit (C1) forms: control strings (DCS, SOS, PM, APC, OSC) with their
  * payloads, across line breaks; CSI sequences; and the remaining escapes (charset selection, keypad modes, ...).
- * A control string's payload runs to its terminator, or, unterminated, to the next ESC or C1 control or the end of
- * the text, and is removed either way. No scan passes another introducer, so stripping stays linear in the text,
+ * A control string's payload runs to its terminator, or, unterminated, to a CAN or SUB (which cancel it, as in a
+ * terminal), the next ESC or C1 control, or the end of the text, and is removed either way. No scan passes another introducer, so stripping stays linear in the text,
  * however hostile the pane output.
  */
 const ESCAPES =
-  /(?:\u001b[P^_X]|[\u0090\u0098\u009e\u009f])[^\u001b\u0080-\u009f]*(?:\u001b\\|\u009c|(?=[\u001b\u0080-\u009f])|$)|(?:\u001b\]|\u009d)[^\u0007\u001b\u0080-\u009f]*(?:\u0007|\u001b\\|\u009c|(?=[\u001b\u0080-\u009f])|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|\u001b[ -/]*[0-~]/g;
+  /(?:\u001b[P^_X]|[\u0090\u0098\u009e\u009f])[^\u0018\u001a\u001b\u0080-\u009f]*(?:\u001b\\|\u009c|(?=[\u0018\u001a\u001b\u0080-\u009f])|$)|(?:\u001b\]|\u009d)[^\u0007\u0018\u001a\u001b\u0080-\u009f]*(?:\u0007|\u001b\\|\u009c|(?=[\u0018\u001a\u001b\u0080-\u009f])|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|\u001b[ -/]*[0-~]/g;
 const CONTROL_ALL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
 
 /**
