@@ -15,6 +15,7 @@ import {
   type Requirement,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { nextAllowed } from '../push/quiet-hours.js';
@@ -347,9 +348,6 @@ function actionHandler(kind: ActionKind): Handler {
     ) {
       throw bad('record does not belong to the authenticated device');
     }
-    // Phone images (docs/protocol.md section 17) need upload binding this relay does not implement yet, and it
-    // does not advertise `phone-images-v1`: an answer naming images could never have them.
-    if (record.attachment_ids?.length) throw bad('this relay does not accept phone images yet');
     const afterRevision = BUMPS.has(kind) ? record.expected_revision + 1 : record.expected_revision;
     if (envelope) {
       checkEnvelopeBinding(
@@ -474,6 +472,16 @@ function actionHandler(kind: ActionKind): Handler {
           throw bad('expires_at must be in the future (or null)');
         }
       }
+      // The phone images an answer or override lists bind with it, or it does not commit (section 17).
+      bindPhoneImages(room, {
+        questionId: qid,
+        signerDeviceId: auth.deviceId,
+        binding: { kind: 'answer', record_id: record.action_id },
+        ids: record.attachment_ids ?? [],
+        publisherDeviceId: q.creator_device_id,
+        t,
+        retainMs: retentionMs(room),
+      });
       const provenance = provenanceForAction(kind);
       const terminal = tr.status === 'human-answered' || tr.status === 'cancelled';
       room.run(
@@ -659,8 +667,10 @@ export const getQuestion: Handler = async (room, c) => {
     created_at: number;
     event_seq: number;
   }>(`SELECT * FROM actions WHERE question_id = ? ORDER BY event_seq`, id);
+  // The question's own images only: phone images are listed by the answers and messages that reference them.
   const attachments = room.q<{ attachment_id: string; state: string; ciphertext_bytes: number }>(
-    `SELECT attachment_id, state, ciphertext_bytes FROM attachments WHERE question_id = ? ORDER BY created_at`,
+    `SELECT attachment_id, state, ciphertext_bytes FROM attachments WHERE question_id = ? AND kind = 'question'
+     ORDER BY created_at`,
     id,
   );
   const deliveries = room.q<{

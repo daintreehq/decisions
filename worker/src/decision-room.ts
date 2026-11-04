@@ -30,6 +30,7 @@ import type { Auth, DeviceRow, Handler, JobInput, Room, RouteCtx, Settings } fro
 import { ROUTES } from './routes/index.js';
 import { processDueJobs } from './jobs/alarm.js';
 import { applyAck } from './room/ack.js';
+import { assertUploaderRole } from './room/phone-images.js';
 import { nextSnapshotRetention, sweepSnapshotRetention } from './room/snapshots.js';
 import {
   errorResponse,
@@ -456,11 +457,13 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
       const a = this.q1<{
         object_key: string;
         state: string;
+        kind: string;
         creator_device_id: string;
         ciphertext_bytes: number;
         sha256_ciphertext: string;
         upload_expires_at: number;
       }>(`SELECT * FROM attachments WHERE attachment_id = ?`, attachmentId);
+      if (a) assertUploaderRole(a.kind, auth.role);
       if (!a || a.creator_device_id !== auth.deviceId)
         throw new ApiError('not_found', 'no such attachment');
       if (a.state !== 'reserved')
@@ -501,11 +504,25 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     attachmentId: string,
   ): Promise<RpcResult<{ object_key: string; bytes: number }>> {
     return this.wrap('download', () => {
-      const a = this.q1<{ object_key: string; state: string; ciphertext_bytes: number }>(
-        `SELECT object_key, state, ciphertext_bytes FROM attachments WHERE attachment_id = ?`,
+      const a = this.q1<{
+        object_key: string;
+        state: string;
+        ciphertext_bytes: number;
+        kind: string;
+        bound: number;
+        delete_after: number | null;
+      }>(
+        `SELECT object_key, state, ciphertext_bytes, kind, bound, delete_after FROM attachments WHERE attachment_id = ?`,
         attachmentId,
       );
       if (!a || a.state !== 'available') throw new ApiError('not_found', 'attachment unavailable');
+      // A phone image is readable only once a committed answer or message lists it, and only until its
+      // retention ends, even if the alarm that deletes it runs late.
+      if (
+        a.kind === 'phone' &&
+        (!a.bound || (a.delete_after !== null && a.delete_after <= nowMs()))
+      )
+        throw new ApiError('not_found', 'attachment unavailable');
       return { object_key: a.object_key, bytes: a.ciphertext_bytes };
     });
   }

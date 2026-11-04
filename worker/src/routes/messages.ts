@@ -12,10 +12,11 @@ import {
   type MessageSide,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { deviceFeatures } from './devices.js';
-import { expireQuestionNow, sweepExpired, type QuestionRow } from './questions.js';
+import { expireQuestionNow, retentionMs, sweepExpired, type QuestionRow } from './questions.js';
 import { withReceipt } from './receipts.js';
 
 /*
@@ -74,9 +75,6 @@ export const postMessage: Handler = async (room, c) => {
   if (record.installation_id !== auth.installationId || record.signer_device_id !== auth.deviceId) {
     throw bad('record does not belong to the authenticated device');
   }
-  // Phone images (section 17) need upload binding this relay does not implement yet, and it does not advertise
-  // `phone-images-v1`: a message naming images could never have them.
-  if (record.attachment_ids.length) throw bad('this relay does not accept phone images yet');
   if (envelope.key_epoch > room.currentEpoch()) throw bad('envelope uses an unknown key epoch');
   if ((await sha256Hex(canonicalize(envelope))) !== record.envelope_digest)
     throw bad('envelope digest mismatch');
@@ -160,6 +158,17 @@ export const postMessage: Handler = async (room, c) => {
     ) {
       throw new ApiError('invalid_state', "the question's desktop does not accept messages");
     }
+
+    // The phone images a human message lists bind with it, or it does not commit (section 17).
+    bindPhoneImages(room, {
+      questionId: qid,
+      signerDeviceId: auth.deviceId,
+      binding: { kind: 'message', record_id: record.message_id },
+      ids: record.attachment_ids,
+      publisherDeviceId: q.creator_device_id,
+      t,
+      retainMs: retentionMs(room),
+    });
 
     const seq = count + 1;
     const ev = room.emit('decision.message.posted', {

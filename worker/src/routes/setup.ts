@@ -17,6 +17,7 @@ import { iso, json, nowMs } from '../util.js';
 /** The extensions this relay implements (docs/protocol.md section 19), advertised in `GET /info`. */
 export const RELAY_FEATURES: readonly ProtocolFeature[] = [
   'pane-snapshots-v1',
+  'phone-images-v1',
   'thread-messages-v1',
 ];
 

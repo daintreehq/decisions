@@ -147,7 +147,11 @@ function threadAwaitsPerson(
   return threadAwaitsHuman({ status, messages, lastHumanActionSeq: lastHuman ?? null });
 }
 
-/** Marks every not-yet-removed attachment of a question as deleted, synchronously, and returns what to purge. */
+/**
+ * Marks every not-yet-removed attachment of a question as deleted, synchronously, and returns what to purge.
+ * Retention (`force` false) covers the question's own images: each phone image keeps its own retention from
+ * the commit that bound it. Deleting the question (`force`) removes both kinds.
+ */
 function claimAttachmentsForDeletion(
   room: Room,
   questionId: string,
@@ -155,14 +159,16 @@ function claimAttachmentsForDeletion(
 ): { attachment_id: string; object_key: string }[] {
   const q = getQuestion(room, questionId);
   if (q && !force && (q.status === 'open' || q.status === 'proxy-answered')) return [];
+  const kinds = force ? `kind IN ('question','phone')` : `kind = 'question'`;
   const rows = room.q<{ attachment_id: string; object_key: string }>(
-    `SELECT attachment_id, object_key FROM attachments WHERE question_id = ? AND object_deleted = 0`,
+    `SELECT attachment_id, object_key FROM attachments WHERE question_id = ? AND object_deleted = 0 AND ${kinds}`,
     questionId,
   );
   // The claim happens in the same synchronous section as the check above, so binding or reopening
   // cannot slip in while R2 is being cleaned: they require state 'available'.
   room.run(
-    `UPDATE attachments SET state = 'deleted', deleted_at = COALESCE(deleted_at, ?) WHERE question_id = ? AND object_deleted = 0`,
+    `UPDATE attachments SET state = 'deleted', deleted_at = COALESCE(deleted_at, ?)
+     WHERE question_id = ? AND object_deleted = 0 AND ${kinds}`,
     nowMs(),
     questionId,
   );
@@ -258,6 +264,25 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
         `UPDATE attachments SET object_deleted = 1 WHERE attachment_id = ?`,
         job.attachment_id ?? '',
       );
+      return;
+    }
+    case 'delete_phone_image': {
+      // A bound phone image's retention ended. Claim it synchronously before touching R2, so nothing can read
+      // it while the object goes; a retry after a failed delete finds the claim and finishes the job.
+      const id = job.attachment_id ?? '';
+      const a = room.q1<{ object_key: string; delete_after: number | null; object_deleted: number }>(
+        `SELECT object_key, delete_after, object_deleted FROM attachments WHERE attachment_id = ? AND kind = 'phone'`,
+        id,
+      );
+      if (!a || a.object_deleted || a.delete_after === null) return;
+      if (a.delete_after > nowMs()) return { deferUntil: a.delete_after };
+      room.run(
+        `UPDATE attachments SET state = 'deleted', deleted_at = COALESCE(deleted_at, ?) WHERE attachment_id = ?`,
+        nowMs(),
+        id,
+      );
+      await room.env.ATTACHMENTS.delete(a.object_key);
+      room.run(`UPDATE attachments SET object_deleted = 1 WHERE attachment_id = ?`, id);
       return;
     }
     case 'purge': {

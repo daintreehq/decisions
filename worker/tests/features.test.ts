@@ -86,6 +86,7 @@ describe('declaring features', () => {
   it('advertises the extensions the relay implements', async () => {
     expect((await raw('GET', '/api/v1/info')).json.features).toEqual([
       'pane-snapshots-v1',
+      'phone-images-v1',
       'thread-messages-v1',
     ]);
   });

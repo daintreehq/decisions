@@ -74,7 +74,9 @@ export const ROUTES: Route[] = [
   r('POST', `/questions/${ID}/snapshot/refresh`, 'signed', snapshots.requestRefresh, HUMAN_ROLES),
 
   r('POST', '/attachments/reservations', 'signed', attachments.reserve, DESKTOP_ROLES),
-  r('POST', `/attachments/${ID}/complete`, 'signed', attachments.complete, DESKTOP_ROLES),
+  r('POST', `/questions/${ID}/images/reservations`, 'signed', attachments.reservePhoneImage, HUMAN_ROLES),
+  // Question images are completed by desktops, phone images by phones and tablets: the reservation decides.
+  r('POST', `/attachments/${ID}/complete`, 'signed', attachments.complete, ANY),
 
   r('GET', '/devices', 'signed', devices.listDevices, ANY),
   r('GET', `/devices/${ID}/key-grants`, 'signed', devices.keyGrants, ANY),

@@ -208,10 +208,10 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     // A key epoch the relay has never had.
     const future = { ...w.epoch, epoch: 9 };
     expect(await why(say(w, phone, questionId, { epoch: future }))).toMatch(/key epoch/);
-    // Phone images need the image extension, which this relay does not implement yet.
-    expect(await why(say(w, phone, questionId, { attachmentIds: [newId()] }))).toMatch(
-      /phone images/,
-    );
+    // Phone images need a publishing desktop that takes them (this one declared threads only).
+    const imaged = await say(w, phone, questionId, { attachmentIds: [newId()] });
+    expect(imaged.res.status).toBe(409);
+    expect(imaged.res.json.message).toMatch(/phone images/);
     // A human message never expects a reply; an envelope over the limit never parses.
     expect(await why(say(w, phone, questionId, { expectsReply: true }))).toMatch(/expects_reply/);
     const big = await say(w, phone, questionId);

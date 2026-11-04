@@ -10,6 +10,8 @@ import {
   type DeviceCert,
   type EpochGrant,
   type PairingInvitePayload,
+  type PhoneImageBinding,
+  type PhoneImageReference,
   type Requirement,
   type Role,
 } from '@daintreehq/decisions-protocol';
@@ -336,6 +338,8 @@ export async function act(
     idempotencyKey?: string;
     actionId?: string;
     epoch?: EpochKey;
+    /** Phone images the signed record lists (`ActionRecord.attachment_ids`, answer and override only). */
+    attachmentIds?: string[];
   } = {},
 ) {
   const bumps = ['answer', 'override', 'proxy-answer', 'confirm-proxy', 'reopen'].includes(kind);
@@ -371,6 +375,13 @@ export async function act(
     expiresAt: opts.expiresAt ?? null,
     ...(opts.actionId ? { actionId: opts.actionId } : {}),
   });
+  if (opts.attachmentIds) {
+    const { signature: _s, ...unsigned } = signed.record;
+    signed.record = (await signObject(actor.keys.signing.privateKey, {
+      ...unsigned,
+      attachment_ids: opts.attachmentIds,
+    })) as typeof signed.record;
+  }
   const res = await actor.call('POST', `/api/v1/questions/${questionId}/${kind}`, {
     protocol_version: PROTOCOL_VERSION,
     idempotency_key: opts.idempotencyKey ?? newId(),
@@ -452,6 +463,121 @@ export async function uploadImage(
   return { attachmentId, enc, put, complete };
 }
 
+export interface PhoneUpload {
+  attachmentId: string;
+  enc: Awaited<ReturnType<typeof encryptAttachment>>;
+  reserve: Res;
+  put: Res | null;
+  complete: Res | null;
+  /** What the encrypted answer or message content says about the image. */
+  ref: PhoneImageReference;
+}
+
+/** A small png: an 8-byte signature and some pixels. */
+export const PNG = new Uint8Array([
+  0x89,
+  0x50,
+  0x4e,
+  0x47,
+  0x0d,
+  0x0a,
+  0x1a,
+  0x0a,
+  ...Array.from({ length: 200 }, (_, i) => (i * 7) & 255),
+]);
+
+/**
+ * Phone-side image flow (docs/protocol.md section 17): encrypt, reserve for one answer or message on an existing
+ * question, PUT the ciphertext, complete. `until` stops after the named step.
+ */
+export async function uploadPhoneImage(
+  w: World,
+  actor: Actor,
+  questionId: string,
+  binding: PhoneImageBinding,
+  o: {
+    plaintext?: Uint8Array;
+    sendBytes?: Uint8Array;
+    until?: 'reserve' | 'put';
+    attachmentId?: string;
+    idempotencyKey?: string;
+  } = {},
+): Promise<PhoneUpload> {
+  const plaintext = o.plaintext ?? PNG;
+  const attachmentId = o.attachmentId ?? newId();
+  const epoch = actor.epoch ?? w.epoch;
+  const enc = await encryptAttachment(
+    epoch,
+    { installationId: w.installationId, questionId, attachmentId, keyEpoch: epoch.epoch },
+    plaintext,
+  );
+  const ref: PhoneImageReference = {
+    attachment_id: attachmentId,
+    mime: 'image/png',
+    size: plaintext.length,
+    sha256: enc.sha256Plaintext,
+    nonce: enc.nonce,
+    key_epoch: epoch.epoch,
+  };
+  const reserve = await actor.call('POST', `/api/v1/questions/${questionId}/images/reservations`, {
+    protocol_version: PROTOCOL_VERSION,
+    idempotency_key: o.idempotencyKey ?? newId(),
+    attachment_id: attachmentId,
+    binding,
+    ciphertext_bytes: enc.ciphertext.length,
+    sha256_ciphertext: enc.sha256Ciphertext,
+    mime_category: 'image',
+  });
+  const out: PhoneUpload = { attachmentId, enc, reserve, put: null, complete: null, ref };
+  if (reserve.status !== 201 || o.until === 'reserve') return out;
+  out.put = await putCiphertext(w, actor, attachmentId, enc, o.sendBytes);
+  if (out.put.status !== 200 || o.until === 'put') return out;
+  out.complete = await actor.call('POST', `/api/v1/attachments/${attachmentId}/complete`, {
+    protocol_version: PROTOCOL_VERSION,
+  });
+  return out;
+}
+
+/** Streams ciphertext the way a client does: the signature covers the declared digest, not the bytes sent. */
+export async function putCiphertext(
+  w: World,
+  actor: Actor,
+  attachmentId: string,
+  enc: { ciphertext: Uint8Array; sha256Ciphertext: string },
+  sendBytes?: Uint8Array,
+): Promise<Res> {
+  const path = `/api/v1/attachments/${attachmentId}/content`;
+  const body = sendBytes ?? enc.ciphertext;
+  const signed = await signRequest({
+    method: 'PUT',
+    path,
+    body: enc.ciphertext,
+    installationId: w.installationId,
+    deviceId: actor.id,
+    signingKey: actor.keys.signing.privateKey,
+  });
+  return raw('PUT', path, {
+    body,
+    headers: {
+      authorization: signed.authorization,
+      'x-content-sha256': enc.sha256Ciphertext,
+      'content-length': String(body.length),
+    },
+  });
+}
+
+/** Downloads an attachment's ciphertext as `actor`. */
+export async function download(
+  actor: Actor,
+  attachmentId: string,
+): Promise<{ status: number; bytes: Uint8Array }> {
+  const path = `/api/v1/attachments/${attachmentId}/content`;
+  const res = await exports.default.fetch(
+    new Request(ORIGIN + path, { headers: { authorization: await actor.authHeader('GET', path) } }),
+  );
+  return { status: res.status, bytes: new Uint8Array(await res.arrayBuffer()) };
+}
+
 export { sha256Hex, bytesToBase64Url, type PairingInvitePayload };
 
 /** Declares `features` the way a client does, on a socket ticket; the relay records it for the device. */
@@ -507,6 +633,8 @@ export interface SayOpts {
   messageId?: string;
   idempotencyKey?: string;
   attachmentIds?: string[];
+  /** The phone images the encrypted human content references. */
+  images?: PhoneImageReference[];
   epoch?: EpochKey;
   /** Edits the record before it is signed (for binding tests). */
   edit?: (record: Record<string, unknown>) => void;
@@ -533,7 +661,7 @@ export async function say(w: World, actor: Actor, questionId: string, o: SayOpts
     purpose: 'message-content',
     plaintext:
       side === 'human'
-        ? { content_version: 1, side, text, images: [] }
+        ? { content_version: 1, side, text, images: o.images ?? [] }
         : { content_version: 1, side, text },
   });
   const unsigned: Record<string, unknown> = {
