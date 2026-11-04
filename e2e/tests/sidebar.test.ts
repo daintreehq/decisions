@@ -142,7 +142,10 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     await bridge.pump();
     // The closed sidebar holds the same text in its Recent list, so look for it on the page itself.
     await page.goto(relay.origin + '/');
-    await page.locator('main').getByText('Approve the compact sidebar').waitFor({ timeout: 30_000 });
+    await page
+      .locator('main')
+      .getByText('Approve the compact sidebar')
+      .waitFor({ timeout: 30_000 });
   });
 
   afterAll(async () => {
