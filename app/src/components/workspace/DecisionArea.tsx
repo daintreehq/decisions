@@ -119,14 +119,18 @@ export function ConflictCard({
   now,
   canCorrect,
   onUseAsCorrection,
+  onSendAsFollowUp,
   onDismiss,
 }: {
   view: QuestionView;
   entry: OutboxEntry;
   current: ActionView | null;
   now: number;
+  /** The answer in force is a model answer still open to overruling. */
   canCorrect: boolean;
   onUseAsCorrection: () => void;
+  /** The answer in force is a person's, which is final: the words can still go as a follow-up. */
+  onSendAsFollowUp?: () => void;
   onDismiss: () => void;
 }) {
   const expired = entry.state === 'expired';
@@ -167,6 +171,11 @@ export function ConflictCard({
         {canCorrect && !expired && (
           <button type="button" className="btn small" onClick={onUseAsCorrection}>
             Use as correction
+          </button>
+        )}
+        {onSendAsFollowUp && !expired && !canCorrect && (
+          <button type="button" className="btn small" onClick={onSendAsFollowUp}>
+            Send as a follow-up
           </button>
         )}
         <button type="button" className="btn small ghost" onClick={onDismiss}>

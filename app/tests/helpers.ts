@@ -1,6 +1,7 @@
 import type { DeviceCert, LedgerEvent, Requirement } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  buildSignedMessage,
   buildSignedQuestion,
   encryptEnvelope,
   exportPublicKey,
@@ -56,6 +57,13 @@ async function actor(
     exchangePub,
   });
   return { id, keys, cert, signingPub, exchangePub };
+}
+
+/** Another desktop the owner certified: it can sign, but it did not publish the world's questions. */
+export async function otherDesktop(w: World): Promise<Actor> {
+  const d = await actor(w.installationId, 'desktop-host', w.owner);
+  await w.trust.addCert(d.cert, null);
+  return d;
 }
 
 export async function makeWorld(): Promise<World> {
@@ -293,4 +301,63 @@ export function plainEvent(
   extra: Partial<LedgerEvent> = {},
 ): LedgerEvent {
   return ev({ event_type: type, question_id: questionId, question_revision: null, data, ...extra });
+}
+
+/** A `decision.message.posted` event: a human follow-up signed by the phone, or the publishing desktop's agent. */
+export async function messageEvent(
+  w: World,
+  o: {
+    questionId: string;
+    side: 'human' | 'agent';
+    text?: string;
+    expectsReply?: boolean;
+    signer?: Actor;
+    /** Content to seal in place of the side's usual shape. */
+    plaintext?: unknown;
+    seq?: number;
+    messageSeq?: number;
+  },
+): Promise<LedgerEvent> {
+  const signer = o.signer ?? (o.side === 'human' ? w.phone : w.desktop);
+  const messageId = newId();
+  const envelope = await encryptEnvelope({
+    epochKey: w.epoch,
+    installationId: w.installationId,
+    questionId: o.questionId,
+    recordId: messageId,
+    recordType: 'thread.message',
+    revision: 0,
+    senderDeviceId: signer.id,
+    purpose: 'message-content',
+    plaintext: o.plaintext ?? {
+      content_version: 1,
+      side: o.side,
+      text: o.text ?? (o.side === 'human' ? 'Also bump the version.' : 'Which version?'),
+      ...(o.side === 'human' ? { images: [] } : {}),
+    },
+  });
+  const m = await buildSignedMessage({
+    installationId: w.installationId,
+    questionId: o.questionId,
+    messageId,
+    side: o.side,
+    signerDeviceId: signer.id,
+    signingKey: signer.keys.signing.privateKey,
+    expectsReply: o.expectsReply ?? false,
+    envelope,
+  });
+  return ev({
+    ...(o.seq ? { seq: o.seq } : {}),
+    event_type: 'decision.message.posted',
+    question_id: o.questionId,
+    question_revision: null,
+    origin_device_id: signer.id,
+    data: {
+      message_seq: o.messageSeq ?? 1,
+      committed_at: nowIso(),
+      record: m.record,
+      envelope: m.envelope,
+      target_host_id: 'host_aaaaaaaa',
+    },
+  });
 }

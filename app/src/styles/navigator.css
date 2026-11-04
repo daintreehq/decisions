@@ -355,6 +355,14 @@
   font-weight: 500;
   color: var(--text);
 }
+/* The agent's question in the thread, waiting on the person: it reads as what needs them, like an unread line. */
+.qrow-a.ask {
+  color: var(--text);
+  font-weight: 500;
+}
+.qrow-a.ask .who {
+  font-weight: 600;
+}
 .qrow-meta {
   display: flex;
   align-items: baseline;
@@ -434,6 +442,10 @@
 .navigator .qrow-a {
   -webkit-line-clamp: 1;
   line-height: 20px;
+}
+/* What the agent is asking is the row's reason to be here: room for its alternatives, not just its opening. */
+.navigator .qrow-a.ask {
+  -webkit-line-clamp: 2;
 }
 /* Project · computer, then the chips; a chip that does not fit takes the next line rather than cutting the
    computer's name. */

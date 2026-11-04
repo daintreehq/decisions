@@ -19,12 +19,18 @@ import {
   type FieldId,
 } from '../../domain/compose.js';
 import type { QuestionView } from '../../domain/model.js';
+import { choiceLine } from '../../domain/lists.js';
+import { ThreadClosedError } from '../../domain/message.js';
 import {
+  agentName,
+  canOverrule,
   currentAnswer,
   deliveryProgress,
   effectiveStatus,
   lastProxyAction,
+  messageProgress,
   originParts,
+  pendingAsk,
   proxyNeedsReview,
   submitKind,
   unreadableHere,
@@ -63,6 +69,7 @@ import { WorkspaceOpening } from './Opening.js';
 import { Sheet } from './Sheet.js';
 import {
   AgentMessage,
+  AgentNote,
   HumanAnswer,
   MessageContext,
   ModelMessage,
@@ -130,10 +137,23 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const verified = view.verification.ok;
   const content = view.content;
   const entries = app.outbox!.forQuestion(id);
-  const pendingEntry = entries.find((e) => e.state === 'queued' || e.state === 'sending');
-  const failed = entries.filter(
-    (e) => e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired',
+  const isRefused = (e: (typeof entries)[number]) =>
+    e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired';
+  // The person's answer (or confirmation) on its way, and the follow-ups queued behind it: separate lanes.
+  const actionEntries = entries.filter((e) => e.kind !== 'message');
+  const pendingEntry = actionEntries.find((e) => e.state === 'queued' || e.state === 'sending');
+  const failed = actionEntries.filter(isRefused);
+  const sentIds = new Set(view.messages.map((m) => m.messageId));
+  const messageEntries = entries.filter(
+    (e) => e.kind === 'message' && !(e.messageId && sentIds.has(e.messageId)),
   );
+  const pendingMessages = messageEntries.filter(
+    (e) => e.state === 'queued' || e.state === 'sending',
+  );
+  const failedMessages = messageEntries.filter(isRefused);
+  /** One identity per follow-up from the moment it is queued: its signed message id, the same once committed. */
+  const messageKey = (e: (typeof entries)[number]) => e.messageId ?? `pm:${e.id}`;
+  const pendingKeys = new Set(pendingMessages.map(messageKey));
   const answer = currentAnswer(view);
   const proxy = lastProxyAction(view);
   const kind = submitKind(view, now);
@@ -145,25 +165,39 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     app.store && pendingEntry
       ? deliveryProgress(view, app.store, pendingEntry.state as 'queued' | 'sending')
       : null;
-  const canCorrect = verified && !!content && kind === 'override' && !pendingEntry;
+  // Only a model answer can be replaced, by overruling it; the person's own answer is final, and anything more they
+  // want to say is a follow-up.
+  const canCorrect =
+    verified && !!content && kind === 'override' && canOverrule(view, now) && !pendingEntry;
+  const ask = pendingAsk(view, now);
+  const followUps = app.followUpsFor(view);
+  // Follow-ups open once the decision is made (sent or on its way), while the thread takes messages. A model answer
+  // still awaiting review is decided first (Confirm or Overrule), unless the agent is asking the person something.
+  const decided =
+    status === 'human-answered' ||
+    (status === 'proxy-answered' && (!modelReview || !!ask)) ||
+    (status === 'open' && !!pendingEntry);
+  const canFollowUp =
+    verified && !!content && followUps === 'yes' && failed.length === 0 && decided;
 
   const answerDraft = useDraft(id, 'answer', view.revision);
   const correctionDraft = useDraft(id, 'correction', view.revision);
+  const messageDraft = useDraft(id, 'message', view.revision);
   const inCorrection = correcting && canCorrect;
-  const mode: ComposeMode = inCorrection ? 'correction' : 'answer';
-  const draft = inCorrection ? correctionDraft : answerDraft;
+  const following = canFollowUp && !inCorrection;
+  const mode: ComposeMode = inCorrection ? 'correction' : following ? 'message' : 'answer';
+  const draft = inCorrection ? correctionDraft : following ? messageDraft : answerDraft;
   const composing =
     verified &&
     !!content &&
-    !pendingEntry &&
-    failed.length === 0 &&
-    (status === 'open' || inCorrection);
+    (following || (!pendingEntry && failed.length === 0 && (status === 'open' || inCorrection)));
   const shape = content ? composeShape(content, mode) : null;
   const activeField: FieldId =
     field && shape?.fields.includes(field) ? field : (shape?.fields[0] ?? 'text');
   const mine = dictAll.binding?.key === draft.key ? dictAll : null;
   const capturing = composing ? dictation.busyFor(draft.key) : false;
-  const stale = composing && draft.loaded && draft.revision !== view.revision;
+  // A follow-up is about the thread, not a revision: a newer revision never holds it back.
+  const stale = composing && mode !== 'message' && draft.loaded && draft.revision !== view.revision;
   const currentContent = answer?.content as {
     selected_option_ids?: string[];
     text?: string;
@@ -191,22 +225,37 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const next = nextQuestion(all, id, now);
   const { project, machine } = originParts(view);
   const excerpt = content ? previewText(content.question, 90) : '';
+  // The decision in force, in one line: the header keeps it in view while the follow-ups after it scroll by. The
+  // header is narrow, so the choice leads and a note only stands in when there is no choice.
+  const answerLine = (() => {
+    const short = (selected: string[], text: string) =>
+      selected.length ? choiceLine(view, selected, '') : choiceLine(view, [], text) || 'No note';
+    if (pendingEntry && pendingEntry.kind !== 'confirm-proxy')
+      return `Answer: ${short(pendingEntry.selected, pendingEntry.text)}`;
+    if (!answer) return null;
+    const c = answer.content as { selected_option_ids?: string[]; text?: string } | null;
+    const line = short(c?.selected_option_ids ?? [], c?.text ?? '');
+    return `${answer.provenance === 'proxy' ? 'Model answer' : 'Answer'}: ${line}`;
+  })();
   const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
 
   // A draft emptied by a revision change simply follows the question; one with words in it waits for Review update.
   // Capture for it settles first: words still arriving belong to the revision they were spoken for.
   const settling = dictation.busyFor(draft.key);
+  // A follow-up draft follows the question's revision whenever nothing is being captured into it.
   useEffect(() => {
     if (!composing || !draft.loaded || draft.revision === view.revision || settling) return;
     const empty = !draft.text.trim() && !draft.reason.trim() && !draft.selected.length;
-    if (empty) drafts.rebind(draft.key, view.revision);
-  }, [composing, draft, view.revision, settling]);
+    if (empty || mode === 'message') drafts.rebind(draft.key, view.revision);
+  }, [composing, draft, view.revision, settling, mode]);
 
-  // The question changed or closed under a running dictation: stop, keep the words, lock Send.
+  // The question changed or closed under a running dictation: stop, keep the words, lock Send. A follow-up only
+  // stops when the thread closes.
   useEffect(() => {
     const b = dictation.getState().binding;
     if (!b || b.questionId !== id || !dictation.isActive()) return;
-    if (b.revision !== view.revision || !composing) void dictation.stop(MESSAGES.changed);
+    if (!composing || (b.mode !== 'message' && b.revision !== view.revision))
+      void dictation.stop(MESSAGES.changed);
   }, [id, view.revision, composing]);
 
   // Leaving the question (another question, History, Settings) stops capture and saves to this question.
@@ -271,8 +320,37 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     drafts.edit(draft.key, { selected: [optionId] });
   };
 
+  const sendFollowUp = async () => {
+    if (!verdict?.canSend) return;
+    const d = drafts.get(draft.key)!;
+    if (dictation.busyFor(d.key)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await app.sendMessage({ view, text: d.text });
+      dictation.release(d.key);
+      await drafts.sent(d.key);
+      announce(
+        navigator.onLine
+          ? 'Your follow-up is queued and sending.'
+          : 'Queued on this device. It will send when you’re back online.',
+      );
+    } catch (e) {
+      setError(
+        e instanceof ThreadClosedError
+          ? 'This question no longer takes messages. Your words are kept.'
+          : e instanceof Error
+            ? e.message
+            : 'Could not prepare your follow-up.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const commit = async () => {
     if (!shape || !verdict) return;
+    if (mode === 'message') return sendFollowUp();
     const d = drafts.get(draft.key)!;
     const k = mode === 'answer' ? 'answer' : 'override';
     // Everything is checked again at the moment of Send, not only when the button was enabled.
@@ -398,11 +476,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     onSelect: () => void navigator.clipboard?.writeText(id).catch(() => undefined),
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
-  if (canCorrect && !inCorrection)
-    menu.push({
-      label: hasWords(correctionDraft) ? 'Resume correction' : 'Change answer',
-      onSelect: startCorrection,
-    });
   // Clearing is an explicit loss with Undo, so it lives here rather than in the composer.
   if (composing && hasWords(draft))
     menu.push({
@@ -448,7 +521,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         {next && moveOn(false)}
       </AnswerDock>
     );
-  } else if (pendingEntry) {
+  } else if (pendingEntry && !following) {
     // The reply and its receipt are in the thread; the dock offers what comes next.
     dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
   } else if (failed.length > 0) {
@@ -469,34 +542,49 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   } else if (composing && shape && verdict) {
     const voice = !dictation.unavailable();
     const reason = activeField === 'reason';
+    const message = mode === 'message';
+    // A follow-up names who it goes to when the agent is waiting on it; otherwise it is plainly something more.
+    const followUp = ask ? `Reply to ${agentName(view)}` : 'Add a follow-up';
     const placeholder = reason
       ? 'Why are you changing it?'
-      : mode === 'correction'
-        ? 'Write the corrected answer'
-        : shape.textIsAnswer
-          ? voice
-            ? 'Type or hold to talk'
-            : 'Type an answer'
-          : 'Add a note';
+      : message
+        ? followUp
+        : mode === 'correction'
+          ? 'Write the corrected answer'
+          : shape.textIsAnswer
+            ? voice
+              ? 'Type or hold to talk'
+              : 'Type an answer'
+            : 'Add a note';
     const focusedPlaceholder = reason
       ? 'Why are you changing it?'
-      : mode === 'correction'
-        ? 'Write the corrected answer'
-        : shape.textIsAnswer
-          ? 'Type an answer'
-          : 'Add a note';
+      : message
+        ? followUp
+        : mode === 'correction'
+          ? 'Write the corrected answer'
+          : shape.textIsAnswer
+            ? 'Type an answer'
+            : 'Add a note';
     const fieldNoun = reason
       ? 'reason'
-      : shape.textIsAnswer || mode === 'correction'
-        ? 'answer'
-        : 'note';
+      : message
+        ? ask
+          ? 'reply'
+          : 'follow-up'
+        : shape.textIsAnswer || mode === 'correction'
+          ? 'answer'
+          : 'note';
     const fieldLabel = reason
       ? 'Reason for the change'
-      : mode === 'correction'
-        ? 'Corrected answer'
-        : shape.textIsAnswer
-          ? 'Answer'
-          : 'Note';
+      : message
+        ? ask
+          ? 'Reply'
+          : 'Follow-up'
+        : mode === 'correction'
+          ? 'Corrected answer'
+          : shape.textIsAnswer
+            ? 'Answer'
+            : 'Note';
     const two = shape.fields.length > 1;
     dock = (
       <AnswerDock>
@@ -518,6 +606,19 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               : null
           }
           caption={mode === 'correction' && reason ? 'Reason · required' : null}
+          // A follow-up is a chat message: Send, named in full for assistive tech, keeps the save state beside it on
+          // one line. The bubble it becomes says "Follow-up".
+          sendLabel={message ? 'Send' : undefined}
+          sendName={message ? (ask ? 'Send reply' : 'Send follow-up') : undefined}
+          above={
+            // Once the answer is on its way, moving on stays one tap away beside the follow-up.
+            message && next ? (
+              <button type="button" className="btn small ghost dock-next-quiet" onClick={goNext}>
+                Next question
+                <ArrowRight size={16} />
+              </button>
+            ) : undefined
+          }
           dict={mine}
           voice={voice}
           stale={stale}
@@ -574,6 +675,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   } else if (modelReview && proxy) {
     // Confirm and Overrule live on the model's message; moving on stays here, quieter than Confirm.
     dock = <AnswerDock>{moveOn(false)}</AnswerDock>;
+  } else if (decided && followUps === 'desktop') {
+    // The relay takes follow-ups, but the computer that asked can't type them into the terminal yet.
+    dock = (
+      <AnswerDock>
+        <p className="dock-line">Follow-ups need a newer Daintree on the computer that asked.</p>
+        {moveOn(true)}
+      </AnswerDock>
+    );
   } else {
     // Answered, expired or withdrawn: the thread says which; the dock offers the next question.
     dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
@@ -657,7 +766,54 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           Some activity could not be verified
         </SystemLine>,
       );
-    for (const a of view.actions) {
+    // Answers, model answers, lifecycle lines and the thread's messages, in ledger order.
+    const timeline: (
+      | { seq: number; a: (typeof view.actions)[number] }
+      | { seq: number; m: (typeof view.messages)[number] }
+    )[] = [
+      ...view.actions.map((a) => ({ seq: a.seq, a })),
+      ...view.messages.map((m) => ({ seq: m.seq, m })),
+    ].sort((x, y) => x.seq - y.seq);
+    /** The answer each new one replaces, as the loop walks the ledger. */
+    let replaced: (typeof view.actions)[number] | null = null;
+    let lastAnswer: (typeof view.actions)[number] | null = null;
+    for (const t of timeline) {
+      if ('a' in t && t.a.verified && ['answer', 'override', 'proxy-answer'].includes(t.a.action)) {
+        replaced = lastAnswer;
+        lastAnswer = t.a;
+      }
+      if ('m' in t) {
+        const m = t.m;
+        if (!m.verified) {
+          items.push(
+            <SystemLine key={m.messageId} now={now} tone="warn" icon={<WarningIcon size={14} />}>
+              A message could not be verified and was ignored
+            </SystemLine>,
+          );
+        } else if (m.side === 'agent') {
+          items.push(
+            <AgentNote key={m.messageId} view={view} m={m} now={now} asking={ask === m} />,
+          );
+        } else {
+          const p = messageProgress(m);
+          items.push(
+            <OutgoingMessage
+              key={m.messageId}
+              id={`ws-msg-${m.messageId}`}
+              at={m.createdAt}
+              now={now}
+              label="Follow-up"
+              flagged={p.step === 'attention'}
+              // Every follow-up keeps its own receipt: each is typed (or held) on its own.
+              receipt={<Receipt progress={p} fromPhone subject="Your follow-up" />}
+            >
+              <SafeText text={m.text} className="answer-text" />
+            </OutgoingMessage>,
+          );
+        }
+        continue;
+      }
+      const a = t.a;
       if (!a.verified) {
         items.push(
           <SystemLine key={a.actionId} now={now} tone="warn" icon={<WarningIcon size={14} />}>
@@ -673,6 +829,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             key={a.actionId}
             view={view}
             a={a}
+            // Overruling the model makes it the person's answer; only an older app's correction of their own
+            // answer reads as a changed one.
+            changed={a.action === 'override' && replaced?.provenance !== 'proxy'}
             now={now}
             receipt={isCurrent && progress ? <Receipt progress={progress} fromPhone /> : undefined}
             flagged={isCurrent && progress?.step === 'attention'}
@@ -754,10 +913,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       items.push(
         <OutgoingMessage
           key="pending"
+          at={new Date(pendingEntry.createdAt).toISOString()}
           now={now}
           tone="pending"
           id="ws-answer"
-          label={pendingEntry.kind === 'override' ? 'Changed answer' : undefined}
+          label={pendingEntry.kind === 'confirm-proxy' ? undefined : 'Your answer'}
           receipt={
             pendingProgress ? (
               <Receipt
@@ -786,6 +946,71 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         </OutgoingMessage>,
       );
     }
+    for (const e of pendingMessages) {
+      const queuedOffline = e.state === 'queued' && !navigator.onLine;
+      items.push(
+        <OutgoingMessage
+          key={messageKey(e)}
+          at={new Date(e.createdAt).toISOString()}
+          now={now}
+          tone="pending"
+          label="Follow-up"
+          receipt={
+            <Receipt
+              progress={messageProgress(null, e.state as 'queued' | 'sending')}
+              fromPhone
+              subject="Your follow-up"
+              note={queuedOffline ? 'Sends when you’re back online' : undefined}
+            />
+          }
+        >
+          <SafeText text={e.text} className="answer-text" />
+        </OutgoingMessage>,
+      );
+    }
+    for (const e of failedMessages) {
+      const closedThread = e.errorCode === 'invalid_state' || e.state === 'expired';
+      items.push(
+        <OutgoingMessage
+          key={messageKey(e)}
+          at={new Date(e.createdAt).toISOString()}
+          now={now}
+          tone="failed"
+          label="Follow-up · not sent"
+        >
+          <SafeText text={e.text} className="answer-text" />
+          <div className="msg-failure" role="alert">
+            <WarningIcon size={14} />
+            <span>
+              {e.state === 'expired'
+                ? 'Not sent: the question expired first.'
+                : closedThread
+                  ? 'Not sent: this question no longer takes messages.'
+                  : 'Not sent: your relay refused it.'}
+            </span>
+          </div>
+          <div className="row">
+            {!closedThread && (
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => void app.outbox?.retry(e.id)}
+              >
+                Try again
+              </button>
+            )}
+            <CopyButton text={e.text} />
+            <button
+              type="button"
+              className="btn small ghost"
+              onClick={() => void app.outbox?.discard(e.id)}
+            >
+              Remove
+            </button>
+          </div>
+        </OutgoingMessage>,
+      );
+    }
     for (const e of failed)
       items.push(
         <div key={e.id} className="msg out wide">
@@ -794,7 +1019,23 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             entry={e}
             current={answer}
             now={now}
-            canCorrect={canCorrect || kind === 'override'}
+            canCorrect={canCorrect}
+            onSendAsFollowUp={
+              followUps === 'yes' && answer && answer.provenance !== 'proxy'
+                ? () => {
+                    const words = [
+                      e.selected
+                        .map((o) => content.options.find((x) => x.id === o)?.label ?? o)
+                        .join(', '),
+                      e.text.trim(),
+                    ]
+                      .filter(Boolean)
+                      .join('\n\n');
+                    if (!hasWords(messageDraft)) drafts.edit(messageDraft.key, { text: words });
+                    void app.outbox?.discard(e.id);
+                  }
+                : undefined
+            }
             onDismiss={() => {
               if (status === 'open' && !hasWords(answerDraft) && e.text.trim())
                 drafts.edit(answerDraft.key, { text: e.text });
@@ -864,6 +1105,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </div>
         </OutgoingMessage>,
       );
+    if (closed && messageDraft.text.trim())
+      items.push(
+        <OutgoingMessage key="mdraft" now={now} tone="draft" label="Unsent follow-up">
+          <SafeText text={messageDraft.text} className="answer-text" />
+          <div className="row">
+            <CopyButton text={messageDraft.text} />
+          </div>
+        </OutgoingMessage>,
+      );
   }
 
   // On open, a question still waiting for an answer starts at the question; anything else shows its latest item
@@ -876,18 +1126,29 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const itemKeys = items.map((it) => String((it as { key?: string | null }).key ?? ''));
   const keysKey = itemKeys.join('|');
   const lastKey = itemKeys[itemKeys.length - 1] ?? '';
-  const deliveryKey = `${progress?.step ?? ''}/${pendingProgress?.step ?? ''}`;
-  const waitingForAnswer = status === 'open' && !pendingEntry && failed.length === 0;
+  const sentFollowUps = view.messages.filter((m) => m.verified && m.side === 'human');
+  const latestFollowUp = sentFollowUps.at(-1);
+  // Every follow-up's step counts: one further up needing attention is activity too.
+  const deliveryKey = `${progress?.step ?? ''}/${pendingProgress?.step ?? ''}/${sentFollowUps
+    .map((m) => messageProgress(m).step)
+    .join(',')}`;
+  const waitingForAnswer =
+    status === 'open' && !pendingEntry && failed.length === 0 && view.messages.length === 0;
   const shownKeys = useRef<string | null>(null);
   const shownDelivery = useRef(deliveryKey);
-  const following = useRef(true);
+  // A follow-up that has just come to need attention is where "New activity" leads, even when later messages
+  // followed it: its explanation sits under it, not at the end.
+  const followSteps = new Map(sentFollowUps.map((m) => [m.messageId, messageProgress(m).step]));
+  const shownSteps = useRef<Map<string, string> | null>(null);
+  const stuckTarget = useRef<string | null>(null);
+  const followingEnd = useRef(true);
   const [newBelow, setNewBelow] = useState(false);
   const atEnd = (b: HTMLElement) => b.scrollHeight - b.scrollTop - b.clientHeight < 96;
   const onBodyScroll = () => {
     const b = bodyRef.current;
     if (!b) return;
-    following.current = atEnd(b);
-    if (following.current && newBelow) setNewBelow(false);
+    followingEnd.current = atEnd(b);
+    if (followingEnd.current && newBelow) setNewBelow(false);
   };
   /** The latest item: all of it when it fits, otherwise from its start (`end` shows its end instead). */
   const showLatest = (smooth: boolean, end = false) => {
@@ -908,12 +1169,36 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const to = Math.min(max, Math.max(0, top));
     if (smooth) body.scrollTo({ top: to, behavior: reducedMotion() ? 'auto' : 'smooth' });
     else body.scrollTop = to;
-    following.current = max - to < 96;
+    followingEnd.current = max - to < 96;
+  };
+  /** One item, from its start (`id` is its element's), as `showLatest` shows the latest. */
+  const showItem = (id: string, smooth: boolean): boolean => {
+    const body = bodyRef.current;
+    const el = document.getElementById(id);
+    if (!body || !el) return false;
+    const max = body.scrollHeight - body.clientHeight;
+    const top =
+      el.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop - 12;
+    const to = Math.min(Math.max(0, max), Math.max(0, top));
+    if (smooth) body.scrollTo({ top: to, behavior: reducedMotion() ? 'auto' : 'smooth' });
+    else body.scrollTop = to;
+    followingEnd.current = max - to < 96;
+    return true;
   };
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!body || !threadRef.current) return;
     const first = shownKeys.current === null;
+    const priorSteps = shownSteps.current;
+    shownSteps.current = followSteps;
+    // The earliest follow-up that needs attention and did not before (on open: any that does), unless it is the
+    // latest item anyway.
+    const stuck = sentFollowUps.find(
+      (m) =>
+        followSteps.get(m.messageId) === 'attention' &&
+        (first || priorSteps?.get(m.messageId) !== 'attention'),
+    );
+    const stuckId = stuck && stuck.messageId !== lastKey ? `ws-msg-${stuck.messageId}` : null;
     const before = new Set((shownKeys.current ?? '').split('|'));
     // Something new arrived (an item that wasn't there before); a removal alone is not activity.
     const added = itemKeys.filter((k) => !before.has(k));
@@ -923,18 +1208,27 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     shownDelivery.current = deliveryKey;
     if (first) {
       if (waitingForAnswer) body.scrollTop = 0;
-      else showLatest(false);
-      following.current = atEnd(body);
+      else if (!stuckId || !showItem(stuckId, false)) showLatest(false);
+      followingEnd.current = atEnd(body);
       return;
     }
     if (!itemsChanged && !deliveryChanged) return;
     // The person's own reply is always followed; anything else only while they are following the end.
-    const mine = added.includes(lastKey) && (lastKey === 'pending' || lastKey === 'correction');
-    if (mine || following.current) {
-      // A delivery change grows the end of the latest reply (its receipt or problem): show that end.
-      showLatest(true, deliveryChanged && !itemsChanged);
+    const mine =
+      added.includes(lastKey) &&
+      (lastKey === 'pending' || lastKey === 'correction' || pendingKeys.has(lastKey));
+    if (mine) {
+      showLatest(true);
       setNewBelow(false);
-    } else setNewBelow(true);
+    } else if (followingEnd.current) {
+      // A follow-up further up that now needs attention is shown from its start; otherwise a delivery change grows
+      // the end of the latest reply (its receipt or problem): show that end.
+      if (!stuckId || !showItem(stuckId, true)) showLatest(true, deliveryChanged && !itemsChanged);
+      setNewBelow(false);
+    } else {
+      if (stuckId) stuckTarget.current = stuckId;
+      setNewBelow(true);
+    }
   }, [keysKey, deliveryKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Delivery outcomes are announced once, when they happen: typed into the terminal, or needing attention, for the
@@ -952,6 +1246,21 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       announce(`${progress.label}. Open Daintree on your computer to see what happened.`);
   }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The same for the latest follow-up: typed, or needing attention, once each.
+  const followKey = latestFollowUp
+    ? `${latestFollowUp.messageId}:${messageProgress(latestFollowUp).step}`
+    : '';
+  const lastFollow = useRef(followKey);
+  useEffect(() => {
+    const prev = lastFollow.current;
+    lastFollow.current = followKey;
+    if (!followKey || followKey === prev || !latestFollowUp) return;
+    const p = messageProgress(latestFollowUp);
+    if (p.step === 'terminal') announce('Your follow-up was typed into the terminal.');
+    else if (p.step === 'attention')
+      announce(`${p.label}. Open Daintree on your computer to see what happened.`);
+  }, [followKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div
       ref={rootRef}
@@ -963,6 +1272,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         project={project}
         machine={machine}
         excerpt={excerpt}
+        answerLine={answerLine}
         showExcerpt={headingAway}
         onExcerpt={() => {
           bodyRef.current?.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
@@ -1011,7 +1321,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             className="new-activity"
             onClick={() => {
               setNewBelow(false);
-              showLatest(true);
+              const target = stuckTarget.current;
+              stuckTarget.current = null;
+              if (!target || !showItem(target, true)) showLatest(true);
             }}
           >
             New activity

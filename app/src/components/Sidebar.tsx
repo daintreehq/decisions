@@ -1,11 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { useAgentStates, useNow, useQuestions } from '../app/hooks.js';
+import { useActionCount, useAgentStates, useNow, useQuestions } from '../app/hooks.js';
 import { useLayer } from '../app/layers.js';
 import { Link, usePath, useRoute } from '../app/router.js';
 import { closeSidebar, openSidebar, useSidebarOpen } from '../app/sidebar.js';
 import type { AgentStateView } from '../domain/agentState.js';
 import type { QuestionView } from '../domain/model.js';
-import { hiddenQuestionText, needsAction, needsYou, originParts } from '../domain/selectors.js';
+import { hiddenQuestionText, needsYou, originParts } from '../domain/selectors.js';
 import { previewText } from '../lib/safe-text.js';
 import {
   ConnectionLine,
@@ -152,13 +152,12 @@ function SidebarContent({
   onClose?: () => void;
 }) {
   const path = usePath();
-  const all = useQuestions();
   const now = useNow();
   const recent = useRecent(currentId, hold);
   const agentOf = useAgentStates();
   const slots = useStateSlots(recent, agentOf, hold);
   const recentId = useId();
-  const waiting = all.filter((v) => needsAction(v, now)).length;
+  const waiting = useActionCount(now);
   return (
     <>
       <div className="side-head">
@@ -245,10 +244,10 @@ export function MenuButton() {
   const open = useSidebarOpen();
   const attention = useShellAttention();
   const route = useRoute();
-  const all = useQuestions();
   const now = useNow();
   // Waiting work, where the page itself does not already count it (Home's scopes do).
-  const waiting = route.name === 'inbox' ? 0 : all.filter((v) => needsAction(v, now)).length;
+  const counted = useActionCount(now);
+  const waiting = route.name === 'inbox' ? 0 : counted;
   const name =
     attention === 'offline'
       ? 'Menu, offline'

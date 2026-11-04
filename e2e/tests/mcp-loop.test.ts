@@ -134,6 +134,7 @@ describe.skipIf(!chromiumPath)(
         sink,
         client: relayClient,
         pumpIntervalMs: 0,
+        followUps: true,
       });
       await bridge.start();
 
@@ -282,41 +283,30 @@ describe.skipIf(!chromiumPath)(
       expect(cancel.isError).toBe(true);
     });
 
-    it("a correction on the phone reaches the agent with the human's reason", async () => {
+    it('a follow-up on the phone reaches the agent as a follow-up, and the answer stays in force', async () => {
       const typedBefore = sink.typed.length;
       // answered questions leave the inbox; open it where History links to it
       await page.goto(`${relay.origin}/q/${qid}`);
-      // Change answer lives in the question's overflow menu.
+      // An answer is final: there is no Change answer, and the composer takes a follow-up instead.
       await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
-      await page.getByRole('menuitem', { name: 'Change answer' }).click();
-      await page
-        .getByRole('radio', { name: /No, wait for the server/ })
-        .first()
-        .check();
-      // The reason is the composer's field (with a switch to it when the correction also has text).
-      const why = page.getByRole('button', { name: /Why are you changing it/ });
-      if (await why.isVisible()) await why.click();
+      await page.getByRole('menuitem', { name: 'View activity' }).waitFor();
+      expect(await page.getByRole('menuitem', { name: /Change answer/ }).count()).toBe(0);
+      await page.keyboard.press('Escape');
       await page
         .locator('.dock')
-        .getByRole('textbox', { name: 'Reason for the change' })
-        .fill('Conflicts are too common on shared lists');
-      await page.locator('.dock').getByRole('button', { name: 'Send correction' }).click();
-      await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
+        .getByRole('textbox', { name: 'Follow-up' })
+        .fill('Keep a server round-trip for deletes.');
+      await page.locator('.dock').getByRole('button', { name: 'Send follow-up' }).click();
 
-      await until(async () => sink.typed.length > typedBefore, 30_000, 'the correction');
+      await until(async () => sink.typed.length > typedBefore, 30_000, 'the follow-up');
       const typed = sink.typed.at(-1)!;
       expect(typed.pane).toBe('pane-a');
-      expect(typed.text).toContain('CORRECTS an earlier answer');
-      expect(typed.text).toContain('choice: no');
-      expect(typed.text).toContain('reason: Conflicts are too common on shared lists');
+      expect(typed.text).toContain('FOLLOW-UP');
+      expect(typed.text).toContain('Keep a server round-trip for deletes.');
+      expect(typed.text).not.toContain('CORRECTS');
 
       const view = await call(paneA, 'get_decision', { question_id: qid });
-      expect(view.structuredContent).toMatchObject({ choice: 'no', revision: 2 });
-      const answers = view.structuredContent!.answers as { reason: string; correction: boolean }[];
-      expect(answers.at(-1)).toMatchObject({
-        correction: true,
-        reason: 'Conflicts are too common on shared lists',
-      });
+      expect(view.structuredContent).toMatchObject({ choice: 'yes', revision: 1 });
     });
 
     it('cancel_question withdraws an open question, and the phone shows it as withdrawn', async () => {

@@ -5,7 +5,8 @@ import { LIMITS, utf8ByteLength, type DecisionContentV1 } from '@daintreehq/deci
  * the editor and the moment of Send all read the same verdict, so the button and the final check never disagree.
  */
 
-export type ComposeMode = 'answer' | 'correction';
+/** What the composer sends: the answer, a correction to a model answer (Overrule), or a follow-up message. */
+export type ComposeMode = 'answer' | 'correction' | 'message';
 /** The draft's text fields. `text` is the answer or note; `reason` exists only in a correction. */
 export type FieldId = 'text' | 'reason';
 
@@ -22,10 +23,22 @@ export interface ComposeShape {
   approval: boolean;
   /** The text fields in the order they appear; the first is the dock's own field. */
   fields: FieldId[];
-  sendLabel: 'Send answer' | 'Send decision' | 'Send correction';
+  sendLabel: 'Send answer' | 'Send decision' | 'Send correction' | 'Send';
 }
 
+/** A follow-up is words and nothing else: no options, no reason, no evidence. */
+const MESSAGE_SHAPE: ComposeShape = {
+  hasOptions: false,
+  textAllowed: true,
+  textIsAnswer: false,
+  mixed: false,
+  approval: false,
+  fields: ['text'],
+  sendLabel: 'Send',
+};
+
 export function composeShape(c: DecisionContentV1, mode: ComposeMode): ComposeShape {
+  if (mode === 'message') return MESSAGE_SHAPE;
   const hasOptions = c.options.length > 0 && c.kind !== 'text';
   const mixed = c.kind === 'mixed' && hasOptions;
   // A correction to a choice is a different choice plus the reason; a separate note would compete with it.
@@ -106,15 +119,20 @@ export function verdict(i: ComposeInput): ComposeVerdict {
   const { shape } = i;
   const text = i.text.trim();
   const bytes = textBytes(i.text);
-  const textOver = Math.max(0, bytes - LIMITS.answerTextBytes);
+  const textOver = Math.max(
+    0,
+    bytes - (i.mode === 'message' ? LIMITS.messageTextBytes : LIMITS.answerTextBytes),
+  );
   // The protocol's reason limit counts UTF-16 units (a zod string max), exactly as `length` does.
   const reasonOver = Math.max(0, i.reason.length - REASON_MAX_CHARS);
   const hasChoice = shape.hasOptions && i.selected.length > 0;
   const hasText = shape.textAllowed && text.length > 0;
   const hasAnswer = shape.hasOptions ? hasChoice || (shape.mixed && hasText) : hasText;
+  const message = i.mode === 'message';
   const hasContent = hasChoice || hasText || (i.mode === 'correction' && !!i.reason.trim());
-  // A correction to an approval is a decision on the same files, so it needs the same evidence.
-  const needsEvidence = shape.approval && i.attachments > 0;
+  // A correction to an approval is a decision on the same files, so it needs the same evidence. A follow-up decides
+  // nothing, so it needs none.
+  const needsEvidence = !message && shape.approval && i.attachments > 0;
   const seen = evidenceSeen(i.evidence);
   const remainingFiles = needsEvidence ? Math.max(0, i.evidence.total - seen) : 0;
   const evidenceOk = !needsEvidence || (i.evidence.total > 0 && seen >= i.evidence.total);
@@ -123,7 +141,7 @@ export function verdict(i: ComposeInput): ComposeVerdict {
     !!i.current &&
     sameSet(shape.hasOptions ? i.selected : [], i.current.selected) &&
     (shape.textAllowed ? text : '') === i.current.text.trim();
-  const reasonOk = i.mode === 'answer' || i.reason.trim().length > 0;
+  const reasonOk = i.mode !== 'correction' || i.reason.trim().length > 0;
 
   let hint: string | null = null;
   if (i.closed) hint = null;
@@ -131,12 +149,15 @@ export function verdict(i: ComposeInput): ComposeVerdict {
   else if (i.capturing === 'capturing') hint = null;
   else if (i.capturing === 'cleaning') hint = null;
   else if (!hasAnswer)
-    hint = shape.mixed
-      ? 'Choose an option or write an answer'
-      : shape.hasOptions
-        ? 'Choose an option'
-        : 'Write an answer';
-  else if (textOver > 0) hint = `Shorten your answer by ${formatBytes(textOver)}`;
+    hint = message
+      ? null
+      : shape.mixed
+        ? 'Choose an option or write an answer'
+        : shape.hasOptions
+          ? 'Choose an option'
+          : 'Write an answer';
+  else if (textOver > 0)
+    hint = `Shorten your ${message ? 'message' : 'answer'} by ${formatBytes(textOver)}`;
   else if (unchanged) hint = 'Change the answer to send a correction';
   else if (!reasonOk) hint = 'Add a reason for the change';
   else if (reasonOver > 0) hint = `Shorten the reason by ${reasonOver} characters`;

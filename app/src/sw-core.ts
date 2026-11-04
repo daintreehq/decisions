@@ -19,6 +19,7 @@ const BODY: Record<string, string> = {
   'decision-new': 'A question needs your input',
   'decision-reminder': 'A question is still waiting',
   'decision-proxy': 'A proxy answer needs your review',
+  'decision-reply': 'A question needs your reply',
   test: 'Notifications are working',
 };
 

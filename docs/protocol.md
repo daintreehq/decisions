@@ -368,11 +368,13 @@ Events: `decision.message.posted` (`EventData.messagePosted`: the `MessageEntry`
 ### 16.1 Answers are final
 
 A human answer is final in the product: saying more after answering is a message, not an `override`, and an app built
-for threads never offers to change a human answer. For compatibility, the relay still accepts a phone's `override`
-of a human answer, unchanged (a new revision, delivered as a correction). Today's phone app corrects answers that way
-until its thread UI ships, phones keep running cached copies of it, 0.3.0 Daintree delivers corrections, and the relay
-cannot tell an older app from a newer one. It is deprecated, and a later protocol version may refuse it. Confirming or
-overruling a proxy (model) answer with `confirm-proxy` or `override` is unchanged and not deprecated.
+for threads never offers to change a human answer. The phone app does not: once a question is answered, its composer
+sends follow-ups (section 16), and it offers an `override` only to overrule a model answer. For compatibility, the
+relay still accepts a phone's `override` of a human answer, unchanged (a new revision, delivered as a correction):
+phones keep running cached copies of the 0.3.0 app, which corrected answers that way, 0.3.0 Daintree delivers
+corrections, and the relay cannot tell an older app from a newer one. It is deprecated, and a later protocol version
+may refuse it. Confirming or overruling a proxy (model) answer with `confirm-proxy` or `override` is unchanged and not
+deprecated.
 
 ### 16.2 Waiting on the person
 

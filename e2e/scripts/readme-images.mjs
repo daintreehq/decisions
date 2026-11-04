@@ -287,9 +287,9 @@ const images = {
             phone(shot('14-detail-proxy'), 262),
           ],
           [
-            'Change your mind',
-            'A correction carries your reason back to the agent.',
-            phone(shot('16-detail-override'), 262),
+            'Follow-ups',
+            'Your answer stays final. Say more, and the agent can reply.',
+            phone(shot('16-detail-follow-up'), 262),
           ],
         ]
           .map(

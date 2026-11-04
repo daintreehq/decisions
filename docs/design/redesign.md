@@ -43,7 +43,7 @@ Decisions is Daintree's sister app and must look like it. **Resolved:** both spe
 2. The question stays identifiable in every file-viewing and answering mode.
 3. Files and questions have different navigation. A horizontal file gesture never changes the question.
 4. **Stop and Send are separate actions.** Silence, a spoken phrase, a release, a swipe or closing a viewer never sends. **Resolved (issue #43):** Send takes the mic's place, so the hand-off is guarded instead of spatial: the right edge never changes while capture runs, and Send arms only after a quiet period once the hand has left the mic, showing itself as not ready until then. A double tap on Stop can never send.
-5. A draft belongs to one question, one reviewed revision and one mode (answer or correction). Late async results can never land in another question or a newer revision.
+5. A draft belongs to one question, one reviewed revision and one mode (answer, correction or follow-up). Late async results can never land in another question or a newer revision.
 6. Normal movement is reversible: going back restores the file, scroll, draft, filters and search.
 7. Selecting an option is reversible until Send. No option is preselected.
 8. An answer never silently authorises a newer question revision.
@@ -52,7 +52,8 @@ Decisions is Daintree's sister app and must look like it. **Resolved:** both spe
 11. Status claims match evidence: saved on this device, saved on your relay, received by your computer and delivered to the terminal are different labels.
 12. Every gesture has a visible, tappable and keyboard-operable alternative.
 13. Failures keep recoverable work on screen and say what was not saved.
-14. No routine confirmation for a safely saved draft. Confirm only real loss or a deliberate corrective action (a correction, unpairing, discarding a correction).
+14. No routine confirmation for a safely saved draft. Confirm only real loss or a deliberate corrective action (overruling a model answer, unpairing, discarding a correction). A follow-up is a message, not a corrective action: it sends without a confirmation.
+15. **A person's answer is final (issue #44).** Saying more after answering is a follow-up message in the same thread. Nothing offers to change, edit or delete a sent answer or message, and nothing suggests a follow-up changed the answer in force. Only a model answer can be replaced, by overruling it.
 
 ## 2. Visual system
 
@@ -185,19 +186,19 @@ The owner wants Decisions usable on iPad, iPhone and desktop as an installed app
 | Context       | "Context from the agent" disclosure with a one-line literal preview         | Expands inline; never inserts itself above the question after loading.                                                            |
 | Decision area | Options (radio cards) or the current answer, model answer or closed state   | Depends on kind and lifecycle.                                                                                                    |
 | Record        | Delivery progress and question details                                      | Collapsed under clear labels; exact timestamps, IDs and fingerprints live in Question details.                                    |
-| Dock          | The composer: field, mic and Send, with choice chips (§6)                   | Always visible in an answerable question.                                                                                         |
+| Dock          | The composer: field, mic and Send, with choice chips (§6)                   | Always visible in an answerable question; once it is answered, it takes follow-ups (§6.3).                                        |
 
 On a 390 × 844 phone with a short question and images, the first screen shows the question, a useful preview and the complete dock. Do not spend the top third on branding, multiple timestamps and repeated badges.
 
 ### 4.2 Status vocabulary
 
-One principal status per question: **Needs you**, **Model answer · review**, **Answered**, **Expired**, **Withdrawn**, plus **Delivery needs attention** when relevant. Deadlines read "Due in 2 h", then "Due in 12 min", in the warning hue only inside 24 hours; nothing flashes. Human-required questions say "Human decision required" next to the choice. An answered question shows the actual answer and its author instead of more chips.
+One principal status per question: **Needs you**, **Model answer · review**, **Answered**, **Expired**, **Withdrawn**, plus **Delivery needs attention** when relevant. An answered question is **Needs you** again while the agent's latest message in its thread expects a reply and nothing from the person has come after it (`docs/protocol.md` section 16.2). Deadlines read "Due in 2 h", then "Due in 12 min", in the warning hue only inside 24 hours; nothing flashes. Human-required questions say "Human decision required" next to the choice. An answered question shows the actual answer and its author instead of more chips.
 
 **Agent state** is a second, separate vocabulary: what Daintree last observed in the asking pane, from its pane snapshot (`docs/protocol.md` section 18), never a claim about the question. The words are Daintree's own: **Working**, **Waiting**, **Directing**, **Idle**, **Finished** (for `completed`) and **Exited**; a state this version does not know shows nothing. Colour sits on a small dot only: Daintree's working green, its waiting amber, and secondary text for the rest. A snapshot the relay received over a minute ago (or a refresh nobody answered) is stale: the dot becomes a hollow neutral ring, the word steps down to secondary text at the same weight, and where there is room its age follows ("Waiting · 4 min ago"). No snapshot, sharing turned off or a closed question shows nothing, so the row looks as it does without the feature. A mark that would appear on or leave a Home row waits while the person is touching or scrolling, since it changes the row's height; a mark already there updates at once. In Recent only fresh states show, in a fixed slot at the row's end; which rows have a slot is held while the sidebar is in use (as its order is), so a state that goes stale, stops being shared or closes meanwhile leaves its slot empty until the sidebar is next opened, and a new state waits for that opening. `app/src/domain/agentState.ts` holds the words and rules, for every surface that shows agent state.
 
 ### 4.3 More menu
 
-Question details, Copy question, Copy question ID, View activity, and Change answer when legal. Never a non-functional Delete, Reopen, Cancel question or Revoke.
+Question details, Copy question, Copy question ID, View activity, and Clear draft when there is one. **Resolved (issue #44):** there is no Change answer: a person's answer is final, and a model answer is overruled from its own message. Never a non-functional Delete, Reopen, Cancel question or Revoke.
 
 ### 4.4 Opening states
 
@@ -291,35 +292,48 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 
 ### 6.2 States
 
-| State                           | Composer                                                                                                                             |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Empty, text allowed             | Field and mic on one row                                                                                                             |
-| Choice, nothing chosen          | Chips; field ("Add a note") and mic                                                                                                  |
-| Choice chosen or text entered   | Two rows; save state or Send reason; mic; Send                                                                                       |
-| Starting                        | Lane "Starting microphone…"; the mic is Stop with the wait arc                                                                       |
-| Recording                       | Lane "Recording · 00:24" and Discard; locked words in the field, interim words (two lines at most) beneath them; Stop with the orbit |
-| Finishing, cleaning             | Lane says so; Send not ready                                                                                                         |
-| Sent, queued, answered, expired | The composer gives way to a 60 px **Next question** (or "No more questions need you")                                                |
-| Conflict                        | "Your answer was not applied. Your words are kept." and **Review change**                                                            |
-| Unreadable, unverified          | The trust explanation, and Next question when there is one                                                                           |
+| State                         | Composer                                                                                                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Empty, text allowed           | Field and mic on one row                                                                                                             |
+| Choice, nothing chosen        | Chips; field ("Add a note") and mic                                                                                                  |
+| Choice chosen or text entered | Two rows; save state or Send reason; mic; Send                                                                                       |
+| Starting                      | Lane "Starting microphone…"; the mic is Stop with the wait arc                                                                       |
+| Recording                     | Lane "Recording · 00:24" and Discard; locked words in the field, interim words (two lines at most) beneath them; Stop with the orbit |
+| Finishing, cleaning           | Lane says so; Send not ready                                                                                                         |
+| Answer sent, queued, answered | Follow-ups (§6.3): the pill with "Add a follow-up" and a quiet **Next question** above it                                            |
+| Expired, withdrawn            | The composer gives way to a 60 px **Next question** (or "No more questions need you")                                                |
+| Conflict                      | "Your answer was not applied. Your words are kept." and **Review change**                                                            |
+| Unreadable, unverified        | The trust explanation, and Next question when there is one                                                                           |
+
+### 6.3 Follow-ups
+
+**Resolved (issue #44):** once the person's answer is on its way (or a model answer is confirmed or overruled), the composer sends follow-up messages into the thread instead of the answer. Before an answer it sends the answer, as above.
+
+- The placeholder says what it is: "Add a follow-up", or "Reply to Claude Code" while the agent's latest message waits on a reply. Send reads **Send** (named "Send follow-up" or "Send reply" for assistive tech and in its tooltip), so the save state beside it keeps one line.
+- **Next question** sits just above the pill at its trailing edge, quiet, one tap away; moving on is never automatic.
+- A follow-up becomes an outgoing bubble labelled **Follow-up**, with its own receipt (§10). The person's answer is labelled **Your answer**, and once the question scrolls away the header's second line keeps the answer in force in view ("Your answer: Yes, rename").
+- The agent's messages are incoming bubbles under its name. One that expects a reply carries "Waiting for your reply" beside the amber Needs-you ring.
+- A model answer awaiting review is decided first (Confirm answer or Overrule on its message); the follow-up composer appears after, or at once when the agent is asking something.
+- When the computer that asked doesn't take follow-ups yet, the dock says so above **Next question**.
 
 Dictation availability changes only the mic: an unconfigured relay says "Dictation isn't set up for this relay"; offline says "Dictation needs a connection". Never a silently disabled icon. The placeholder only promises holding when dictation can start.
 
 ## 7. Composing and validating
 
-| Kind       | Required                                      | Text                    | Send label      |
-| ---------- | --------------------------------------------- | ----------------------- | --------------- |
-| Text       | Non-empty valid text                          | Typed or dictated       | Send answer     |
-| Choice     | One option                                    | Note when allowed       | Send answer     |
-| Approval   | One option plus every required file presented | Note when allowed       | Send decision   |
-| Mixed      | An option or non-empty text                   | Supplements or replaces | Send answer     |
-| Correction | A changed answer plus a reason                | Kind-specific           | Send correction |
+| Kind       | Required                                                  | Text                    | Send label                            |
+| ---------- | --------------------------------------------------------- | ----------------------- | ------------------------------------- |
+| Text       | Non-empty valid text                                      | Typed or dictated       | Send answer                           |
+| Choice     | One option                                                | Note when allowed       | Send answer                           |
+| Approval   | One option plus every required file presented             | Note when allowed       | Send decision                         |
+| Mixed      | An option or non-empty text                               | Supplements or replaces | Send answer                           |
+| Correction | Overruling a model answer: a changed answer plus a reason | Kind-specific           | Send correction                       |
+| Follow-up  | Non-empty text within the message limit (16 KiB UTF-8)    | Typed or dictated       | Send ("Send follow-up", "Send reply") |
 
 Validation speaks only when it can help: next to Send, as one short reason ("Choose an option", "Write an answer", "Review the remaining 2 files", "Add a reason for the change", "Review the updated question"). Use the protocol's real limits: answer text is limited in UTF-8 bytes (measure bytes, not characters), reasons to 2,000 characters. Over-limit text is kept and the overage is stated; nothing is truncated. Everything is validated again at the moment of Send.
 
 ## 8. Drafts
 
-A draft is keyed by question, reviewed revision and mode, and holds the selected options, text, correction reason, selection/caret, and any raw/cleaned dictation variants needed to restore "Use original wording". Drafts are encrypted at rest in the existing `drafts` store (schema-versioned; migrate the current rows conservatively). **Correction drafts persist too** (Spec A and Spec B both flag that they do not today); reopening Change answer resumes "Unsent correction". **Cancel** closes a correction while keeping its draft; **Discard correction** is the explicit loss action.
+A draft is keyed by question, reviewed revision and mode (answer, correction or follow-up), and holds the selected options, text, correction reason, selection/caret, and any raw/cleaned dictation variants needed to restore "Use original wording". Drafts are encrypted at rest in the existing `drafts` store (schema-versioned; migrate the current rows conservatively). **Correction drafts persist too** (Spec A and Spec B both flag that they do not today); overruling a model answer again resumes "Unsent correction". **Cancel** closes a correction while keeping its draft; **Discard correction** is the explicit loss action. A follow-up draft is sealed the same way; it is about the thread, not a revision, so a newer revision never holds it back.
 
 Save on a 400 ms debounce plus explicit flushes at Stop, navigation, collapse and Send. Feedback is quiet: "Saving…" only if a write takes long enough to notice, "Saved on this device", "Could not save draft" (persistent, with Retry and Copy), "Draft restored" once on return, "Draft from an earlier version of this question" when the revision moved. Screen readers hear failures and restoration, never each autosave. **Clear draft** lives in the question's more menu with Undo.
 
@@ -401,22 +415,24 @@ At Send: re-validate (status, revision, trust, kind, byte limits, evidence); req
 
 The dock shows the current stage; tapping it expands the stepper (done steps carry a check glyph and words). Never claim the agent finished or acted. After Send the answer stays on screen as a read-only card and the dock offers **Next question** (explicit, never automatic; next in Needs you order, skipping questions with a pending local answer; "No more questions need you" when empty).
 
-Conflict: show **Current answer** (author, time) and **Your unsent answer** with **Copy text**, **Use as correction** (deliberate, needs a reason) and **Dismiss**. Expiry keeps and copies the draft but offers no Send.
+Conflict: show **Current answer** (author, time) and **Your unsent answer** with **Copy text**, **Dismiss**, and either **Use as correction** (deliberate, needs a reason) when the answer in force is a model answer, or **Send as a follow-up** when it is a person's (which is final). Expiry keeps and copies the draft but offers no Send.
 
-## 11. Model answers and corrections
+Follow-ups have the same evidence-based receipt as an answer, each its own: Queued on this device, Sending…, Saved on your relay, Received by your computer (only once the computer explicitly receives that message), Typed into the terminal, or Needs attention on your computer / Delivery couldn't be confirmed. A follow-up waits on the computer behind an answer that is held there. A follow-up the relay refuses stays in the thread as "Follow-up · not sent" with what happened, **Try again** when it can help, **Copy text** and **Remove**.
 
-Model answer presentation: "Model answer · review", the option and text, the model and the model-reported confidence (labelled as such), the rationale and references behind a disclosure, with **Confirm answer** (contrast) and **Change answer**. Confirming records an endorsement and never shows a delivery animation (the `confirm-proxy` action is not delivered). After confirming: "Model answer, confirmed by you · 14:02". Human-required questions cannot be satisfied by a model answer.
+## 11. Model answers and overruling
 
-Change answer opens correction mode in the workspace: the current answer read-only at the top, the replacement choice/text, and **Why are you changing it?** (required). The dock's Dictate targets the focused field and says so ("Dictating your reason"); switching fields while recording stops first. Send correction shows a compact before → after review with the reason and "Your agent may already have acted on the earlier answer. This sends a correction; it doesn't undo completed work." and a final **Send correction**. An unchanged choice with no changed text cannot be sent, and the hint says why.
+Model answer presentation: "Model answer · review", the option and text, the model and the model-reported confidence (labelled as such), the rationale and references behind a disclosure, with **Confirm answer** (contrast) and **Overrule**. Confirming records an endorsement and never shows a delivery animation (the `confirm-proxy` action is not delivered). After confirming: "Model answer, confirmed by you · 14:02". Human-required questions cannot be satisfied by a model answer.
+
+Overrule opens correction mode in the workspace (only for a model answer: a person's own answer is final, §1.4 rule 15): the current answer read-only at the top, the replacement choice/text, and **Why are you changing it?** (required). The dock's Dictate targets the focused field and says so ("Dictating your reason"); switching fields while recording stops first. Send correction shows a compact before → after review with the reason and "Your agent may already have acted on the earlier answer. This sends a correction; it doesn't undo completed work." and a final **Send correction**. An unchanged choice with no changed text cannot be sent, and the hint says why.
 
 ## 12. Questions & answers navigator
 
 One navigation model, two presentations: Home's list, and a sheet titled **Questions & answers** (opened from Ctrl/⌘ + K; full height on phones, from the left from 720 px). Same counts, same selection, same filters.
 
-- **Sections:** one list of every question, with no scope control: **Needs you** first (answers whose delivery needs attention on a computer, then answerable questions; when empty it says so in its place), then **Waiting to send** (answers still in this device's outbox), **Model answers to review**, and everything else by most recent activity under Today, Yesterday and dates. A long Needs you links down to the answers waiting to send and the model answers to review. **Resolved (issue #41):** the owner asked for the list to be as efficient as a chat list; sections replace the Needs you / Model answers / All segments, so nothing is a tap away and the top of the screen is the list.
+- **Sections:** one list of every question, with no scope control: **Needs you** first (answers whose delivery needs attention on a computer, then answerable questions and answered ones whose agent is waiting on a reply; when empty it says so in its place), then **Waiting to send** (answers still in this device's outbox), **Model answers to review**, and everything else by most recent activity under Today, Yesterday and dates. A long Needs you links down to the answers waiting to send and the model answers to review. **Resolved (issue #41):** the owner asked for the list to be as efficient as a chat list; sections replace the Needs you / Model answers / All segments, so nothing is a tap away and the top of the screen is the list.
 - **Search** (local over decrypted content, 150–250 ms debounce) and separate **Project** and **Computer** filters in one **Filter** sheet, offered only when questions come from more than one of either. On phones and tablets search and filter are round buttons on the menu button's row (search opens into a field there); in the wide column and the sheet they sit above the list. Active filters show as removable chips; the sheet's **Any computer** / **Any project** clears one.
 - **Sort:** Needs you by soonest deadline then oldest (or newest first); everything else by most recent activity. Rows never reshuffle under the finger: new questions show "2 new questions" to refresh deliberately.
-- **Row:** the state glyph; the question in one line, two at most, with its relative time at the right; the answer in force as one line ("You: …" / "Model: …"), or why it closed without one; project · computer; and only the chips that call for action: a due time inside three days, Queued or Sending…, Delivery issue. When the asking desktop shares pane snapshots, the agent's observed state (4.2) ends that line in a slot as wide as its longest word, so going stale or changing word never adds a line. The whole row opens the question. The current question is highlighted (neutral raised fill) and scrolled into view. **Resolved (issue #41):** file counts, Draft and Review chips and the status word leave the row (the section and the glyph carry the status); a week-out default expiry is not shown.
+- **Row:** the state glyph; the question in one line, two at most, with its relative time at the right; the answer in force as one line ("You: …" / "Model: …"), or, while the agent waits on a reply, its message in primary text ("Claude Code: …"), or why it closed without one; project · computer; and only the chips that call for action: a due time inside three days, Queued or Sending…, Delivery issue. When the asking desktop shares pane snapshots, the agent's observed state (4.2) ends that line in a slot as wide as its longest word, so going stale or changing word never adds a line. The whole row opens the question. The current question is highlighted (neutral raised fill) and scrolled into view. **Resolved (issue #41):** file counts, Draft and Review chips and the status word leave the row (the section and the glyph carry the status); a week-out default expiry is not shown.
 - History and Settings are reachable from the navigator's header on phones.
 - Empty states: "No questions yet." · "Nothing needs you right now." (in Needs you's place) · "No questions match these filters." (Clear filters) · "No matches in questions saved on this device." · offline "You're offline. New questions will appear when you reconnect." · syncing "Checking for questions…" (never an all-clear while syncing).
 - Filters and the Needs you order persist per device; search persists for the session.
@@ -427,8 +443,8 @@ One navigation model, two presentations: Home's list, and a sheet titled **Quest
 History answers "what did I decide, why, and what changed?" It is not a second inbox.
 
 - Default **Decisions**: human answers, confirmed model answers, expired and withdrawn. **All activity** adds unreviewed model answers (still labelled Review).
-- Rows: project · computer, question excerpt, **the effective answer** with author, decision time, "Changed 2 times" when corrected, delivery issue if any. Grouped Today, Yesterday, then dates.
-- Search covers question, context, origin, option labels, current and earlier answers and correction reasons. A hit in an earlier answer says "Matched an earlier answer". Coverage line: "Searching questions saved on this device · Synced 14:32" (replacing the transport-based warning).
+- Rows: project · computer, question excerpt, **the effective answer** with author, decision time, "Changed 2 times" when overruled or corrected by an older app, delivery issue if any. A follow-up never counts as a change. Grouped Today, Yesterday, then dates.
+- Search covers question, context, origin, option labels, current and earlier answers, correction reasons and the thread's messages. A hit in an earlier answer says "Matched an earlier answer"; one in a message says "Matched a message". Coverage line: "Searching questions saved on this device · Synced 14:32" (replacing the transport-based warning).
 - Opening a record shows the question workspace in read-only mode with an **Activity** timeline: asked, model answer, human answer, confirmation, corrections (old → new with reason), expiry or withdrawal, and delivery milestones (collapsed). Back returns to the same query and row.
 
 ## 14. Settings

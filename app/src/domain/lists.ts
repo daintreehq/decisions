@@ -1,10 +1,14 @@
 import type { ActionView, QuestionView } from './model.js';
 import {
+  agentName,
+  answerable,
+  awaitingReply,
   currentAnswer,
   deliveryNeedsAttention,
   effectiveStatus,
   hiddenQuestionText,
   needsYou,
+  pendingAsk,
   originParts,
   proxyNeedsReview,
   sortNeedsYou,
@@ -30,7 +34,7 @@ export type RowStatus =
   | 'delivery'
   | 'unverified'
   | 'unreadable'
-  /** Local only: an answer from this device still in its outbox. Never a relay status. */
+  /** Local only: an answer or follow-up from this device still in its outbox. Never a relay status. */
   | 'sending';
 
 export const STATUS_LABEL: Record<RowStatus, string> = {
@@ -50,6 +54,8 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
   if (s === 'unverified') return unreadableHere(v) ? 'unreadable' : 'unverified';
   if (s === 'open') return 'needs';
   if (deliveryNeedsAttention(v)) return 'delivery';
+  // The agent asked something in the thread after the answer: it is the person's turn again.
+  if (awaitingReply(v, now)) return 'needs';
   if (s === 'proxy-answered') return proxyNeedsReview(v, now) ? 'review' : 'answered';
   if (s === 'human-answered') return 'answered';
   if (s === 'expired') return 'expired';
@@ -112,8 +118,11 @@ function answerWords(v: QuestionView, a: ActionView): string[] {
   return [...labels, c.text ?? '', c.reason ?? ''];
 }
 
-/** What a search can see: the question as it stands, and everything said about it earlier. */
-export function haystacks(v: QuestionView): { current: string; earlier: string } {
+/**
+ * What a search can see: the question as it stands, everything decided about it earlier (earlier answers and
+ * reasons), and the thread's messages, which never change the answer in force.
+ */
+export function haystacks(v: QuestionView): { current: string; earlier: string; thread: string } {
   const c = v.content;
   const cur = currentAnswer(v);
   const current = [
@@ -132,22 +141,30 @@ export function haystacks(v: QuestionView): { current: string; earlier: string }
     if (ANSWERS.has(a.action)) earlier.push(...answerWords(v, a));
     else if (a.content?.reason) earlier.push(a.content.reason);
   }
-  return { current: fold(current.join('\n')), earlier: fold(earlier.join('\n')) };
+  const thread = v.messages.filter((m) => m.verified).map((m) => m.text);
+  return {
+    current: fold(current.join('\n')),
+    earlier: fold(earlier.join('\n')),
+    thread: fold(thread.join('\n')),
+  };
 }
 
-export type SearchHit = 'current' | 'earlier';
+export type SearchHit = 'current' | 'earlier' | 'thread';
 
 /**
  * Every term must appear somewhere. A hit that needs an earlier answer or reason to complete it is labelled
- * "earlier", so History can say "Matched an earlier answer".
+ * "earlier", so History can say "Matched an earlier answer"; one that needs the thread's messages is "thread"
+ * ("Matched a message"), so a follow-up is never presented as an answer.
  */
 export function searchQuestion(v: QuestionView, query: string): SearchHit | null {
   const terms = queryTerms(query);
   if (terms.length === 0) return 'current';
   const h = haystacks(v);
   if (terms.every((t) => h.current.includes(t))) return 'current';
-  const all = h.current + '\n' + h.earlier;
-  return terms.every((t) => all.includes(t)) ? 'earlier' : null;
+  const decided = h.current + '\n' + h.earlier;
+  if (terms.every((t) => decided.includes(t))) return 'earlier';
+  const all = decided + '\n' + h.thread;
+  return terms.every((t) => all.includes(t)) ? 'thread' : null;
 }
 
 /* ---------------- Home's list ---------------- */
@@ -157,6 +174,8 @@ export interface ListQuery extends Filters {
   query: string;
   /** Questions with an answer from this device still in its outbox. */
   pending?: ReadonlySet<string>;
+  /** Questions with a follow-up from this device the relay refused: it was not sent, and the words wait there. */
+  refused?: ReadonlySet<string>;
 }
 
 export type SectionKind = 'needs' | 'sending' | 'review' | 'day';
@@ -195,7 +214,7 @@ export function homeSections(
   for (const v of rows) {
     if (q.pending?.has(v.id)) sending.push(v);
     else if (needsYou(v, now)) needs.push(v);
-    else if (deliveryNeedsAttention(v)) delivery.push(v);
+    else if (deliveryNeedsAttention(v) || q.refused?.has(v.id)) delivery.push(v);
     else if (proxyNeedsReview(v, now)) review.push(v);
     else rest.push(v);
   }
@@ -246,7 +265,9 @@ export function stableOrder(
 /* ---------------- row summaries ---------------- */
 
 export interface AnswerSummary {
-  author: 'You' | 'Model';
+  author: string;
+  /** The agent is asking the person something: this line is what needs them. */
+  ask?: boolean;
   /** Option labels and the note, as one plain line. */
   text: string;
   confirmed: boolean;
@@ -264,6 +285,22 @@ export function choiceLine(v: QuestionView, selected: readonly string[], note: s
     .map((id) => v.content?.options.find((o) => o.id === id)?.label)
     .filter((l): l is string => !!l);
   return [labels.join(', '), note.replace(/\s+/g, ' ').trim()].filter(Boolean).join(' — ');
+}
+
+/**
+ * The line under a row's question. Normally the answer in force ("You: Keep Canopy — …"); when the agent has asked
+ * something in the thread since, its message instead ("Claude Code: Which branch?"), since that is what needs you.
+ */
+export function rowSummary(v: QuestionView, now: number): AnswerSummary | null {
+  const ask = pendingAsk(v, now);
+  if (ask)
+    return {
+      author: agentName(v),
+      text: ask.text.replace(/\s+/g, ' ').trim(),
+      confirmed: false,
+      ask: true,
+    };
+  return answerSummary(v);
 }
 
 /** The answer in force as one line, for list rows: "Keep Canopy — Canopy is the brand name". */
@@ -284,7 +321,7 @@ const DAY = 24 * 3_600_000;
 
 /** "Due in 2 h" — in the warning hue only inside 24 hours. Only for questions that can still be answered. */
 export function dueLabel(v: QuestionView, now: number): { label: string; urgent: boolean } | null {
-  if (!v.expiresAt || !needsYou(v, now)) return null;
+  if (!v.expiresAt || !answerable(v, now)) return null;
   const ms = Date.parse(v.expiresAt) - now;
   if (ms <= 0) return null;
   const m = Math.floor(ms / 60_000);
@@ -331,7 +368,9 @@ export function historyEntries(
 ): HistoryEntry[] {
   const out: HistoryEntry[] = [];
   for (const v of list) {
-    if (needsYou(v, now)) continue;
+    // History is what was decided: a question still to answer is not in it (one the agent has since asked more
+    // about was still decided, and stays).
+    if (answerable(v, now)) continue;
     const status = principalStatus(v, now);
     if (
       mode === 'decisions' &&
