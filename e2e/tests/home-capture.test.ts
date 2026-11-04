@@ -585,7 +585,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     await theme('light');
     checks.rowsOnFirstScreen = await page.evaluate(
       () =>
-        [...document.querySelectorAll('main a.qrow')].filter((r) => {
+        Array.from(document.querySelectorAll('main a.qrow')).filter((r) => {
           const b = r.getBoundingClientRect();
           return b.top >= 0 && b.bottom <= window.innerHeight;
         }).length,
