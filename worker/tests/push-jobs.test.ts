@@ -197,10 +197,10 @@ describe('push, reminders and expiry', () => {
     await ask(w);
     // The notify_new is due at once, so the room's own alarm makes the first attempt. Running it by hand
     // as well could make a second one.
-    await vi.waitFor(
-      async () => expect((await pending('notify_new'))[0]?.attempt_count).toBe(1),
-      { timeout: 5000, interval: 20 },
-    );
+    await vi.waitFor(async () => expect((await pending('notify_new'))[0]?.attempt_count).toBe(1), {
+      timeout: 5000,
+      interval: 20,
+    });
     const [job] = await pending('notify_new');
     expect(job).toMatchObject({ status: 'pending', attempt_count: 1 });
     expect(job!.run_at).toBeGreaterThan(Date.now());
