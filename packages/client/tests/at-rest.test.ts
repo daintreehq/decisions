@@ -30,7 +30,16 @@ const QUESTION = 'QPLAIN shall we ship the gizmo';
 const CONTEXT = 'CTXPLAIN the staging database is still migrating';
 const LABEL = 'LABELPLAIN Approve the release';
 const ANSWER = 'ANSPLAIN looks good, ship it';
-const MARKERS = ['QPLAIN', 'CTXPLAIN', 'LABELPLAIN', 'ANSPLAIN', 'PROXYPLAIN', 'LEGACYPLAIN'];
+const MESSAGE = 'MSGPLAIN the hover colour is still open';
+const MARKERS = [
+  'QPLAIN',
+  'CTXPLAIN',
+  'LABELPLAIN',
+  'ANSPLAIN',
+  'PROXYPLAIN',
+  'LEGACYPLAIN',
+  'MSGPLAIN',
+];
 
 /** Everything a LocalStore holds that the bridge wrote, as one string. */
 async function dumpStore(store: LocalStore): Promise<string> {
@@ -111,6 +120,37 @@ async function ask(bridge: DecisionsBridge, extra: Record<string, unknown> = {})
 }
 
 describe('no question or answer plaintext at rest (learning off)', () => {
+  it('an agent follow-up waiting in the outbox is ciphertext, in the rows and in the database file', async () => {
+    const env = await makeEnv();
+    const path = dbPath();
+    const store = new SqliteLocalStore(path);
+    const bridge = bridgeFor(env, store);
+    const qid = await ask(bridge);
+    env.relay.down = 1000; // keep it queued
+    await bridge.postMessage(
+      { question_id: qid, text: MESSAGE, expects_reply: true },
+      {
+        host_id: 'host-local',
+        pane_id: 'pane-1',
+        terminal_generation: 1,
+        ownership_principal: 'principal-1',
+        agent_incarnation: 'inc-1',
+        agent_session_id: 'sess-1',
+        worktree_id: 'wt-1',
+      },
+    );
+    await bridge.pump();
+    expect(await dumpStore(store)).not.toMatch(/MSGPLAIN/);
+    expect(leakedInFile(path)).toEqual([]);
+    // what is queued opens to the real text
+    const [item] = await store.outboxFor(qid);
+    const signed = (item!.payload as { signed: { envelope: never } }).signed;
+    expect(await decryptEnvelope(signed.envelope, env.identity.epochs)).toMatchObject({
+      side: 'agent',
+      text: MESSAGE,
+    });
+    await store.close();
+  });
   it('a full ask, answer and delivery leaves no plaintext in any store row or in the database file', async () => {
     const env = await makeEnv();
     const path = dbPath();

@@ -5,11 +5,13 @@ import {
   EpochGrant as GrantSchema,
   QuestionRecord as QuestionSchema,
   SignedAction,
+  SignedMessage,
   bytesToBase64Url,
   parseAuthHeader,
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  buildSignedMessage,
   buildSignedQuestion,
   createEpochGrant,
   decodeInvite,
@@ -315,6 +317,54 @@ describe('envelopes', () => {
     expect(SignedAction.safeParse(a).success).toBe(true);
     expect(await verifyRecordAndEnvelope(a.record, null, pub)).toBe(true);
     expect(await envelopeDigest(env)).toHaveLength(64);
+  });
+  it('signed thread messages carry the side and expects_reply and bind the envelope', async () => {
+    const w = await world();
+    const messageId = newId();
+    const env = await encryptEnvelope({
+      epochKey: w.ownerEpoch,
+      installationId: INST,
+      questionId: 'question01',
+      recordId: messageId,
+      recordType: 'thread.message',
+      revision: 0,
+      senderDeviceId: w.ownerId,
+      purpose: 'message-content',
+      plaintext: { content_version: 1, side: 'agent', text: 'Which of the two?' },
+    });
+    const m = await buildSignedMessage({
+      installationId: INST,
+      questionId: 'question01',
+      messageId,
+      side: 'agent',
+      expectsReply: true,
+      signerDeviceId: w.ownerId,
+      signingKey: w.ownerKeys.signing.privateKey,
+      envelope: env,
+    });
+    expect(SignedMessage.safeParse(m).success).toBe(true);
+    expect(m.record).toMatchObject({
+      type: 'thread.message',
+      message_id: messageId,
+      side: 'agent',
+      expects_reply: true,
+      attachment_ids: [],
+    });
+    const pub = w.ownerKeys.signing.publicKey;
+    expect(await verifyRecordAndEnvelope(m.record, m.envelope, pub)).toBe(true);
+    expect(await verifyRecordAndEnvelope({ ...m.record, expects_reply: false }, env, pub)).toBe(
+      false,
+    );
+    const quiet = await buildSignedMessage({
+      installationId: INST,
+      questionId: 'question01',
+      messageId,
+      side: 'agent',
+      signerDeviceId: w.ownerId,
+      signingKey: w.ownerKeys.signing.privateKey,
+      envelope: env,
+    });
+    expect(quiet.record.expects_reply).toBe(false);
   });
 });
 

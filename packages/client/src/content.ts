@@ -43,6 +43,24 @@ export const AskHumanInput = z.object({
 });
 export type AskHumanInput = z.infer<typeof AskHumanInput>;
 
+/**
+ * The `send_followup` input contract: an agent message in the thread of a question this pane asked
+ * (docs/protocol.md section 16). `expects_reply` is required, so an agent always says whether it waits on the
+ * person.
+ */
+export const PostMessageInput = z.object({
+  question_id: z.string().min(1).max(128),
+  text: z
+    .string()
+    .refine((v) => v.trim() !== '', 'text is empty')
+    .refine(
+      (v) => utf8ByteLength(v) <= LIMITS.messageTextBytes,
+      `text exceeds ${LIMITS.messageTextBytes / 1024} KiB (UTF-8)`,
+    ),
+  expects_reply: z.boolean(),
+});
+export type PostMessageInput = z.infer<typeof PostMessageInput>;
+
 export class BridgeError extends Error {
   constructor(
     readonly code:
@@ -52,7 +70,10 @@ export class BridgeError extends Error {
       | 'forbidden'
       | 'attachment_error'
       | 'proxy_forbidden'
-      | 'not_configured',
+      | 'not_configured'
+      | 'invalid_state'
+      | 'expired'
+      | 'not_supported',
     message: string,
   ) {
     super(message);

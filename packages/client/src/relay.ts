@@ -13,10 +13,13 @@ import {
   type Diagnostics,
   type EpochGrant,
   type InfoResponse,
+  type MessageBody,
+  type MessageReceipt,
   type PendingPairing,
   type ProtocolFeature,
   type QuestionDetail,
   type SignedAction,
+  type SignedMessage,
   type SignedQuestion,
 } from '@daintreehq/decisions-protocol';
 import { signRequest } from '@daintreehq/decisions-crypto';
@@ -276,6 +279,29 @@ export class RelayClient {
       action,
     };
     return this.request('POST', `${API_PREFIX}/questions/${questionId}/${kind}`, { body });
+  }
+  /** Post an agent message into a question's thread (docs/protocol.md section 16). */
+  postMessage(
+    questionId: string,
+    idempotencyKey: string,
+    message: SignedMessage,
+  ): Promise<MessageReceipt> {
+    // A desktop speaks only for its agent: a human message is a phone's or tablet's, like a human answer.
+    if (message.record.side !== 'agent') {
+      return Promise.reject(
+        new RelayError(
+          'forbidden',
+          'a desktop never signs a human message: only a phone or tablet speaks for the person',
+          403,
+        ),
+      );
+    }
+    const body: MessageBody = {
+      protocol_version: PROTOCOL_VERSION,
+      idempotency_key: idempotencyKey,
+      message,
+    };
+    return this.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, { body });
   }
   deleteQuestion(id: string): Promise<unknown> {
     return this.ownerOnly('deleting a question', () =>

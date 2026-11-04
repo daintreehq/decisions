@@ -2,7 +2,10 @@ import {
   PROTOCOL_VERSION,
   type ActionKind,
   type ActionRecord,
+  MESSAGE_RECORD_TYPE,
   type CryptoEnvelope,
+  type MessageRecord,
+  type MessageSide,
   type QuestionRecord,
   type Requirement,
 } from '@daintreehq/decisions-protocol';
@@ -89,6 +92,43 @@ export async function buildSignedAction(i: BuildActionInput): Promise<{
     signer_device_id: i.signerDeviceId,
   })) as ActionRecord;
   return { record, envelope };
+}
+
+export interface BuildMessageInput {
+  installationId: string;
+  questionId: string;
+  /** Chosen by the signer, stable for the message's lifetime, and also the envelope's `record_id`. */
+  messageId: string;
+  side: MessageSide;
+  signerDeviceId: string;
+  signingKey: CryptoKey;
+  /** Agent only: the agent is waiting on the person. */
+  expectsReply?: boolean;
+  /** Human only: the phone images the content references. */
+  attachmentIds?: string[];
+  envelope: CryptoEnvelope;
+  createdAt?: string;
+}
+
+/** A signed thread message (docs/protocol.md section 16): its record and the envelope it commits to. */
+export async function buildSignedMessage(i: BuildMessageInput): Promise<{
+  record: MessageRecord;
+  envelope: CryptoEnvelope;
+}> {
+  const record = (await signObject(i.signingKey, {
+    v: PROTOCOL_VERSION,
+    type: MESSAGE_RECORD_TYPE,
+    installation_id: i.installationId,
+    question_id: i.questionId,
+    message_id: i.messageId,
+    side: i.side,
+    expects_reply: i.expectsReply ?? false,
+    attachment_ids: i.attachmentIds ?? [],
+    created_at: i.createdAt ?? nowIso(),
+    envelope_digest: await envelopeDigest(i.envelope),
+    signer_device_id: i.signerDeviceId,
+  })) as MessageRecord;
+  return { record, envelope: i.envelope };
 }
 
 /** Verifies the record signature and that the envelope is the one the signer committed to. */

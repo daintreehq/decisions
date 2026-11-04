@@ -5,7 +5,7 @@ import {
   type ProtocolFeature,
 } from '@daintreehq/decisions-protocol';
 import { AuditLog } from './audit.js';
-import { BridgeError } from './content.js';
+import { BridgeError, PostMessageInput } from './content.js';
 import {
   MemorySpool,
   type AttachmentResolver,
@@ -16,7 +16,7 @@ import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
-import { Publisher, type RegisterResult } from './publisher.js';
+import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { sameDigests, type OpenAnswerEntry } from './answers.js';
 import { openAnswers, openQuestionContent, sealStoredContent } from './at-rest.js';
 import { RelayError } from './errors.js';
@@ -363,6 +363,29 @@ export class DecisionsBridge {
     await this.owned(questionId, pane);
     await this.publisher.enqueueCancel(questionId);
     void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  /**
+   * Post an agent message in the thread of a question `pane` asked: commits locally and returns immediately;
+   * publishing happens in the background. Another pane's question is refused exactly like an unknown id. A
+   * message never answers the question, changes its answer or touches its gate.
+   */
+  async postMessage(input: unknown, pane: PaneIdentity): Promise<PostMessageResult> {
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = PostMessageInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    // Scoped to a pane, always: unlike getDecision, there is no unscoped form.
+    if (!pane) throw new BridgeError('not_found', 'unknown question');
+    const row = await this.owned(parsed.data.question_id, pane);
+    const r = await this.publisher.enqueueMessage(row.question_id, parsed.data);
+    void this.pump().catch((e) => this.emitError(e as Error));
+    return r;
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
