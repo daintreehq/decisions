@@ -79,8 +79,8 @@ export interface BridgeOptions {
   pumpIntervalMs?: number;
   /**
    * Pane snapshots (`publishSnapshot`, `clearSnapshots`) and the refresh callback. Setting it declares
-   * `pane-snapshots-v1` to the relay, so refresh requests reach this bridge; without it, both methods throw
-   * `not_configured` and every request keeps its 0.3.0 shape.
+   * `pane-snapshots-v1` to the relay, alongside `BRIDGE_FEATURES`, so refresh requests reach this bridge;
+   * without it, both methods throw `not_configured` and the feature is never declared.
    */
   snapshots?: SnapshotOptions;
 }
