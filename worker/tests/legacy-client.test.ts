@@ -25,6 +25,14 @@ import {
   say,
   type Actor,
 } from './helpers.js';
+import {
+  SNAPSHOTS,
+  enrollHost as enrollPaneHost,
+  eventsWith,
+  openSocket,
+  publish,
+  refresh,
+} from './snapshots.helpers.js';
 
 /** A socket that keeps every raw frame, as a 0.3.0 client receives them. */
 async function hold(ticket: string) {
@@ -108,17 +116,35 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
   it('parses every page, frame and info response the relay sends it', async () => {
     const w = await claimRelay();
     const phone = await pairDevice(w);
+    // A newer phone and desktop use pane snapshots on the same relay, between the 0.3.0 events.
+    const newer = await pairDevice(w, 'phone', 'Newer iPhone');
+    await declare(w.owner, SNAPSHOTS);
     const answered = await ask(w);
     expect(answered.res.status).toBe(201);
+    expect((await publish(w, w.owner, answered.questionId, { at: -2000 })).res.status).toBe(200);
+    expect((await refresh(newer, answered.questionId)).status).toBe(200);
     expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+    expect(
+      (await publish(w, w.owner, answered.questionId, { revision: 1, at: -1000 })).res.status,
+    ).toBe(200);
     const cancelled = await ask(w);
+    expect((await publish(w, w.owner, cancelled.questionId)).res.status).toBe(200);
     expect((await act(w, w.owner, 'cancel', cancelled.questionId, 0)).res.status).toBe(201);
-    expect((await ask(w)).res.status).toBe(201);
+    const last = await ask(w);
+    expect((await refresh(newer, last.questionId)).status).toBe(200);
+    expect((await publish(w, w.owner, last.questionId, { sharing: 'off' })).res.status).toBe(200);
     const all = await events(w.owner);
     const types = all.map((e) => e.event_type);
     expect(types.filter((t) => t === 'decision.created')).toHaveLength(3);
     expect(types).toContain('decision.answer.committed');
     expect(types).toContain('decision.cancelled');
+    // The ledger holds snapshot events, interleaved with these, that a 0.3.0 client is never sent.
+    const full = await eventsWith(newer, SNAPSHOTS);
+    expect(full.length).toBeGreaterThan(all.length);
+    expect(
+      full.some((e) => e.seq < all.at(-1)!.seq && e.event_type.startsWith('decision.snapshot.')),
+    ).toBe(true);
+    expect(types.some((t) => t.startsWith('decision.snapshot.'))).toBe(false);
 
     const pages = (a: Actor) => async (after: number) =>
       (await a.call('GET', '/api/v1/events', undefined, `after=${after}&limit=2`)).json;
@@ -137,7 +163,7 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     const info = await raw('GET', '/api/v1/info');
     expect(info.status).toBe(200);
     expect(info.json.name).toBe('daintree-decisions');
-    expect(info.json.features).toEqual(['thread-messages-v1']);
+    expect(info.json.features).toEqual(['pane-snapshots-v1', 'thread-messages-v1']);
   });
 
   it('pages events and holds a socket while messages flow, without a parse failure (issue #32)', async () => {
@@ -247,6 +273,37 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     expect(replay.dropped).toEqual([]);
     expect(replay.accepted.filter((f) => f.t === 'event')).toHaveLength(visible.length);
     for (const s of [legacy, legacyPhone, modern]) s.close();
+  });
+
+  it('never pushes a snapshot event frame to a live 0.3.0 socket', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    // A newer host publishes snapshots; the owner and a phone still run 0.3.0 and hold sockets opened with
+    // its ticket body while the snapshots flow.
+    const host = await enrollPaneHost(w);
+    await declare(host, SNAPSHOTS);
+    const { questionId } = await ask({ ...w, owner: host });
+    const desktop = await openSocket(w.owner);
+    const handset = await openSocket(phone);
+    const newer = await pairDevice(w, 'phone', 'Newer iPhone');
+    const watching = await openSocket(newer, SNAPSHOTS);
+    expect((await refresh(newer, questionId)).status).toBe(200);
+    expect((await publish(w, host, questionId)).res.status).toBe(200);
+    const next = await ask(w);
+    for (const s of [desktop, handset]) {
+      await s.waitFor((f) => f.t === 'event' && f.event.question_id === next.questionId);
+      const { dropped } = legacySocketReceive(s.frames.map((f) => JSON.stringify(f)));
+      expect(dropped).toEqual([]);
+      expect(
+        s.frames.some(
+          (f) => f.t === 'event' && f.event.event_type.startsWith('decision.snapshot.'),
+        ),
+      ).toBe(false);
+    }
+    await watching.waitFor(
+      (f) => f.t === 'event' && f.event.event_type === 'decision.snapshot.updated',
+    );
+    for (const s of [desktop, handset, watching]) s.close();
   });
 
   it('refuses an answer that references phone images, which this relay cannot bind yet', async () => {
