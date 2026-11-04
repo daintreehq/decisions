@@ -122,6 +122,8 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
+    // The phone has finished setting up once Home settles on its empty state; the computer asks after that.
+    await page.getByText('No questions yet.').waitFor({ timeout: 30_000 });
 
     // Fourteen questions from two computers and two projects: long enough to scroll on a phone.
     for (let i = 0; i < 14; i++) {
@@ -145,7 +147,17 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     }
     await bridge.pump();
     await home();
-    await until(async () => (await rows().count()) === 14, 30_000, 'all fourteen questions');
+    // Questions that arrive after the first sync are held behind "N new questions" (rows never reshuffle under the
+    // finger), so take them in the way a person would.
+    await until(
+      async () => {
+        const pill = page.locator('main .nav-new');
+        if (await pill.isVisible().catch(() => false)) await pill.click();
+        return (await rows().count()) === 14;
+      },
+      30_000,
+      'all fourteen questions',
+    );
   });
 
   afterAll(async () => {
