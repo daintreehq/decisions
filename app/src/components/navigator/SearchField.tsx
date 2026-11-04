@@ -14,7 +14,8 @@ export function useDebounced<T>(value: T, ms = 200): T {
 
 /**
  * Daintree's search field: a recessed well with a hairline and a magnifier, a neutral focus (no accent), a clear
- * button while it holds a query, and Escape that clears before it closes anything.
+ * button while it holds a query, and Escape that clears before it closes anything. A field that was opened from a
+ * button (`onEscapeEmpty`) closes on Escape once it is empty, and can leave clearing to that button (`clearable`).
  */
 export function SearchField({
   value,
@@ -24,6 +25,10 @@ export function SearchField({
   inputRef,
   describedBy,
   shortcut,
+  id,
+  className,
+  clearable = true,
+  onEscapeEmpty,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -32,19 +37,29 @@ export function SearchField({
   inputRef?: Ref<HTMLInputElement>;
   describedBy?: string;
   shortcut?: string;
+  id?: string;
+  className?: string;
+  clearable?: boolean;
+  onEscapeEmpty?: () => void;
 }) {
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Escape' && value && !e.nativeEvent.isComposing) {
+    if (e.key !== 'Escape' || e.nativeEvent.isComposing) return;
+    if (value) {
       e.preventDefault();
       e.stopPropagation();
       onChange('');
+    } else if (onEscapeEmpty) {
+      e.preventDefault();
+      e.stopPropagation();
+      onEscapeEmpty();
     }
   };
   return (
-    <div className="search-field">
+    <div className={className ? `search-field ${className}` : 'search-field'}>
       <SearchIcon size={16} />
       <input
         ref={inputRef}
+        id={id}
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -58,7 +73,7 @@ export function SearchField({
         spellCheck={false}
         enterKeyHint="search"
       />
-      {value ? (
+      {value && clearable ? (
         <button
           type="button"
           className="search-clear"

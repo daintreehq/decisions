@@ -1,13 +1,13 @@
 import { useLayoutEffect, useSyncExternalStore, type RefObject } from 'react';
-import type { HistoryMode, NeedsSort, Scope } from '../domain/lists.js';
+import type { HistoryMode, NeedsSort } from '../domain/lists.js';
 import { goBackPast } from './layers.js';
 import { matchRoute, navigate } from './router.js';
 
 /**
  * Where every list was left, and where Back from a question goes.
  *
- * - Scope, project and computer filters, sort and History's mode persist per device (labels are never stored in
- *   the clear: a filter is kept as a salted digest and resolved against the labels on screen).
+ * - Project and computer filters, the Needs you order and History's mode persist per device (labels are never
+ *   stored in the clear: a filter is kept as a salted digest and resolved against the labels on screen).
  * - Search text, the scroll anchor, the row to refocus and History's open record last for the session, in memory.
  * - A question opened from a list records its origin in its own history entry (`history.state.decisionsBack`),
  *   so Back returns to that list with its query, filters and row, even after a reload. A direct link goes Back to
@@ -31,7 +31,6 @@ interface ListMemory {
 }
 
 export interface QuestionsState extends ListMemory {
-  scope: Scope;
   sort: NeedsSort;
   project: string | null;
   computer: string | null;
@@ -52,7 +51,6 @@ const STORAGE_KEY = 'decisions:lists:v1';
 
 interface Persisted {
   salt: string;
-  scope: Scope;
   sort: NeedsSort;
   mode: HistoryMode;
   project: string | null;
@@ -62,7 +60,7 @@ interface Persisted {
 const blank = (): ListMemory => ({ query: '', anchor: null, focusId: null });
 
 const initial = (): NavState => ({
-  questions: { ...blank(), scope: 'needs', sort: 'due', project: null, computer: null },
+  questions: { ...blank(), sort: 'due', project: null, computer: null },
   history: { ...blank(), mode: 'decisions', record: null },
 });
 
@@ -104,11 +102,10 @@ function load(): void {
     p = {};
   }
   salt = typeof p.salt === 'string' && p.salt ? p.salt : Math.random().toString(36).slice(2, 12);
-  const scope: Scope = p.scope === 'model' || p.scope === 'all' ? p.scope : 'needs';
   const sort: NeedsSort = p.sort === 'newest' ? 'newest' : 'due';
   const mode: HistoryMode = p.mode === 'all' ? 'all' : 'decisions';
   state = {
-    questions: { ...state.questions, scope, sort },
+    questions: { ...state.questions, sort },
     history: { ...state.history, mode },
   };
   pending = {
@@ -121,7 +118,6 @@ function save(): void {
   const q = state.questions;
   const p: Persisted = {
     salt,
-    scope: q.scope,
     sort: q.sort,
     mode: state.history.mode,
     project: q.project ? digest(q.project) : pending.project,
@@ -149,7 +145,7 @@ export function useNavState(): NavState {
   return useSyncExternalStore(subscribeNav, getNavState, getNavState);
 }
 
-const PERSISTED_Q: (keyof QuestionsState)[] = ['scope', 'sort', 'project', 'computer'];
+const PERSISTED_Q: (keyof QuestionsState)[] = ['sort', 'project', 'computer'];
 
 export function setQuestions(patch: Partial<QuestionsState>): void {
   // Choosing a filter (or clearing one) replaces whatever was waiting to be restored.

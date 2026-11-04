@@ -4,7 +4,6 @@ import {
   deliveryNeedsAttention,
   effectiveStatus,
   hiddenQuestionText,
-  needsAction,
   needsYou,
   originParts,
   proxyNeedsReview,
@@ -13,12 +12,11 @@ import {
 } from './selectors.js';
 
 /**
- * The list model behind the Questions & answers navigator and History: scopes, filters, local search, sorting,
- * stable ordering and day grouping. Pure functions over question views, so every presentation (phone sheet, page,
- * desktop rail, History) answers the same way and all of it is unit-tested.
+ * The list model behind Home's list (and the navigator sheet) and History: sections, filters, local search, sorting,
+ * stable ordering and day grouping. Pure functions over question views, so every presentation (the page, the sheet,
+ * History) answers the same way and all of it is unit-tested.
  */
 
-export type Scope = 'needs' | 'model' | 'all';
 export type NeedsSort = 'due' | 'newest';
 export type HistoryMode = 'decisions' | 'all';
 
@@ -31,7 +29,9 @@ export type RowStatus =
   | 'withdrawn'
   | 'delivery'
   | 'unverified'
-  | 'unreadable';
+  | 'unreadable'
+  /** Local only: an answer from this device still in its outbox. Never a relay status. */
+  | 'sending';
 
 export const STATUS_LABEL: Record<RowStatus, string> = {
   needs: 'Needs you',
@@ -42,6 +42,7 @@ export const STATUS_LABEL: Record<RowStatus, string> = {
   delivery: 'Delivery needs attention',
   unverified: 'Could not verify',
   unreadable: 'Not readable here',
+  sending: 'Waiting to send',
 };
 
 export function principalStatus(v: QuestionView, now: number): RowStatus {
@@ -53,6 +54,15 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
   if (s === 'human-answered') return 'answered';
   if (s === 'expired') return 'expired';
   return 'withdrawn';
+}
+
+/** What a row says in place of an answer when a question closed without one (Home and History). */
+export function closedLine(status: RowStatus): string | null {
+  if (status === 'expired') return 'Expired before anyone answered';
+  if (status === 'withdrawn') return 'Withdrawn by your agent';
+  if (status === 'unreadable') return 'This device holds no key for it';
+  if (status === 'unverified') return 'Could not be verified';
+  return null;
 }
 
 /* ---------------- origin ---------------- */
@@ -140,65 +150,80 @@ export function searchQuestion(v: QuestionView, query: string): SearchHit | null
   return terms.every((t) => all.includes(t)) ? 'earlier' : null;
 }
 
-/* ---------------- the navigator ---------------- */
+/* ---------------- Home's list ---------------- */
 
-export function inScope(v: QuestionView, scope: Scope, now: number): boolean {
-  if (scope === 'needs') return needsAction(v, now);
-  if (scope === 'model') return proxyNeedsReview(v, now);
-  return true;
+export interface ListQuery extends Filters {
+  sort: NeedsSort;
+  query: string;
+  /** Questions with an answer from this device still in its outbox. */
+  pending?: ReadonlySet<string>;
 }
 
-export interface ScopeCounts {
-  needs: number;
-  model: number;
-  all: number;
-}
+export type SectionKind = 'needs' | 'sending' | 'review' | 'day';
 
-/** Counts follow the project and computer filters (never the search), so a count never promises hidden rows. */
-export function scopeCounts(list: QuestionView[], f: Filters, now: number): ScopeCounts {
-  const base = list.filter((v) => matchesFilters(v, f));
-  return {
-    needs: base.filter((v) => needsAction(v, now)).length,
-    model: base.filter((v) => proxyNeedsReview(v, now)).length,
-    all: base.length,
-  };
+export interface ListSection {
+  /** Stable per section: `needs`, `sending`, `review`, or `day:<local date>`. */
+  key: string;
+  kind: SectionKind;
+  title: string;
+  items: QuestionView[];
 }
 
 const byActivity = (a: QuestionView, b: QuestionView) =>
   b.lastSeq - a.lastSeq || Date.parse(b.createdAt) - Date.parse(a.createdAt);
 
-export interface NavGroup {
-  key: 'main' | 'delivery';
-  title: string | null;
-  items: QuestionView[];
-}
-
-export interface NavQuery extends Filters {
-  scope: Scope;
-  sort: NeedsSort;
-  query: string;
-}
-
 /**
- * The navigator's rows in display order. Needs you: answerable questions by soonest deadline then oldest (or
- * newest first), with answered questions whose delivery needs attention in their own group below. Model answers
- * and All: most recent activity first.
+ * Every question in one list, in the order a person deals with them. Needs you: answers whose delivery needs
+ * attention on a computer (they are stuck, so they lead), then the questions waiting for a decision (soonest
+ * deadline, then oldest, or newest first); the same set the sidebar counts. Then answers from this device still
+ * waiting to send, model answers still to review, and everything else by most recent activity, grouped by day.
+ * Needs you is always present, even when empty, so the list can say so in its place; the others appear only when
+ * they hold something. Filters and search apply to every section.
  */
-export function navigatorGroups(list: QuestionView[], q: NavQuery, now: number): NavGroup[] {
-  const rows = list.filter(
-    (v) => inScope(v, q.scope, now) && matchesFilters(v, q) && searchQuestion(v, q.query) !== null,
-  );
-  if (q.scope !== 'needs') return [{ key: 'main', title: null, items: rows.sort(byActivity) }];
-  const open = sortNeedsYou(
-    rows.filter((v) => needsYou(v, now)),
-    q.sort === 'newest',
-    now,
-  );
-  const delivery = rows.filter((v) => !needsYou(v, now)).sort(byActivity);
-  const groups: NavGroup[] = [{ key: 'main', title: null, items: open }];
-  if (delivery.length)
-    groups.push({ key: 'delivery', title: 'Delivery needs attention', items: delivery });
-  return groups;
+export function homeSections(
+  list: QuestionView[],
+  q: ListQuery,
+  now: number,
+  locale?: string,
+): ListSection[] {
+  const rows = list.filter((v) => matchesFilters(v, q) && searchQuestion(v, q.query) !== null);
+  const needs: QuestionView[] = [];
+  const delivery: QuestionView[] = [];
+  const sending: QuestionView[] = [];
+  const review: QuestionView[] = [];
+  const rest: QuestionView[] = [];
+  for (const v of rows) {
+    if (q.pending?.has(v.id)) sending.push(v);
+    else if (needsYou(v, now)) needs.push(v);
+    else if (deliveryNeedsAttention(v)) delivery.push(v);
+    else if (proxyNeedsReview(v, now)) review.push(v);
+    else rest.push(v);
+  }
+  const sections: ListSection[] = [
+    {
+      key: 'needs',
+      kind: 'needs',
+      title: 'Needs you',
+      items: [...delivery.sort(byActivity), ...sortNeedsYou(needs, q.sort === 'newest', now)],
+    },
+  ];
+  if (sending.length)
+    sections.push({
+      key: 'sending',
+      kind: 'sending',
+      title: 'Waiting to send',
+      items: sending.sort(byActivity),
+    });
+  if (review.length)
+    sections.push({
+      key: 'review',
+      kind: 'review',
+      title: 'Model answers to review',
+      items: review.sort(byActivity),
+    });
+  for (const g of groupByDay(rest.sort(byActivity), (v) => v.lastEventAt, now, locale))
+    sections.push({ key: `day:${g.key}`, kind: 'day', title: g.label, items: g.items });
+  return sections;
 }
 
 /**
@@ -233,13 +258,19 @@ export function optionLabels(v: QuestionView, a: ActionView | null): string[] {
     .filter((l): l is string => !!l);
 }
 
+/** Chosen options and a note as one plain line: "Keep Canopy — Canopy is the brand name". */
+export function choiceLine(v: QuestionView, selected: readonly string[], note: string): string {
+  const labels = selected
+    .map((id) => v.content?.options.find((o) => o.id === id)?.label)
+    .filter((l): l is string => !!l);
+  return [labels.join(', '), note.replace(/\s+/g, ' ').trim()].filter(Boolean).join(' — ');
+}
+
 /** The answer in force as one line, for list rows: "Keep Canopy — Canopy is the brand name". */
 export function answerSummary(v: QuestionView): AnswerSummary | null {
   const a = currentAnswer(v);
   if (!a) return null;
-  const labels = optionLabels(v, a);
-  const note = (a.content?.text ?? '').replace(/\s+/g, ' ').trim();
-  const text = [labels.join(', '), note].filter(Boolean).join(' — ');
+  const text = choiceLine(v, a.content?.selected_option_ids ?? [], a.content?.text ?? '');
   const confirmed =
     a.provenance === 'proxy' &&
     v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);

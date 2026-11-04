@@ -319,18 +319,13 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
       await shot('p-home-open-light');
       await closeSidebar();
     }
-    // The page scrolled, so content passes under the floating button (All is long enough to scroll).
-    await page.getByRole('button', { name: /^All/ }).first().click();
+    // The page scrolled, so content passes under the floating button (Home lists every question).
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.evaluate(() => window.scrollTo(0, 260));
     await settle();
     if ((await page.evaluate(() => window.scrollY)) < 200) throw new Error('Home did not scroll');
     await shot('p-home-scrolled-light');
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page
-      .getByRole('button', { name: /^Needs you/ })
-      .first()
-      .click();
     await go('/history');
     await shot('p-history-closed-light');
     await go('/settings');

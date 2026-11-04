@@ -135,14 +135,14 @@ Daintree's tiers, all under 300 ms: state changes 150 ms ease-out; panel and she
 
 Three top-level destinations, as both specs agree: **Questions** (scopes Needs you, Model answers, All), **History**, **Settings**. Devices moves inside Settings; `/devices` keeps working and shows a back link to Settings.
 
-| Route                             | Meaning                                                                               |
-| --------------------------------- | ------------------------------------------------------------------------------------- |
-| `/`                               | Questions, remembering this device's last scope and filters; first visit is Needs you |
-| `/q/:id`                          | That exact question in its current authoritative state                                |
-| `/history`                        | History, restoring the session's query, filters and position                          |
-| `/settings`, `/settings/:section` | Settings index and its sections                                                       |
-| `/devices`                        | Devices (inside Settings visually)                                                    |
-| `/pair`, `/install`, `/privacy`   | Unchanged meanings                                                                    |
+| Route                             | Meaning                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| `/`                               | Home: every question, Needs you first, remembering this device's filters |
+| `/q/:id`                          | That exact question in its current authoritative state                   |
+| `/history`                        | History, restoring the session's query, filters and position             |
+| `/settings`, `/settings/:section` | Settings index and its sections                                          |
+| `/devices`                        | Devices (inside Settings visually)                                       |
+| `/pair`, `/install`, `/privacy`   | Unchanged meanings                                                       |
 
 Never put question text, answers, file names, search terms, pairing secrets or keys in a URL. Workspace modes (file viewer, navigator, editor) are history entries without new paths: they push a `history.state` marker so Back closes them, and file-to-file movement replaces state rather than adding Back steps.
 
@@ -413,13 +413,14 @@ Change answer opens correction mode in the workspace: the current answer read-on
 
 One navigation model, two presentations: Home's list, and a sheet titled **Questions & answers** (opened from All Q&A or Ctrl/⌘ + K; full height on phones, from the left from 720 px). Same counts, same selection, same filters.
 
-- **Scopes:** Needs you (answerable questions, with a separate "Delivery needs attention" group), Model answers (still needing review), All. Segmented control with counts.
-- **Search** (local over decrypted content, 150–250 ms debounce) and separate **Project** and **Computer** filters (replacing the combined origin select). Active filters show as removable chips; **Clear filters** keeps the search.
-- **Sort:** Needs you by soonest deadline then oldest; All by most recent activity. Rows never reshuffle under the finger: new questions show "2 new questions" to refresh deliberately.
-- **Row:** project · computer, a two- or three-line question excerpt, the answer excerpt when one exists ("You: …" / "Model: …"), file count, one principal status, and only actionable extras (Draft, Queued, Review, Delivery issue, due time). When the asking desktop shares pane snapshots, the agent's observed state (4.2) ends the meta line in a slot as wide as its longest word, so going stale or changing word never adds a line. The whole row opens the question. The current question is highlighted (neutral raised fill) and scrolled into view.
+- **Sections:** one list of every question, with no scope control: **Needs you** first (answers whose delivery needs attention on a computer, then answerable questions; when empty it says so in its place), then **Waiting to send** (answers still in this device's outbox), **Model answers to review**, and everything else by most recent activity under Today, Yesterday and dates. A long Needs you links down to the answers waiting to send and the model answers to review. **Resolved (issue #41):** the owner asked for the list to be as efficient as a chat list; sections replace the Needs you / Model answers / All segments, so nothing is a tap away and the top of the screen is the list.
+- **Search** (local over decrypted content, 150–250 ms debounce) and separate **Project** and **Computer** filters in one **Filter** sheet, offered only when questions come from more than one of either. On phones and tablets search and filter are round buttons on the menu button's row (search opens into a field there); in the wide column and the sheet they sit above the list. Active filters show as removable chips; the sheet's **Any computer** / **Any project** clears one.
+- **Sort:** Needs you by soonest deadline then oldest (or newest first); everything else by most recent activity. Rows never reshuffle under the finger: new questions show "2 new questions" to refresh deliberately.
+- **Row:** the state glyph; the question in one line, two at most, with its relative time at the right; the answer in force as one line ("You: …" / "Model: …"), or why it closed without one; project · computer; and only the chips that call for action: a due time inside three days, Queued or Sending…, Delivery issue. When the asking desktop shares pane snapshots, the agent's observed state (4.2) ends that line in a slot as wide as its longest word, so going stale or changing word never adds a line. The whole row opens the question. The current question is highlighted (neutral raised fill) and scrolled into view. **Resolved (issue #41):** file counts, Draft and Review chips and the status word leave the row (the section and the glyph carry the status); a week-out default expiry is not shown.
 - History and Settings are reachable from the navigator's header on phones.
-- Empty states: "Nothing needs you right now." · "No questions match these filters." (Clear filters) · "No matches in questions saved on this device." · offline "New questions will appear when you reconnect." · syncing "Checking for more questions…" (never an all-clear while syncing).
-- Scope, filters and sort persist per device; search persists for the session.
+- Empty states: "No questions yet." · "Nothing needs you right now." (in Needs you's place) · "No questions match these filters." (Clear filters) · "No matches in questions saved on this device." · offline "You're offline. New questions will appear when you reconnect." · syncing "Checking for questions…" (never an all-clear while syncing).
+- Filters and the Needs you order persist per device; search persists for the session.
+- From 1100 px Home is a list-detail split: the list keeps its own column beside the sidebar, and the pane beside it holds the chosen question, or a calm "Choose a question" until one is chosen.
 
 ## 13. History
 

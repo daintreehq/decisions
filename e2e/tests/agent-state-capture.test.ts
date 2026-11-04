@@ -419,16 +419,12 @@ describe.skipIf(!OUT || !chromiumPath)(
       await expectLive('dialog.sidebar-sheet[open]');
       await shot('p-side-light');
       await closeSidebar();
-      await page.getByRole('button', { name: /^All/ }).first().click();
+      // Home lists every question in sections, so the closed ones are further down the same list.
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await expectRows('.navigator', all);
       await page.evaluate(() => window.scrollTo(0, 280));
       await shot('p-home-all-light');
       await page.evaluate(() => window.scrollTo(0, 0));
-      await page
-        .getByRole('button', { name: /^Needs you/ })
-        .first()
-        .click();
 
       // A state changes while the list is open: the row follows without a reload, and nothing moves.
       await expectRows('.navigator', needs);

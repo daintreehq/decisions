@@ -19,20 +19,23 @@ import {
   useRestoreList,
 } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
-import { Link, usePath } from '../../app/router.js';
+import { Link } from '../../app/router.js';
 import {
+  computerOf,
   filterOptions,
-  navigatorGroups,
-  scopeCounts,
+  homeSections,
+  projectOf,
+  searchQuestion,
   stableOrder,
   type NeedsSort,
-  type Scope,
 } from '../../domain/lists.js';
 import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import { currentSubscription, isIos, isStandalone, pushSupport } from '../../features/push.js';
-import { CloseIcon, OfflineIcon, SearchIcon, SuccessIcon } from '../Icons.js';
-import { QuestionRow } from './QuestionRow.js';
+import { ChevronDown, CloseIcon, FilterIcon, OfflineIcon, SearchIcon } from '../Icons.js';
+import { FilterChips, FilterSheet, type FacetValue } from './Filters.js';
+import { QuestionRow, type PendingAnswer } from './QuestionRow.js';
+import { StatusGlyph } from './StatusGlyph.js';
 import { SearchField, useDebounced } from './SearchField.js';
 
 export type Presentation = 'page' | 'sheet';
@@ -40,8 +43,10 @@ export type Presentation = 'page' | 'sheet';
 /* ---------------- search focus (Ctrl/⌘+K) ---------------- */
 
 const searchInputs = new Set<HTMLInputElement>();
+/** Opens Home's search when it is folded behind its round button (phones and tablets). */
+let openHomeSearch: (() => void) | null = null;
 
-/** Focus the Home list's own search if it is on screen. Returns false when there is none. */
+/** Focus Home's own search if it is on screen, opening it if it is folded away. Returns false when there is none. */
 export function focusNavigatorSearch(): boolean {
   for (const el of searchInputs) {
     if (el.isConnected && el.offsetParent !== null) {
@@ -50,6 +55,10 @@ export function focusNavigatorSearch(): boolean {
       return true;
     }
   }
+  if (openHomeSearch) {
+    openHomeSearch();
+    return true;
+  }
   return false;
 }
 
@@ -57,43 +66,7 @@ export const isMac = () =>
   typeof navigator !== 'undefined' &&
   /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
-/* ---------------- drafts ---------------- */
-
-const MAX_DRAFT_LOOKUPS = 60;
-
-/** Which of these questions hold an unsent draft on this device (sealed at rest, so read through the store). */
-function useDrafts(ids: string[]): Set<string> {
-  const path = usePath();
-  const [found, setFound] = useState<Set<string>>(() => new Set());
-  const key = ids.slice(0, MAX_DRAFT_LOOKUPS).join(',');
-  useEffect(() => {
-    const drafts = app.drafts;
-    if (!drafts || !key) {
-      setFound(new Set());
-      return;
-    }
-    let live = true;
-    void Promise.all(
-      key.split(',').map(async (id) => {
-        try {
-          const d = await drafts.load(id);
-          return d && (d.text?.trim() || d.selected?.length || d.reason?.trim()) ? id : null;
-        } catch {
-          return null;
-        }
-      }),
-    ).then((r) => {
-      if (live) setFound(new Set(r.filter((x): x is string => !!x)));
-    });
-    return () => {
-      live = false;
-    };
-    // Leaving a question flushes its draft, so look again whenever the route changes.
-  }, [key, path]);
-  return found;
-}
-
-/* ---------------- empty states ---------------- */
+/* ---------------- empty and edge states ---------------- */
 
 function useNotificationsReady(): boolean | null {
   const [ready, setReady] = useState<boolean | null>(null);
@@ -107,6 +80,24 @@ function useNotificationsReady(): boolean | null {
       .catch(() => setReady(false));
   }, []);
   return ready;
+}
+
+/**
+ * A quiet offer of notifications, when this device would not hear about a new question: a sentence of its own
+ * after another (`inline`), or a line on its own.
+ */
+function NotifyNudge({ inline = false }: { inline?: boolean }) {
+  const ready = useNotificationsReady();
+  if (ready !== false) return null;
+  const needsInstall = isIos() && !isStandalone();
+  const link = (
+    <Link to={needsInstall ? '/install' : '/settings'} className="list-note-link">
+      {needsInstall
+        ? 'Add Decisions to your Home Screen to hear about new ones'
+        : 'Turn on notifications to hear about new ones'}
+    </Link>
+  );
+  return inline ? <> {link}.</> : link;
 }
 
 function Empty({
@@ -129,51 +120,39 @@ function Empty({
   );
 }
 
-function AllClear({ compact }: { compact: boolean }) {
-  const ready = useNotificationsReady();
-  const needsInstall = isIos() && !isStandalone();
-  return (
-    <Empty icon={<SuccessIcon size={20} />} title="Nothing needs you right now.">
-      {ready === false && !compact ? (
-        <>
-          <p>
-            {needsInstall
-              ? 'To hear when a question arrives, add Decisions to your Home Screen.'
-              : 'Turn on notifications to hear when a question arrives.'}
-          </p>
-          <Link to={needsInstall ? '/install' : '/settings'} className="btn small">
-            {needsInstall ? 'Add to Home Screen' : 'Turn on notifications'}
-          </Link>
-        </>
-      ) : (
-        <p>New questions from your agents appear here.</p>
-      )}
-    </Empty>
-  );
+/* ---------------- filters ---------------- */
+
+function facetCounts(
+  all: QuestionView[],
+  values: string[],
+  pick: (v: QuestionView) => string,
+  keep: (v: QuestionView) => boolean,
+): FacetValue[] {
+  const n = new Map(values.map((x) => [x, 0]));
+  for (const v of all) {
+    if (!v.content || !keep(v)) continue;
+    const k = pick(v);
+    const c = n.get(k);
+    if (c !== undefined) n.set(k, c + 1);
+  }
+  return values.map((value) => ({ value, count: n.get(value) ?? 0 }));
 }
 
 /* ---------------- the panel ---------------- */
 
-const SCOPES: { id: Scope; label: string; unit: string }[] = [
-  { id: 'needs', label: 'Needs you', unit: ' waiting' },
-  { id: 'model', label: 'Model answers', unit: ' to review' },
-  { id: 'all', label: 'All', unit: '' },
-];
-
 /**
- * The Questions & answers navigator: one model, two presentations. Home's list (`page`, at `/`) and a sheet over a
- * question (`sheet`, opened by the dock's All Q&A or Ctrl/⌘+K). Same scopes, counts, filters, search and selection
- * in both.
+ * Every question in one list: Home's list (`page`, at `/`) and a sheet over a question (`sheet`, opened by the dock's
+ * All Q&A or Ctrl/⌘+K). Needs you comes first, then delivery problems and model answers to review, then everything
+ * else by day; one search and one filter (computer and project, in a sheet) apply to all of it. On phones and
+ * tablets Home's tools are round buttons floating top-right, beside the menu button, so the list starts at the top
+ * of the screen; in the wide column and the sheet they sit above the list.
  */
 export function NavigatorPanel({
   presentation,
   currentId,
-  title,
 }: {
   presentation: Presentation;
   currentId?: string;
-  /** Rendered above the controls (the page's heading). */
-  title?: ReactNode;
 }) {
   const snap = useApp();
   const all = useQuestions();
@@ -192,33 +171,110 @@ export function NavigatorPanel({
   };
   const nav = useNavState().questions;
   const query = useDebounced(nav.query, 200);
-  const searchRef = useRef<HTMLInputElement | null>(null);
   const wide = useWide();
+  const floating = presentation === 'page' && !wide;
   const listRef = useRef<HTMLDivElement | null>(null);
   const uid = useId();
+  const searchId = `${uid}-search`;
+  const page = presentation === 'page';
+  const Heading = page ? 'h2' : 'h3';
 
+  /* ---- search: always open in the column and the sheet; behind a round button on phones ---- */
+  const [searchOpen, setSearchOpen] = useState(() => nav.query !== '');
+  const searchInput = useRef<HTMLInputElement | null>(null);
+  const searchButton = useRef<HTMLButtonElement | null>(null);
+  const focusSearch = useRef(false);
+  const registerSearch = useCallback(
+    (el: HTMLInputElement | null) => {
+      if (searchInput.current) searchInputs.delete(searchInput.current);
+      searchInput.current = el;
+      if (el && page) searchInputs.add(el);
+    },
+    [page],
+  );
+  const openSearch = useCallback(() => {
+    focusSearch.current = true;
+    setSearchOpen(true);
+    searchInput.current?.focus();
+  }, []);
+  const closeSearch = useCallback(() => {
+    setQuestions({ query: '' });
+    setSearchOpen(false);
+    requestAnimationFrame(() => searchButton.current?.focus());
+  }, []);
+  // Opening by hand moves focus into the field; coming back to a list that still holds a query does not (it would
+  // raise the keyboard over the list).
+  useEffect(() => {
+    if (searchOpen && focusSearch.current) {
+      focusSearch.current = false;
+      searchInput.current?.focus();
+    }
+  }, [searchOpen]);
+  useEffect(() => {
+    if (!floating) return;
+    openHomeSearch = openSearch;
+    return () => {
+      if (openHomeSearch === openSearch) openHomeSearch = null;
+    };
+  }, [floating, openSearch]);
+
+  /* ---- filters ---- */
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const opts = useMemo(() => filterOptions(all), [all]);
   useEffect(() => resolvePersistedFilters(opts.projects, opts.computers), [opts]);
-
   const filters = useMemo(
     () => ({ project: nav.project, computer: nav.computer }),
     [nav.project, nav.computer],
   );
-  const counts = useMemo(() => scopeCounts(all, filters, now), [all, filters, now]);
-  const groups = useMemo(
-    () => navigatorGroups(all, { ...filters, scope: nav.scope, sort: nav.sort, query }, now),
-    [all, filters, nav.scope, nav.sort, query, now],
+  const filtered = !!(nav.project || nav.computer);
+  const activeFilters = (nav.project ? 1 : 0) + (nav.computer ? 1 : 0);
+  const showFilter = opts.projects.length > 1 || opts.computers.length > 1 || filtered;
+  // Each count says what choosing that value would show: under the search and the other facet. The options stay
+  // the same whatever the counts.
+  const facets = useMemo(() => {
+    const matching = query.trim() ? all.filter((v) => searchQuestion(v, query) !== null) : all;
+    return {
+      computers: facetCounts(
+        matching,
+        opts.computers,
+        computerOf,
+        (v) => !nav.project || projectOf(v) === nav.project,
+      ),
+      projects: facetCounts(
+        matching,
+        opts.projects,
+        projectOf,
+        (v) => !nav.computer || computerOf(v) === nav.computer,
+      ),
+    };
+  }, [all, opts, nav.project, nav.computer, query]);
+  const filterLabel =
+    activeFilters > 0 ? `Filter questions, ${activeFilters} active` : 'Filter questions';
+
+  /* ---- answers from this device still in its outbox ---- */
+  void snap.rev; // re-read outbox state on every app change
+  const pendingById = new Map<string, PendingAnswer>();
+  for (const e of app.outbox?.list() ?? [])
+    if ((e.state === 'queued' || e.state === 'sending') && !pendingById.has(e.questionId))
+      pendingById.set(e.questionId, { state: e.state, selected: e.selected, text: e.text });
+  const pendingKey = [...pendingById.keys()].sort().join(',');
+  const pendingIds = useMemo(() => new Set(pendingKey ? pendingKey.split(',') : []), [pendingKey]);
+
+  /* ---- sections, held still under the finger ---- */
+  const sections = useMemo(
+    () => homeSections(all, { ...filters, sort: nav.sort, query, pending: pendingIds }, now),
+    [all, filters, nav.sort, query, pendingIds, now],
   );
   const byId = useMemo(() => {
-    const m = new Map<string, { v: QuestionView; group: number }>();
-    groups.forEach((g, gi) => g.items.forEach((v) => m.set(v.id, { v, group: gi })));
+    const m = new Map<string, { v: QuestionView; section: number }>();
+    sections.forEach((s, si) => s.items.forEach((v) => m.set(v.id, { v, section: si })));
     return m;
-  }, [groups]);
-  const fresh = useMemo(() => groups.flatMap((g) => g.items.map((v) => v.id)), [groups]);
+  }, [sections]);
+  const fresh = useMemo(() => sections.flatMap((s) => s.items.map((v) => v.id)), [sections]);
 
   // Rows never reshuffle under the finger: hold the order on screen, offer newcomers deliberately.
   const firstSync = snap.syncing && !snap.lastSyncedAt;
-  const viewKey = `${nav.scope}|${nav.sort}|${nav.project}|${nav.computer}|${query}`;
+  const viewKey = `${nav.sort}|${nav.project}|${nav.computer}|${query}`;
   const frozen = useRef<{ key: string; ids: string[] } | null>(null);
   const [, refresh] = useReducer((x: number) => x + 1, 0);
   let order: { ids: string[]; added: string[] };
@@ -234,52 +290,69 @@ export function NavigatorPanel({
   const showNew = useCallback(() => {
     frozen.current = null;
     refresh();
-    listRef.current?.scrollTo?.({ top: 0 });
+    // Back to the top of whatever scrolls the list: the sheet's own list, the wide column, or the page.
+    let sc: HTMLElement | null = listRef.current;
+    while (sc && !/(auto|scroll)/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
+    if (sc) sc.scrollTo?.({ top: 0 });
+    else window.scrollTo?.({ top: 0 });
   }, []);
-
-  const drafts = useDrafts(order.ids);
-  void snap.rev; // re-read outbox state on every app change
-  const pending = (id: string) => app.outbox?.pendingState(id);
 
   const loading =
     snap.phase === 'loading' || (snap.syncing && all.length === 0 && !snap.lastSyncedAt);
   // Offline is the device's network; a socket between retries is reconnecting, not offline.
   const offline = !snap.online;
   const connected = snap.connection === 'live' || snap.connection === 'polling';
-  const filtered = !!(nav.project || nav.computer);
+  const checking = !offline && (snap.syncing || !connected);
   const searching = query.trim().length > 0;
 
-  useRestoreList('questions', listRef, presentation === 'page' && !loading);
+  useRestoreList('questions', listRef, page && !loading);
 
   // The current question is highlighted and kept in view.
   useEffect(() => {
-    if (presentation === 'page' || !currentId) return;
+    if (!currentId) return;
     const row = listRef.current?.querySelector<HTMLElement>('[aria-current="page"]');
     row?.scrollIntoView?.({ block: 'nearest' });
-  }, [currentId, presentation, loading]);
-
-  const registerSearch = useCallback(
-    (el: HTMLInputElement | null) => {
-      if (searchRef.current) searchInputs.delete(searchRef.current);
-      searchRef.current = el;
-      if (el && presentation === 'page') searchInputs.add(el);
-    },
-    [presentation],
-  );
+  }, [currentId, loading]);
 
   const onOpen = useCallback(
     (e: MouseEvent<HTMLAnchorElement>, id: string) =>
-      rowClick(e, id, 'questions', { refocus: presentation === 'page' }),
-    [presentation],
+      rowClick(e, id, 'questions', { refocus: page }),
+    [page],
   );
 
-  const setScope = (scope: Scope) => {
-    if (scope !== nav.scope) setQuestions({ scope, anchor: null });
-  };
-
-  const showFilters =
-    opts.projects.length > 1 || opts.computers.length > 1 || filtered || nav.scope === 'needs';
   const visible = order.ids.filter((id) => byId.has(id));
+  const shown = sections.map((s, si) => ({
+    s,
+    ids: visible.filter((id) => byId.get(id)!.section === si),
+  }));
+  // Under load what follows Needs you falls below the fold: a long Needs you points to answers still waiting to
+  // leave this device and to model answers waiting for review.
+  const countOf = (kind: string) => shown.find((x) => x.s.kind === kind)?.ids.length ?? 0;
+  const needsCount = countOf('needs');
+  const jumps =
+    needsCount >= 4 && !searching
+      ? [
+          {
+            key: 'sending',
+            glyph: 'sending' as const,
+            n: countOf('sending'),
+            label: (n: number) => `${n} ${n === 1 ? 'answer' : 'answers'} waiting to send`,
+          },
+          {
+            key: 'review',
+            glyph: 'review' as const,
+            n: countOf('review'),
+            label: (n: number) => `${n} model ${n === 1 ? 'answer' : 'answers'} to review`,
+          },
+        ].filter((j) => j.n > 0)
+      : [];
+  const jumpTo = (key: string) => {
+    const h = document.getElementById(`${uid}-${key}`);
+    if (!h) return;
+    const reduce = matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    h.closest('section')?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+    h.focus({ preventScroll: true });
+  };
 
   let body: ReactNode;
   if (loading) {
@@ -292,142 +365,232 @@ export function NavigatorPanel({
         ))}
       </ul>
     );
-  } else if (visible.length === 0) {
-    if (searching)
-      body = (
-        <Empty
-          icon={<SearchIcon size={20} />}
-          title="No matches in questions saved on this device."
+  } else if (all.length === 0) {
+    body = offline ? (
+      <Empty icon={<OfflineIcon size={20} />} title="You’re offline.">
+        <p>Questions will appear here when you reconnect.</p>
+      </Empty>
+    ) : checking ? (
+      <Empty busy title="Checking for questions…" />
+    ) : (
+      <Empty title="No questions yet.">
+        <p>Questions your agents ask will appear here.</p>
+        {page && <NotifyNudge />}
+      </Empty>
+    );
+  } else if (visible.length === 0 && searching) {
+    body = (
+      <Empty icon={<SearchIcon size={20} />} title="No matches in questions saved on this device.">
+        <p>Search covers the question, its context, project, computer and answers.</p>
+      </Empty>
+    );
+  } else if (visible.length === 0 && filtered) {
+    body = (
+      <Empty title="No questions match these filters.">
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setQuestions({ project: null, computer: null })}
         >
-          <p>Search covers the question, its context, project, computer and answers.</p>
-        </Empty>
-      );
-    else if (filtered)
-      body = (
-        <Empty title="No questions match these filters.">
-          <button
-            type="button"
-            className="btn small"
-            onClick={() => setQuestions({ project: null, computer: null })}
-          >
-            Clear filters
-          </button>
-        </Empty>
-      );
-    else if (nav.scope === 'needs' && offline)
-      body = (
-        <Empty icon={<OfflineIcon size={20} />} title="You're offline.">
-          <p>New questions will appear when you reconnect.</p>
-        </Empty>
-      );
-    else if (nav.scope === 'needs' && (snap.syncing || !connected))
-      // Never an all-clear while the relay has not been checked.
-      body = <Empty busy title="Checking for more questions…" />;
-    else if (nav.scope === 'needs') body = <AllClear compact={presentation !== 'page'} />;
-    else if (nav.scope === 'model')
-      body = (
-        <Empty title="No model answers to review.">
-          <p>When the decision model answers for you, you can confirm or change it here.</p>
-        </Empty>
-      );
-    else
-      body = (
-        <Empty title="No questions yet.">
-          <p>Questions your agents ask will be listed here.</p>
-        </Empty>
-      );
+          Clear filters
+        </button>
+      </Empty>
+    );
   } else {
-    const shownGroups = groups
-      .map((g, gi) => ({
-        g,
-        ids: visible.filter((id) => byId.get(id)!.group === gi),
-      }))
-      .filter((x) => x.ids.length > 0);
-    body = shownGroups.map(({ g, ids }) => (
-      <section
-        key={g.key}
-        className="qgroup"
-        aria-labelledby={g.title ? `${uid}-${g.key}` : undefined}
-      >
-        {g.title && (
-          <h3 className="qgroup-title" id={`${uid}-${g.key}`}>
-            {g.title}
-            <span className="count">{ids.length}</span>
-          </h3>
-        )}
-        <ul className="qlist" aria-label={g.title ?? 'Questions'}>
-          {ids.map((id) => {
-            const v = byId.get(id)!.v;
-            return (
-              <QuestionRow
-                key={id}
-                v={v}
-                now={now}
-                selected={id === currentId}
-                showStatusWord={nav.scope === 'all'}
-                extras={{ draft: drafts.has(id), pending: pending(id) }}
-                agent={agentFor(v)}
-                onOpen={onOpen}
-              />
-            );
-          })}
-        </ul>
-      </section>
-    ));
+    body = shown.map(({ s, ids }) => {
+      const needs = s.kind === 'needs';
+      // Searching shows only what matched; otherwise Needs you keeps its place and says when it is empty.
+      if (ids.length === 0 && (!needs || searching || offline)) return null;
+      const headId = `${uid}-${s.key}`;
+      return (
+        <section
+          key={s.key}
+          className="qgroup"
+          data-section={s.kind === 'day' ? 'day' : s.kind}
+          aria-labelledby={headId}
+        >
+          <div className="qgroup-head">
+            <Heading className="qgroup-title" id={headId} tabIndex={-1}>
+              {s.title}
+              {s.kind !== 'day' && ids.length > 0 && (
+                <span className={needs ? 'count waiting' : 'count'}>
+                  <span className="sr-only">, </span>
+                  {ids.length}
+                </span>
+              )}
+            </Heading>
+            {needs && ids.length > 1 && <SortSelect sort={nav.sort} />}
+          </div>
+          {needs &&
+            jumps.map((j) => (
+              <button key={j.key} type="button" className="jump-link" onClick={() => jumpTo(j.key)}>
+                <StatusGlyph status={j.glyph} label={false} />
+                {j.label(j.n)}
+                <ChevronDown size={14} />
+              </button>
+            ))}
+          {ids.length > 0 ? (
+            <ul className="qlist" aria-labelledby={headId}>
+              {ids.map((id) => {
+                const v = byId.get(id)!.v;
+                return (
+                  <QuestionRow
+                    key={id}
+                    v={v}
+                    now={now}
+                    selected={id === currentId}
+                    extras={{ pending: pendingById.get(id) }}
+                    agent={agentFor(v)}
+                    onOpen={onOpen}
+                  />
+                );
+              })}
+            </ul>
+          ) : checking ? (
+            <p className="list-note" role="status" aria-busy="true">
+              <span className="list-note-spin" aria-hidden="true" />
+              Checking for questions…
+            </p>
+          ) : (
+            <p className="list-note list-note-clear" role="status">
+              {filtered ? 'Nothing in these filters needs you.' : 'Nothing needs you right now.'}
+              {page && !filtered && <NotifyNudge inline />}
+            </p>
+          )}
+        </section>
+      );
+    });
   }
 
-  return (
-    <section
-      className="navigator"
-      data-presentation={presentation}
-      aria-label="Questions and answers"
-    >
-      <div className="nav-controls">
-        {title}
-        <div className="seg nav-scopes" role="group" aria-label="Show">
-          {SCOPES.map(({ id, label, unit }) => {
-            const n = id === 'needs' ? counts.needs : id === 'model' ? counts.model : 0;
-            return (
-              <button
-                key={id}
-                type="button"
-                aria-pressed={nav.scope === id}
-                onClick={() => setScope(id)}
-              >
-                {label}
-                {n > 0 && (
-                  <span className={id === 'needs' ? 'count waiting' : 'count'}>
-                    <span className="sr-only">, </span>
-                    {n}
-                    <span className="sr-only">{unit}</span>
-                  </span>
-                )}
-              </button>
-            );
-          })}
+  const count = visible.length;
+  // Search and filter changes start the new results from the top and say how many questions now show (clearing the
+  // last filter included); arrivals and other background changes do neither. Coming back to a list keeps its key,
+  // so Back's restored position stands.
+  const [said, setSaid] = useState('');
+  const resultKey = `${query.trim()}|${nav.project ?? ''}|${nav.computer ?? ''}`;
+  const lastKey = useRef(resultKey);
+  useEffect(() => {
+    if (lastKey.current === resultKey) return;
+    lastKey.current = resultKey;
+    let sc: HTMLElement | null = listRef.current;
+    while (sc && !/(auto|scroll)/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
+    if (sc) sc.scrollTo?.({ top: 0 });
+    else window.scrollTo?.({ top: 0 });
+    setSaid(
+      searching
+        ? `${count} ${count === 1 ? 'match' : 'matches'}`
+        : `${count} ${count === 1 ? 'question' : 'questions'}`,
+    );
+    // Announce on a change of query or filters only, with the count as it stands then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resultKey]);
+  const tools = floating ? (
+    <>
+      {searchOpen && (
+        <div className="float-search" role="search">
+          <SearchField
+            id={searchId}
+            inputRef={registerSearch}
+            value={nav.query}
+            onChange={(q) => setQuestions({ query: q })}
+            label="Search questions"
+            placeholder="Search questions"
+            clearable={false}
+            onEscapeEmpty={closeSearch}
+          />
         </div>
+      )}
+      <div className="float-tools">
+        {showFilter && (
+          <button
+            type="button"
+            className="float-btn"
+            data-active={activeFilters > 0 || undefined}
+            aria-label={filterLabel}
+            aria-haspopup="dialog"
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen(true)}
+          >
+            <FilterIcon size={20} />
+            {activeFilters > 0 && (
+              <span className="float-btn-badge" aria-hidden="true">
+                {activeFilters}
+              </span>
+            )}
+          </button>
+        )}
+        <button
+          ref={searchButton}
+          type="button"
+          className="float-btn"
+          aria-label={searchOpen ? 'Close search' : 'Search questions'}
+          aria-expanded={searchOpen}
+          aria-controls={searchOpen ? searchId : undefined}
+          onClick={searchOpen ? closeSearch : openSearch}
+        >
+          {searchOpen ? <CloseIcon size={20} /> : <SearchIcon size={20} />}
+        </button>
+      </div>
+    </>
+  ) : (
+    <div className="nav-tools">
+      <div className="nav-tools-row" role="search">
         <SearchField
+          id={searchId}
           inputRef={registerSearch}
           value={nav.query}
           onChange={(q) => setQuestions({ query: q })}
           label="Search questions"
           placeholder="Search questions"
-          shortcut={
-            presentation === 'page' && wide ? (isMac() ? 'Meta+K' : 'Control+K') : undefined
-          }
+          shortcut={page && wide ? (isMac() ? 'Meta+K' : 'Control+K') : undefined}
         />
-        {showFilters && (
-          <FilterBar
-            projects={opts.projects}
-            computers={opts.computers}
-            project={nav.project}
-            computer={nav.computer}
-            sort={nav.scope === 'needs' && visible.length > 1 ? nav.sort : null}
-            showClear={visible.length > 0 || searching}
-          />
+        {showFilter && (
+          <button
+            type="button"
+            className="btn icon nav-filter"
+            data-active={activeFilters > 0 || undefined}
+            aria-label={filterLabel}
+            aria-haspopup="dialog"
+            aria-expanded={filtersOpen}
+            title="Filter by computer or project"
+            onClick={() => setFiltersOpen(true)}
+          >
+            <FilterIcon size={18} />
+            {activeFilters > 0 && (
+              <span className="float-btn-badge" aria-hidden="true">
+                {activeFilters}
+              </span>
+            )}
+          </button>
         )}
       </div>
+      <FilterChips project={nav.project} computer={nav.computer} />
+    </div>
+  );
+
+  return (
+    <section
+      className="navigator"
+      data-presentation={presentation}
+      data-tools={floating ? 'floating' : 'inline'}
+      data-filter={showFilter || undefined}
+      aria-labelledby={page ? 'questions-h' : undefined}
+      aria-label={page ? undefined : 'Questions and answers'}
+    >
+      {page && (
+        <h1 className="sr-only" id="questions-h" tabIndex={-1}>
+          Questions
+        </h1>
+      )}
+      {tools}
       <div className="nav-scroll" ref={listRef}>
+        {floating && <FilterChips project={nav.project} computer={nav.computer} />}
+        {offline && all.length > 0 && !loading && (
+          <p className="list-note home-offline" role="status">
+            <OfflineIcon size={16} />
+            You’re offline. New questions will appear when you reconnect.
+          </p>
+        )}
         {order.added.length > 0 && (
           <button type="button" className="nav-new" onClick={showNew}>
             {order.added.length} new {order.added.length === 1 ? 'question' : 'questions'}
@@ -435,142 +598,43 @@ export function NavigatorPanel({
           </button>
         )}
         {body}
-        {!loading && visible.length > 0 && snap.syncing && (
+        {!loading && count > 0 && snap.syncing && (
           <p className="nav-foot" role="status">
             Checking for more questions…
           </p>
         )}
       </div>
       <p className="sr-only" role="status">
-        {searching ? `${visible.length} ${visible.length === 1 ? 'match' : 'matches'}` : ''}
+        {said}
       </p>
+      {showFilter && (
+        <FilterSheet
+          open={filtersOpen}
+          onClose={() => setFiltersOpen(false)}
+          computers={facets.computers}
+          projects={facets.projects}
+          computer={nav.computer}
+          project={nav.project}
+          resultCount={visible.length}
+        />
+      )}
     </section>
   );
 }
 
-/* ---------------- filters ---------------- */
-
-function FilterSelect({
-  label,
-  values,
-  onPick,
-}: {
-  label: string;
-  values: string[];
-  onPick: (v: string) => void;
-}) {
+/** The order of Needs you: soonest deadline (then oldest), or newest first. The platform's own picker. */
+function SortSelect({ sort }: { sort: NeedsSort }) {
   return (
-    <label className="fchip select">
-      <span aria-hidden="true">{label}</span>
+    <label className="qgroup-sort">
+      <span aria-hidden="true">{sort === 'due' ? 'Due soonest' : 'Newest first'}</span>
       <select
-        value=""
-        aria-label={`Filter by ${label.toLowerCase()}`}
-        onChange={(e) => e.target.value && onPick(e.target.value)}
+        aria-label="Order of questions that need you"
+        value={sort}
+        onChange={(e) => setQuestions({ sort: e.target.value as NeedsSort })}
       >
-        <option value="">{`Any ${label.toLowerCase()}`}</option>
-        {values.map((v) => (
-          <option key={v} value={v}>
-            {v}
-          </option>
-        ))}
+        <option value="due">Due soonest</option>
+        <option value="newest">Newest first</option>
       </select>
     </label>
-  );
-}
-
-function ActiveChip({
-  kind,
-  value,
-  onRemove,
-}: {
-  kind: string;
-  value: string;
-  onRemove: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="fchip on"
-      onClick={onRemove}
-      aria-label={`${kind}: ${value}. Remove filter`}
-      title={`${kind}: ${value}`}
-    >
-      <span className="fchip-label">{value}</span>
-      <CloseIcon size={13} />
-    </button>
-  );
-}
-
-function FilterBar({
-  projects,
-  computers,
-  project,
-  computer,
-  sort,
-  showClear,
-}: {
-  showClear: boolean;
-  projects: string[];
-  computers: string[];
-  project: string | null;
-  computer: string | null;
-  sort: NeedsSort | null;
-}) {
-  const any = !!(project || computer);
-  return (
-    <div className="filter-bar" role="group" aria-label="Filters">
-      {project ? (
-        <ActiveChip
-          kind="Project"
-          value={project}
-          onRemove={() => setQuestions({ project: null })}
-        />
-      ) : (
-        projects.length > 1 && (
-          <FilterSelect
-            label="Project"
-            values={projects}
-            onPick={(p) => setQuestions({ project: p })}
-          />
-        )
-      )}
-      {computer ? (
-        <ActiveChip
-          kind="Computer"
-          value={computer}
-          onRemove={() => setQuestions({ computer: null })}
-        />
-      ) : (
-        computers.length > 1 && (
-          <FilterSelect
-            label="Computer"
-            values={computers}
-            onPick={(c) => setQuestions({ computer: c })}
-          />
-        )
-      )}
-      {any && showClear && (
-        <button
-          type="button"
-          className="fclear"
-          onClick={() => setQuestions({ project: null, computer: null })}
-        >
-          Clear filters
-        </button>
-      )}
-      {sort && (
-        <label className="fchip select fsort">
-          <span aria-hidden="true">{sort === 'due' ? 'Due soonest' : 'Newest first'}</span>
-          <select
-            aria-label="Order"
-            value={sort}
-            onChange={(e) => setQuestions({ sort: e.target.value as NeedsSort })}
-          >
-            <option value="due">Due soonest</option>
-            <option value="newest">Newest first</option>
-          </select>
-        </label>
-      )}
-    </div>
   );
 }

@@ -68,7 +68,30 @@
   margin: 0;
 }
 
-/* ---------- a calm empty pane (History's record column) ---------- */
+/* ---------- Home at 1100px and up: the list beside the chosen question (or a calm pane) ---------- */
+.home[data-layout='split'] {
+  display: grid;
+  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+.home[data-layout='split'] .home-list {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 24px 20px 40px;
+  border-right: 1px solid var(--line);
+}
+.home[data-layout='split'] .home-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.home[data-layout='split'] .home-pane > .choose {
+  height: 100%;
+}
+
+/* ---------- a calm empty pane (History's record column, Home's question pane) ---------- */
 .choose {
   display: flex;
   flex-direction: column;
@@ -91,6 +114,13 @@
 }
 .choose .btn {
   margin-top: 20px;
+}
+.choose-hint {
+  margin-top: 14px !important;
+  font-size: var(--text-xs);
+}
+.choose-hint kbd + kbd {
+  margin-left: 3px;
 }
 .choose-icon {
   display: grid;
