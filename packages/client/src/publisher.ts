@@ -534,7 +534,11 @@ export class Publisher {
     for (const o of await this.ctx.store.outboxFor(questionId)) {
       if (o.kind !== 'message') continue;
       await this.ctx.store.deleteOutbox(o.id);
-      await this.ctx.audit.log({ event: 'outbox.message.dropped', question_id: questionId, result });
+      await this.ctx.audit.log({
+        event: 'outbox.message.dropped',
+        question_id: questionId,
+        result,
+      });
     }
   }
 

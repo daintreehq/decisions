@@ -81,7 +81,11 @@ describe('thread messages: what is published', () => {
       signer_device_id: env.identity.config.deviceId,
     });
     expect(
-      await verifyRecordAndEnvelope(sent.record, sent.envelope, env.identity.keys.signing.publicKey),
+      await verifyRecordAndEnvelope(
+        sent.record,
+        sent.envelope,
+        env.identity.keys.signing.publicKey,
+      ),
     ).toBe(true);
     const plain = await decryptEnvelope(sent.envelope, env.identity.epochs, {
       questionId: qid,
@@ -298,7 +302,12 @@ describe('thread messages: the durable outbox', () => {
         store,
         sink: new FakeSink(),
         pumpIntervalMs: 0,
-        client: new RelayClient({ identity, fetch: relay.fetch, sleep: async () => {}, maxRetries: 0 }),
+        client: new RelayClient({
+          identity,
+          fetch: relay.fetch,
+          sleep: async () => {},
+          maxRetries: 0,
+        }),
       });
     const s1 = new SqliteLocalStore(dbPath);
     const b1 = mk(s1);
@@ -361,7 +370,9 @@ describe('thread messages: the durable outbox', () => {
     expect(await env.store.outboxFor(qid)).toHaveLength(0);
     expect((await env.store.getQuestion(qid))!.local_status).toBe('open');
     const audit = await env.store.listAudit(50);
-    expect(audit.some((x) => x.event === 'outbox.message.rejected' && x.result === 'invalid_state')).toBe(true);
+    expect(
+      audit.some((x) => x.event === 'outbox.message.rejected' && x.result === 'invalid_state'),
+    ).toBe(true);
   });
 });
 
@@ -375,7 +386,9 @@ describe('thread messages: relay features', () => {
     expect(messagePosts(env)).toHaveLength(0);
     expect(await env.store.outboxFor(qid)).toHaveLength(0);
     const audit = await env.store.listAudit(50);
-    expect(audit.some((x) => x.event === 'outbox.message.rejected' && x.result === 'not_supported')).toBe(true);
+    expect(
+      audit.some((x) => x.event === 'outbox.message.rejected' && x.result === 'not_supported'),
+    ).toBe(true);
     const e = await refused(post(env, qid, 'again?'));
     expect(e.code).toBe('not_supported');
     expect(await env.store.outboxFor(qid)).toHaveLength(0);
@@ -427,4 +440,3 @@ describe('thread messages: relay features', () => {
     expect(messagePosts(env)).toHaveLength(0);
   });
 });
-

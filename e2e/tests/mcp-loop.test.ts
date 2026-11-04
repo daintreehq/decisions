@@ -190,17 +190,25 @@ describe.skipIf(!chromiumPath)(
       await page.getByText(text).first().click();
     };
 
-    it('negotiates with the SDK client and lists the three tools with their annotations', async () => {
+    it('negotiates with the SDK client and lists the four tools with their annotations', async () => {
       expect(paneA.getServerVersion()?.name).toBe('daintree-decisions');
       expect(paneA.getInstructions()).toMatch(/ask_human/);
+      expect(paneA.getInstructions()).toMatch(/send_followup/);
       const { tools } = await paneA.listTools();
       const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-      expect(Object.keys(byName)).toEqual(['ask_human', 'get_decision', 'cancel_question']);
+      expect(Object.keys(byName)).toEqual([
+        'ask_human',
+        'get_decision',
+        'cancel_question',
+        'send_followup',
+      ]);
       expect(byName.get_decision!.annotations?.readOnlyHint).toBe(true);
-      expect(byName.ask_human!.annotations).toMatchObject({
-        destructiveHint: false,
-        openWorldHint: false,
-      });
+      for (const name of ['ask_human', 'send_followup']) {
+        expect(byName[name]!.annotations).toMatchObject({
+          destructiveHint: false,
+          openWorldHint: false,
+        });
+      }
     });
 
     let qid = '';

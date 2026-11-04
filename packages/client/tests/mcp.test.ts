@@ -1,15 +1,22 @@
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
+import { decryptEnvelope } from '@daintreehq/decisions-crypto';
+import { AgentMessageContentV1, type SignedMessage } from '@daintreehq/decisions-protocol';
 import {
+  MCP_BRIDGE_METHODS,
   PolicyRegistry,
+  SERVER_INSTRUCTIONS,
   TOOLS,
   TokenMapAuthenticator,
+  askedInstruction,
   createDecisionsMcpHandler,
+  followupInstruction,
   startDecisionsMcpServer,
+  type DecisionsMcpBridge,
   type RunningMcp,
 } from '../src/index.js';
-import { origin, setupBridge } from './helpers.js';
+import { origin, setupBridge, tick } from './helpers.js';
 
 const TOKEN = 'pane-token-AAAAAAAAAAAAAAAAAAAAAAAA';
 let running: RunningMcp | null = null;
@@ -24,6 +31,8 @@ async function boot(
     maxBody?: number;
     path?: string;
     bridge?: Parameters<typeof setupBridge>[0];
+    /** Serve this instead of the bridge itself (a host's forwarder). */
+    wrap?: (b: Awaited<ReturnType<typeof setupBridge>>['bridge']) => DecisionsMcpBridge;
   } = {},
 ) {
   const env = await setupBridge(opts.bridge);
@@ -31,7 +40,7 @@ async function boot(
   auth.register(TOKEN, origin());
   auth.register('other-pane-token-BBBBBBBBBBBBBBBBBB', origin({ pane_id: 'pane-2' }));
   running = await startDecisionsMcpServer({
-    bridge: env.bridge,
+    bridge: opts.wrap ? opts.wrap(env.bridge) : env.bridge,
     authenticator: auth,
     ...(opts.rate ? { rateLimitPerMinute: opts.rate } : {}),
     ...(opts.maxBody ? { maxBodyBytes: opts.maxBody } : {}),
@@ -116,18 +125,20 @@ describe('HTTP MCP: protocol', () => {
     );
     expect(r.result.protocolVersion).toBe('2025-03-26');
     expect(r.result.capabilities.tools).toBeTruthy();
+    expect(r.result.instructions).toBe(SERVER_INSTRUCTIONS);
     const unknown = JSON.parse(
       (await raw(mcp, { body: rpc('initialize', { protocolVersion: '1999-01-01' }) })).body,
     );
     expect(unknown.result.protocolVersion).toBe('2025-06-18');
   });
-  it('tools/list: exactly the three tools, descriptions under 400 bytes', async () => {
+  it('tools/list: exactly the four tools, descriptions under 400 bytes', async () => {
     const { mcp } = await boot();
     const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
     expect(r.result.tools.map((t: { name: string }) => t.name)).toEqual([
       'ask_human',
       'get_decision',
       'cancel_question',
+      'send_followup',
     ]);
     for (const t of TOOLS) expect(new TextEncoder().encode(t.description).length).toBeLessThan(400);
     expect(r.result.tools[0].inputSchema.required).toEqual(['question']);
@@ -153,6 +164,14 @@ describe('HTTP MCP: protocol', () => {
     expect(by.get_decision).toEqual({
       title: 'Check a decision',
       readOnlyHint: true,
+      openWorldHint: false,
+    });
+    // a follow-up only adds to the owner's own thread, like a question
+    expect(by.send_followup).toEqual({
+      title: 'Send a follow-up',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
       openWorldHint: false,
     });
     // cancelling cannot be undone, so it stays a call a cautious client confirms
@@ -212,9 +231,11 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
       options: [{ id: 'red', label: 'Red' }],
     });
     expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toBe(askedInstruction(1));
     expect(res.content[0].text).toMatch(
-      /^Asked as q-1\. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn\. The answer arrives as a new message in this terminal, with your question quoted\.$/,
+      /^Asked as q-1\. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn\. The answer arrives as a new message in this terminal, with your question quoted\. /,
     );
+    expect(res.structuredContent.instruction).toBe(askedInstruction(1));
     expect(res.structuredContent).toMatchObject({
       status: 'queued',
       enforced_requirement: 'human-required',
@@ -256,6 +277,180 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     );
     expect(cancelOther.isError).toBe(true);
     expect((await call(mcp, 'cancel_question', { question_id: id })).isError).toBeUndefined();
+  });
+});
+
+describe('HTTP MCP: send_followup', () => {
+  const OTHER = 'other-pane-token-BBBBBBBBBBBBBBBBBB';
+  const ask = async (mcp: RunningMcp) =>
+    (await call(mcp, 'ask_human', { question: 'Which colour?' })).structuredContent
+      .question_id as string;
+  /** Let the background pumps the calls started finish, then flush what is left. */
+  const settle = async (bridge: Awaited<ReturnType<typeof boot>>['bridge']) => {
+    await tick();
+    await bridge.pump();
+    await bridge.pump();
+  };
+
+  it('lists the question id, the text and the reply flag, all required', async () => {
+    const { mcp } = await boot();
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const tool = r.result.tools.find((t: { name: string }) => t.name === 'send_followup');
+    expect(tool.inputSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['question_id', 'text', 'expects_reply'],
+      properties: {
+        question_id: { type: 'string' },
+        text: { type: 'string', minLength: 1, maxLength: 16384 },
+        expects_reply: { type: 'boolean' },
+      },
+    });
+  });
+
+  it('a message from the asking pane is queued at once and published with its reply flag', async () => {
+    const { mcp, bridge, relay, identity } = await boot();
+    const id = await ask(mcp);
+    const res = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'Do you mean the dark red?',
+      expects_reply: true,
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toBe(followupInstruction(1, true));
+    expect(res.structuredContent).toMatchObject({
+      question_id: id,
+      status: 'queued',
+      expects_reply: true,
+      instruction: followupInstruction(1, true),
+    });
+    const quiet = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'Going with red otherwise.',
+      expects_reply: false,
+    });
+    expect(quiet.content[0].text).toBe(followupInstruction(1, false));
+    await settle(bridge);
+
+    const sent = relay.messages.map((m) => m.message as SignedMessage);
+    expect(sent.map((m) => m.record.message_id)).toEqual([
+      res.structuredContent.message_id,
+      quiet.structuredContent.message_id,
+    ]);
+    expect(sent.map((m) => [m.record.side, m.record.expects_reply])).toEqual([
+      ['agent', true],
+      ['agent', false],
+    ]);
+    const content = AgentMessageContentV1.parse(
+      await decryptEnvelope(sent[0]!.envelope, identity.epochs, { questionId: id, revision: 0 }),
+    );
+    expect(content.text).toBe('Do you mean the dark red?');
+    // the question is untouched: still open, no answer
+    const d = await call(mcp, 'get_decision', { question_id: id });
+    expect(d.structuredContent).toMatchObject({ status: 'open', provenance: null, answers: [] });
+  });
+
+  it("another pane's question and an unknown id are refused with the same error", async () => {
+    const { mcp, bridge, relay } = await boot();
+    const id = await ask(mcp);
+    const args = { text: 'hi', expects_reply: false };
+    const other = await call(mcp, 'send_followup', { question_id: id, ...args }, OTHER);
+    const unknown = await call(mcp, 'send_followup', { question_id: 'q_nope_1234', ...args });
+    expect(other.isError).toBe(true);
+    expect(other).toEqual(unknown);
+    expect(other.content[0].text).toBe('not_found: unknown question');
+    await settle(bridge);
+    expect(relay.messages).toHaveLength(0);
+  });
+
+  it('refuses an over-limit, blank or flagless message with a clear error', async () => {
+    const { mcp, bridge, relay } = await boot();
+    const id = await ask(mcp);
+    // 8193 characters, within maxLength, but 16386 bytes of UTF-8
+    const big = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'é'.repeat(8193),
+      expects_reply: false,
+    });
+    expect(big.isError).toBe(true);
+    expect(big.content[0].text).toBe('validation_error: text: text exceeds 16 KiB (UTF-8)');
+    const blank = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: ' ',
+      expects_reply: false,
+    });
+    expect(blank.content[0].text).toBe('validation_error: text: text is empty');
+    const flagless = await call(mcp, 'send_followup', { question_id: id, text: 'hi' });
+    expect(flagless.isError).toBe(true);
+    expect(flagless.content[0].text).toContain('expects_reply');
+    await settle(bridge);
+    expect(relay.messages).toHaveLength(0);
+  });
+
+  it('a withdrawn question takes no follow-ups', async () => {
+    const { mcp, store, bridge } = await boot();
+    const id = await ask(mcp);
+    await settle(bridge); // published first, so the publish cannot reopen it below
+    await store.updateQuestion(id, { local_status: 'cancelled' });
+    const res = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'hi',
+      expects_reply: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toBe(
+      'invalid_state: q-1 was cancelled, so its thread takes no more messages',
+    );
+  });
+
+  it('the agent is told that threads exist, both ways, and that answers are final', () => {
+    for (const t of [SERVER_INSTRUCTIONS, askedInstruction(1)]) {
+      expect(t).toContain('send_followup'); // reply, clarify or ask in the same thread
+      expect(t).toMatch(/instead of asking a new/);
+      expect(t).toMatch(/even after answering|also after answering/); // the person may follow up
+      expect(t).toMatch(/marked as follow-ups/); // how they arrive
+      expect(t).toMatch(/never change the answer|without changing it/);
+      expect(t).toMatch(/final/);
+      expect(t).toMatch(/reconsidered decision arrives as a follow-up/);
+      expect(t).toMatch(/arrives? the same way/); // replies to the agent's follow-ups
+    }
+    const desc = TOOLS.find((t) => t.name === 'send_followup')!.description;
+    expect(desc).toMatch(/clarify it, reply to the person's follow-up, or ask a follow-up/);
+    expect(desc).toMatch(/Returns at once/);
+    expect(desc).toMatch(/marked follow-up/);
+    expect(desc).toMatch(/never changes the answer: a human answer is final/);
+    expect(followupInstruction(3, true)).toMatch(/^Queued in q-3's thread/);
+    expect(followupInstruction(3, true)).toMatch(/end your turn/);
+    expect(followupInstruction(3, false)).not.toMatch(/end your turn/);
+  });
+
+  it('a host that forwards exactly MCP_BRIDGE_METHODS serves every tool', async () => {
+    const forwarded: string[] = [];
+    let forwarder: DecisionsMcpBridge | null = null;
+    const { mcp, bridge, relay } = await boot({
+      // A forwarder like Daintree's: plain functions across a boundary, no bridge object.
+      wrap: (b) =>
+        (forwarder = Object.fromEntries(
+          MCP_BRIDGE_METHODS.map((m) => [
+            m,
+            (...a: unknown[]) => {
+              forwarded.push(m);
+              return (b[m] as (...x: unknown[]) => unknown).apply(b, a);
+            },
+          ]),
+        ) as unknown as DecisionsMcpBridge),
+    });
+    expect(Object.keys(forwarder!).sort()).toEqual([...MCP_BRIDGE_METHODS].sort());
+    const id = await ask(mcp);
+    expect(
+      (await call(mcp, 'send_followup', { question_id: id, text: 'hi', expects_reply: true }))
+        .isError,
+    ).toBeUndefined();
+    expect((await call(mcp, 'get_decision', { question_id: id })).isError).toBeUndefined();
+    expect((await call(mcp, 'cancel_question', { question_id: id })).isError).toBeUndefined();
+    expect(new Set(forwarded)).toEqual(new Set(MCP_BRIDGE_METHODS));
+    await settle(bridge);
+    expect(relay.messages).toHaveLength(1);
   });
 });
 
@@ -499,7 +694,7 @@ describe('HTTP MCP: mount path', () => {
     const { mcp } = await boot({ path: '/mcp/decisions' });
     expect(mcp.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/decisions$/);
     const tools = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
-    expect(tools.result.tools).toHaveLength(3);
+    expect(tools.result.tools).toHaveLength(TOOLS.length);
     expect((await raw(mcp, { path: '/mcp/decisions?session=1', body: rpc('ping') })).status).toBe(
       200,
     );
@@ -595,7 +790,7 @@ describe('HTTP MCP: mount path', () => {
       const target = { port, url: `http://127.0.0.1:${port}/mcp/decisions` };
       const ok = await raw(target, { body: rpc('tools/list') });
       expect(ok.status).toBe(200);
-      expect(JSON.parse(ok.body).result.tools).toHaveLength(3);
+      expect(JSON.parse(ok.body).result.tools).toHaveLength(TOOLS.length);
       expect((await raw(target, { path: '/mcp', body: rpc('ping') })).body).toBe(
         'host control surface',
       );
