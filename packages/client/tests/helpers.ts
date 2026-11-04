@@ -7,6 +7,7 @@ import {
   type EpochGrant,
   type LedgerEvent,
   type SignedAction,
+  type SignedMessage,
   type SignedQuestion,
 } from '@daintreehq/decisions-protocol';
 import {
@@ -130,6 +131,16 @@ export class FakeRelay {
   /** Phone image ciphertext served by `GET /attachments/{id}/content`, and the ids each download asked for. */
   blobs = new Map<string, Uint8Array>();
   downloads: string[] = [];
+  /** What `GET /info` advertises; undefined leaves `features` out, like a 0.3.0 relay. */
+  features: string[] | undefined = ['thread-messages-v1'];
+  /** Number of upcoming `GET /info` reads that fail with a network error. */
+  failInfo = 0;
+  /** Thread messages the relay committed, in commit order. */
+  messages: { idem: string; message: SignedMessage }[] = [];
+  /** The status and code every upcoming message POST is refused with, until cleared. */
+  rejectMessage: { status: number; code: string } | null = null;
+  /** Number of upcoming message POSTs the relay COMMITS but whose reply is lost. */
+  dropMessageReply = 0;
 
   constructor(private readonly owner: Identity) {}
 
@@ -173,6 +184,46 @@ export class FakeRelay {
       return json(200, { ok: true });
     }
 
+    if (method === 'GET' && p === '/api/v1/info') {
+      if (this.failInfo > 0) {
+        this.failInfo--;
+        throw new TypeError('fetch failed');
+      }
+      return json(200, {
+        name: 'daintree-decisions',
+        protocol_min: 1,
+        protocol_max: 1,
+        worker_version: 'test',
+        claimed: true,
+        claim_configured: true,
+        voice: { xai: false, anthropic: false, openai: false },
+        ...(this.features ? { features: this.features } : {}),
+      });
+    }
+    if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/messages$/))) {
+      if (this.rejectMessage)
+        return json(this.rejectMessage.status, { code: this.rejectMessage.code, message: 'no' });
+      const b = body as { idempotency_key: string; message: SignedMessage };
+      const id = b.message.record.message_id;
+      let i = this.messages.findIndex((x) => x.message.record.message_id === id);
+      if (i >= 0 && JSON.stringify(this.messages[i]!.message) !== JSON.stringify(b.message))
+        return json(409, { code: 'idempotency_collision', message: 'different message' });
+      if (i < 0) i = this.messages.push({ idem: b.idempotency_key, message: b.message }) - 1;
+      const receipt = {
+        question_id: m[1],
+        message_id: id,
+        message_seq: i + 1,
+        // Not a ledger seq of this fake: the bridge does not read message events yet (#35), and a burnt seq
+        // would look like a ledger gap.
+        event_seq: 10_000 + i,
+        committed_at: new Date().toISOString(),
+      };
+      if (this.dropMessageReply > 0) {
+        this.dropMessageReply--;
+        throw new TypeError('connection reset after the relay committed the message');
+      }
+      return json(201, receipt);
+    }
     if (method === 'POST' && p === '/api/v1/questions') {
       if (this.rejectCreate)
         return json(this.rejectCreate, { code: 'validation_error', message: 'nope' });

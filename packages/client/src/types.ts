@@ -85,7 +85,8 @@ export interface QuestionRow {
   attachment_digests: string[];
 }
 
-export type OutboxKind = 'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain';
+/** `message` is an agent message for a question's thread (`MessagePayload`); it never touches the answer. */
+export type OutboxKind = 'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain' | 'message';
 
 export interface OutboxItem {
   /** Also the relay idempotency key. */

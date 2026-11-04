@@ -1,13 +1,19 @@
 import {
+  AgentMessageContentV1,
   LIMITS,
+  MESSAGE_RECORD_TYPE,
+  knownFeatures,
   stricter,
   type CommandReceipt,
   type DecisionContentV1,
+  type ProtocolFeature,
   type SignedAction,
+  type SignedMessage,
   type SignedQuestion,
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  buildSignedMessage,
   buildSignedQuestion,
   encryptAttachment,
   encryptEnvelope,
@@ -20,6 +26,7 @@ import {
   AskHumanInput,
   BridgeError,
   resolveExpiry,
+  type PostMessageInput,
   shapeForGates,
   validateOptions,
 } from './content.js';
@@ -59,6 +66,30 @@ export interface ActionPayload {
   content?: Record<string, unknown>;
 }
 
+/** An agent message waiting to be posted, encrypted and signed when the agent wrote it. */
+export interface MessagePayload {
+  /** Replayed byte for byte on every retry, so a retry after a lost reply is the same message. */
+  signed: SignedMessage;
+  /** The message's local number in its question's thread, from 1: one thread's messages go out in this order. */
+  seq: number;
+}
+
+export interface PostMessageResult {
+  questionId: string;
+  messageId: string;
+  alias: number;
+  status: 'queued';
+  expectsReply: boolean;
+}
+
+/** The relay feature that carries thread messages (docs/protocol.md section 19). */
+const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
+/** How long what the relay advertised in `GET /info` is trusted before it is read again. */
+const FEATURES_TTL_MS = 60_000;
+/** Agent messages committed for one question, ever: the local share of `LIMITS.messagesPerQuestion`. */
+const messageCountKey = (questionId: string) => `thread-messages:${questionId}`;
+const messageSeq = (o: OutboxItem) => (o.payload as MessagePayload).seq;
+
 export interface RegisterResult {
   questionId: string;
   alias: number;
@@ -71,6 +102,9 @@ export interface RegisterResult {
 export class Publisher {
   /** Creates currently on the wire. A cancel arriving now must become a real cancel. */
   private readonly inflight = new Set<string>();
+  /** The features the relay last advertised, and when (`ctx.now()`) they were read. */
+  private features: { set: ReadonlySet<ProtocolFeature>; at: number } | null = null;
+  private featuresRead: Promise<ReadonlySet<ProtocolFeature>> | null = null;
 
   constructor(private readonly ctx: BridgeContext) {}
 
@@ -352,6 +386,7 @@ export class Publisher {
       // Provably never sent: drop it entirely instead of publishing then cancelling.
       await ctx.store.deleteOutbox(pendingCreate.id);
       await this.dropSpool(pendingCreate.payload as CreatePayload);
+      await this.dropMessages(questionId, 'never-published');
       await ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });
       await ctx.audit.log({
         event: 'question.cancelled',
@@ -397,6 +432,138 @@ export class Publisher {
     });
   }
 
+  /**
+   * Commit an agent message for a question's thread and return. NOTHING here touches the network: the message
+   * is encrypted and signed now, and the outbox posts it. The caller has already checked that the asking pane
+   * owns the question. A message never changes the question's state, answer or gate.
+   */
+  async enqueueMessage(questionId: string, input: PostMessageInput): Promise<PostMessageResult> {
+    const { ctx } = this;
+    const known = this.features;
+    if (known && !known.set.has(THREAD_FEATURE)) {
+      // Read the relay again in the background, so an upgraded relay is picked up for the next call.
+      if (ctx.now() - known.at >= FEATURES_TTL_MS) void this.relayFeatures().catch(() => undefined);
+      throw new BridgeError(
+        'not_supported',
+        'the relay does not support follow-up messages yet; it needs updating before a follow-up can be sent',
+      );
+    }
+    const content = AgentMessageContentV1.parse({
+      content_version: 1,
+      side: 'agent',
+      text: input.text,
+    });
+    const result = await ctx.lock.run(async () => {
+      const row = await ctx.store.getQuestion(questionId);
+      if (!row || row.history_only) throw new BridgeError('not_found', 'unknown question');
+      const q = `q-${row.alias}`;
+      if (row.local_status === 'expired')
+        throw new BridgeError('expired', `${q} expired, so its thread takes no more messages`);
+      if (row.local_status === 'cancelled')
+        throw new BridgeError(
+          'invalid_state',
+          `${q} was cancelled, so its thread takes no more messages`,
+        );
+      if (row.local_status === 'publish-failed')
+        throw new BridgeError('invalid_state', `${q} was never published, so it has no thread`);
+      if ((await ctx.store.outboxFor(questionId)).some((o) => o.kind === 'cancel'))
+        throw new BridgeError(
+          'invalid_state',
+          `${q} is being cancelled, so its thread takes no more messages`,
+        );
+      // The relay counts both sides against one lifetime budget; here only this desktop's own messages are
+      // known, so this refuses early what the relay would refuse anyway. The count is reserved before the
+      // outbox write: a crash between the two wastes one message, never exceeds the budget.
+      const key = messageCountKey(questionId);
+      const count = Number(await ctx.store.getMeta(key)) || 0;
+      if (count >= LIMITS.messagesPerQuestion)
+        throw new BridgeError(
+          'invalid_state',
+          `${q} has reached its limit of ${LIMITS.messagesPerQuestion} messages`,
+        );
+
+      const now = ctx.now();
+      const messageId = newId(now);
+      const envelope = await encryptEnvelope({
+        epochKey: currentEpochKey(ctx.identity),
+        installationId: ctx.identity.config.installationId,
+        questionId,
+        recordId: messageId,
+        recordType: MESSAGE_RECORD_TYPE,
+        revision: 0,
+        senderDeviceId: ctx.identity.config.deviceId,
+        purpose: 'message-content',
+        plaintext: content,
+      });
+      const signed = await buildSignedMessage({
+        installationId: ctx.identity.config.installationId,
+        questionId,
+        messageId,
+        side: 'agent',
+        expectsReply: input.expects_reply,
+        signerDeviceId: ctx.identity.config.deviceId,
+        signingKey: ctx.identity.keys.signing.privateKey,
+        envelope,
+        createdAt: nowIso(now),
+      });
+      await ctx.store.setMeta(key, String(count + 1));
+      await ctx.store.putOutbox({
+        id: newId(now),
+        kind: 'message',
+        question_id: questionId,
+        payload: { signed, seq: count + 1 } satisfies MessagePayload,
+        attempts: 0,
+        next_attempt_at: now,
+        created_at: now,
+        last_error: null,
+      });
+      return { questionId, messageId, alias: row.alias, status: 'queued' as const };
+    });
+    await ctx.audit.log({
+      event: 'message.queued',
+      question_id: questionId,
+      result: 'local-commit',
+      detail: { message_id: result.messageId, expects_reply: input.expects_reply },
+      content: input.text,
+    });
+    return { ...result, expectsReply: input.expects_reply };
+  }
+
+  /** Drop a question's queued messages, which can never be posted once their question will not be. */
+  private async dropMessages(questionId: string, result: string): Promise<void> {
+    for (const o of await this.ctx.store.outboxFor(questionId)) {
+      if (o.kind !== 'message') continue;
+      await this.ctx.store.deleteOutbox(o.id);
+      await this.ctx.audit.log({ event: 'outbox.message.dropped', question_id: questionId, result });
+    }
+  }
+
+  /**
+   * The features the relay advertises in `GET /info`, read again after `FEATURES_TTL_MS`. A relay that answers
+   * `/info` with a client error advertises nothing; a network failure or 5xx throws, so the caller retries.
+   */
+  private relayFeatures(): Promise<ReadonlySet<ProtocolFeature>> {
+    const known = this.features;
+    if (known && this.ctx.now() - known.at < FEATURES_TTL_MS) return Promise.resolve(known.set);
+    this.featuresRead ??= (async () => {
+      try {
+        let set: ReadonlySet<ProtocolFeature>;
+        try {
+          const info = await this.ctx.client.info();
+          set = knownFeatures(Array.isArray(info?.features) ? info.features : null);
+        } catch (e) {
+          if (!(e instanceof RelayError) || e.retryable) throw e;
+          set = new Set();
+        }
+        this.features = { set, at: this.ctx.now() };
+        return set;
+      } finally {
+        this.featuresRead = null;
+      }
+    })();
+    return this.featuresRead;
+  }
+
   private async dropSpool(p: CreatePayload): Promise<void> {
     for (const a of p.attachments) await this.ctx.spool.delete(a.attachment_id);
   }
@@ -407,11 +574,46 @@ export class Publisher {
     let sent = 0;
     let failed = 0;
     const created: string[] = [];
+    let features: Promise<ReadonlySet<ProtocolFeature>> | null = null; // read at most once per flush
     for (const item of await ctx.store.dueOutbox(ctx.now(), 20)) {
       if (item.kind !== 'create') {
-        // Per-question ordering: an action must never overtake its own (possibly backed-off) create.
+        // Per-question ordering: an action must never overtake its own (possibly backed-off) create, and a
+        // message never overtakes an earlier message in its thread, or a later "no reply needed" could land
+        // before the question it settles.
         const pending = await ctx.store.outboxFor(item.question_id);
+        if (!pending.some((o) => o.id === item.id)) continue; // dropped earlier in this flush
         if (pending.some((o) => o.kind === 'create')) continue;
+        if (
+          item.kind === 'message' &&
+          pending.some((o) => o.kind === 'message' && messageSeq(o) < messageSeq(item))
+        )
+          continue;
+      }
+      if (item.kind === 'message') {
+        // A relay that does not advertise threads is never sent one (protocol section 19). Failing to read
+        // `/info` backs off this message alone, so it never holds up other questions behind it.
+        let set: ReadonlySet<ProtocolFeature>;
+        try {
+          set = await (features ??= this.relayFeatures());
+        } catch (e) {
+          failed++;
+          await ctx.store.recordOutboxFailure(
+            item.id,
+            e instanceof RelayError ? e.code : 'network_error',
+            ctx.now() + backoffMs(item.attempts + 1, 2000, 300_000),
+          );
+          continue;
+        }
+        if (!set.has(THREAD_FEATURE)) {
+          failed++;
+          await ctx.store.deleteOutbox(item.id);
+          await ctx.audit.log({
+            event: 'outbox.message.rejected',
+            question_id: item.question_id,
+            result: 'not_supported',
+          });
+          continue;
+        }
       }
       try {
         if (item.kind === 'create') {
@@ -422,6 +624,8 @@ export class Publisher {
             remote_event_seq: receipt.event_seq,
             error_code: null,
           });
+        } else if (item.kind === 'message') {
+          await this.sendMessage(item);
         } else {
           await this.sendAction(item);
         }
@@ -444,10 +648,15 @@ export class Publisher {
         await ctx.store.deleteOutbox(item.id);
         if (item.kind === 'create') {
           await this.dropSpool(item.payload as CreatePayload);
+          await this.dropMessages(item.question_id, 'never-published');
           await ctx.store.updateQuestion(item.question_id, {
             local_status: 'publish-failed',
             error_code: err.code,
           });
+        }
+        // A relay that advertised threads but has no route for them: read `/info` again next time.
+        if (item.kind === 'message' && (err.status === 404 || err.status === 405)) {
+          this.features = null;
         }
         await ctx.audit.log({
           event: `outbox.${item.kind}.rejected`,
@@ -502,6 +711,18 @@ export class Publisher {
       result: 'ok',
     });
     return receipt;
+  }
+
+  /** Post one agent message. A message never moves the revision, so there is nothing to re-sign on a retry. */
+  private async sendMessage(item: OutboxItem): Promise<void> {
+    const p = item.payload as MessagePayload;
+    await this.ctx.client.postMessage(item.question_id, item.id, p.signed);
+    await this.ctx.audit.log({
+      event: 'message.published',
+      question_id: item.question_id,
+      result: 'ok',
+      detail: { message_id: p.signed.record.message_id },
+    });
   }
 
   private async sendAction(item: OutboxItem): Promise<void> {

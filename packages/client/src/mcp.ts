@@ -66,6 +66,34 @@ function decisionResult(v: DecisionView) {
   };
 }
 
+/**
+ * The `DecisionsBridge` operations the handler calls. A host that forwards them across a process boundary
+ * (instead of passing a bridge) forwards exactly these, with the pane identity and any `BridgeError` intact.
+ */
+export const MCP_BRIDGE_METHODS = [
+  'registerQuestion',
+  'getDecision',
+  'cancelQuestion',
+  'postMessage',
+] as const satisfies readonly (keyof DecisionsBridge)[];
+
+/** What `createDecisionsMcpHandler` needs from a bridge: a `DecisionsBridge`, or a host's forwarder. */
+export type DecisionsMcpBridge = Pick<DecisionsBridge, (typeof MCP_BRIDGE_METHODS)[number]>;
+
+/** What agents are told when they connect: questions return at once, and each one is a conversation. */
+export const SERVER_INSTRUCTIONS =
+  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way.';
+
+/** The `ask_human` result text. */
+export const askedInstruction = (alias: number) =>
+  `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`;
+
+/** The `send_followup` result text. */
+export const followupInstruction = (alias: number, expectsReply: boolean) =>
+  expectsReply
+    ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
+    : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
+
 /** Tool definitions. Descriptions stay under 400 bytes (Daintree's CI budget for tool lists). */
 export const TOOLS = [
   {
@@ -215,6 +243,38 @@ export const TOOLS = [
       openWorldHint: false,
     },
   },
+  {
+    name: 'send_followup',
+    description:
+      "Post a message in the thread of a question you asked with ask_human from this terminal: clarify it, reply to the person's follow-up, or ask a follow-up, instead of asking a new question. Returns at once. Set expects_reply when you need a reply; it arrives in this terminal as a marked follow-up. A message never changes the answer: a human answer is final.",
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['question_id', 'text', 'expects_reply'],
+      properties: {
+        question_id: { type: 'string', description: 'The question_id ask_human returned.' },
+        text: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 16384,
+          description: 'The message, self-contained; at most 16 KiB of UTF-8.',
+        },
+        expects_reply: {
+          type: 'boolean',
+          description:
+            'true when you need the person to reply; false for a note that needs nothing back.',
+        },
+      },
+    },
+    // Only adds a message to the owner's own thread, like ask_human, so approval-gating clients run it unprompted.
+    annotations: {
+      title: 'Send a follow-up',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
 ] as const;
 
 export interface McpHandlerOptions {
@@ -305,7 +365,7 @@ function bearer(req: IncomingMessage): string | null {
 }
 
 export function createDecisionsMcpHandler(
-  bridge: DecisionsBridge,
+  bridge: DecisionsMcpBridge,
   authenticator: PaneAuthenticator,
   opts: McpHandlerOptions = {},
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
@@ -333,7 +393,7 @@ export function createDecisionsMcpHandler(
     try {
       if (name === 'ask_human') {
         const r = await bridge.registerQuestion({ origin, input: args });
-        const instruction = `Asked as q-${r.alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted.`;
+        const instruction = askedInstruction(r.alias);
         return text(instruction, {
           question_id: r.questionId,
           status: r.status,
@@ -361,6 +421,17 @@ export function createDecisionsMcpHandler(
           status: 'cancelling',
         });
       }
+      if (name === 'send_followup') {
+        const r = await bridge.postMessage(args, pane);
+        const instruction = followupInstruction(r.alias, r.expectsReply);
+        return text(instruction, {
+          question_id: r.questionId,
+          message_id: r.messageId,
+          status: r.status,
+          expects_reply: r.expectsReply,
+          instruction,
+        });
+      }
     } catch (e) {
       if (e instanceof BridgeError) return text(`${e.code}: ${e.message}`, { error: e.code }, true);
       return text(
@@ -383,8 +454,7 @@ export function createDecisionsMcpHandler(
           protocolVersion: SUPPORTED_VERSIONS.includes(asked) ? asked : SUPPORTED_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'daintree-decisions', version: SERVER_VERSION },
-          instructions:
-            'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal.',
+          instructions: SERVER_INSTRUCTIONS,
         });
       }
       case 'notifications/initialized':
@@ -474,7 +544,7 @@ export function createDecisionsMcpHandler(
 }
 
 export interface StartMcpOptions extends McpHandlerOptions {
-  bridge: DecisionsBridge;
+  bridge: DecisionsMcpBridge;
   authenticator: PaneAuthenticator;
   port?: number;
 }
