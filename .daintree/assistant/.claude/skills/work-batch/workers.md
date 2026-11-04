@@ -1,0 +1,86 @@
+# Workers
+
+Read when the user names other hosts to run the `/work` agents. It adds to SKILL.md; everything there still applies.
+
+## What changes
+
+- **The workers do the work; this machine orchestrates.** Every `/work` agent runs on a worker, and this machine keeps only the pick, the merge, the checkpoint and the cron. Match the names the user uses to `host.list`'s hosts.
+- **Instances.** This replaces SKILL.md's rule that every host holding the repository is an instance (its decisions, Preflight step 4, Sync step 2): the run's instances are this machine and the named workers, and Sync brings each up to date before every batch. Hosts they didn't name are noted in Preflight, never synced or used; a fresh `host.list` refreshes the workers and never adds a host.
+- **Caps.** Each worker has a cap: the user's count for it, else the batch size split evenly. The caps add up to the batch size, which stays the ceiling; usage and load (below) move share between them. Flow's slots are per worker: refill each worker as its slots free, and size each pick per worker.
+- **Models.** Each launch carries its unit's model and effort wherever it lands (SKILL.md, Models). When the user ties a model to a worker ("Sonnet on X, Opus on Y"), that worker takes only issues it can run: placement follows The pick below.
+- **A worker that drops out.** Going on without it in Sync never lets a create or launch reach it before it syncs again: record it as out of sync. Its launched agents keep running and keep their slots; read them again once it is back. Its units not yet launched wait for it, and move to another worker only when the user says so. While it has units waiting, every check runs Sync for that worker alone, against this machine's current `origin/<base>`, and its waiting units are created and launched once it is up to date.
+
+## Preflight additions
+
+- On each worker, `host.call` `slashCommands.list` (`agentId: "claude"`) must list `/work` (and `/design-review`, or that worker takes no `design-review` issue), and `agent.listModels` (`agentId: "claude"`) must list `sonnet` and `opus`, or the one model tied to it. Claude's ids are aliases (`sonnet`, `opus`). Otherwise stop before launching anything, and say which. Both are answered only while a window drives that project: with none, they answer `NO_FRONTEND_ATTACHED`, which says nothing about the commands or models, and the banner check on the first launch (below) stands in for them.
+- `worktree.list` and `terminal.list` there: report any worktree or pane already present, and leave it alone.
+- **Toolchain.** This repository has no worktree setup, so each worktree installs its own dependencies with pnpm from that worker's store (SKILL.md, This repository): nothing is shared or linked from the main checkout, and nothing needs approving there. What a worker must have is the toolchain. One `project.runCommand` there: `node --version` (22 or later), `pnpm --version` (the version `package.json`'s `packageManager` pins; corepack provides it), and `pnpm install --frozen-lockfile --prefer-offline` in the project root (`timeoutMs: 600000`), which warms that worker's store so every worktree after it installs from it in seconds. Run the install only while no unit of this run is on that worker and the `terminal.list` above shows no agent working in that project's root. A missing or wrong Node or pnpm is reported, and that worker takes no units until it is fixed; a failed install is reported, and its units still launch, since each installs on its own.
+- Report, with the rest of step 6: the workers with their caps and models. For each worker, say that its worktree deletes confirm on this machine, in the window showing that worker's project (even a hidden one; with none open, the window this assistant runs in), and fail when that window isn't on screen or isn't answered within 30 seconds. For the run to clean up after itself there, the user keeps such a window open and visible here and answers its dialogs. Until daintreehq/daintree#15697 lands, setting deletes not to ask doesn't stop a relayed one asking.
+
+## Calling a worker
+
+Everything a unit needs on a worker goes through `host.call` with that worker's host id and project id, and the same arguments as on this machine: `worktree.createWithRecipe`, `worktree.waitUntilReady`, `agent.launch`, `terminal.getStatus`, `terminal.readLastMessageOwned`, `terminal.getOutput`, `terminal.list`, `terminal.closeMany`, `terminal.waitForExit`, `worktree.retireOwned`, `worktree.deleteOwned` and `project.runCommand`. Input goes through the owned forms there: `terminal.sendCommandOwned`, `terminal.sendKeysOwned` and `terminal.interruptOwned`. A worker refuses the plain `terminal.sendCommand` and `terminal.sendKeys` from another machine's assistant with `TIER_NOT_PERMITTED`.
+
+```json tool=host.call
+{
+  "hostId": "<host id>",
+  "projectId": "<its project id>",
+  "tool": "agent.launch",
+  "args": {
+    "agentId": "claude",
+    "model": "<the unit's model>",
+    "agentLaunchFlags": ["--effort", "<the unit's effort>"],
+    "worktreeId": "<its worktree id>",
+    "name": "Batch <k> · #31",
+    "prompt": "/work 31",
+    "requestedId": "<fresh id, saved first>",
+    "notify": true,
+    "replyLines": 12,
+    "focusPolicy": "preserve"
+  }
+}
+```
+
+- Read every answer's `outcome`, then `result.isError`, as in Sync. Ids and paths a worker returns mean nothing on this machine: keep each with its host and project id in the unit.
+- **One create and one launch per worker at a time**; different workers in parallel. Use the `worktreeId` and `worktreePath` the create returns, never one built from the branch: the path follows that project's own pattern. Setup runs with or without a recipe, so the readiness gate in Start applies there too.
+- **Check the model once per worker and model-effort pair per batch.** After the first launch of each pair there, `terminal.getOutput` (`maxLines: 200`) on that pane: Claude Code's banner names the model and effort (`Opus … with xhigh effort`, `Sonnet … with low effort`). A different model or effort, a start error naming the id, or the unit's command not starting (an unknown-command line, or no sign its pipeline began), is handled as SKILL.md's Models check does: one relaunch, then run on what the launch gives (or Opus at xhigh) and report it. Nothing waits for the user.
+- **Notices name the host** ("on host <name>, terminal <id> stopped"). Read the pane with `host.call` `terminal.readLastMessageOwned` there. A notice may never come, so every check reads each worker's live panes with one `terminal.getStatus` there, recording any usage reading it shows.
+
+## The pick
+
+Work out Flow's refill count per worker, against its own cap and its own working and queued units. `<size>` is their sum. A worker with nothing to refill gets nothing. `/next-batch` splits only into even counts (`floor(B / K)` each, the first `B mod K` one more), so ask it for one unsplit ranked list of `<size>` and place the issues here, with SKILL.md's pick prompt and no instance count. With an Opus cap or models tied to workers, ask it for no count instead (SKILL.md, Models).
+
+**Placing.** Walk the `🟩 all ·` line in order, which is priority order. Give each issue to the worker with the lowest load among those still under their refill count, where load is the sum of the sizes already given to it (small 1, medium 2, large 3, each issue's `· <size>` in the report). Break ties by fewer issues, then by the order the user named the workers. So every worker opens on top-priority work and large issues spread out, as `/next-batch`'s own split does. With an Opus cap, an Opus issue is placed only while the cap has room. An issue the re-check drops leaves its worker's list. Save every unit with its worker, model and effort.
+
+**Models tied to workers.** Place in two passes over the `🟩 all ·` line, against each worker's refill count:
+
+1. **Opus first.** Walk it for Opus issues only, giving each to an Opus worker with room (lowest load first, as above). Past that, Opus issues are left out: never created, so they come back in a later pick. They never go to a Sonnet worker.
+2. **Then Sonnet.** Walk it again for Sonnet issues, giving each to a Sonnet worker with room, then to an Opus worker's leftover room, where it runs on Opus at xhigh. When the user is saving the Sonnet workers' allowance, use the Opus workers' leftover room first. Past that, they are left out.
+
+The first pass keeps the Opus workers for the highest-ranked Opus issues: a Sonnet issue ranked above them never takes their slot.
+
+## Tidy on a worker
+
+- **Retire there, as here.** Finishing a unit on a worker is SKILL.md's step 5 there: one `worktree.retireOwned` there per unit checks it, closes its pane, waits for the process to exit and deletes it. A worktree left on a worker is unfinished tidy, not a footnote. Its confirmation is relayed to this machine, in the window showing that worker's project, so every delete on a worker can fail while every local one succeeds. That is a Daintree bug, not a setting the user forgot: until daintreehq/daintree#15697 lands, a relayed delete asks even when this session is set never to ask, the link gives up after 30 seconds while the dialog stays up, and an expired dialog stays queued ahead of newer ones (daintreehq/daintree#15700).
+- **Two failures, both pending**, plain or as a `PARTIAL_SUCCESS`'s `details.cause`. `CONFIRMATION_TIMEOUT`: the window wasn't on screen (it declines nothing and names where it asked). `EXECUTION_ERROR` or `OUTCOME_UNKNOWN` with "No answer from the peer within 30000 ms": the dialog reached the screen, but the link gave up first, and the dialog later says "Timed out before an answer, so nothing ran". After any relayed delete that fails or is ambiguous, `git worktree list` there (`project.runCommand`) decides, never an assumption either way: gone is deleted; still listed goes on the checkpoint's pending deletes (host, project id, worktree id, issue, first failure time), and that worker gets no more deletes this check.
+- **Tell the user once per worker**, at its first failure: bring forward the window on this machine that shows <host>'s project and answer its dialogs, and close the stale ones first, since every failed attempt leaves a dead confirmation queued here ("2 more requests waiting") ahead of new ones. Never ask, and never re-report a failure: status reports give each worker's pending count.
+- **Probe on every check** while the run lives, not once: at most one pending delete per worker per check, never a burst, since each failure queues another dead dialog. When the probe succeeds, drain that worker's list in the same check, one delete at a time, each after the last one's answer. Never route around a confirmation: no `rm` or `git worktree remove` through `project.runCommand`, no `/reset-worker`, no other agent. The fix is the confirmation being seen and answered.
+- **The user at the screen.** When the user says they're here to approve, send that worker's pending deletes one at a time, telling the user before each that it is coming (host and issue), so each is approved inside the link's 30 seconds, and confirm each with `git worktree list` there before the next.
+- **Sweep before the final report** (and before phase `done`): one more probe per worker with pending deletes, drained on success, then `worktree.list` on each worker for this run's unit worktrees (its branches and issue numbers) missing from the checkpoint, each checked and deleted as above. The final report lists everything still on a worker with its host, path and why.
+
+## Allowance, load and restarts
+
+Fetch the runbook named for each from the runbook backend when it first happens (SKILL.md, Runbooks by stage).
+
+- **Allowance** follows SKILL.md's Usage limits, per worker. A worker's usage pane goes through `host.call` there, with `terminal.sendCommandOwned` for `/usage`. A worker scaled down at about 95% has a cap of 2, and 0 once out at 98%; the share it frees is split evenly over the workers still in the mix, so the caps still add up to the batch size, and refill counts and placement (The pick) use those caps from the next pick. Its share comes back at its reset. At 98% its units not yet launched move to the worker with room and the lowest load rather than wait for the reset: record the move, create the unit there on the same branch, and tidy its old worktree (SKILL.md, step 5). With no room anywhere, they wait, queued, for the first slot to free.
+- **A usage-limit stop** on a worker is handled as in SKILL.md's Usage limits, sending continue with `terminal.sendCommandOwned` there.
+- **Load.** Each check reads `host.list` `load` for the workers. `memoryPressure` `warn` or `critical`: no launches there and a lower cap for that worker; a merge running there counts, with its subagents and test runs (`daintree.hosts.rebalance-load`). Ten heavy `/work` agents plus a merge took one worker to critical and its Daintree restarted.
+- **A worker's Daintree restarts** (panes still listed, `terminal.getStatus` says output unavailable, no agent working): every agent there died, but each worktree and conversation survives. Inventory each unit's worktree (`project.runCommand`: ahead, pushed, dirty), then revive each unit once in its own worktree, per `daintree.hosts.recover-and-clean-up`: at Full, `agentSessionHistory.list` there, then `agentSessionHistory.resume` by exact `sessionId`; else `agent.launch` with `agentLaunchFlags: ["--continue", "--fork-session"]` (plain `--continue` fails on the session id Daintree assigns), only where that unit was its worktree's one agent. Check its own task is back on screen, then send its nudge text (`Continue the /work pipeline for #<n> from where you stopped, through to WORK_COMPLETE.`, or a design-review unit's from SKILL.md). A unit with no work yet relaunches fresh on its own command. The dead panes, and every earlier pane and worktree there, are no longer this session's (`RESOURCE_NOT_OWNED`): list them in the report to close there, never resume them, or two agents share a worktree. Lower that worker's cap before refilling.
+
+## Resume
+
+Reconcile each worker too: `terminal.list` and `worktree.list` there through `host.call`. Ownership there is this help session's, so a new help session owns nothing on a worker: `terminal.readLastMessageOwned`, `terminal.closeMany` and `worktree.retireOwned` there answer `RESOURCE_NOT_OWNED` for the earlier panes and worktrees. Read those panes with `terminal.getOutput` where it answers, and list what this session can't close or delete for the user.
+
+## Reports
+
+Each issue with its worker, command, model and effort, and each worker's cap while usage or load lowers it. A worker left out of a sync, or unreachable, with why; its agents keep running while it is disconnected, so read them again once it is back.

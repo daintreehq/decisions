@@ -69,6 +69,9 @@ AGENTS.local.md
 # Daintree
 .daintree/*.local.json
 
+# Agent pipeline state (/merge-prs keeps its state file and CI plan here)
+.tmp/
+
 # Dependencies and build output
 node_modules/
 dist/
