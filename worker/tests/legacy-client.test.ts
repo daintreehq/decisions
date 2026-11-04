@@ -35,7 +35,11 @@ async function socketReplay(a: Actor, after: number): Promise<unknown[]> {
     ws.addEventListener('message', (ev) => {
       if (ev.data === 'pong') return;
       frames.push(ev.data);
-      const f = JSON.parse(ev.data as string) as { t: string; has_more?: boolean; high_water?: number };
+      const f = JSON.parse(ev.data as string) as {
+        t: string;
+        has_more?: boolean;
+        high_water?: number;
+      };
       if (f.t === 'caught_up') {
         if (f.has_more) ws.send(JSON.stringify({ t: 'sync', after: f.high_water }));
         else {

@@ -46,7 +46,11 @@ export type Provenance = z.infer<typeof Provenance>;
  * sends it nothing that needs a feature it did not declare. Received lists use `FeatureToken`, so a newer peer's
  * unknown features never fail a parse; they are ignored.
  */
-export const ProtocolFeature = z.enum(['thread-messages-v1', 'phone-images-v1', 'pane-snapshots-v1']);
+export const ProtocolFeature = z.enum([
+  'thread-messages-v1',
+  'phone-images-v1',
+  'pane-snapshots-v1',
+]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
 export const FeatureList = z.array(FeatureToken).max(LIMITS.featuresPerDeclaration);

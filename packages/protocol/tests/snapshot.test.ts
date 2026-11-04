@@ -84,9 +84,9 @@ describe('snapshot content', () => {
     });
     expect(c.agent_state).toBe('unknown');
     expect(c.waiting_reason).toBeNull();
-    expect(PaneSnapshotContentV1.parse({ ...content, waiting_reason: undefined }).waiting_reason).toBe(
-      null,
-    );
+    expect(
+      PaneSnapshotContentV1.parse({ ...content, waiting_reason: undefined }).waiting_reason,
+    ).toBe(null);
   });
 });
 
@@ -140,7 +140,10 @@ describe('snapshot freshness', () => {
     expect(f(SNAPSHOT_FIXTURE.record)).toBe('fresh');
     expect(f(STALE_SNAPSHOT_FIXTURE.aged.record)).toBe('stale');
     expect(
-      f(STALE_SNAPSHOT_FIXTURE.refreshTimedOut.record, STALE_SNAPSHOT_FIXTURE.refreshTimedOut.refresh),
+      f(
+        STALE_SNAPSHOT_FIXTURE.refreshTimedOut.record,
+        STALE_SNAPSHOT_FIXTURE.refreshTimedOut.refresh,
+      ),
     ).toBe('stale');
     expect(f(SHARING_OFF_FIXTURE)).toBe('off');
   });
@@ -173,7 +176,9 @@ describe('boundTerminalLines', () => {
     PaneSnapshotContentV1.safeParse({ ...content, terminal_lines: lines }).success;
 
   it('strips escape sequences and control characters and normalises line ends', () => {
-    const lines = boundTerminalLines('\u001b[1;32m✓ ok\u001b[0m\r\nnext\u0007\rlast\u001b]0;title\u0007\n\n');
+    const lines = boundTerminalLines(
+      '\u001b[1;32m✓ ok\u001b[0m\r\nnext\u0007\rlast\u001b]0;title\u0007\n\n',
+    );
     expect(lines).toEqual(['✓ ok', 'next', 'last']);
     expect(valid(lines)).toBe(true);
   });

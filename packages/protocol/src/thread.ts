@@ -266,7 +266,10 @@ export function applyMessage(
     throw new ApiError('forbidden', `role ${m.role} may not send a human message`);
   }
   if (m.side === 'agent' && !(DESKTOP_ROLES.includes(m.role) && m.signerIsPublisher)) {
-    throw new ApiError('forbidden', 'only the desktop that published the question speaks for its agent');
+    throw new ApiError(
+      'forbidden',
+      'only the desktop that published the question speaks for its agent',
+    );
   }
   if (state.status === 'expired') throw new ApiError('expired', 'question expired');
   if (isThreadClosedStatus(state.status)) {
@@ -275,7 +278,12 @@ export function applyMessage(
   if (m.messageCount >= LIMITS.messagesPerQuestion) {
     throw new ApiError('invalid_state', 'this question has reached its message limit');
   }
-  return { state: { ...state }, deliverable: false, approval: false, deliverToHost: m.side === 'human' };
+  return {
+    state: { ...state },
+    deliverable: false,
+    approval: false,
+    deliverToHost: m.side === 'human',
+  };
 }
 
 /**

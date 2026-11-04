@@ -137,16 +137,16 @@ describe('message content', () => {
       false,
     );
     // 'é' is two bytes: half as many fit
-    expect(AgentMessageContentV1.safeParse({ side: 'agent', text: bytes(max / 2, 'é') }).success).toBe(
-      true,
-    );
+    expect(
+      AgentMessageContentV1.safeParse({ side: 'agent', text: bytes(max / 2, 'é') }).success,
+    ).toBe(true);
     expect(
       AgentMessageContentV1.safeParse({ side: 'agent', text: bytes(max / 2 + 1, 'é') }).success,
     ).toBe(false);
     // escaping never counts against the limit: a full message of newlines and quotes is still a message
-    expect(
-      HumanMessageContentV1.safeParse({ side: 'human', text: bytes(max, '"') }).success,
-    ).toBe(true);
+    expect(HumanMessageContentV1.safeParse({ side: 'human', text: bytes(max, '"') }).success).toBe(
+      true,
+    );
   });
   it('carries no answer: option, approval and reason fields are dropped', () => {
     const c = HumanMessageContentV1.parse({
@@ -177,9 +177,7 @@ describe('message content', () => {
     expect(imagesMatchRecord(undefined, undefined)).toBe(true);
     expect(imagesMatchRecord([], [MESSAGE_IMAGE_FIXTURE])).toBe(false);
     expect(imagesMatchRecord([MESSAGE_IMAGE_FIXTURE.attachment_id], [])).toBe(false);
-    expect(
-      imagesMatchRecord(['att_otherimg1'], [MESSAGE_IMAGE_FIXTURE]),
-    ).toBe(false);
+    expect(imagesMatchRecord(['att_otherimg1'], [MESSAGE_IMAGE_FIXTURE])).toBe(false);
     expect(
       imagesMatchRecord(
         [MESSAGE_IMAGE_FIXTURE.attachment_id, MESSAGE_IMAGE_FIXTURE.attachment_id],
@@ -310,9 +308,9 @@ describe('message delivery receipts', () => {
 
 describe('push payloads', () => {
   it('carry a type and a question id and nothing else', () => {
-    expect(PushPayload.safeParse({ type: 'decision-reply', question_id: 'q_aaaaaaaa' }).success).toBe(
-      true,
-    );
+    expect(
+      PushPayload.safeParse({ type: 'decision-reply', question_id: 'q_aaaaaaaa' }).success,
+    ).toBe(true);
     expect(PushPayload.safeParse({ type: 'test' }).success).toBe(true);
     for (const extra of [
       { pane_title: 'claude' },
@@ -321,7 +319,8 @@ describe('push payloads', () => {
       { text: 'hello' },
     ]) {
       expect(
-        PushPayload.safeParse({ type: 'decision-new', question_id: 'q_aaaaaaaa', ...extra }).success,
+        PushPayload.safeParse({ type: 'decision-new', question_id: 'q_aaaaaaaa', ...extra })
+          .success,
         Object.keys(extra)[0],
       ).toBe(false);
     }

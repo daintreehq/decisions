@@ -70,7 +70,12 @@ const ServerFrame = z.discriminatedUnion('t', [
     has_more: z.boolean().default(false),
   }),
   z.object({ t: z.literal('pairing'), pairing_id: Id }),
-  z.object({ t: z.literal('res'), id: z.string().max(64), status: z.number().int(), body: z.string() }),
+  z.object({
+    t: z.literal('res'),
+    id: z.string().max(64),
+    status: z.number().int(),
+    body: z.string(),
+  }),
   z.object({ t: z.literal('revoked') }),
   z.object({ t: z.literal('error'), code: z.string(), message: z.string() }),
 ]);
@@ -115,7 +120,8 @@ export async function legacyDesktopCatchUp(
     const page = EventsPage.parse(await fetchPage(after));
     events.push(...page.events);
     if (page.next_after > after) after = page.next_after;
-    else if (page.has_more) throw new Error('relay returned a page that does not advance the cursor');
+    else if (page.has_more)
+      throw new Error('relay returned a page that does not advance the cursor');
     if (!page.has_more) return { events, cursor: after, pages };
   }
   throw new Error('catch-up did not finish');

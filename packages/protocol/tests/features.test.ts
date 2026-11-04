@@ -27,7 +27,11 @@ import {
 const ALL = new Set(ProtocolFeature.options);
 const NONE = new Set<ProtocolFeature>();
 
-const event = (seq: number, event_type: EventType, data: Record<string, unknown> = {}): LedgerEvent => ({
+const event = (
+  seq: number,
+  event_type: EventType,
+  data: Record<string, unknown> = {},
+): LedgerEvent => ({
   protocol_version: 1,
   seq,
   event_id: `evt_${String(seq).padStart(8, '0')}`,
@@ -76,10 +80,9 @@ const relay =
 
 describe('feature declarations', () => {
   it('reads known features and ignores the rest', () => {
-    expect([...knownFeatures(['thread-messages-v1', 'teleport-v9', 'pane-snapshots-v1'])].sort()).toEqual([
-      'pane-snapshots-v1',
-      'thread-messages-v1',
-    ]);
+    expect(
+      [...knownFeatures(['thread-messages-v1', 'teleport-v9', 'pane-snapshots-v1'])].sort(),
+    ).toEqual(['pane-snapshots-v1', 'thread-messages-v1']);
     expect([...knownFeatures('phone-images-v1, nonsense')]).toEqual(['phone-images-v1']);
     expect(knownFeatures(undefined).size).toBe(0);
     expect(knownFeatures('').size).toBe(0);
@@ -100,9 +103,9 @@ describe('feature declarations', () => {
         features: Array(LIMITS.featuresPerDeclaration + 1).fill('x'),
       }).success,
     ).toBe(false);
-    expect(SocketTicketBody.safeParse({ protocol_version: 1, features: ['Bad Token'] }).success).toBe(
-      false,
-    );
+    expect(
+      SocketTicketBody.safeParse({ protocol_version: 1, features: ['Bad Token'] }).success,
+    ).toBe(false);
   });
   it('a newer peer advertising features this version does not know still parses', () => {
     const info = {
@@ -136,9 +139,11 @@ describe('which events need which features', () => {
     }
   });
   it('messages need threads, snapshots need snapshots, and images need images on top', () => {
-    expect(requiredFeaturesForEvent(event(1, 'decision.message.posted', { record: { attachment_ids: [] } }))).toEqual([
-      'thread-messages-v1',
-    ]);
+    expect(
+      requiredFeaturesForEvent(
+        event(1, 'decision.message.posted', { record: { attachment_ids: [] } }),
+      ),
+    ).toEqual(['thread-messages-v1']);
     expect(requiredFeaturesForEvent(event(1, 'decision.message.posted', withImages))).toEqual([
       'thread-messages-v1',
       'phone-images-v1',
@@ -177,10 +182,16 @@ describe('a client pinned to 0.3.0', () => {
     const want = ledger.filter((e) => isEventVisible(e, NONE)).map((e) => e.seq);
     for (const limit of [1, 2, 3, 5, 100]) {
       const desktop = await legacyDesktopCatchUp(relay(ledger, NONE, limit));
-      expect(desktop.events.map((e) => e.seq), `desktop limit ${limit}`).toEqual(want);
+      expect(
+        desktop.events.map((e) => e.seq),
+        `desktop limit ${limit}`,
+      ).toEqual(want);
       expect(desktop.cursor, `desktop limit ${limit}`).toBe(ledger.length);
       const phone = await legacyPhoneCatchUp(relay(ledger, NONE, limit));
-      expect(phone.events.map((e) => e.seq), `phone limit ${limit}`).toEqual(want);
+      expect(
+        phone.events.map((e) => e.seq),
+        `phone limit ${limit}`,
+      ).toEqual(want);
       expect(phone.cursor, `phone limit ${limit}`).toBe(ledger.length);
     }
   });
@@ -225,7 +236,9 @@ describe('a client pinned to 0.3.0', () => {
 
   it('never sees an answer that carries images, so it cannot deliver it without them', async () => {
     const { events } = await legacyDesktopCatchUp(relay(mixedLedger(), NONE, 100));
-    expect(events.some((e) => (e.data as typeof withImages).record?.attachment_ids?.length)).toBe(false);
+    expect(events.some((e) => (e.data as typeof withImages).record?.attachment_ids?.length)).toBe(
+      false,
+    );
   });
 });
 
@@ -233,7 +246,7 @@ describe('events pages for any client', () => {
   /** Deterministic pseudo-random ledgers, so the cursor rules are checked beyond hand-written cases. */
   function* ledgers(): Generator<LedgerEvent[]> {
     let x = 7;
-    const rand = () => ((x = (x * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31);
+    const rand = () => (x = (x * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
     const types = EventType.options;
     for (let n = 0; n < 60; n++) {
       const len = Math.floor(rand() * 25);

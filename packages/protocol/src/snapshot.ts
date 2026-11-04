@@ -1,14 +1,7 @@
 import { z } from 'zod';
 import { utf8ByteLength } from './encoding.js';
 import { LIMITS } from './limits.js';
-import {
-  CryptoEnvelope,
-  Id,
-  IsoTime,
-  Sha256Hex,
-  SigB64,
-  type QuestionStatus,
-} from './schema.js';
+import { CryptoEnvelope, Id, IsoTime, Sha256Hex, SigB64, type QuestionStatus } from './schema.js';
 import { isThreadClosedStatus } from './thread.js';
 import { PROTOCOL_VERSION } from './version.js';
 
@@ -182,7 +175,8 @@ export function snapshotFreshness(i: {
   return i.now - Date.parse(i.snapshot.observed_at) <= LIMITS.snapshotFreshMs ? 'fresh' : 'stale';
 }
 
-const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+const ANSI =
+  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
 const CONTROL_ALL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
 
 /**

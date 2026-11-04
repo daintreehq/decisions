@@ -7,7 +7,12 @@ import type {
   MessageRecord,
 } from './thread.js';
 
-export { Legacy030, legacyDesktopCatchUp, legacyPhoneCatchUp, legacySocketReceive } from './legacy-0.3.0.js';
+export {
+  Legacy030,
+  legacyDesktopCatchUp,
+  legacyPhoneCatchUp,
+  legacySocketReceive,
+} from './legacy-0.3.0.js';
 export type { LegacyCatchUp } from './legacy-0.3.0.js';
 
 /*

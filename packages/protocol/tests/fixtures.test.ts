@@ -45,9 +45,9 @@ describe('shared fixtures', () => {
       const record = MessageRecord.parse({ ...m.record, envelope_digest: DIGEST, signature: SIG });
       expect(record.question_id).toBe(t.question_id);
       expect(MessageContentV1.parse(m.content).side).toBe(record.side);
-      expect(imagesMatchRecord(record.attachment_ids, 'images' in m.content ? m.content.images : [])).toBe(
-        true,
-      );
+      expect(
+        imagesMatchRecord(record.attachment_ids, 'images' in m.content ? m.content.images : []),
+      ).toBe(true);
       if (m.delivery) expect(MessageDeliveryInfo.safeParse(m.delivery).success).toBe(true);
       // agent messages come from the publishing desktop, human ones from the phone
       expect(record.signer_device_id).toBe(
@@ -84,9 +84,9 @@ describe('shared fixtures', () => {
       },
     };
     const entry = { message_seq: m.message_seq, committed_at: m.committed_at, record, envelope };
-    expect(MessageView.safeParse({ ...entry, event_seq: m.event_seq, delivery: m.delivery }).success).toBe(
-      true,
-    );
+    expect(
+      MessageView.safeParse({ ...entry, event_seq: m.event_seq, delivery: m.delivery }).success,
+    ).toBe(true);
     expect(
       EventData.messagePosted.safeParse({ ...entry, target_host_id: THREAD_FIXTURE.target_host_id })
         .success,
@@ -94,17 +94,25 @@ describe('shared fixtures', () => {
   });
 
   it('snapshots are fresh, stale by age, stale by a timed-out refresh, and off', () => {
-    const label = (s: { record: { observed_at: string; sharing: 'on' | 'off' }; refresh: unknown }) =>
+    const label = (s: {
+      record: { observed_at: string; sharing: 'on' | 'off' };
+      refresh: unknown;
+    }) =>
       snapshotFreshness({
         now: NOW,
         status: THREAD_FIXTURE.status,
         snapshot: s.record,
         refresh: s.refresh as { deadline_at: string } | null,
       });
-    for (const s of [SNAPSHOT_FIXTURE, STALE_SNAPSHOT_FIXTURE.aged, STALE_SNAPSHOT_FIXTURE.refreshTimedOut]) {
-      expect(PaneSnapshotRecord.safeParse({ ...s.record, envelope_digest: DIGEST, signature: SIG }).success).toBe(
-        true,
-      );
+    for (const s of [
+      SNAPSHOT_FIXTURE,
+      STALE_SNAPSHOT_FIXTURE.aged,
+      STALE_SNAPSHOT_FIXTURE.refreshTimedOut,
+    ]) {
+      expect(
+        PaneSnapshotRecord.safeParse({ ...s.record, envelope_digest: DIGEST, signature: SIG })
+          .success,
+      ).toBe(true);
       const c = PaneSnapshotContentV1.parse(s.content);
       expect(c.observed_at).toBe(s.record.observed_at);
       if (s.refresh) expect(SnapshotRefresh.safeParse(s.refresh).success).toBe(true);
@@ -113,8 +121,11 @@ describe('shared fixtures', () => {
     expect(label(STALE_SNAPSHOT_FIXTURE.aged)).toBe('stale');
     expect(label(STALE_SNAPSHOT_FIXTURE.refreshTimedOut)).toBe('stale');
     expect(
-      PaneSnapshotRecord.safeParse({ ...SHARING_OFF_FIXTURE, envelope_digest: null, signature: SIG })
-        .success,
+      PaneSnapshotRecord.safeParse({
+        ...SHARING_OFF_FIXTURE,
+        envelope_digest: null,
+        signature: SIG,
+      }).success,
     ).toBe(true);
     expect(label({ record: SHARING_OFF_FIXTURE, refresh: null })).toBe('off');
   });

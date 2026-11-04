@@ -77,7 +77,6 @@ export const LIMITS = {
   featuresPerDeclaration: 16,
 } as const;
 
-
 export const DEFAULTS = {
   questionExpiryMs: 7 * 24 * 60 * 60 * 1000,
   firstReminderMs: 4 * 60 * 60 * 1000,
