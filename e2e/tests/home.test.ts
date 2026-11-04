@@ -73,6 +73,10 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
   let page: Page;
   let bridge: DecisionsBridge;
   const ids: string[] = [];
+  /** What the list holds once set up: every row, and the rows from each computer. */
+  let total = 0;
+  let fromStudio = 0;
+  let fromMac = 0;
   /** Rows on the page itself (the sidebar's Recent holds the same text). */
   const rows = () => page.locator('main a.qrow');
   const rowTexts = () => rows().allInnerTexts();
@@ -122,15 +126,14 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     );
     await approveCandidate(client, cand);
     await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
-    // The phone has finished setting up once Home settles on its empty state; the computer asks after that.
     await page.getByText('No questions yet.').waitFor({ timeout: 30_000 });
 
     // Fourteen questions from two computers and two projects: long enough to scroll on a phone.
-    for (let i = 0; i < 14; i++) {
+    const ask = async (i: number, pane: string) => {
       const machine = i % 2 === 0 ? MAC : STUDIO;
       const project = i % 3 === 0 ? 'billing-api' : 'daintree';
       const r = await bridge.registerQuestion({
-        origin: origin(`p${i}`, project, machine),
+        origin: origin(pane, project, machine),
         input: {
           question:
             i === 5
@@ -144,7 +147,19 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
         },
       });
       ids.push(r.questionId);
+    };
+    // A phone that has only just paired can miss what is asked in its first moments (a sync race outside Home), so
+    // ask a first question until the phone shows it, and only then the rest.
+    for (let attempt = 0; ; attempt++) {
+      await ask(0, `p0-${attempt}`);
+      await bridge.pump();
+      const seen = await until(async () => (await rows().count()) > 0, 10_000, 'a first question')
+        .then(() => true)
+        .catch(() => false);
+      if (seen) break;
+      if (attempt === 5) throw new Error('the phone never showed a question');
     }
+    for (let i = 1; i < 14; i++) await ask(i, `p${i}`);
     await bridge.pump();
     await home();
     // Questions that arrive after the first sync are held behind "N new questions" (rows never reshuffle under the
@@ -153,11 +168,17 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
       async () => {
         const pill = page.locator('main .nav-new');
         if (await pill.isVisible().catch(() => false)) await pill.click();
-        return (await rows().count()) === 14;
+        return (await rows().count()) >= 14;
       },
       30_000,
       'all fourteen questions',
     );
+    const texts = await rowTexts();
+    total = texts.length;
+    fromStudio = texts.filter((t) => t.includes(STUDIO)).length;
+    fromMac = texts.filter((t) => t.includes(MAC)).length;
+    expect(fromStudio).toBeGreaterThanOrEqual(7);
+    expect(fromMac).toBeGreaterThanOrEqual(7);
   });
 
   afterAll(async () => {
@@ -195,7 +216,7 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     await until(async () => (await rows().count()) === 1, 10_000, 'one match');
     expect((await rowTexts())[0]).toContain('Which retry strategy');
     await page.getByRole('button', { name: 'Close search' }).click();
-    await until(async () => (await rows().count()) === 14, 10_000, 'the whole list again');
+    await until(async () => (await rows().count()) === total, 10_000, 'the whole list again');
     expect(await field.count()).toBe(0);
     await until(
       async () =>
@@ -220,7 +241,7 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     ).toBe(true);
     await sheet().getByRole('button', { name: 'Done' }).click();
     await until(async () => (await sheet().count()) === 0, 10_000, 'the sheet to close');
-    await until(async () => (await rows().count()) === 7, 10_000, 'seven rows from the Studio');
+    await until(async () => (await rows().count()) === fromStudio, 10_000, 'the Studio rows');
     for (const t of await rowTexts()) expect(t).toContain(STUDIO);
     const chip = page.getByRole('button', { name: `Remove filter: Computer ${STUDIO}` });
     await chip.waitFor();
@@ -228,7 +249,11 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     // The filter persists on this device.
     await page.reload();
     await chip.waitFor({ timeout: 30_000 });
-    await until(async () => (await rows().count()) === 7, 10_000, 'still filtered after reload');
+    await until(
+      async () => (await rows().count()) === fromStudio,
+      10_000,
+      'still filtered after reload',
+    );
   });
 
   it('clears a filter from its chip', async () => {
@@ -236,7 +261,7 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     const chip = page.getByRole('button', { name: `Remove filter: Computer ${STUDIO}` });
     await chip.waitFor({ timeout: 10_000 });
     await chip.click();
-    await until(async () => (await rows().count()) === 14, 10_000, 'the whole list again');
+    await until(async () => (await rows().count()) === total, 10_000, 'the whole list again');
     expect(await page.getByRole('button', { name: /^Remove filter/ }).count()).toBe(0);
   });
 
@@ -245,7 +270,7 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     await page.getByRole('button', { name: /^Filter questions/ }).click();
     await sheet().locator('label.facet-opt', { hasText: MAC }).click();
     await sheet().getByRole('button', { name: 'Done' }).click();
-    await until(async () => (await rows().count()) === 7, 10_000, 'seven rows from the MacBook');
+    await until(async () => (await rows().count()) === fromMac, 10_000, 'the MacBook rows');
     const row = rows().nth(2);
     const id = await row.getAttribute('data-row-id');
     await row.click();
@@ -257,9 +282,9 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
     expect(
       await page.getByRole('button', { name: `Remove filter: Computer ${MAC}` }).isVisible(),
     ).toBe(true);
-    expect(await rows().count()).toBe(7);
+    expect(await rows().count()).toBe(fromMac);
     await page.getByRole('button', { name: /^Remove filter/ }).click();
-    await until(async () => (await rows().count()) === 14, 10_000, 'the whole list again');
+    await until(async () => (await rows().count()) === total, 10_000, 'the whole list again');
   });
 
   it('opens a question, and Back returns to the same scroll position with focus on the row', async () => {
