@@ -30,6 +30,7 @@ import type { Auth, DeviceRow, Handler, JobInput, Room, RouteCtx, Settings } fro
 import { ROUTES } from './routes/index.js';
 import { processDueJobs } from './jobs/alarm.js';
 import { applyAck } from './room/ack.js';
+import { nextSnapshotRetention, sweepSnapshotRetention } from './room/snapshots.js';
 import {
   errorResponse,
   iso,
@@ -781,6 +782,10 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     this.alarmDirty = true;
   }
 
+  markAlarmDirty(): void {
+    this.alarmDirty = true;
+  }
+
   cancelJobs(where: { questionId: string; kinds?: string[] }): void {
     if (where.kinds && where.kinds.length > 0) {
       const marks = where.kinds.map(() => '?').join(',');
@@ -801,10 +806,13 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     return await this.ctx.storage.getAlarm();
   }
 
+  /** One alarm serves every pending job and every snapshot retention deadline. */
   private async refreshAlarm(): Promise<void> {
-    const next = this.q1<{ m: number | null }>(
+    const job = this.q1<{ m: number | null }>(
       `SELECT MIN(run_at) AS m FROM scheduled_jobs WHERE status = 'pending'`,
     )?.m;
+    const snapshot = nextSnapshotRetention(this);
+    const next = job == null ? snapshot : snapshot == null ? job : Math.min(job, snapshot);
     const current = await this.ctx.storage.getAlarm();
     if (next == null) {
       if (current != null) await this.ctx.storage.deleteAlarm();
@@ -814,6 +822,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
   }
 
   override async alarm(): Promise<void> {
+    await sweepSnapshotRetention(this);
     await processDueJobs(this);
     await this.refreshAlarm();
   }

@@ -71,6 +71,13 @@ export const LIMITS = {
   snapshotRetentionMs: 24 * 60 * 60 * 1000,
   /** Refresh requests per human device per minute, across questions. */
   snapshotRefreshesPerDeviceMinute: 6,
+  /** Snapshots (shared or sharing off) the relay accepts per question per minute. */
+  snapshotWritesPerQuestionMinute: 30,
+  /**
+   * Base64url ciphertext of one snapshot envelope. The largest valid `PaneSnapshotContentV1` (every limit full,
+   * every character escaped in JSON) encrypts to about 91 KiB of base64url, so this leaves headroom and nothing more.
+   */
+  snapshotCiphertextChars: 96 * 1024,
 
   /* ---- feature negotiation (section 19) ---- */
   /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */

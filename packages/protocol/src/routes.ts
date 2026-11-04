@@ -47,6 +47,12 @@ import {
   VoiceSessionResponse,
 } from './api.js';
 import { MessageBody, MessageReceipt, MessageReceiptBody, MessagesPage } from './thread.js';
+import {
+  PaneSnapshotBody,
+  PaneSnapshotResponse,
+  SnapshotRefresh,
+  SnapshotRefreshBody,
+} from './snapshot.js';
 import { API_PREFIX, PROTOCOL_VERSION } from './version.js';
 
 export interface RouteSpec {
@@ -267,6 +273,33 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     request: ActionBody,
     response: CommandReceipt,
     status: 201,
+  },
+  {
+    method: 'PUT',
+    path: '/questions/{id}/snapshot',
+    auth: 'signed',
+    roles: DESKTOPS,
+    summary:
+      "Replace the question's pane snapshot, or say sharing is off (the publishing desktop only)",
+    request: PaneSnapshotBody,
+    response: CommandReceipt,
+  },
+  {
+    method: 'GET',
+    path: '/questions/{id}/snapshot',
+    auth: 'signed',
+    roles: 'any',
+    summary: 'The latest pane snapshot (ciphertext) and any outstanding refresh request',
+    response: PaneSnapshotResponse,
+  },
+  {
+    method: 'POST',
+    path: '/questions/{id}/snapshot/refresh',
+    auth: 'signed',
+    roles: HUMANS,
+    summary: 'Ask the publishing desktop for a fresh snapshot (coalesced while one is outstanding)',
+    request: SnapshotRefreshBody,
+    response: SnapshotRefresh,
   },
   {
     method: 'POST',

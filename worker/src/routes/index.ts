@@ -11,6 +11,7 @@ import * as pairing from './pairing.js';
 import * as push from './push.js';
 import * as questions from './questions.js';
 import * as setup from './setup.js';
+import * as snapshots from './snapshots.js';
 import * as voice from './voice.js';
 
 export interface Route {
@@ -68,6 +69,9 @@ export const ROUTES: Route[] = [
   // Human messages need a phone or tablet and agent messages the publishing desktop; the handler checks which.
   r('POST', `/questions/${ID}/messages`, 'signed', messages.postMessage, ANY),
   r('GET', `/questions/${ID}/messages`, 'signed', messages.listMessages, ANY),
+  r('PUT', `/questions/${ID}/snapshot`, 'signed', snapshots.putSnapshot, DESKTOP_ROLES),
+  r('GET', `/questions/${ID}/snapshot`, 'signed', snapshots.getSnapshot, ANY),
+  r('POST', `/questions/${ID}/snapshot/refresh`, 'signed', snapshots.requestRefresh, HUMAN_ROLES),
 
   r('POST', '/attachments/reservations', 'signed', attachments.reserve, DESKTOP_ROLES),
   r('POST', `/attachments/${ID}/complete`, 'signed', attachments.complete, DESKTOP_ROLES),

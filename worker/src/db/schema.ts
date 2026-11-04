@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -216,6 +216,28 @@ const V2 = [
   `CREATE INDEX IF NOT EXISTS message_deliveries_question_idx ON message_deliveries(question_id)`,
 ];
 
+/**
+ * Pane snapshots (docs/protocol.md section 18). `question_snapshots` holds at most one row per question,
+ * replaced in place. `last_observed_at` is the order watermark and outlives the snapshot it came from;
+ * `sharing_off` outlives it too, until a shared snapshot arrives. `retain_until` is when the stored ciphertext
+ * must go. `refresh_json` is the latest refresh request.
+ */
+const V3 = [
+  `CREATE TABLE IF NOT EXISTS question_snapshots (
+    question_id TEXT PRIMARY KEY,
+    last_observed_at INTEGER,
+    sharing_off INTEGER NOT NULL DEFAULT 0,
+    snapshot_id TEXT,
+    record_json TEXT,
+    envelope_json TEXT,
+    received_at INTEGER,
+    retain_until INTEGER,
+    refresh_json TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS question_snapshots_retain_idx ON question_snapshots(retain_until)
+    WHERE retain_until IS NOT NULL`,
+];
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -226,6 +248,7 @@ export function migrate(sql: SqlStorage): void {
   }
   if (current < 1) for (const stmt of V1) sql.exec(stmt);
   if (current < 2) for (const stmt of V2) sql.exec(stmt);
+  if (current < 3) for (const stmt of V3) sql.exec(stmt);
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),
