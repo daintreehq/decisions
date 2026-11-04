@@ -195,7 +195,7 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
     await drawer()
       .getByRole('heading', { name: /Claude Code · Webhook retries/ })
       .waitFor();
-    await drawer().getByText('Waiting at its prompt').waitFor({ timeout: 20_000 });
+    await drawer().getByText('Waiting at its prompt', { exact: true }).waitFor({ timeout: 20_000 });
     const lines = drawer().getByRole('region', { name: 'Last terminal lines' });
     await lines.getByText('Which retry strategy should I use?', { exact: false }).waitFor();
     // Scrolled to the newest line, and the lines are text, not controls.
