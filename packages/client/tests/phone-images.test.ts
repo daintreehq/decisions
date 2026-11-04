@@ -49,6 +49,9 @@ class FakeImageStore implements PhoneImageStore {
 
 type Env = Awaited<ReturnType<typeof setupBridge>>;
 
+/** The real timer, kept for waits while a test fakes the clock. */
+const realSetTimeout = globalThis.setTimeout;
+
 async function asked(phoneImages?: PhoneImageStore) {
   const env = await setupBridge(phoneImages ? { phoneImages } : {});
   const r = await env.bridge.registerQuestion({
@@ -343,6 +346,45 @@ describe('phone images reach the agent as files the host stored', () => {
     expect(env.sink.injectCalls).toBe(0);
   });
 
+  it("still delivers the pane's other answer when one is withdrawn mid-delivery", async () => {
+    let release!: () => void;
+    const images = new FakeImageStore();
+    images.wait = new Promise<void>((r) => (release = r));
+    const env = await asked(images);
+    const other = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'And the second one?', options: [{ id: 'yes', label: 'Yes' }] },
+    });
+    await env.bridge.pump();
+    const ref = await upload(env, env.qid, PNG);
+    await env.relay.answerEvent({
+      questionId: env.qid,
+      phone: env.phone,
+      options: ['yes'],
+      attachmentIds: [ref.attachment_id],
+      extra: { images: [ref] },
+    });
+    await env.relay.answerEvent({
+      questionId: other.questionId,
+      phone: env.phone,
+      options: ['yes'],
+      text: 'Second answer',
+    });
+    const first = env.bridge.catchUp();
+    await vi.waitFor(() => expect(images.calls).toHaveLength(1));
+    env.relay.push('decision.deleted', env.qid, null, {});
+    const second = env.bridge.catchUp();
+    await vi.waitFor(async () =>
+      expect((await env.store.getQuestion(env.qid))!.local_status).toBe('cancelled'),
+    );
+    release();
+    await Promise.all([first, second]);
+    // The batch that held both was dropped; the same drain typed the second answer alone, with no wake-up.
+    expect(env.sink.typed).toHaveLength(1);
+    expect(env.sink.typed[0]!.text).toContain('comment: Second answer');
+    expect(env.sink.typed[0]!.text).not.toContain(env.qid);
+  });
+
   it('gives a stalled relay or host a deadline, then lists the rest as timed_out', async () => {
     const env = await setupBridge();
     const qid = newId();
@@ -363,15 +405,23 @@ describe('phone images reach the agent as files the host stored', () => {
       { attachmentId: a.attachment_id, unavailable: 'timed_out' },
       { attachmentId: b.attachment_id, unavailable: 'timed_out' },
     ]);
-    // A host store that never answers is cut off the same way.
+    // A host store that never answers is cut off the same way, on a clock the test drives.
+    const real = { identity: env.identity, client: env.client };
     const hung = new FakeImageStore();
     hung.wait = new Promise<void>(() => {});
-    const real = { identity: env.identity, client: env.client };
-    expect(await resolvePhoneImages(real, hung, { ...input, timeoutMs: 50 })).toEqual([
-      { attachmentId: a.attachment_id, unavailable: 'timed_out' },
-      { attachmentId: b.attachment_id, unavailable: 'timed_out' },
-    ]);
-    expect(hung.calls).toHaveLength(1);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const run = resolvePhoneImages(real, hung, { ...input, timeoutMs: 60_000 });
+      await vi.waitFor(() => expect(hung.calls).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await run).toEqual([
+        { attachmentId: a.attachment_id, unavailable: 'timed_out' },
+        { attachmentId: b.attachment_id, unavailable: 'timed_out' },
+      ]);
+      expect(hung.calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
     // Shutting down resolves nothing further.
     const fresh = new FakeImageStore();
     expect(await resolvePhoneImages(real, fresh, { ...input, stopped: () => true })).toEqual([
@@ -379,6 +429,36 @@ describe('phone images reach the agent as files the host stored', () => {
       { attachmentId: b.attachment_id, unavailable: 'timed_out' },
     ]);
     expect(fresh.calls).toHaveLength(0);
+  });
+
+  it('never hands the host an image whose download finished after the deadline', async () => {
+    const env = await setupBridge();
+    const qid = newId();
+    const a = await upload(env, qid, PNG);
+    let arrive!: (b: Uint8Array) => void;
+    const slow = {
+      downloadAttachment: () => new Promise<Uint8Array>((r) => (arrive = r)),
+    } as unknown as RelayClient;
+    const store = new FakeImageStore();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const run = resolvePhoneImages({ identity: env.identity, client: slow }, store, {
+        questionId: qid,
+        carrier: { kind: 'answer', actionId: newId() },
+        origin: origin(),
+        signedIds: [a.attachment_id],
+        images: [a],
+        timeoutMs: 1000,
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await run).toEqual([{ attachmentId: a.attachment_id, unavailable: 'timed_out' }]);
+      // The ciphertext arrives late and decrypts fine, but the deadline (on the same clock) has passed.
+      arrive(env.relay.blobs.get(a.attachment_id)!);
+      await new Promise((r) => realSetTimeout(r, 100));
+      expect(store.calls).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('carries image references through an export and an import', async () => {

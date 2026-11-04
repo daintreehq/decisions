@@ -458,35 +458,44 @@ export class DeliveryEngine {
       return res;
     }
     // 0b. Every answer must still be one to type: fetching images takes time, and a cancellation, deletion or
-    //     another delivery may have settled one meanwhile. A later pass rebuilds the chunk without it.
-    for (const q of questions) {
-      const row = await ctx.store.getQuestion(q.question_id);
-      const live = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
-      if (chunk.some((i) => i.q.question_id === q.question_id && !live.has(i.entry.entry_id))) {
-        res.deferred++;
-        return res;
+    //     another delivery may have settled one meanwhile. The check and the intents share the lock the inbox
+    //     applies cancellations and deletions under, so none lands between them.
+    const admitted = await ctx.lock.run(async () => {
+      for (const q of questions) {
+        const row = await ctx.store.getQuestion(q.question_id);
+        const live = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
+        if (chunk.some((i) => i.q.question_id === q.question_id && !live.has(i.entry.entry_id)))
+          return false;
       }
-    }
-    const now = ctx.now();
-    // 1. Persist the intent BEFORE touching the terminal.
-    for (const i of chunk) {
-      await ctx.store.putIntent({
-        injection_id: i.intentId,
-        question_id: i.q.question_id,
-        answer_revision: i.entry.revision,
-        host_id: target.hostId,
-        pane_id: target.paneId,
-        terminal_generation: target.terminalGeneration,
-        ownership_principal: target.ownershipPrincipal,
-        agent_incarnation: target.agentIncarnation,
-        state: 'intent',
-        created_at: now,
-        updated_at: now,
-      });
-      await ctx.store.updateQuestion(i.q.question_id, {
-        last_injection_id: i.intentId,
-        last_attempt_at: new Date(now).toISOString(),
-      });
+      const now = ctx.now();
+      // 1. Persist the intent BEFORE touching the terminal.
+      for (const i of chunk) {
+        await ctx.store.putIntent({
+          injection_id: i.intentId,
+          question_id: i.q.question_id,
+          answer_revision: i.entry.revision,
+          host_id: target.hostId,
+          pane_id: target.paneId,
+          terminal_generation: target.terminalGeneration,
+          ownership_principal: target.ownershipPrincipal,
+          agent_incarnation: target.agentIncarnation,
+          state: 'intent',
+          created_at: now,
+          updated_at: now,
+        });
+        await ctx.store.updateQuestion(i.q.question_id, {
+          last_injection_id: i.intentId,
+          last_attempt_at: new Date(now).toISOString(),
+        });
+      }
+      return true;
+    });
+    if (!admitted) {
+      // Stale: another pass rebuilds the lane from the store, without what was settled, so the pane's other
+      // answers are not left waiting for an unrelated wake-up.
+      this.again = true;
+      res.deferred++;
+      return res;
     }
     // 2. Type, and take the sink's word only in the shapes the contract allows.
     let result: InjectResult & { code?: string };
