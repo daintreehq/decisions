@@ -157,6 +157,12 @@ export const LinkIcon = icon(
 export const SparkleIcon = icon(
   'M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.14 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z',
 );
+/** The asking agent's terminal: Lucide's square-terminal, a pane with a prompt in it (never a bare chevron, which
+ * would read as Forward beside the header's Back). */
+export const TerminalIcon = icon(
+  'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7 15l3-3-3-3M12 15h5',
+  20,
+);
 /** Model provenance: Daintree's rotated-square decision node, small. */
 export const ModelIcon = icon('M12 3l9 9-9 9-9-9z');
 

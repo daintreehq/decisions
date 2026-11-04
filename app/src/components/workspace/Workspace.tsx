@@ -10,6 +10,7 @@ import {
 import { app } from '../../app/controller.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
+import { useWide } from '../../app/media.js';
 import { StaleQuestionError } from '../../domain/answer.js';
 import {
   composeShape,
@@ -71,6 +72,12 @@ import {
   Thread,
 } from './Thread.js';
 import { useKeyboardInset } from './useKeyboardInset.js';
+import {
+  TerminalButton,
+  TerminalDrawer,
+  terminalModalOpen,
+  useTerminalServed,
+} from './TerminalDrawer.js';
 import { WorkspaceHeader, type MenuItem } from './WorkspaceHeader.js';
 
 /** The gallery's review report: `digests` are the files both verified and actually presented. */
@@ -100,6 +107,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const terminalServed = useTerminalServed();
+  const wide = useWide();
+  // The drawer belongs to the question it was opened on.
+  useEffect(() => setTerminalOpen(false), [id]);
   useKeyboardInset(rootRef);
   const all = useQuestions();
   const dictAll = useDictation();
@@ -352,6 +364,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      // The terminal drawer covers the chat: nothing behind it, the dock included, takes a command meanwhile.
+      if (mod && terminalModalOpen()) return;
       if (mod && e.key === 'Enter') {
         e.preventDefault();
         latest.current.send();
@@ -939,7 +953,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div ref={rootRef} className="ws" data-state={composing ? 'compose' : status}>
+    <div
+      ref={rootRef}
+      className="ws"
+      data-state={composing ? 'compose' : status}
+      data-terminal={terminalOpen && wide ? 'docked' : undefined}
+    >
       <WorkspaceHeader
         project={project}
         machine={machine}
@@ -950,8 +969,26 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           headingRef.current?.focus({ preventScroll: true });
         }}
         back={cameFromApp()}
+        terminal={
+          terminalServed && verified ? (
+            <TerminalButton
+              view={view}
+              open={terminalOpen}
+              docked={wide}
+              onOpen={() => setTerminalOpen((o) => !o)}
+            />
+          ) : undefined
+        }
         menu={menu}
       />
+      {terminalServed && verified && (
+        <TerminalDrawer
+          view={view}
+          open={terminalOpen}
+          docked={wide}
+          onClose={() => setTerminalOpen(false)}
+        />
+      )}
       <Sheet
         open={activityOpen}
         title="Activity"

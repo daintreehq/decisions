@@ -432,8 +432,8 @@ main.bare {
   opacity: 0;
 }
 .side-sheet-body {
-  /* Vertical scrolling stays native; a horizontal drag is the swipe that closes the panel. */
-  touch-action: pan-y;
+  /* Vertical scrolling and pinch zoom stay native; a horizontal drag is the swipe that closes the panel. */
+  touch-action: pan-y pinch-zoom;
 }
 @keyframes side-in {
   from {

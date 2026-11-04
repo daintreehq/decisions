@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { backLabel, backTarget, goBack } from '../../app/listState.js';
 import { ChevronLeft, MoreIcon } from '../Icons.js';
 import { Menu } from './Sheet.js';
@@ -14,7 +14,8 @@ export interface MenuItem {
  *   question was reached from inside the app;
  * - centre: the project over the computer, or, once the question has scrolled away, a one-line excerpt over
  *   "project · computer" that scrolls back to the question;
- * - trailing: a slot reserved for the terminal button, then the overflow menu.
+ * - trailing: the terminal button (its slot stays reserved when the relay serves no snapshots), then the overflow
+ *   menu.
  */
 export function WorkspaceHeader({
   project,
@@ -23,6 +24,7 @@ export function WorkspaceHeader({
   showExcerpt,
   onExcerpt,
   back,
+  terminal,
   menu,
 }: {
   project: string;
@@ -32,6 +34,8 @@ export function WorkspaceHeader({
   onExcerpt?: () => void;
   /** Offer Back: navigation reached this question from a page inside the app. */
   back: boolean;
+  /** The terminal button; without one the slot stays empty so the title keeps its place. */
+  terminal?: ReactNode;
   menu?: MenuItem[];
 }) {
   const [open, setOpen] = useState(false);
@@ -81,8 +85,7 @@ export function WorkspaceHeader({
         )}
       </div>
       <div className="ws-tools">
-        {/* Reserved for the terminal button (a separate issue under #30). */}
-        <span className="ws-terminal-slot" data-slot="terminal" aria-hidden="true" />
+        {terminal ?? <span className="ws-terminal-slot" data-slot="terminal" aria-hidden="true" />}
         {menu && menu.length > 0 && (
           <span className="menu-anchor">
             <button

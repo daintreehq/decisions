@@ -68,9 +68,11 @@ export function agentStateView(
   });
   if (f === 'none' || f === 'off') return null;
   // A refresh still in flight leaves the last observation as it was: fresh while it is inside the window.
+  // One that already outlived an unanswered refresh stays stale while it is asked for again.
   const fresh =
-    f === 'fresh' ||
-    (f === 'pending' && relayNow - Date.parse(o.receivedAt) <= LIMITS.snapshotFreshMs);
+    !s.missedRefresh &&
+    (f === 'fresh' ||
+      (f === 'pending' && relayNow - Date.parse(o.receivedAt) <= LIMITS.snapshotFreshMs));
   return {
     state: o.agentState,
     label: AGENT_STATE_LABEL[o.agentState],

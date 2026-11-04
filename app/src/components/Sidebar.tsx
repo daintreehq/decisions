@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type PointerEvent as ReactPointerEvent,
-} from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useAgentStates, useNow, useQuestions } from '../app/hooks.js';
 import { useLayer } from '../app/layers.js';
 import { Link, usePath, useRoute } from '../app/router.js';
@@ -24,6 +17,7 @@ import {
 import { AgentStateMark } from './AgentState.js';
 import { CloseIcon, MenuIcon } from './Icons.js';
 import { NavGlyph, type Destination } from './NavGlyphs.js';
+import { useSwipeClose } from './useSwipeClose.js';
 
 /** Three destinations; Devices lives inside Settings. */
 const NAV: { to: string; label: string; glyph: Destination }[] = [
@@ -305,14 +299,6 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const openedAt = useRef<string>('');
-  const drag = useRef<{
-    id: number;
-    x: number;
-    y: number;
-    t: number;
-    dx: number;
-    on: boolean;
-  } | null>(null);
 
   useEffect(() => {
     const d = ref.current;
@@ -352,50 +338,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   }, [open]);
 
   // A left swipe on the panel follows the finger and closes it past a third of its width (or on a flick).
-  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'mouse') return;
-    drag.current = {
-      id: e.pointerId,
-      x: e.clientX,
-      y: e.clientY,
-      t: e.timeStamp,
-      dx: 0,
-      on: false,
-    };
-  };
-  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const s = drag.current;
-    const d = ref.current;
-    if (!s || !d || s.id !== e.pointerId) return;
-    const dx = e.clientX - s.x;
-    const dy = e.clientY - s.y;
-    if (!s.on) {
-      if (dx < -10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
-        s.on = true;
-        try {
-          e.currentTarget.setPointerCapture(e.pointerId);
-        } catch {
-          // A pointer the browser no longer tracks: the drag still follows its moves.
-        }
-        d.setAttribute('data-dragging', '');
-      } else if (Math.abs(dy) > 10 || dx > 10) {
-        drag.current = null;
-        return;
-      } else return;
-    }
-    s.dx = Math.min(0, dx);
-    d.style.transform = `translateX(${s.dx}px)`;
-  };
-  const onPointerEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const s = drag.current;
-    const d = ref.current;
-    drag.current = null;
-    if (!s || !d || !s.on || s.id !== e.pointerId) return;
-    d.removeAttribute('data-dragging');
-    const velocity = s.dx / Math.max(1, e.timeStamp - s.t);
-    if (s.dx < -d.offsetWidth / 3 || velocity < -0.6) dismiss();
-    else d.style.transform = '';
-  };
+  const swipe = useSwipeClose(ref, 'left', dismiss);
 
   return (
     <dialog
@@ -412,13 +355,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      <div
-        className="side side-sheet-body"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
-      >
+      <div className="side side-sheet-body" {...swipe}>
         <SidebarContent
           currentId={currentId}
           titleId={titleId}
