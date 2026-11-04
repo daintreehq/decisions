@@ -63,6 +63,8 @@ export interface BuildActionInput {
   expiresAt?: string | null;
   actionId?: string;
   createdAt?: string;
+  /** `answer` / `override` only: the phone images the encrypted content references (protocol section 17). */
+  attachmentIds?: string[];
 }
 
 export async function buildSignedAction(i: BuildActionInput): Promise<{
@@ -82,6 +84,8 @@ export async function buildSignedAction(i: BuildActionInput): Promise<{
     envelope_digest: envelope ? await envelopeDigest(envelope) : null,
     confirms_action_id: i.confirmsActionId ?? null,
     expires_at: i.expiresAt ?? null,
+    // Left out when absent, so records signed without images stay byte-identical to 0.3.0 ones.
+    ...(i.attachmentIds !== undefined ? { attachment_ids: i.attachmentIds } : {}),
     signer_device_id: i.signerDeviceId,
   })) as ActionRecord;
   return { record, envelope };

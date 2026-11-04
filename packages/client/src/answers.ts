@@ -1,3 +1,5 @@
+import type { PhoneImageReference } from '@daintreehq/decisions-protocol';
+
 /**
  * One locally stored answer for a question: delivery bookkeeping in clear, content sealed.
  *
@@ -20,6 +22,12 @@ export interface AnswerEntry {
   injection_id?: string;
   /** The sealed `AnswerContent`, or null for an entry that carries none (an expiry notice). */
   sealed: string | null;
+  /**
+   * Phone images the host already stored for this answer, by attachment id: the path its `PhoneImageStore`
+   * returned. A retried delivery reuses them instead of downloading and storing the image again. Delivery
+   * bookkeeping in clear, like the rest of the entry: no alt text or digest, only the host's path.
+   */
+  stored_images?: { attachment_id: string; path: string }[];
 }
 
 /** The content of an answer. Held in memory only; at rest it is sealed into `AnswerEntry.sealed`. */
@@ -31,6 +39,10 @@ export interface AnswerContent {
   model_id?: string;
   /** Why the human corrected an earlier answer (the phone requires one for a correction). */
   reason?: string;
+  /** Phone images the human attached, as the encrypted answer references them (protocol section 17). */
+  images?: PhoneImageReference[];
+  /** The image ids the signed action record lists; delivery checks them against `images` before any fetch. */
+  image_ids?: string[];
 }
 
 /** An answer with its content opened. Never stored. */
@@ -42,7 +54,10 @@ export const EMPTY_ANSWER_CONTENT: AnswerContent = Object.freeze({
   reviewed_attachment_digests: [],
 }) as AnswerContent;
 
-/** The content fields an entry written before sealing existed carried in clear. */
+/**
+ * Every content field, which `storedEntry` strips from an entry before it is stored: the ones an entry written
+ * before sealing existed carried in clear, and the image fields, which only ever exist sealed.
+ */
 export const ANSWER_CONTENT_FIELDS = [
   'choices',
   'text',
@@ -50,6 +65,8 @@ export const ANSWER_CONTENT_FIELDS = [
   'confidence',
   'model_id',
   'reason',
+  'images',
+  'image_ids',
 ] as const;
 
 /** True for an entry from a store written before content was sealed: its content is still in clear. */

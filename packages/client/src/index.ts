@@ -22,6 +22,7 @@ export * from './proxy.js';
 export * from './publisher.js';
 export * from './inbound.js';
 export * from './inbox.js';
+export * from './phone-images.js';
 export * from './delivery.js';
 export * from './bridge.js';
 export * from './mcp.js';

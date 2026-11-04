@@ -415,7 +415,10 @@ sha256_ciphertext, mime_category: "image"}` → `AttachmentReservation`. `record
    `MessageRecord.attachment_ids`) and the same images in the encrypted content. At commit the relay requires every
    listed id to be completed, reserved by the signer for this question and exactly this `binding`, and not yet bound;
    it binds them all or commits nothing. An image binds once.
-4. Readers check `imagesMatchRecord`, then the downloaded image's size, MIME and `sha256`.
+4. Readers check `imagesMatchRecord`, then the downloaded image's size, MIME and `sha256`. A reader that cannot fetch
+   or verify an image still shows the answer or message, and shows that image as unavailable. A desktop types the
+   words with each image's local path, or its reason for being unavailable, into the asking pane (integration spec
+   section 6.4); plaintext images exist only on the phone and the host's disk.
 
 `ActionRecord.attachment_ids` is optional with no default, so records signed without it verify exactly as before.
 Phone images never join the question's attachments or `reviewed_attachment_digests`, and never count as approval

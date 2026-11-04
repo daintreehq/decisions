@@ -404,6 +404,10 @@ export class Inbox {
       ...(v.content?.confidence !== undefined ? { confidence: v.content.confidence } : {}),
       ...(v.content?.model_id ? { model_id: v.content.model_id } : {}),
       ...(v.action === 'override' && v.content?.reason?.trim() ? { reason: v.content.reason } : {}),
+      // Phone images stay references here, sealed with the words: delivery fetches and checks them, against
+      // the ids the phone signed into the record, only when the answer is about to be typed.
+      ...(v.content?.images?.length ? { images: v.content.images } : {}),
+      ...(v.record.attachment_ids?.length ? { image_ids: v.record.attachment_ids } : {}),
     };
     // Only the sealed form is stored; the clear content lives in memory until it is typed.
     const entry: AnswerEntry = {

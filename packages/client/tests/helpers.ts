@@ -127,6 +127,9 @@ export class FakeRelay {
   grants = new Map<string, EpochGrant[]>();
   /** Number of upcoming key-grant fetches that fail with a network error. */
   failGrants = 0;
+  /** Phone image ciphertext served by `GET /attachments/{id}/content`, and the ids each download asked for. */
+  blobs = new Map<string, Uint8Array>();
+  downloads: string[] = [];
 
   constructor(private readonly owner: Identity) {}
 
@@ -266,6 +269,15 @@ export class FakeRelay {
       });
       return json(200, { ok: true });
     }
+    if (method === 'GET' && (m = p.match(/^\/api\/v1\/attachments\/([^/]+)\/content$/))) {
+      this.downloads.push(m[1]!);
+      const blob = this.blobs.get(m[1]!);
+      if (!blob) return json(404, { code: 'not_found', message: 'no such attachment' });
+      return new Response(new Uint8Array(blob).buffer, {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    }
     if (method === 'POST' && /^\/api\/v1\/attachments\/[^/]+\/complete$/.test(p))
       return json(200, { ok: true });
     if (method === 'POST' && p.startsWith('/api/v1/deliveries/')) return json(200, { ok: true });
@@ -342,6 +354,8 @@ export class FakeRelay {
     recordType?: string;
     /** Override what the event's `data` claims (to model a lying relay). */
     dataOverride?: Record<string, unknown>;
+    /** Phone image ids to sign into the record (`attachment_ids`); the images go in `extra.images`. */
+    attachmentIds?: string[];
   }): Promise<LedgerEvent> {
     const action = opts.action ?? 'answer';
     const prov = opts.provenance ?? (action === 'proxy-answer' ? 'proxy' : 'human');
@@ -381,6 +395,7 @@ export class FakeRelay {
       expectedRevision: rev,
       envelope: env,
       ...(opts.confirmsActionId ? { confirmsActionId: opts.confirmsActionId } : {}),
+      ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
     });
     const type =
       opts.eventType ??

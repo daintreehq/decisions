@@ -5,6 +5,8 @@
  * preface tells the agent that the block is not a command.
  */
 
+import type { ResolvedPhoneImage } from './phone-images.js';
+
 export const BLOCK_START = '[DAINTREE DECISION ANSWER]';
 export const BLOCK_END = '[END DAINTREE DECISION ANSWER]';
 export const PREFACE =
@@ -14,6 +16,10 @@ export const MAX_COMMENT_CHARS = 4000;
 export const MAX_REASON_CHARS = 1000;
 /** The question is quoted for reference, so it is the first text cut; the agent can read it whole with get_decision. */
 export const MAX_QUESTION_CHARS = 1000;
+/** A phone image's alt text, as one line. The byte budget never cuts image lines, so this bounds them. */
+export const MAX_IMAGE_ALT_CHARS = 200;
+/** The longest host path an image line carries, in UTF-8 bytes. */
+export const MAX_IMAGE_PATH_BYTES = 512;
 export const MAX_NOTICE_BYTES = 8000;
 /** Upper bound for ONE block's UTF-8 size; leaves room for the preface and neighbours in a batched chunk. */
 export const MAX_BLOCK_BYTES = 6000;
@@ -52,6 +58,17 @@ export function sanitizeText(input: string, maxChars = MAX_COMMENT_CHARS): strin
   return s;
 }
 
+/** True when a host path can be typed verbatim: one line, no controls or escapes, within the byte budget. */
+export function isTypablePath(path: unknown): path is string {
+  return (
+    typeof path === 'string' &&
+    path.length > 0 &&
+    byteLen(path) <= MAX_IMAGE_PATH_BYTES &&
+    !path.includes('\n') &&
+    sanitizeText(path, MAX_IMAGE_PATH_BYTES) === path
+  );
+}
+
 /** Keep single-line fields on one line. */
 function oneLine(s: string, max = 200): string {
   return sanitizeText(s, max).replace(/\n+/g, ' ');
@@ -75,6 +92,8 @@ export interface AnswerNoticeInput {
   /** Proxy only. */
   confidence?: number;
   modelId?: string;
+  /** Human only: the phone images attached to the answer, each stored by the host or unavailable. */
+  images?: ResolvedPhoneImage[];
   /** Stable id embedded in the block so a crash can be reconciled by searching the terminal for it. */
   injectionId?: string;
 }
@@ -84,6 +103,7 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
   const fullReason =
     n.kind === 'answer' && n.correction && n.reason ? sanitizeText(n.reason, MAX_REASON_CHARS) : '';
   const fullQuestion = n.question ? sanitizeText(n.question, MAX_QUESTION_CHARS) : '';
+  const imageLines = n.kind === 'answer' ? formatImageLines(n.images ?? []) : [];
   const build = (c: string, reason: string, question = fullQuestion): string => {
     const lines: string[] = [BLOCK_START];
     const field = (name: string, value: string) => {
@@ -124,14 +144,16 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       }
       if (reason) field('reason', reason);
       if (c) field('comment', c);
+      lines.push(...imageLines);
     }
     lines.push(BLOCK_END);
     return lines.join('\n');
   };
 
   // Enforce the UTF-8 byte budget on the whole block. Only free text is ever cut (the quoted question first,
-  // then the comment, then a correction's reason), never the metadata, the delimiters or the instruction
-  // lines. Cutting a multi-line value also drops its continuation indent, so each pass re-measures the block.
+  // then the comment, then a correction's reason), never the metadata, the image lines, the delimiters or the
+  // instruction lines. Cutting a multi-line value also drops its continuation indent, so each pass re-measures
+  // the block.
   let q = fullQuestion;
   let c = comment;
   let r = fullReason;
@@ -151,6 +173,32 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
 }
 
 const TRUNCATED = ' …[truncated]';
+
+/**
+ * The block lines for a carrier's phone images, numbered from 1 in the order the person attached them:
+ *
+ *     image_1: /host/chosen/path.png
+ *     image_1_alt: The label on the left connector
+ *     image_2_unavailable: digest_mismatch
+ *
+ * `image_N` is the host's path, which the agent can open; `image_N_unavailable` replaces it with the reason when
+ * the image could not be fetched, checked or stored (`PhoneImageUnavailableReason`). `image_N_alt` follows only
+ * when the person described the image, as one sanitised line. A path that is not safe to type verbatim
+ * (`isTypablePath`) is listed as `store_failed` instead.
+ */
+export function formatImageLines(images: readonly ResolvedPhoneImage[]): string[] {
+  const lines: string[] = [];
+  images.forEach((m, i) => {
+    const n = i + 1;
+    const unavailable = 'path' in m ? (isTypablePath(m.path) ? null : 'store_failed') : m.unavailable;
+    lines.push(
+      unavailable === null ? `image_${n}: ${m.path}` : `image_${n}_unavailable: ${unavailable}`,
+    );
+    const alt = m.alt ? oneLine(m.alt, MAX_IMAGE_ALT_CHARS) : '';
+    if (alt) lines.push(`image_${n}_alt: ${alt}`);
+  });
+  return lines;
+}
 
 /** Combine several blocks under one preface, splitting so no typed chunk exceeds the byte cap. */
 export function batchNotices(blocks: string[], maxBytes = MAX_NOTICE_BYTES): string[] {

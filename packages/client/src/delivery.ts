@@ -7,6 +7,11 @@ import { hostRef } from './context.js';
 import { newId } from '@daintreehq/decisions-crypto';
 import { pickResumeAdapter, unsupportedResumeAdapter } from './resume.js';
 import {
+  resolvePhoneImages,
+  type PhoneImageStore,
+  type ResolvedPhoneImage,
+} from './phone-images.js';
+import {
   sameTarget,
   targetOf,
   type AgentResumeAdapter,
@@ -23,6 +28,8 @@ export interface DeliveryOptions {
   /** Combine several pending notices for one pane into a single typed chunk. Default true. */
   batch?: boolean;
   maxBatchBytes?: number;
+  /** Where verified phone images go on the host's disk. Without it, each is listed as unavailable. */
+  phoneImages?: PhoneImageStore;
 }
 
 export interface DrainResult {
@@ -101,6 +108,8 @@ interface Item {
   /** The question as asked, quoted in the block; absent when its sealed content can't be opened now. */
   question?: string;
   intentId: string;
+  /** The answer's phone images, resolved for this attempt once the pane is idle. */
+  images?: ResolvedPhoneImage[];
 }
 
 export class DeliveryEngine {
@@ -307,6 +316,9 @@ export class DeliveryEngine {
       res.deferred++;
       return res;
     }
+    // Only now, with something about to be typed, are images fetched: a busy pane costs no downloads. They are
+    // resolved before chunking, so the batches are measured with their image lines.
+    await this.resolveImages(items);
     const chunks = o.batch === false ? items.map((i) => [i]) : this.chunk(items);
     for (const chunk of chunks) {
       if (this.stopped) break;
@@ -346,8 +358,76 @@ export class DeliveryEngine {
       ...(e.reason ? { reason: e.reason } : {}),
       ...(e.confidence !== undefined ? { confidence: e.confidence } : {}),
       ...(e.model_id ? { modelId: e.model_id } : {}),
+      ...(i.images?.length ? { images: i.images } : {}),
       injectionId: i.intentId,
     });
+  }
+
+  /**
+   * Fetch, check and store each pending answer's phone images, and keep the host's paths on the entry so a
+   * retried delivery (a busy pane, a held write, a restart) reuses the files instead of fetching and storing
+   * them again. Failures are not kept: the next attempt tries again, and the block typed lists them as
+   * unavailable, never holding back the words.
+   */
+  private async resolveImages(items: Item[]): Promise<void> {
+    for (const i of items) {
+      if (this.stopped) return;
+      const images = i.content.images ?? [];
+      const signedIds = i.content.image_ids ?? [];
+      if (images.length === 0 && signedIds.length === 0) continue;
+      const stored = new Map((i.entry.stored_images ?? []).map((s) => [s.attachment_id, s.path]));
+      i.images = await resolvePhoneImages(this.ctx, this.o.phoneImages, {
+        questionId: i.q.question_id,
+        carrier: { kind: 'answer', actionId: i.entry.entry_id },
+        origin: i.q.origin,
+        signedIds,
+        images,
+        stored,
+      });
+      const fresh: { attachment_id: string; path: string }[] = [];
+      for (const m of i.images) {
+        if ('path' in m) {
+          if (stored.get(m.attachmentId) !== m.path)
+            fresh.push({ attachment_id: m.attachmentId, path: m.path });
+        } else {
+          await this.ctx.audit.log({
+            event: 'phone-image.unavailable',
+            question_id: i.q.question_id,
+            result: m.unavailable,
+          });
+        }
+      }
+      if (fresh.length > 0) await this.rememberImages(i, fresh);
+    }
+  }
+
+  /** Record the host's paths on the answer entry, re-read inside the shared lock like `markDelivered`. */
+  private async rememberImages(
+    i: Item,
+    fresh: { attachment_id: string; path: string }[],
+  ): Promise<void> {
+    const merge = (prev: AnswerEntry['stored_images']) => {
+      const ids = new Set(fresh.map((f) => f.attachment_id));
+      return [...(prev ?? []).filter((s) => !ids.has(s.attachment_id)), ...fresh];
+    };
+    await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(i.q.question_id);
+      if (!row) return;
+      const entries = parseAnswers(row.answers_json).map((e) =>
+        e.entry_id === i.entry.entry_id ? { ...e, stored_images: merge(e.stored_images) } : e,
+      );
+      await this.ctx.store.updateQuestion(i.q.question_id, {
+        answers_json: serializeAnswers(entries),
+      });
+    });
+    i.entry = { ...i.entry, stored_images: merge(i.entry.stored_images) };
+    for (const f of fresh) {
+      await this.ctx.audit.log({
+        event: 'phone-image.stored',
+        question_id: i.q.question_id,
+        result: f.attachment_id,
+      });
+    }
   }
 
   private async injectChunk(target: TerminalTarget, chunk: Item[]): Promise<DrainResult> {

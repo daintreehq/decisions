@@ -1,8 +1,11 @@
-import type {
-  CryptoEnvelope,
-  DecisionContentV1,
-  EnvelopePurpose,
+import {
+  Id,
+  PhoneImageReferences,
+  type CryptoEnvelope,
+  type DecisionContentV1,
+  type EnvelopePurpose,
 } from '@daintreehq/decisions-protocol';
+import { z } from 'zod';
 import { decryptEnvelope, encryptEnvelope } from '@daintreehq/decisions-crypto';
 import {
   ANSWER_CONTENT_FIELDS,
@@ -193,6 +196,8 @@ export function sealAnswerContent(
     ...(content.confidence !== undefined ? { confidence: content.confidence } : {}),
     ...(content.model_id ? { model_id: content.model_id } : {}),
     ...(content.reason ? { reason: content.reason } : {}),
+    ...(content.images?.length ? { images: content.images } : {}),
+    ...(content.image_ids?.length ? { image_ids: content.image_ids } : {}),
   };
   return seal(
     ctx,
@@ -229,6 +234,7 @@ export async function openAnswerContent(
       ...(typeof c.confidence === 'number' ? { confidence: c.confidence } : {}),
       ...(typeof c.model_id === 'string' && c.model_id ? { model_id: c.model_id } : {}),
       ...(typeof c.reason === 'string' && c.reason ? { reason: c.reason } : {}),
+      ...openedImages(c),
     };
   }
   if (hasLegacyContent(e)) return legacyContent(e);
@@ -236,6 +242,22 @@ export async function openAnswerContent(
   // empty answer. Only content-free entries (expiry notices) open as empty.
   if (e.kind === 'answer') throw new SealedContentError('answer content is missing');
   return { ...EMPTY_ANSWER_CONTENT, choices: [], reviewed_attachment_digests: [] };
+}
+
+const ImageIds = z.array(Id);
+
+/**
+ * The image fields of opened answer content. A seal is authenticated, so these are what inbox stored; they are
+ * parsed again all the same, because delivery hands them to the network and the host. A list that does not
+ * parse is dropped, and the signed ids that remain make delivery report each of those images unavailable.
+ */
+function openedImages(c: Partial<AnswerContent>): Pick<AnswerContent, 'images' | 'image_ids'> {
+  const images = PhoneImageReferences.safeParse(c.images ?? []).data ?? [];
+  const ids = ImageIds.safeParse(c.image_ids ?? []).data ?? [];
+  return {
+    ...(images.length ? { images } : {}),
+    ...(ids.length ? { image_ids: ids } : {}),
+  };
 }
 
 /** Strip any clear-text content fields an entry carries, leaving only bookkeeping and the seal. */

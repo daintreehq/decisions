@@ -4,6 +4,7 @@ import {
   WS_CLOSE,
   type ClientFrame,
   type LedgerEvent,
+  type ProtocolFeature,
 } from '@daintreehq/decisions-protocol';
 import { RelayError } from './errors.js';
 import { backoffMs, type RelayClient } from './relay.js';
@@ -48,6 +49,8 @@ export interface RelaySocketOptions {
   requestTimeoutMs?: number;
   rand?: () => number;
   schedule?: (ms: number, fn: () => void) => () => void;
+  /** The protocol extensions declared with each socket ticket (section 19). Default: none, the 0.3.0 baseline. */
+  features?: readonly ProtocolFeature[];
 }
 
 const OPEN = 1;
@@ -84,6 +87,7 @@ export class RelaySocket {
       requestTimeoutMs: 30_000,
       rand: Math.random,
       schedule: defaultSchedule,
+      features: [],
       ...opts,
     };
   }
@@ -135,7 +139,7 @@ export class RelaySocket {
     if (this.stopped) return;
     this.setState('connecting');
     try {
-      const t = await this.o.client.socketTicket();
+      const t = await this.o.client.socketTicket(this.o.features);
       if (this.stopped) return;
       const factory =
         this.o.webSocket ?? ((u: string) => new WebSocket(u) as unknown as WebSocketLike);
