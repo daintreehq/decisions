@@ -16,6 +16,7 @@ import {
   RelayClient,
   paneIdentityOf,
   type LocalStore,
+  type OutboxItem,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { FakeRelay, FakeSink, makeIdentity, origin, setupBridge, tick } from './helpers.js';
@@ -30,6 +31,15 @@ type Env = Awaited<ReturnType<typeof setupBridge>>;
 async function due(store: LocalStore): Promise<void> {
   for (const o of await store.dueOutbox(Number.MAX_SAFE_INTEGER, 1000))
     await store.putOutbox({ ...o, next_attempt_at: 0 });
+}
+
+/**
+ * Keep the matching items backing off until `due()`. Backoff has full jitter from zero, so a failed attempt
+ * alone can be due again within milliseconds.
+ */
+async function holdBack(store: LocalStore, questionId: string, kind: OutboxItem['kind']) {
+  for (const o of await store.outboxFor(questionId))
+    if (o.kind === kind) await store.putOutbox({ ...o, next_attempt_at: Number.MAX_SAFE_INTEGER });
 }
 
 /** Ask a question and publish it. */
@@ -287,10 +297,11 @@ describe('thread messages: the durable outbox', () => {
     const qid = await asked(env);
     env.relay.down = 1000;
     const first = await post(env, qid, 'first', true);
-    await settle(env); // the first attempt fails and backs off
+    await env.bridge.pump(); // joins the pump the call started: the first attempt fails
+    await holdBack(env.store, qid, 'message');
     env.relay.down = 0;
     const second = await post(env, qid, 'second', false);
-    await settle(env); // the second is due, the first is not: the second must wait
+    await env.bridge.pump(); // the second is due, the first is not: the second must wait
     expect(env.relay.messages).toHaveLength(0);
     await due(env.store);
     await env.bridge.pump();
@@ -304,10 +315,11 @@ describe('thread messages: the durable outbox', () => {
     const env = await setupBridge();
     env.relay.down = 1000;
     const q = await env.bridge.registerQuestion({ origin: origin(), input: { question: 'q' } });
-    await settle(env); // the create fails and backs off
+    await env.bridge.pump(); // joins the pump the call started: the create fails
+    await holdBack(env.store, q.questionId, 'create');
     env.relay.down = 0;
     await post(env, q.questionId, 'More context.');
-    await settle(env); // the message is due, its create is not
+    await env.bridge.pump(); // the message is due, its create is not
     expect(messagePosts(env)).toHaveLength(0);
     expect(await env.store.outboxFor(q.questionId)).toHaveLength(2);
     await due(env.store);
@@ -320,7 +332,8 @@ describe('thread messages: the durable outbox', () => {
     const env = await setupBridge();
     env.relay.down = 1000;
     const q = await env.bridge.registerQuestion({ origin: origin(), input: { question: 'q' } });
-    await settle(env);
+    await env.bridge.pump(); // joins the pump the call started: the create fails
+    await holdBack(env.store, q.questionId, 'create');
     for (let i = 0; i < 30; i++)
       await env.bridge.publisher.enqueueMessage(q.questionId, {
         question_id: q.questionId,
@@ -376,8 +389,9 @@ describe('thread messages: the durable outbox', () => {
     const qid = await asked(env);
     env.relay.dropMessageReply = 1;
     await post(env, qid, 'Once only.', true);
-    await settle(env);
+    await env.bridge.pump(); // joins the pump the call started: the reply is lost
     expect(await env.store.outboxFor(qid)).toHaveLength(1); // the relay committed it, we do not know
+    expect(messagePosts(env)).toHaveLength(1);
     await due(env.store);
     await env.bridge.pump();
     const posts = messagePosts(env);
