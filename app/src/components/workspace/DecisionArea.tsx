@@ -1,10 +1,11 @@
 import { useId, useState } from 'react';
 import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionView } from '../../domain/model.js';
-import type { OutboxEntry } from '../../data/outbox.js';
+import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
-import { CopyIcon, WarningIcon } from '../Icons.js';
+import { CopyIcon, RefreshIcon, WarningIcon } from '../Icons.js';
+import { PhotoGrid } from './Photos.js';
 
 export const optionLabel = (view: QuestionView, id: string) =>
   view.content?.options.find((o) => o.id === id)?.label ?? id;
@@ -121,6 +122,8 @@ export function ConflictCard({
   onUseAsCorrection,
   onSendAsFollowUp,
   onDismiss,
+  onRetry,
+  note,
 }: {
   view: QuestionView;
   entry: OutboxEntry;
@@ -132,13 +135,21 @@ export function ConflictCard({
   /** The answer in force is a person's, which is final: the words can still go as a follow-up. */
   onSendAsFollowUp?: () => void;
   onDismiss: () => void;
+  /** Its photos were lost on the relay, which sending again (with fresh copies) can put right. */
+  onRetry?: () => void;
+  /** Why moving it elsewhere didn't happen (its photos couldn't be read, or didn't fit). */
+  note?: string | null;
 }) {
   const expired = entry.state === 'expired';
   const reason = expired
     ? 'Your answer arrived after the question expired, so it was not applied.'
-    : current
-      ? 'Another answer was saved first, so yours was not applied. Nothing was overwritten.'
-      : 'The question changed before your answer arrived, so it was not applied.';
+    : entry.refusedAt === 'image' && entry.errorCode === 'payload_too_large'
+      ? 'This question can’t take more photos, so your answer was not applied.'
+      : entry.refusedAt === 'image' && entry.state === 'rejected'
+        ? 'Your relay refused its photos, so your answer was not applied.'
+        : current
+          ? 'Another answer was saved first, so yours was not applied. Nothing was overwritten.'
+          : 'The question changed before your answer arrived, so it was not applied.';
   const labels = entry.selected.map((id) => optionLabel(view, id));
   const plain = [labels.join(', '), entry.text.trim()].filter(Boolean).join('\n\n');
   return (
@@ -163,10 +174,17 @@ export function ConflictCard({
       )}
       <div className="conflict-pane mine">
         <h3 className="eyebrow">Your unsent answer</h3>
+        <PhotoGrid view={view} images={entryImages(entry)} />
         {labels.length > 0 && <p className="answer-choice">{labels.join(', ')}</p>}
         {entry.text.trim() && <SafeText text={entry.text} className="answer-text" />}
       </div>
       <div className="row">
+        {onRetry && (
+          <button type="button" className="btn small" onClick={onRetry}>
+            <RefreshIcon size={16} />
+            Try again
+          </button>
+        )}
         {plain && <CopyButton text={plain} />}
         {canCorrect && !expired && (
           <button type="button" className="btn small" onClick={onUseAsCorrection}>
@@ -182,6 +200,11 @@ export function ConflictCard({
           Dismiss
         </button>
       </div>
+      {note && (
+        <p className="callout-text conflict-note" role="status">
+          {note}
+        </p>
+      )}
     </section>
   );
 }

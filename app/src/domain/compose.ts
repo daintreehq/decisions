@@ -88,6 +88,10 @@ export interface ComposeInput {
   capturing: false | 'capturing' | 'cleaning';
   /** The question can no longer take this action (expired, withdrawn, answered elsewhere). */
   closed?: boolean;
+  /** Photos ready to go with it. In a correction they go with the change; they are not a change on their own. */
+  photos?: number;
+  /** A chosen photo is still being prepared, so Send waits for it. */
+  preparing?: boolean;
 }
 
 export interface ComposeVerdict {
@@ -127,9 +131,15 @@ export function verdict(i: ComposeInput): ComposeVerdict {
   const reasonOver = Math.max(0, i.reason.length - REASON_MAX_CHARS);
   const hasChoice = shape.hasOptions && i.selected.length > 0;
   const hasText = shape.textAllowed && text.length > 0;
-  const hasAnswer = shape.hasOptions ? hasChoice || (shape.mixed && hasText) : hasText;
+  // A photo says what words would: it is the answer where text is (a text question, a mixed one, a follow-up), and a
+  // note beside a choice where the choice is what is asked for.
+  const hasPhotos = (i.photos ?? 0) > 0;
+  const hasAnswer = shape.hasOptions
+    ? hasChoice || (shape.mixed && (hasText || hasPhotos))
+    : hasText || hasPhotos;
   const message = i.mode === 'message';
-  const hasContent = hasChoice || hasText || (i.mode === 'correction' && !!i.reason.trim());
+  const hasContent =
+    hasChoice || hasText || hasPhotos || (i.mode === 'correction' && !!i.reason.trim());
   // A correction to an approval is a decision on the same files, so it needs the same evidence. A follow-up decides
   // nothing, so it needs none.
   const needsEvidence = !message && shape.approval && i.attachments > 0;
@@ -148,6 +158,7 @@ export function verdict(i: ComposeInput): ComposeVerdict {
   else if (i.stale) hint = 'Review the updated question';
   else if (i.capturing === 'capturing') hint = null;
   else if (i.capturing === 'cleaning') hint = null;
+  else if (i.preparing) hint = 'Preparing your photo…';
   else if (!hasAnswer)
     hint = message
       ? null
@@ -175,6 +186,7 @@ export function verdict(i: ComposeInput): ComposeVerdict {
     !i.closed &&
     !i.stale &&
     !i.capturing &&
+    !i.preparing &&
     hasAnswer &&
     textOver === 0 &&
     !unchanged &&

@@ -1,0 +1,500 @@
+/* ---------- photos ----------
+ * The person's photos (docs/protocol.md section 17): `+` at the composer's leading edge, the photos chosen for the
+ * draft in a tray above the field, the small sheet that picks camera or library, and the photos in their bubbles.
+ * Frames are fixed before anything loads, so nothing in the composer or the thread moves when a photo arrives.
+ */
+
+/* The pill gains a leading column for `+`: beside the field at rest, at the start of the action row once open. */
+.composer-pill.has-add {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'lane lane lane'
+    'tray tray tray'
+    'add field actions';
+}
+.composer-pill.has-add.two {
+  grid-template-areas:
+    'lane lane lane'
+    'tray tray tray'
+    'field field field'
+    'add actions actions';
+}
+.composer-pill:not(.has-add) .composer-tray-row {
+  grid-column: 1 / -1;
+}
+.composer-pill.has-add .composer-lane {
+  grid-column: 1 / -1;
+}
+.composer-pill.has-add:not(.two) .composer-input {
+  padding-left: 2px;
+}
+.composer-pill.has-add.two .composer-actions {
+  padding-left: 0;
+}
+/* With `+` on the action row, the save state or Send's reason has its own line above it, aligned with the field's
+   text, at every width: on a phone there is no room beside `+`, the mic and Send, and one place reads the same
+   everywhere. */
+.composer-pill.has-add.two {
+  grid-template-areas:
+    'lane lane lane'
+    'tray tray tray'
+    'field field field'
+    'note note note'
+    'add actions actions';
+}
+.composer-pill.has-add.two .composer-actions {
+  display: contents;
+}
+.composer-pill.has-add.two .composer-note {
+  grid-area: note;
+  padding: 0 12px 2px;
+}
+.composer-pill.has-add.two .composer-note:empty {
+  display: none;
+}
+.composer-pill.has-add.two .composer-buttons {
+  grid-area: actions;
+  align-self: end;
+}
+/* A photo notice keeps its dismiss beside it, however long the words. */
+.lane.photo {
+  flex-wrap: nowrap;
+}
+.lane.photo .lane-text {
+  flex: 1 1 auto;
+}
+.composer-add-slot {
+  grid-area: add;
+  display: flex;
+  align-items: flex-end;
+}
+/* A bare glyph on the pill, like the mic: 46 px, its touch target taken out to 56 px. */
+.composer-add {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.composer-add::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+}
+.composer-add:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.composer-add[aria-disabled='true'] {
+  color: var(--text-2);
+}
+.composer-add:active:not([aria-disabled='true']) {
+  transform: scale(0.98);
+}
+@media (hover: hover) {
+  .composer-add:not([aria-disabled='true']):hover {
+    background: var(--hover);
+  }
+}
+/* The pickers themselves never show; `+` and the sheet's rows open them. */
+.file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.composer-pill.dropping {
+  outline: 2px dashed var(--focus);
+  outline-offset: 1px;
+}
+
+/* The chosen photos: 64 px squares on one row, above the field. */
+.composer-tray-row {
+  grid-area: tray;
+  min-width: 0;
+}
+.composer-tray {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  /* Room above and right for each remove badge and its whole 44 px target, which hang over the photo's corner (the
+     tray scrolls, so anything outside its padding would be clipped); the left edge lines up with the field's text. */
+  padding: 16px 18px 2px 12px;
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.composer-tray::-webkit-scrollbar {
+  display: none;
+}
+.tray-photo {
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 64px;
+}
+.tray-open,
+.tray-wait {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  box-shadow: inset 0 0 0 1px var(--line-default);
+  overflow: hidden;
+}
+.tray-open {
+  position: relative;
+  cursor: zoom-in;
+}
+/* The whole photo, letterboxed on the well: a screenshot shows its content, not a white middle. */
+.tray-open img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.tray-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line-default);
+  pointer-events: none;
+}
+.tray-open:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.tray-wait {
+  display: grid;
+  place-items: center;
+  background: var(--surface-inset);
+}
+/* A 24 px contrast badge on the corner, its target taken out to 44 px. */
+.tray-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid var(--surface-input);
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--text-inverse);
+  cursor: pointer;
+}
+.tray-remove::after {
+  content: '';
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+}
+.tray-remove:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.tray-remove[aria-disabled='true'],
+.composer-add[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* The sheet: two rows, each a full-width target with its glyph in a well. */
+.attach-sheet {
+  max-width: 420px;
+}
+.attach-sheet .sheet-content {
+  padding: 4px 12px calc(16px + var(--safe-b));
+}
+.attach-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.attach-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.attach-option:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.attach-option:active {
+  background: var(--pressed);
+}
+@media (hover: hover) {
+  .attach-option:hover {
+    background: var(--hover);
+  }
+}
+.attach-glyph {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  color: var(--text);
+}
+.attach-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.attach-label {
+  font-size: var(--text-md);
+  line-height: 24px;
+  font-weight: 500;
+}
+.attach-sub {
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+}
+
+/* ---------- photos in the thread ---------- */
+.photo-grid {
+  --photo-gap: 3px;
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: var(--photo-gap);
+  width: 100%;
+  max-width: 320px;
+  margin: 2px 0 8px;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.photo-grid:last-child {
+  margin-bottom: 2px;
+}
+.photo-grid[data-n='1'] {
+  aspect-ratio: 4 / 3;
+}
+.photo-grid[data-n='2'] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  aspect-ratio: 2 / 1;
+}
+.photo-grid[data-n='3'] {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  aspect-ratio: 3 / 2;
+}
+.photo-grid[data-n='3'] .photo-cell:first-child {
+  grid-row: 1 / span 2;
+}
+.photo-grid[data-n='4'] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  aspect-ratio: 1;
+}
+.photo-cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* A hairline over each photo, so a dark photo keeps its edge on the dark bubble (and a pale one on the pale). */
+.photo-cell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 0 1px var(--line-default);
+  pointer-events: none;
+}
+.photo-tile {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: var(--surface-inset);
+  color: var(--text-2);
+  cursor: zoom-in;
+}
+.photo-tile[aria-disabled='true'] {
+  cursor: default;
+}
+.photo-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.photo-tile:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+/* Uploading: the photo dims under a scrim, and a ring fills as it goes. */
+.photo-progress {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklab, #000 38%, transparent);
+  pointer-events: none;
+}
+.photo-ring {
+  width: 36px;
+  height: 36px;
+  transform: rotate(-90deg);
+}
+.photo-ring circle {
+  fill: none;
+  stroke-width: 3;
+}
+.photo-ring-track {
+  stroke: color-mix(in oklab, #fff 32%, transparent);
+}
+.photo-ring-fill {
+  stroke: #fff;
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--dur) var(--ease-out);
+}
+/* Every byte sent, the relay still confirming: a short arc turning on the full track. */
+.photo-ring.finishing {
+  animation: photo-turn 900ms linear infinite;
+}
+@keyframes photo-turn {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
+}
+/* Waiting its turn (or for a connection) is calm: a clock on a raised disc. Stopped is the warning glyph. */
+.photo-badge {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text-2);
+}
+.photo-badge.warn {
+  color: var(--warning-text);
+}
+.photo-progress.is-waiting {
+  background: color-mix(in oklab, #000 24%, transparent);
+}
+.photo-retry {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+.photo-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
+  line-height: 18px;
+  color: var(--text-2);
+}
+.photo-note.warn svg {
+  color: var(--warning-text);
+}
+/* A bubble with photos is as wide as its photos, so the grid fills it edge to edge whatever the words beside it. */
+.msg.out .bubble:has(> .photo-grid) {
+  width: 300px;
+  padding-top: 8px;
+}
+@media (min-width: 720px) {
+  .msg.out .bubble:has(> .photo-grid) {
+    width: 348px;
+  }
+}
+.msg-trouble {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 8px 0 4px;
+}
+/* A closed question's unsent photos: small, so the words still lead. */
+.draft-photos {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.draft-photos img {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px var(--line-default);
+}
+.change-photos {
+  margin: 6px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.msg-trouble .msg-failure {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-ring-fill {
+    transition: none;
+  }
+  .photo-ring.finishing {
+    animation: none;
+  }
+  .composer-add:active:not([aria-disabled='true']) {
+    transform: none;
+  }
+}
+@media (forced-colors: active) {
+  .tray-remove {
+    border-color: CanvasText;
+  }
+  .photo-grid {
+    outline: 1px solid CanvasText;
+  }
+}
+.conflict-note {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text);
+}

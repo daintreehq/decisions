@@ -26,7 +26,8 @@ export function FileMenu({
   item: FileItem;
   result: ImageResult | undefined;
   total: number;
-  onAllFiles: () => void;
+  /** The question's files have an All files grid; the person's own photos don't need one. */
+  onAllFiles?: () => void;
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState(false);
@@ -64,14 +65,14 @@ export function FileMenu({
   };
 
   const items: MenuItem[] = [];
-  if (total > 1)
+  if (total > 1 && onAllFiles)
     items.push({
       key: 'all',
       label: 'All files',
       icon: <GridIcon size={18} />,
       onSelect: () => {
         setMenu(false);
-        onAllFiles();
+        onAllFiles?.();
       },
     });
   items.push(

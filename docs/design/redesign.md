@@ -283,7 +283,7 @@ On phones, one large image at a time with a full-width **Before | After** segmen
 
 ### 6.1 The composer
 
-One rounded pill pinned to the bottom of the chat, inside the safe area and above the on-screen keyboard. Resting and empty it is the field ("Type or hold to talk"; "Add a note" beside a choice) and the mic on one row. Once there is something to send it opens into two rows inside the same pill: the field across the top, and an action row with the one reason Send can't send yet (or the quiet save state) at the left, the mic, and **Send answer** / **Send decision** / **Send correction** (contrast button) at the right edge, in the mic's old place. `+` (phone images) will sit at the pill's left; it is not shown until attaching ships. All Q&A is gone from the dock: other questions are in the sidebar (the menu button carries the waiting count) and behind Ctrl/⌘ + K.
+One rounded pill pinned to the bottom of the chat, inside the safe area and above the on-screen keyboard. Resting and empty it is the field ("Type or hold to talk"; "Add a note" beside a choice) and the mic on one row. Once there is something to send it opens into two rows inside the same pill: the field across the top, and an action row with the one reason Send can't send yet (or the quiet save state) at the left, the mic, and **Send answer** / **Send decision** / **Send correction** (contrast button) at the right edge, in the mic's old place. `+` sits at the pill's left (§6.4). All Q&A is gone from the dock: other questions are in the sidebar (the menu button carries the waiting count) and behind Ctrl/⌘ + K.
 
 - **The field** is a real, labelled textarea at 16/24 that grows with its text to about five lines (less with the keyboard up), then scrolls. Return inserts a newline. It never focuses itself because dictation produced text.
 - **The lane** at the pill's top says one thing at a time: Starting microphone…, Recording · 00:24 with Discard, Finishing your words…, Tidying wording… with Use original wording, then (in priority order) a failed save with Retry and Copy, an error, a changed question with Review update, Undo, dictation messages, the cleanup marks, Draft restored.
@@ -315,6 +315,19 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 - The agent's messages are incoming bubbles under its name. One that expects a reply carries "Waiting for your reply" beside the amber Needs-you ring.
 - A model answer awaiting review is decided first (Confirm answer or Overrule on its message); the follow-up composer appears after, or at once when the agent is asking something.
 - When the computer that asked doesn't take follow-ups yet, the dock says so above **Next question**.
+
+### 6.4 Photos
+
+**Resolved (issue #45):** the person can attach photos to an answer or a follow-up (protocol §17: four per answer or message, sixteen per question for its life, 10 MiB each). A correction carries none.
+
+- **`+`** sits at the pill's leading edge: beside the field at rest, at the start of the action row once the pill opens. On a phone or tablet with a camera (a coarse pointer and a listed video input) it opens a small sheet, **Take photo** ("With the camera") and **Choose photos** ("Up to 4 with each answer", or how many more fit). Anywhere else there is only the library, so `+` opens the picker directly; a desktop also takes a photo pasted into the field or dropped on the pill. `+` is offered only when the desktop that asked takes photos; otherwise it is not drawn.
+- **The tray**: chosen photos line up above the field inside the pill as 64 px thumbnails, each with a 24 px contrast remove badge on its corner (its target taken out to 44 px, named "Remove photo 2 of 3"). A photo being prepared holds its place with a spinner, and Send says "Preparing your photo…" until it is ready. Removing one offers Undo.
+- **Limits are said, never silently enforced**: choosing more than fit adds what fits and the lane says "Up to 4 photos per answer. 2 weren’t added." (or "This question can take 3 photos more."). With no room left `+` stays in place, marked unavailable, and a tap says why. A photo that can't be read says so ("That photo couldn’t be read here. Try a JPEG or PNG.").
+- **Preparing**: each photo is decoded with its orientation applied, scaled to 2048 px on its longest edge and drawn into a fresh canvas that is encoded again (JPEG 0.85; a screenshot stays PNG while it is under 4 MiB). The encoder writes only pixels, so EXIF, location and every other metadata stay behind. Chosen photos are sealed at rest with the draft and come back with it.
+- **Sending**: at Send each photo is encrypted on the phone under a fresh attachment id, exactly as a question attachment is, and queued with its answer or follow-up. Before the signed record can commit, each photo is reserved for that record, uploaded and completed; the record is then committed with their ids. A photo whose reservation the relay lost is encrypted again once under a fresh id, and the record signed again.
+- **On the way**: the outgoing bubble shows the photos at once (from this device's own copy, checked as a download would be), each dimmed with a ring that fills as it uploads; the receipt reads "Uploading photo 2 of 3" before the usual steps. An upload that stops keeps the words and photos on screen with a warning badge, "The upload stopped. It will try again." and **Try again**; it retries by itself after 3, 10 and 30 s. Offline they wait with their message ("Queued · Sends when you’re back online").
+- **In the thread**: photos sit above the words in the person's bubble in fixed frames, so nothing moves as they load: one at 4:3, two side by side, three as one large and two small, four as a 2 × 2 grid with 3 px gutters. A tap opens the file viewer (§5.4) on that photo; photos are never evidence for an approval. A photo that can't be fetched or verified shows its state in its frame; photos that disagree with their signed record are not shown at all and the bubble says so.
+- Lists and the header count photos as part of what was said: "You: Keep Canopy · 2 photos", or "Answer: 2 photos".
 
 Dictation availability changes only the mic: an unconfigured relay says "Dictation isn't set up for this relay"; offline says "Dictation needs a connection". Never a silently disabled icon. The placeholder only promises holding when dictation can start.
 
@@ -495,7 +508,7 @@ Sentence case; a single "…" character; no exclamation marks; no full stop on s
 
 ## 20. Out of scope (later)
 
-Non-image attachments (PDF, text, code, media) and filename metadata; persisted offline image cache; phone-side revoke, reopen, cancel or delete; multi-select answers; editing a queued answer; cross-device drafts; reveal-slider comparison; spoken editing beyond line breaks; settings compare-and-swap; a native desktop wrapper. None of these appear as controls.
+Non-image attachments (PDF, text, code, media) and filename metadata; photo captions (alt text) from the phone; persisted offline image cache; phone-side revoke, reopen, cancel or delete; multi-select answers; editing a queued answer; cross-device drafts; reveal-slider comparison; spoken editing beyond line breaks; settings compare-and-swap; a native desktop wrapper. None of these appear as controls.
 
 ## 21. Build plan
 

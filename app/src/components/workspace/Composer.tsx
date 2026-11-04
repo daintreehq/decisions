@@ -22,6 +22,7 @@ import { OrbitRing } from '../../features/voice/OrbitRing.js';
 import { announce } from '../../lib/announce.js';
 import { clockLabel } from '../../lib/time.js';
 import { CheckIcon, CloseIcon, MicIcon, StopIcon, UndoIcon } from '../Icons.js';
+import { AttachButton, imageFiles, PhotoTray, type ComposerPhotosProps } from './ComposerPhotos.js';
 
 const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '');
 export const MOD = MAC ? '⌘' : 'Ctrl';
@@ -90,6 +91,8 @@ export interface ComposerProps {
   onDictate: () => void;
   onHoldStart: () => void;
   onHoldEnd: () => void;
+  /** Photos for this draft when the question can take them; null leaves `+` out entirely. */
+  photos: ComposerPhotosProps | null;
 }
 
 /**
@@ -98,8 +101,9 @@ export interface ComposerProps {
  * top, and an action row with the Send reason (or the quiet save state) at the left, the mic, and Send in the
  * mic's old place at the right edge. Dictation, errors and notices speak in a lane at the pill's top; choices sit
  * as chips just above it. The right edge never changes while capture runs, and Send arms only after the hand has
- * left the mic, so a double tap on Stop can never send. `+` (attaching phone images, #30) belongs at the pill's left
- * edge; until it ships nothing is drawn there, not even a spacer.
+ * left the mic, so a double tap on Stop can never send. `+` sits at the pill's leading edge (on the action row once it
+ * opens), and chosen photos line up above the field; on a desktop, a photo pasted into the field or dropped on the
+ * pill is added the same way.
  */
 export function Composer(p: ComposerProps) {
   const { shape, draft, verdict, dict, field } = p;
@@ -150,7 +154,18 @@ export function Composer(p: ComposerProps) {
 
   const textless = shape.fields.length === 0;
   const live = !!dict && (dict.final || dict.interim);
-  const two = textless || sendSlot || hasText || (capturing && !!live);
+  const photos = p.photos;
+  const hasPhotos = !!photos?.list.length;
+  const two = textless || sendSlot || hasText || hasPhotos || (capturing && !!live);
+  const [dropping, setDropping] = useState(false);
+  const takesDrop = !!photos && !p.disabled && !p.stale;
+  const dropped = (list: FileList | null | undefined) => {
+    const files = imageFiles(list);
+    if (!photos || !files.length) return false;
+    if (photos.room <= 0) photos.onFull();
+    else photos.onAdd(files);
+    return true;
+  };
 
   const unsure =
     dict?.unsure &&
@@ -220,8 +235,31 @@ export function Composer(p: ComposerProps) {
           onClose={() => setReviewing(false)}
         />
       )}
-      <div className={`composer-pill${two ? ' two' : ''}${capturing ? ' capturing' : ''}`}>
+      <div
+        className={`composer-pill${two ? ' two' : ''}${capturing ? ' capturing' : ''}${
+          photos ? ' has-add' : ''
+        }${dropping ? ' dropping' : ''}`}
+        onDragOver={(e) => {
+          if (!takesDrop || !e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          setDropping(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false);
+        }}
+        onDrop={(e) => {
+          setDropping(false);
+          if (!takesDrop) return;
+          if (dropped(e.dataTransfer.files)) e.preventDefault();
+        }}
+      >
         {lane && <div className="composer-lane">{lane}</div>}
+        {photos && hasPhotos && (
+          <div className="composer-tray-row">
+            <PhotoTray photos={photos} />
+          </div>
+        )}
         {!textless && (
           <Field
             {...p}
@@ -230,7 +268,13 @@ export function Composer(p: ComposerProps) {
             focused={focused}
             setFocused={setFocused}
             onContact={quiet}
+            onPastePhotos={takesDrop ? dropped : undefined}
           />
+        )}
+        {photos && (
+          <div className="composer-add-slot">
+            <AttachButton photos={photos} />
+          </div>
         )}
         <div className="composer-actions">
           {two && (
@@ -292,6 +336,8 @@ function Field(
     focused: boolean;
     setFocused: (v: boolean) => void;
     onContact: () => void;
+    /** A paste that carries photos adds them (true when it did). */
+    onPastePhotos?: (files: FileList) => boolean;
   },
 ) {
   const { draft, field, dict, fieldRef: ref, value } = p;
@@ -366,6 +412,12 @@ function Field(
         onSelect={caret}
         onKeyUp={caret}
         onClick={caret}
+        onPaste={(e) => {
+          const files = e.clipboardData?.files;
+          if (!files?.length || !p.onPastePhotos?.(files)) return;
+          // Photos only: the text that sometimes rides along (a copied image's name) is not wanted in the answer.
+          if (!e.clipboardData.getData('text/plain').trim()) e.preventDefault();
+        }}
         onBlur={() => {
           p.setFocused(false);
           void drafts.flush(draft.key).catch(() => undefined);
@@ -701,6 +753,16 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
       <span className="lane">
         <span className="lane-text">{draft.undo.message}</span>
         {action('Undo', draft.undo.restore, <UndoIcon size={14} />)}
+      </span>
+    );
+  if (draft.photoNotice)
+    return (
+      <span
+        className={`lane photo${draft.photoNotice.tone === 'error' ? ' error' : ''}`}
+        role={draft.photoNotice.tone === 'error' ? 'alert' : 'status'}
+      >
+        <span className="lane-text">{draft.photoNotice.text}</span>
+        {dismiss(() => drafts.dismissPhotoNotice(draft.key))}
       </span>
     );
   if (dict?.message)

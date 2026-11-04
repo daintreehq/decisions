@@ -307,7 +307,15 @@ export function rowSummary(v: QuestionView, now: number): AnswerSummary | null {
 export function answerSummary(v: QuestionView): AnswerSummary | null {
   const a = currentAnswer(v);
   if (!a) return null;
-  const text = choiceLine(v, a.content?.selected_option_ids ?? [], a.content?.text ?? '');
+  // Photos are part of what was said, and short: they come before the note, so a truncated row still shows them.
+  // "Keep Canopy · 2 photos — Canopy is the brand name", "2 photos — The serial is on the second".
+  const photos = (a.content as { images?: unknown[] } | null)?.images?.length ?? 0;
+  const counted = photos ? `${photos} ${photos === 1 ? 'photo' : 'photos'}` : '';
+  const head = [choiceLine(v, a.content?.selected_option_ids ?? [], ''), counted]
+    .filter(Boolean)
+    .join(' · ');
+  const note = (a.content?.text ?? '').replace(/\s+/g, ' ').trim();
+  const text = [head, note].filter(Boolean).join(' — ');
   const confirmed =
     a.provenance === 'proxy' &&
     v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);

@@ -1,5 +1,5 @@
 import { forwardRef, type ReactNode, type Ref } from 'react';
-import type { ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
 import { agentName, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
@@ -7,6 +7,7 @@ import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
 import { CheckIcon, ModelIcon, WarningIcon } from '../Icons.js';
 import { AnswerBody } from './DecisionArea.js';
+import { PhotoGrid, type PhotoUpload } from './Photos.js';
 
 /**
  * The question as a conversation: the agent's question as an incoming message, the person's answers as outgoing
@@ -237,6 +238,9 @@ export function HumanAnswer({
   now,
   receipt,
   flagged,
+  tone,
+  upload,
+  extra,
 }: {
   view: QuestionView;
   a: ActionView;
@@ -245,6 +249,12 @@ export function HumanAnswer({
   now: number;
   receipt?: ReactNode;
   flagged?: boolean;
+  /** Still on this device (queued or sending). */
+  tone?: 'pending';
+  /** Its photos' progress while they upload. */
+  upload?: PhotoUpload;
+  /** What follows the words while it is on its way (an upload that stopped). */
+  extra?: ReactNode;
 }) {
   return (
     <OutgoingMessage
@@ -253,9 +263,17 @@ export function HumanAnswer({
       now={now}
       receipt={receipt}
       flagged={flagged}
+      tone={tone}
       id={receipt ? 'ws-answer' : undefined}
     >
+      <PhotoGrid
+        view={view}
+        images={(a.content as HumanAnswerContentV1 | null)?.images ?? []}
+        upload={upload}
+        unverified={a.imagesOk === false}
+      />
       <AnswerBody view={view} content={a.content as never} />
+      {extra}
     </OutgoingMessage>
   );
 }

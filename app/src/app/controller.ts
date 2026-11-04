@@ -8,10 +8,12 @@ import {
   type AttachmentDescriptor,
   type InfoResponse,
   type LedgerEvent,
+  type PhoneImageReference,
   type SettingsBody,
 } from '@daintreehq/decisions-protocol';
 import {
   decryptAttachment,
+  encryptAttachment,
   importSigningPublicKey,
   openEpochGrant,
   sniffImageMime,
@@ -20,7 +22,14 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { Db, type ConfigRecord, type DeviceKeyRecord } from '../data/db.js';
 import { ImageCache, type ImageContext, type ImageResult } from '../data/images.js';
-import { Drafts, Outbox } from '../data/outbox.js';
+import {
+  Drafts,
+  Outbox,
+  type OutboxEntry,
+  type OutboxImage,
+  type Rebuilt,
+} from '../data/outbox.js';
+import type { PreparedPhoto } from '../data/photos.js';
 import { runPairing, type PairingPhase } from '../data/pairing.js';
 import { publicJson, Relay, RelayError } from '../data/relay.js';
 import { SnapshotStore } from '../data/snapshots.js';
@@ -42,6 +51,11 @@ const SNAPSHOT_BACKFILL_PREF = 'snapshot-backfill-v1';
 const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
 /** Set once this device has read every question's thread after first declaring the feature. */
 const THREAD_BACKFILL_PREF = 'thread-backfill-v1';
+/** Phone images: photos the person attaches to an answer or a follow-up (docs/protocol.md section 17). */
+const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
+
+/** A photo the composer hands over at Send: scaled, stripped and hashed, still plaintext. */
+export type OutgoingPhoto = PreparedPhoto;
 
 export type ServerSettings = z.infer<typeof SettingsResponse>['settings'];
 
@@ -160,12 +174,31 @@ export class AppController {
     return this.snap.info?.features?.includes(THREAD_FEATURE) ?? false;
   }
 
-  /** What this app declares to the relay: only features the relay advertises (docs/protocol.md section 19). */
+  /** Whether the relay takes phone images; until it does, nothing offers to attach a photo. */
+  photosServed(): boolean {
+    return this.snap.info?.features?.includes(PHOTO_FEATURE) ?? false;
+  }
+
+  /**
+   * What this app declares to the relay: only features the relay advertises (docs/protocol.md section 19). Phone
+   * images are declared with thread messages, so a photo sent from this or another phone is never hidden from it.
+   */
   private declaredFeatures(): ProtocolFeature[] {
     return [
       ...(this.snapshotsServed() ? [SNAPSHOT_FEATURE] : []),
       ...(this.threadsServed() ? [THREAD_FEATURE] : []),
+      ...(this.photosServed() ? [PHOTO_FEATURE] : []),
     ];
+  }
+
+  /**
+   * Whether photos can go with this question's answer or follow-ups: the relay takes them and the desktop that asked
+   * declares them (it is what hands them to the agent). The relay refuses a reservation otherwise, so nothing offers it.
+   */
+  photosFor(view: QuestionView): boolean {
+    if (!this.photosServed() || !view.verification.ok) return false;
+    const d = this.snap.devices?.devices.find((x) => x.device_id === view.originatingDeviceId);
+    return !!d?.features?.includes(PHOTO_FEATURE);
   }
 
   /**
@@ -271,14 +304,27 @@ export class AppController {
 
     this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
       onChange: () => this.patch({}),
-      // A follow-up the relay just committed is read back before its local copy goes, so it never blinks out of
-      // the thread (the thread hides the local copy once the committed one is in).
-      settle: (e) => (e.kind === 'message' ? this.sync?.catchUp() : undefined),
+      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
+      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
+      settle: () => this.sync?.catchUp(),
       onCommitted: () =>
         void this.sync
           ?.catchUp()
           .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
+      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
+      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
+      inThread: (e) => {
+        const v = this.store?.get(e.questionId);
+        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
+        const id = e.recordId ?? e.messageId;
+        if (!id) return true;
+        return e.kind === 'message'
+          ? v.messages.some((m) => m.messageId === id)
+          : v.actions.some((a) => a.actionId === id);
+      },
     });
+    // Whatever the thread reads (a socket event, a catch-up, a backfill) may be what a committed entry waited for.
+    this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
     await this.outbox.load();
 
@@ -317,6 +363,7 @@ export class AppController {
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
   lockRevoked(): void {
     this.teardown();
+    this.outbox?.stop();
     this.snapshots?.clear();
     this.images.dispose();
     this.patch({ phase: 'revoked' });
@@ -360,7 +407,8 @@ export class AppController {
     const drafts = this.db ? (await this.db.drafts()).length : 0;
     return {
       questions: this.store?.list().length ?? 0,
-      unsent: this.outbox?.list().length ?? 0,
+      // An entry already on the relay, only waiting to be read back here, is not unsent.
+      unsent: this.outbox?.list().filter((e) => e.state !== 'committed').length ?? 0,
       drafts,
     };
   }
@@ -391,6 +439,7 @@ export class AppController {
     // never wait on the network. A stalled download must not be able to delay or undo an erase.
     this.teardown();
     this.sync?.stop();
+    this.outbox?.stop();
     this.snapshots?.clear();
     this.images.dispose();
     const db = this.db;
@@ -479,6 +528,64 @@ export class AppController {
 
   /* ---------------- answering ---------------- */
 
+  /**
+   * Encrypts each photo for this question under the newest content key, with a fresh attachment id, exactly as a
+   * question attachment is: only ciphertext ever leaves the device. Returns the references the signed content
+   * carries, the outbox's bookkeeping, and the ciphertexts to seal beside the entry.
+   */
+  private async sealPhotos(
+    view: QuestionView,
+    photos: readonly OutgoingPhoto[],
+  ): Promise<{
+    refs: PhoneImageReference[];
+    images: OutboxImage[];
+    ciphertexts: Map<string, Uint8Array>;
+  }> {
+    const epoch = highestEpoch(this.epochKeys);
+    const refs: PhoneImageReference[] = [];
+    const images: OutboxImage[] = [];
+    const ciphertexts = new Map<string, Uint8Array>();
+    for (const p of photos) {
+      const attachmentId = newId();
+      const enc = await encryptAttachment(
+        epoch,
+        {
+          installationId: this.snap.config!.installationId,
+          questionId: view.id,
+          attachmentId,
+          keyEpoch: epoch.epoch,
+        },
+        p.bytes,
+      );
+      if (enc.sha256Plaintext !== p.sha256)
+        throw new Error('A photo changed while it was being prepared.');
+      refs.push({
+        attachment_id: attachmentId,
+        mime: p.mime,
+        size: p.bytes.length,
+        sha256: enc.sha256Plaintext,
+        nonce: enc.nonce,
+        key_epoch: epoch.epoch,
+      });
+      images.push({
+        attachmentId,
+        reserveKey: newId(),
+        mime: p.mime,
+        size: p.bytes.length,
+        sha256: enc.sha256Plaintext,
+        nonce: enc.nonce,
+        keyEpoch: epoch.epoch,
+        ciphertextBytes: enc.ciphertext.length,
+        sha256Ciphertext: enc.sha256Ciphertext,
+        width: p.width,
+        height: p.height,
+        stage: 'new',
+      });
+      ciphertexts.set(attachmentId, enc.ciphertext);
+    }
+    return { refs, images, ciphertexts };
+  }
+
   async submit(args: {
     view: QuestionView;
     kind: HumanActionKind;
@@ -488,8 +595,12 @@ export class AppController {
     text: string;
     reason?: string;
     reviewedDigests: string[];
+    /** Photos going with the answer (answer and override only). */
+    photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
     if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+    const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
+    const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
     const req = await buildAnswerRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -503,26 +614,37 @@ export class AppController {
       reason: args.reason,
       reviewedDigests: args.reviewedDigests,
       explicitApproval: args.view.content?.kind === 'approval' ? true : undefined,
+      ...(sealed ? { images: sealed.refs } : {}),
     });
-    await this.outbox.enqueue({
-      id: newId(),
-      questionId: args.view.id,
-      kind: req.kind,
-      path: req.path,
-      bodyText: req.bodyText,
-      idempotencyKey: req.idempotencyKey,
-      expectedRevision: req.expectedRevision,
-      selected: args.selected,
-      text: args.text,
-      reason: args.reason ?? '',
-    });
+    await this.outbox.enqueue(
+      {
+        id: newId(),
+        questionId: args.view.id,
+        kind: req.kind,
+        recordId: req.actionId,
+        path: req.path,
+        bodyText: req.bodyText,
+        idempotencyKey: req.idempotencyKey,
+        expectedRevision: req.expectedRevision,
+        selected: args.selected,
+        text: args.text,
+        reason: args.reason ?? '',
+        ...(sealed ? { images: sealed.images, reviewedDigests: args.reviewedDigests } : {}),
+      },
+      sealed?.ciphertexts,
+    );
     await this.drafts?.delete(args.view.id);
     void this.outbox.flush();
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */
-  async sendMessage(args: { view: QuestionView; text: string }): Promise<void> {
+  async sendMessage(args: {
+    view: QuestionView;
+    text: string;
+    photos?: readonly OutgoingPhoto[];
+  }): Promise<void> {
     if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+    const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
     const req = await buildMessageRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -530,21 +652,121 @@ export class AppController {
       epochKey: highestEpoch(this.epochKeys),
       view: args.view,
       text: args.text,
+      ...(sealed ? { images: sealed.refs } : {}),
     });
-    await this.outbox.enqueue({
-      id: newId(),
-      questionId: args.view.id,
-      kind: 'message',
-      messageId: req.messageId,
-      path: req.path,
-      bodyText: req.bodyText,
-      idempotencyKey: req.idempotencyKey,
-      expectedRevision: args.view.revision,
-      selected: [],
-      text: args.text,
-      reason: '',
-    });
+    await this.outbox.enqueue(
+      {
+        id: newId(),
+        questionId: args.view.id,
+        kind: 'message',
+        messageId: req.messageId,
+        recordId: req.messageId,
+        path: req.path,
+        bodyText: req.bodyText,
+        idempotencyKey: req.idempotencyKey,
+        expectedRevision: args.view.revision,
+        selected: [],
+        text: args.text,
+        reason: '',
+        ...(sealed ? { images: sealed.images } : {}),
+      },
+      sealed?.ciphertexts,
+    );
     void this.outbox.flush();
+  }
+
+  /**
+   * A queued entry's photos, decrypted back from this device's copy, so a refused answer's photos can go back into
+   * a draft (a follow-up, a correction, the answer again) rather than being lost with the entry.
+   */
+  async queuedPhotos(e: OutboxEntry): Promise<OutgoingPhoto[]> {
+    // All or nothing: a caller that moves them on must know if even one is missing (it then keeps the entry).
+    const out: OutgoingPhoto[] = [];
+    for (const img of e.images ?? []) {
+      const ct = await this.outbox?.localCiphertext(img.attachmentId);
+      const bytes = ct ? await this.decryptQueued(e, img, ct).catch(() => null) : null;
+      if (!bytes) return out;
+      out.push({ bytes, mime: img.mime, width: img.width, height: img.height, sha256: img.sha256 });
+    }
+    return out;
+  }
+
+  /** One of a queued entry's photos, decrypted back from its stored ciphertext. */
+  private async decryptQueued(e: OutboxEntry, img: OutboxImage, ciphertext: Uint8Array) {
+    const epoch = this.epochKeys.get(img.keyEpoch);
+    if (!epoch || !this.snap.config) throw new Error('Missing key for this photo');
+    return decryptAttachment(
+      epoch,
+      {
+        installationId: this.snap.config.installationId,
+        questionId: e.questionId,
+        attachmentId: img.attachmentId,
+        keyEpoch: img.keyEpoch,
+      },
+      img.nonce,
+      ciphertext,
+      img.sha256,
+    );
+  }
+
+  /**
+   * The relay lost a queued entry's photo reservations: the same answer or follow-up, signed again, with the photos
+   * encrypted under fresh ids for a fresh record. An answer is still refused if the question has moved on.
+   */
+  private async rebuildEntry(e: OutboxEntry, plaintexts: Uint8Array[]): Promise<Rebuilt | null> {
+    const view = this.store?.get(e.questionId);
+    if (!view || !this.keys || !this.snap.config || !e.images?.length) return null;
+    const photos: OutgoingPhoto[] = e.images.map((img, i) => ({
+      bytes: plaintexts[i]!,
+      mime: img.mime,
+      width: img.width,
+      height: img.height,
+      sha256: img.sha256,
+    }));
+    const sealed = await this.sealPhotos(view, photos);
+    const base = {
+      installationId: this.snap.config.installationId,
+      deviceId: this.snap.config.deviceId,
+      signingKey: this.keys.signingPrivate,
+      epochKey: highestEpoch(this.epochKeys),
+      view,
+    };
+    if (e.kind === 'message') {
+      const req = await buildMessageRequest({ ...base, text: e.text, images: sealed.refs });
+      return {
+        entry: {
+          path: req.path,
+          bodyText: req.bodyText,
+          idempotencyKey: req.idempotencyKey,
+          messageId: req.messageId,
+          recordId: req.messageId,
+          images: sealed.images,
+        },
+        ciphertexts: sealed.ciphertexts,
+      };
+    }
+    if (e.kind === 'confirm-proxy') return null;
+    const req = await buildAnswerRequest({
+      ...base,
+      kind: e.kind,
+      expectedRevision: e.expectedRevision,
+      selected: e.selected,
+      text: e.text,
+      reason: e.reason || undefined,
+      reviewedDigests: e.reviewedDigests ?? [],
+      explicitApproval: view.content?.kind === 'approval' ? true : undefined,
+      images: sealed.refs,
+    });
+    return {
+      entry: {
+        path: req.path,
+        bodyText: req.bodyText,
+        idempotencyKey: req.idempotencyKey,
+        recordId: req.actionId,
+        images: sealed.images,
+      },
+      ciphertexts: sealed.ciphertexts,
+    };
   }
 
   /* ---------------- attachments ---------------- */
@@ -562,7 +784,10 @@ export class AppController {
       const epoch = this.epochKeys.get(d.key_epoch);
       if (!epoch || !this.relay || !this.snap.config)
         return { ok: false, reason: 'error', message: 'Missing key for this attachment' };
-      const cipher = await this.relay.bytes(`/attachments/${d.attachment_id}/content`, ctx.signal);
+      // A photo still queued on this device is shown from its own ciphertext, checked exactly as a download is.
+      const cipher =
+        (await this.outbox?.localCiphertext(d.attachment_id)) ??
+        (await this.relay.bytes(`/attachments/${d.attachment_id}/content`, ctx.signal));
       const unverified: ImageResult = {
         ok: false,
         reason: 'unverified',

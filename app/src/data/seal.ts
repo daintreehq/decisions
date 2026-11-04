@@ -40,4 +40,35 @@ export async function open<T>(key: CryptoKey, blob: SealedBlob, label: string): 
   return JSON.parse(bytesToUtf8(new Uint8Array(pt))) as T;
 }
 
+/** Raw bytes sealed as they are (a photo), so a megabyte is never inflated through JSON. Same key, same AAD rule. */
+export async function sealBytes(
+  key: CryptoKey,
+  bytes: Uint8Array,
+  label: string,
+): Promise<SealedBlob> {
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await subtle().encrypt(
+      { name: 'AES-GCM', iv: buf(iv), additionalData: buf(utf8ToBytes(label)) },
+      key,
+      buf(bytes),
+    ),
+  );
+  return { iv, ct };
+}
+
+export async function openBytes(
+  key: CryptoKey,
+  blob: SealedBlob,
+  label: string,
+): Promise<Uint8Array> {
+  return new Uint8Array(
+    await subtle().decrypt(
+      { name: 'AES-GCM', iv: buf(blob.iv), additionalData: buf(utf8ToBytes(label)) },
+      key,
+      buf(blob.ct),
+    ),
+  );
+}
+
 export { base64UrlToBytes, bytesToBase64Url };

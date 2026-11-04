@@ -7,6 +7,7 @@ import {
   type MessageDeliveryInfo,
   type MessageSide,
   type MessageView as RelayMessageView,
+  type PhoneImageReference,
   type Provenance,
   type QuestionStatus,
   type Requirement,
@@ -35,6 +36,8 @@ export interface ActionView {
   content: AnswerContent | null;
   verified: boolean;
   error?: string;
+  /** A human answer's photos match its signed record; false shows them as unavailable. */
+  imagesOk?: boolean;
 }
 
 export type DeliveryState =
@@ -66,6 +69,8 @@ export interface ThreadMessage {
   signerDeviceId: string;
   /** Verified, decrypted text; empty when it could not be verified. */
   text: string;
+  /** Human only: the photos it carries, verified against its signed record (their bytes are checked when shown). */
+  images: PhoneImageReference[];
   verified: boolean;
   error?: string;
   /** Human only: where it has reached on its way into the pane, as the publishing desktop reported it. */
@@ -375,6 +380,7 @@ export class QuestionStore {
           signerRole: v.value.signerRole,
           content: v.value.content,
           verified: true,
+          imagesOk: v.value.imagesOk,
         });
         view.status = tr.status;
         view.revision = tr.revision;
@@ -415,10 +421,16 @@ export class QuestionStore {
           : ({ ok: false, reason: 'the question itself could not be verified' } as const);
         if (!v.ok) {
           // Kept in place (so the order stays honest) but never shown as anything anyone said.
-          view.messages.push({ ...base, text: '', verified: false, error: v.reason });
+          view.messages.push({ ...base, text: '', images: [], verified: false, error: v.reason });
           view.integrityIssues.push(`message: ${v.reason}`);
         } else {
-          view.messages.push({ ...base, text: v.value.content.text, verified: true });
+          const c = v.value.content;
+          view.messages.push({
+            ...base,
+            text: c.text,
+            images: c.side === 'human' ? c.images : [],
+            verified: true,
+          });
         }
         view.messages.sort((a, b) => a.seq - b.seq);
         view.lastSeq = Math.max(view.lastSeq, ev.seq);

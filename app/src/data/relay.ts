@@ -151,6 +151,84 @@ export class Relay {
     return (await res.json()) as T;
   }
 
+  /**
+   * Streams ciphertext to `PUT /attachments/{id}/content`. The request is signed over the bytes themselves, whose
+   * SHA-256 is also declared in `X-Content-Sha256`. `onProgress` hears the fraction sent (an XMLHttpRequest is the one
+   * browser request that reports upload progress); a stall of `timeoutMs` with nothing sent is a network failure.
+   */
+  async upload(
+    path: string,
+    bytes: Uint8Array,
+    sha256Ciphertext: string,
+    onProgress?: (fraction: number) => void,
+    timeoutMs = 60_000,
+  ): Promise<unknown> {
+    const fullPath = API_PREFIX + path;
+    const { authorization } = await signRequest({
+      method: 'PUT',
+      path: fullPath,
+      query: '',
+      body: bytes,
+      installationId: this.d.installationId,
+      deviceId: this.d.deviceId,
+      signingKey: this.d.signingKey,
+      now: this.d.now?.(),
+    });
+    const headers = {
+      authorization,
+      'content-type': 'application/octet-stream',
+      'x-content-sha256': sha256Ciphertext,
+    };
+    if (this.d.fetchImpl || typeof XMLHttpRequest === 'undefined') {
+      let res: Response;
+      try {
+        res = await this.f(this.d.origin + fullPath, {
+          method: 'PUT',
+          headers,
+          body: bytes as unknown as BodyInit,
+          credentials: 'omit',
+          cache: 'no-store',
+          referrerPolicy: 'no-referrer',
+        });
+      } catch {
+        throw new RelayError('network', 0, 'Could not reach the relay');
+      }
+      if (!res.ok) throw await parseError(res);
+      onProgress?.(1);
+      return res.json().catch(() => ({}));
+    }
+    return new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      let stall: ReturnType<typeof setTimeout> | undefined;
+      const watch = () => {
+        clearTimeout(stall);
+        stall = setTimeout(() => x.abort(), timeoutMs);
+      };
+      const lost = () => {
+        clearTimeout(stall);
+        reject(new RelayError('network', 0, 'Could not reach the relay'));
+      };
+      x.open('PUT', this.d.origin + fullPath);
+      for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
+      x.upload.onprogress = (e) => {
+        watch();
+        if (e.lengthComputable && e.total > 0) onProgress?.(Math.min(1, e.loaded / e.total));
+      };
+      x.onerror = lost;
+      x.onabort = lost;
+      x.onload = () => {
+        clearTimeout(stall);
+        const res = new Response(x.responseText || null, { status: x.status });
+        if (x.status >= 200 && x.status < 300) {
+          onProgress?.(1);
+          resolve(res.json().catch(() => ({})));
+        } else void parseError(res).then(reject);
+      };
+      watch();
+      x.send(bytes as unknown as XMLHttpRequestBodyInit);
+    });
+  }
+
   async bytes(path: string, signal?: AbortSignal): Promise<Uint8Array> {
     const res = await this.send('GET', path, undefined, undefined, signal);
     if (!res.ok) throw await parseError(res);

@@ -7,7 +7,10 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
+import { entryImages, type OutboxEntry } from '../../data/outbox.js';
+import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
@@ -18,13 +21,14 @@ import {
   type ComposeMode,
   type FieldId,
 } from '../../domain/compose.js';
-import type { QuestionView } from '../../domain/model.js';
+import type { ActionView, QuestionView } from '../../domain/model.js';
 import { choiceLine } from '../../domain/lists.js';
 import { ThreadClosedError } from '../../domain/message.js';
 import {
   agentName,
   canOverrule,
   currentAnswer,
+  DELIVERY_LABELS,
   deliveryProgress,
   effectiveStatus,
   lastProxyAction,
@@ -35,9 +39,10 @@ import {
   submitKind,
   unreadableHere,
 } from '../../domain/selectors.js';
-import { drafts, useDraft } from '../../features/compose/draftStore.js';
+import { drafts, readyPhotos, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
 import { announce } from '../../lib/announce.js';
+import { useCamera } from '../../lib/camera.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, dueLabel, momentLabel } from '../../lib/time.js';
 import {
@@ -64,6 +69,7 @@ import { Composer } from './Composer.js';
 import { ConsentSheet } from './ConsentSheet.js';
 import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
 import { Receipt } from './DeliveryStatus.js';
+import { DraftPhotoStrip, PhotoGrid, type PhotoUpload } from './Photos.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
 import { Sheet } from './Sheet.js';
@@ -131,6 +137,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  /** Why a refused answer's words and photos stayed where they were when the person tried to move them. */
+  const [handOverNote, setHandOverNote] = useState<string | null>(null);
+  const handingOver = useRef(new Set<string>());
   const onReview = useCallback((s: Review) => setReview(s), []);
 
   const status = effectiveStatus(view, now);
@@ -141,15 +150,19 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired';
   // The person's answer (or confirmation) on its way, and the follow-ups queued behind it: separate lanes.
   const actionEntries = entries.filter((e) => e.kind !== 'message');
-  const pendingEntry = actionEntries.find((e) => e.state === 'queued' || e.state === 'sending');
+  // An answer the relay has committed is the thread's own from then on, even while its local copy is being let go.
+  const committed = new Set(view.actions.map((a) => a.actionId));
+  const onItsWay = (e: OutboxEntry) =>
+    e.state === 'queued' || e.state === 'sending' || e.state === 'committed';
+  const pendingEntry = actionEntries.find(
+    (e) => onItsWay(e) && !(e.recordId && committed.has(e.recordId)),
+  );
   const failed = actionEntries.filter(isRefused);
   const sentIds = new Set(view.messages.map((m) => m.messageId));
   const messageEntries = entries.filter(
     (e) => e.kind === 'message' && !(e.messageId && sentIds.has(e.messageId)),
   );
-  const pendingMessages = messageEntries.filter(
-    (e) => e.state === 'queued' || e.state === 'sending',
-  );
+  const pendingMessages = messageEntries.filter(onItsWay);
   const failedMessages = messageEntries.filter(isRefused);
   /** One identity per follow-up from the moment it is queued: its signed message id, the same once committed. */
   const messageKey = (e: (typeof entries)[number]) => e.messageId ?? `pm:${e.id}`;
@@ -161,9 +174,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const confirmed = view.actions.find((a) => a.verified && a.action === 'confirm-proxy');
   // Where the answer in force has reached, and (separately) where this device's reply on its way has reached.
   const progress = app.store ? deliveryProgress(view, app.store) : null;
+  // On the relay but not yet read back here: that is exactly what the receipt says.
   const pendingProgress =
     app.store && pendingEntry
-      ? deliveryProgress(view, app.store, pendingEntry.state as 'queued' | 'sending')
+      ? pendingEntry.state === 'committed'
+        ? { step: 'confirmed' as const, label: DELIVERY_LABELS.confirmed }
+        : deliveryProgress(view, app.store, pendingEntry.state as 'queued' | 'sending')
       : null;
   // Only a model answer can be replaced, by overruling it; the person's own answer is final, and anything more they
   // want to say is a follow-up.
@@ -192,6 +208,97 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     !!content &&
     (following || (!pendingEntry && failed.length === 0 && (status === 'open' || inCorrection)));
   const shape = content ? composeShape(content, mode) : null;
+  // Photos go with an answer, a correction or a follow-up, when the desktop that asked takes them.
+  const camera = useCamera();
+  const photosAllowed = composing && app.photosFor(view);
+  // Every photo the question has taken, or has on its way from here, counts against its lifetime limit.
+  const unsentEntries = entries.filter((e) => !(e.messageId && sentIds.has(e.messageId)));
+  const photosUsed =
+    view.actions.reduce(
+      (n, a) =>
+        n + (a.verified ? ((a.content as HumanAnswerContentV1 | null)?.images?.length ?? 0) : 0),
+      0,
+    ) +
+    view.messages.reduce((n, m) => n + m.images.length, 0) +
+    unsentEntries.reduce((n, e) => n + (e.images?.length ?? 0), 0);
+  const questionRoom = Math.max(0, PHOTOS_PER_QUESTION - photosUsed);
+  const photoLimit = Math.min(PHOTOS_PER_MESSAGE, questionRoom);
+  const photoRoom = Math.max(0, photoLimit - draft.photos.length);
+  const photoNoun = mode === 'message' ? (ask ? 'reply' : 'follow-up') : 'answer';
+  const preparingPhotos = draft.photos.some((p) => p.status === 'preparing');
+  /**
+   * Move a refused answer's words and photos into a draft, then let it go: only once everything has moved and the
+   * draft is saved on this device. Words join whatever the draft already says; photos that can't be read or don't
+   * fit keep the whole answer where it is, with the reason.
+   */
+  const handOver = async (
+    e: OutboxEntry,
+    key: string,
+    words: string,
+    patch?: { selected: string[] },
+    /** Dismiss: the person is letting it go, so keep what can be kept, say what couldn't, and always let it go. */
+    lossy = false,
+  ) => {
+    // One move at a time per answer: a second tap while one runs does nothing.
+    if (handingOver.current.has(e.id)) return;
+    handingOver.current.add(e.id);
+    setHandOverNote(null);
+    try {
+      if (!(await drafts.whenLoaded(key))) {
+        setHandOverNote('This device couldn’t open that draft, so your unsent answer stays here.');
+        return;
+      }
+      const want = e.images?.length ?? 0;
+      const read = want ? await app.queuedPhotos(e).catch(() => []) : [];
+      const have = drafts.get(key)?.photos.length ?? 0;
+      // Its photos free their own share of the question's lifetime allowance as they move.
+      const room = Math.max(0, Math.min(PHOTOS_PER_MESSAGE, questionRoom + want) - have);
+      const back = lossy ? read.slice(0, room) : read;
+      if (lossy) {
+        if (!(await drafts.mergeInto(key, words, back, patch))) {
+          setHandOverNote('This device couldn’t save the draft, so your unsent answer stays here.');
+          return;
+        }
+        if (back.length < want)
+          drafts.notePhotos(key, {
+            text:
+              want - back.length === 1
+                ? '1 of its photos couldn’t be kept.'
+                : `${want - back.length} of its photos couldn’t be kept.`,
+            tone: 'error',
+          });
+        await app.outbox?.discard(e.id);
+        return;
+      }
+      if (back.length < want) {
+        setHandOverNote(
+          'Its photos couldn’t be read on this device, so your unsent answer stays here. Copy the words, or dismiss it.',
+        );
+        return;
+      }
+      if (back.length > room) {
+        setHandOverNote(
+          'There isn’t room for its photos there, so your unsent answer stays here. Copy the words, or dismiss it.',
+        );
+        return;
+      }
+      // Written and read back before anything on screen changes; only then does the refused answer go.
+      if (!(await drafts.mergeInto(key, words, back, patch))) {
+        setHandOverNote('This device couldn’t save the draft, so your unsent answer stays here.');
+        return;
+      }
+      await app.outbox?.discard(e.id);
+    } finally {
+      handingOver.current.delete(e.id);
+    }
+  };
+  // Once all of an entry's photos are on the relay, that is said once: the progress itself is never announced.
+  for (const e of entries) {
+    const n = e.images?.length ?? 0;
+    if (!n || uploadedAnnounced.has(e.id) || (app.outbox?.imagesSent(e) ?? 0) < n) continue;
+    uploadedAnnounced.add(e.id);
+    queueMicrotask(() => announce(n === 1 ? 'Photo uploaded.' : `${n} photos uploaded.`));
+  }
   const activeField: FieldId =
     field && shape?.fields.includes(field) ? field : (shape?.fields[0] ?? 'text');
   const mine = dictAll.binding?.key === draft.key ? dictAll : null;
@@ -220,6 +327,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           evidence: review,
           stale,
           capturing,
+          photos: photosAllowed ? readyPhotos(draft).length : 0,
+          preparing: photosAllowed && preparingPhotos,
         })
       : null;
   const next = nextQuestion(all, id, now);
@@ -228,13 +337,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   // The decision in force, in one line: the header keeps it in view while the follow-ups after it scroll by. The
   // header is narrow, so the choice leads and a note only stands in when there is no choice.
   const answerLine = (() => {
-    const short = (selected: string[], text: string) =>
-      selected.length ? choiceLine(view, selected, '') : choiceLine(view, [], text) || 'No note';
+    const short = (selected: string[], text: string, photos = 0) =>
+      selected.length
+        ? choiceLine(view, selected, '')
+        : choiceLine(view, [], text) || (photos ? photoCount(photos) : 'No note');
     if (pendingEntry && pendingEntry.kind !== 'confirm-proxy')
-      return `Answer: ${short(pendingEntry.selected, pendingEntry.text)}`;
+      return `Answer: ${short(pendingEntry.selected, pendingEntry.text, pendingEntry.images?.length)}`;
     if (!answer) return null;
-    const c = answer.content as { selected_option_ids?: string[]; text?: string } | null;
-    const line = short(c?.selected_option_ids ?? [], c?.text ?? '');
+    const c = answer.content as HumanAnswerContentV1 | null;
+    const line = short(c?.selected_option_ids ?? [], c?.text ?? '', c?.images?.length);
     return `${answer.provenance === 'proxy' ? 'Model answer' : 'Answer'}: ${line}`;
   })();
   const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
@@ -245,7 +356,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   // A follow-up draft follows the question's revision whenever nothing is being captured into it.
   useEffect(() => {
     if (!composing || !draft.loaded || draft.revision === view.revision || settling) return;
-    const empty = !draft.text.trim() && !draft.reason.trim() && !draft.selected.length;
+    // Photos are part of the draft: a photo-only answer waits for Review update like words do.
+    const empty =
+      !draft.text.trim() && !draft.reason.trim() && !draft.selected.length && !draft.photos.length;
     if (empty || mode === 'message') drafts.rebind(draft.key, view.revision);
   }, [composing, draft, view.revision, settling, mode]);
 
@@ -327,7 +440,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     setBusy(true);
     setError(null);
     try {
-      await app.sendMessage({ view, text: d.text });
+      await app.sendMessage({ view, text: d.text, photos: photosAllowed ? readyPhotos(d) : [] });
       dictation.release(d.key);
       await drafts.sent(d.key);
       announce(
@@ -371,6 +484,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         text: shape.textAllowed ? d.text : '',
         reason: mode === 'correction' ? d.reason : undefined,
         reviewedDigests: review.digests,
+        photos: photosAllowed ? readyPhotos(d) : [],
       });
       // Sealed and queued durably: only now does the draft go, and nothing in flight may bring it back.
       dictation.release(d.key);
@@ -669,6 +783,40 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             )
               void dictation.stop();
           }}
+          photos={
+            photosAllowed
+              ? {
+                  view,
+                  locked: busy,
+                  list: draft.photos,
+                  room: photoRoom,
+                  limit: photoLimit,
+                  noun: photoNoun,
+                  camera,
+                  onAdd: (files) =>
+                    drafts.addPhotos(draft.key, files, {
+                      room: photoRoom,
+                      overflow: (over) =>
+                        `${
+                          photoLimit < PHOTOS_PER_MESSAGE
+                            ? `This question can take ${photoCount(questionRoom)} more.`
+                            : `Up to ${PHOTOS_PER_MESSAGE} photos per ${photoNoun}.`
+                        } ${over} ${over === 1 ? 'wasn’t' : 'weren’t'} added.`,
+                    }),
+                  onRemove: (pid) => drafts.removePhoto(draft.key, pid),
+                  onFull: () =>
+                    drafts.notePhotos(draft.key, {
+                      text:
+                        questionRoom === 0
+                          ? 'This question can’t take any more photos.'
+                          : photoLimit < PHOTOS_PER_MESSAGE
+                            ? `This question can take ${photoCount(questionRoom)} more, and they’re attached.`
+                            : `Up to ${PHOTOS_PER_MESSAGE} photos per ${photoNoun}.`,
+                      tone: 'info',
+                    }),
+                }
+              : null
+          }
         />
       </AnswerDock>
     );
@@ -690,10 +838,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
 
   /* ---------- the thread ---------- */
 
+  // Once the person's answer is on its way the question no longer waits on them: its deadline and gate go at Send,
+  // not later when the relay confirms, so nothing above the answer moves while it uploads.
+  const waitingOnPerson = status === 'open' && !pendingEntry;
   const soon =
-    status === 'open' && !!view.expiresAt && Date.parse(view.expiresAt) - now < 24 * 3_600_000;
+    waitingOnPerson && !!view.expiresAt && Date.parse(view.expiresAt) - now < 24 * 3_600_000;
   const due =
-    status === 'open' && view.expiresAt ? (
+    waitingOnPerson && view.expiresAt ? (
       <span className={soon ? 'due soon' : 'due'}>
         <ClockIcon size={13} />
         {dueLabel(view.expiresAt, now)}
@@ -737,7 +888,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       />,
     );
     // The gate matters while the question is open: no model will step in, so it waits for a person.
-    if (status === 'open' && view.requirement === 'human-required')
+    if (waitingOnPerson && view.requirement === 'human-required')
       items.push(
         <SystemLine
           key="gate"
@@ -807,7 +958,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               // Every follow-up keeps its own receipt: each is typed (or held) on its own.
               receipt={<Receipt progress={p} fromPhone subject="Your follow-up" />}
             >
-              <SafeText text={m.text} className="answer-text" />
+              <PhotoGrid view={view} images={m.images} />
+              {m.text.trim() && <SafeText text={m.text} className="answer-text" />}
             </OutgoingMessage>,
           );
         }
@@ -826,7 +978,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       if (a.action === 'answer' || a.action === 'override') {
         items.push(
           <HumanAnswer
-            key={a.actionId}
+            key={`ans-${a.actionId}`}
             view={view}
             a={a}
             // Overruling the model makes it the person's answer; only an older app's correction of their own
@@ -910,40 +1062,41 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       );
     if (pendingEntry) {
       const queuedOffline = pendingEntry.state === 'queued' && !navigator.onLine;
+      const receipt = pendingProgress ? (
+        <Receipt
+          progress={pendingProgress}
+          fromPhone
+          steps={pendingEntry.kind !== 'confirm-proxy'}
+          label={uploadLabel(pendingEntry)}
+          note={queuedOffline ? 'Sends when you’re back online' : undefined}
+        />
+      ) : undefined;
       items.push(
-        <OutgoingMessage
-          key="pending"
-          at={new Date(pendingEntry.createdAt).toISOString()}
-          now={now}
-          tone="pending"
-          id="ws-answer"
-          label={pendingEntry.kind === 'confirm-proxy' ? undefined : 'Your answer'}
-          receipt={
-            pendingProgress ? (
-              <Receipt
-                progress={pendingProgress}
-                fromPhone
-                steps={pendingEntry.kind !== 'confirm-proxy'}
-                note={queuedOffline ? 'Sends when you’re back online' : undefined}
-              />
-            ) : undefined
-          }
-        >
-          {pendingEntry.kind === 'confirm-proxy' ? (
+        pendingEntry.kind === 'confirm-proxy' ? (
+          <OutgoingMessage
+            key="pending"
+            at={new Date(pendingEntry.createdAt).toISOString()}
+            now={now}
+            tone="pending"
+            id="ws-answer"
+            receipt={receipt}
+          >
             <p className="answer-text">Confirmed the model answer</p>
-          ) : (
-            <AnswerBody
-              view={view}
-              content={{
-                content_version: 1,
-                selected_option_ids: pendingEntry.selected,
-                text: pendingEntry.text.trim() || undefined,
-                reviewed_attachment_digests: [],
-                reason: pendingEntry.reason.trim() || undefined,
-              }}
-            />
-          )}
-        </OutgoingMessage>,
+          </OutgoingMessage>
+        ) : (
+          // The same component, under the same key, as the committed answer it becomes: its photos, and a viewer
+          // open on one of them, stay exactly where they are when the relay confirms it.
+          <HumanAnswer
+            key={`ans-${pendingEntry.recordId ?? pendingEntry.id}`}
+            view={view}
+            a={pendingAction(pendingEntry)}
+            now={now}
+            tone="pending"
+            receipt={receipt}
+            upload={uploadOf(pendingEntry)}
+            extra={<UploadTrouble entry={pendingEntry} subject="answer" />}
+          />
+        ),
       );
     }
     for (const e of pendingMessages) {
@@ -957,14 +1110,20 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           label="Follow-up"
           receipt={
             <Receipt
-              progress={messageProgress(null, e.state as 'queued' | 'sending')}
+              progress={messageProgress(
+                null,
+                e.state === 'committed' ? undefined : (e.state as 'queued' | 'sending'),
+              )}
               fromPhone
               subject="Your follow-up"
+              label={uploadLabel(e)}
               note={queuedOffline ? 'Sends when you’re back online' : undefined}
             />
           }
         >
-          <SafeText text={e.text} className="answer-text" />
+          <PhotoGrid view={view} images={entryImages(e)} upload={uploadOf(e)} />
+          {e.text.trim() && <SafeText text={e.text} className="answer-text" />}
+          <UploadTrouble entry={e} subject="follow-up" />
         </OutgoingMessage>,
       );
     }
@@ -978,7 +1137,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           tone="failed"
           label="Follow-up · not sent"
         >
-          <SafeText text={e.text} className="answer-text" />
+          <PhotoGrid view={view} images={entryImages(e)} />
+          {e.text.trim() && <SafeText text={e.text} className="answer-text" />}
           <div className="msg-failure" role="alert">
             <WarningIcon size={14} />
             <span>
@@ -986,11 +1146,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 ? 'Not sent: the question expired first.'
                 : closedThread
                   ? 'Not sent: this question no longer takes messages.'
-                  : 'Not sent: your relay refused it.'}
+                  : (photoRefusal(e) ?? 'Not sent: your relay refused it.')}
             </span>
           </div>
           <div className="row">
-            {!closedThread && (
+            {!closedThread && e.errorCode !== 'payload_too_large' && (
               <button
                 type="button"
                 className="btn small"
@@ -999,7 +1159,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 Try again
               </button>
             )}
-            <CopyButton text={e.text} />
+            {e.text.trim() && <CopyButton text={e.text} />}
             <button
               type="button"
               className="btn small ghost"
@@ -1031,24 +1191,26 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                     ]
                       .filter(Boolean)
                       .join('\n\n');
-                    if (!hasWords(messageDraft)) drafts.edit(messageDraft.key, { text: words });
-                    void app.outbox?.discard(e.id);
+                    void handOver(e, messageDraft.key, words);
                   }
                 : undefined
             }
             onDismiss={() => {
-              if (status === 'open' && !hasWords(answerDraft) && e.text.trim())
-                drafts.edit(answerDraft.key, { text: e.text });
-              void app.outbox?.discard(e.id);
+              // Back in the answer while it can still be sent; otherwise nothing could take them.
+              void (status === 'open'
+                ? handOver(e, answerDraft.key, e.text, undefined, true)
+                : app.outbox?.discard(e.id));
             }}
             onUseAsCorrection={() => {
-              drafts.edit(correctionDraft.key, {
-                selected: e.selected,
-                text: e.text,
-              });
-              void app.outbox?.discard(e.id);
+              void handOver(e, correctionDraft.key, e.text, { selected: e.selected });
               setCorrecting(true);
             }}
+            note={handOverNote}
+            onRetry={
+              e.refusedAt === 'image' && e.errorCode === 'image_lost'
+                ? () => void app.outbox?.retry(e.id)
+                : undefined
+            }
           />
         </div>,
       );
@@ -1096,21 +1258,25 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           />
         </div>,
       );
-    if (closed && answerDraft.text.trim())
+    if (closed && (answerDraft.text.trim() || answerDraft.photos.length))
       items.push(
         <OutgoingMessage key="draft" now={now} tone="draft" label="Unsent draft">
-          <SafeText text={answerDraft.text} className="answer-text" />
+          <DraftPhotoStrip photos={answerDraft.photos} />
+          {answerDraft.text.trim() && <SafeText text={answerDraft.text} className="answer-text" />}
           <div className="row">
-            <CopyButton text={answerDraft.text} />
+            {answerDraft.text.trim() && <CopyButton text={answerDraft.text} />}
           </div>
         </OutgoingMessage>,
       );
-    if (closed && messageDraft.text.trim())
+    if (closed && (messageDraft.text.trim() || messageDraft.photos.length))
       items.push(
         <OutgoingMessage key="mdraft" now={now} tone="draft" label="Unsent follow-up">
-          <SafeText text={messageDraft.text} className="answer-text" />
+          <DraftPhotoStrip photos={messageDraft.photos} />
+          {messageDraft.text.trim() && (
+            <SafeText text={messageDraft.text} className="answer-text" />
+          )}
           <div className="row">
-            <CopyButton text={messageDraft.text} />
+            {messageDraft.text.trim() && <CopyButton text={messageDraft.text} />}
           </div>
         </OutgoingMessage>,
       );
@@ -1124,6 +1290,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   // What counts as activity: the thread's items by identity (a gate line replaced by an expiry is activity even
   // though the count is the same) and the delivery steps of the answer in force and any pending reply.
   const itemKeys = items.map((it) => String((it as { key?: string | null }).key ?? ''));
+  const pendingAnswerKey = pendingEntry ? `ans-${pendingEntry.recordId ?? pendingEntry.id}` : null;
   const keysKey = itemKeys.join('|');
   const lastKey = itemKeys[itemKeys.length - 1] ?? '';
   const sentFollowUps = view.messages.filter((m) => m.verified && m.side === 'human');
@@ -1216,7 +1383,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     // The person's own reply is always followed; anything else only while they are following the end.
     const mine =
       added.includes(lastKey) &&
-      (lastKey === 'pending' || lastKey === 'correction' || pendingKeys.has(lastKey));
+      (lastKey === 'pending' ||
+        lastKey === 'correction' ||
+        lastKey === pendingAnswerKey ||
+        pendingKeys.has(lastKey));
     if (mine) {
       showLatest(true);
       setNewBelow(false);
@@ -1378,6 +1548,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                   reason: correctionDraft.reason.trim() || undefined,
                 }}
               />
+              {readyPhotos(correctionDraft).length > 0 && (
+                <p className="change-photos">
+                  With {photoCount(readyPhotos(correctionDraft).length)}
+                </p>
+              )}
             </div>
           </div>
           <p className="muted">
@@ -1416,8 +1591,87 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   );
 }
 
-function hasWords(d: { text: string; reason: string; selected: string[] }) {
-  return !!(d.text.trim() || d.reason.trim() || d.selected.length);
+/** Entries whose photos have been announced as uploaded. */
+const uploadedAnnounced = new Set<string>();
+
+function hasWords(d: { text: string; reason: string; selected: string[]; photos?: unknown[] }) {
+  return !!(d.text.trim() || d.reason.trim() || d.selected.length || d.photos?.length);
+}
+
+/** How a queued entry's photos are going, for their frames in the thread. */
+function uploadOf(e: OutboxEntry): PhotoUpload | undefined {
+  const outbox = app.outbox;
+  if (!outbox || !e.images?.length) return undefined;
+  return { state: (id) => outbox.photoState(e, id) };
+}
+
+/** The receipt's words while photos are going up ahead of the words: "Uploading photo 2 of 3". */
+function uploadLabel(e: OutboxEntry): string | undefined {
+  const outbox = app.outbox;
+  const n = e.images?.length ?? 0;
+  if (!outbox || !n || e.state !== 'sending' || outbox.uploadStopped(e.id)) return undefined;
+  const done = outbox.imagesSent(e);
+  if (done >= n) return undefined;
+  return n === 1 ? 'Uploading photo' : `Uploading photo ${done + 1} of ${n}`;
+}
+
+/** A queued answer, shown as the answer it will be once the relay has it. */
+function pendingAction(e: OutboxEntry): ActionView {
+  return {
+    actionId: e.recordId ?? e.id,
+    action: e.kind === 'override' ? 'override' : 'answer',
+    provenance: null,
+    revision: e.expectedRevision + 1,
+    createdAt: new Date(e.createdAt).toISOString(),
+    seq: Number.MAX_SAFE_INTEGER,
+    signerDeviceId: '',
+    signerRole: null,
+    content: {
+      content_version: 1,
+      selected_option_ids: e.selected,
+      text: e.text.trim() || undefined,
+      reviewed_attachment_digests: [],
+      reason: e.reason.trim() || undefined,
+      ...(e.images?.length ? { images: entryImages(e) } : {}),
+    },
+    verified: true,
+    imagesOk: true,
+  };
+}
+
+/** Why the relay turned down a follow-up's or answer's photos, when it did. */
+function photoRefusal(e: OutboxEntry): string | null {
+  if (e.refusedAt !== 'image') return null;
+  if (e.errorCode === 'payload_too_large') return 'Not sent: this question can’t take more photos.';
+  if (e.errorCode === 'image_lost') return 'Not sent: your relay lost its photos.';
+  return 'Not sent: your relay refused its photos.';
+}
+
+/**
+ * Photos that stopped on their way up: the words and photos are safe on this device, they try again by themselves,
+ * and Try again does it now. While a try is running the row keeps its place and the button says so.
+ */
+function UploadTrouble({ entry, subject }: { entry: OutboxEntry; subject: string }) {
+  void app.outbox?.getVersion();
+  if (!app.outbox?.uploadStopped(entry.id)) return null;
+  const trying = entry.state === 'sending';
+  return (
+    <div className="msg-trouble">
+      <p className="msg-failure" role="status">
+        <WarningIcon size={14} />
+        <span>The upload stopped. Your {subject} is saved on this device and isn’t sent yet.</span>
+      </p>
+      <button
+        type="button"
+        className="btn small"
+        aria-disabled={trying || undefined}
+        onClick={() => !trying && void app.outbox?.retryNow()}
+      >
+        <RefreshIcon size={16} />
+        {trying ? 'Trying again…' : 'Try again'}
+      </button>
+    </div>
+  );
 }
 
 function cleanupName(): string | null {
