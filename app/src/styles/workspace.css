@@ -366,6 +366,17 @@
   gap: 8px;
   min-width: 0;
 }
+/* Above a follow-up's pill: moving on, quiet and at the trailing edge, where the thumb already is. */
+.composer-above {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 -4px;
+}
+.dock-next-quiet {
+  min-height: var(--tap-min);
+  gap: 4px;
+  padding: 0 8px 0 12px;
+}
 .composer-pill {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -58,6 +58,12 @@ export interface ComposerProps {
   fieldTabs: { id: FieldId; label: string }[] | null;
   /** A visible name above the pill when the field is not the obvious one (a correction's reason). */
   caption: string | null;
+  /** Send's words when they differ from the shape's. */
+  sendLabel?: string;
+  /** Send's full name for assistive tech and its tooltip, when the visible words are shorter ("Send follow-up"). */
+  sendName?: string;
+  /** A quiet row just above the pill where choices would sit: moving on, once an answer is on its way. */
+  above?: ReactNode;
   /** Dictation state when it belongs to this draft; null otherwise. */
   dict: DictState | null;
   /** Dictation is set up and online here, so holding can start it. */
@@ -171,6 +177,7 @@ export function Composer(p: ComposerProps) {
 
   return (
     <div className="composer" data-rows={two ? 'two' : 'one'}>
+      {p.above && <div className="composer-above">{p.above}</div>}
       {p.options && (
         <ChoiceChips
           options={p.options}
@@ -244,7 +251,8 @@ export function Composer(p: ComposerProps) {
             )}
             {sendSlot && (
               <SendButton
-                label={shape.sendLabel}
+                label={p.sendLabel ?? shape.sendLabel}
+                name={p.sendName}
                 ready={verdict.canSend && !p.sending && !capturing && !settling}
                 sending={p.sending}
                 describedBy={verdict.hint && two ? 'ws-send-hint' : undefined}
@@ -545,6 +553,7 @@ export function DictateButton({
 
 function SendButton({
   label,
+  name,
   ready,
   sending,
   describedBy,
@@ -552,6 +561,8 @@ function SendButton({
   onSend,
 }: {
   label: string;
+  /** The full name when `label` is a shortened form of it (the visible words stay inside it). */
+  name?: string;
   ready: boolean;
   sending: boolean;
   describedBy?: string;
@@ -566,7 +577,8 @@ function SendButton({
       className="btn primary composer-send"
       aria-disabled={!ready || undefined}
       aria-describedby={describedBy}
-      title={`${label} (${MOD}+Enter)`}
+      aria-label={name && !sending ? name : undefined}
+      title={`${name ?? label} (${MOD}+Enter)`}
       onPointerDown={() => (armed.current = now() >= (quietUntil.current ?? 0))}
       onClick={(e) => {
         const pointer = e.detail > 0;

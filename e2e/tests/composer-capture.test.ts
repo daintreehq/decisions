@@ -263,6 +263,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
       client,
       policy: new PolicyRegistry({ proxyAllowlisted: false }),
       pumpIntervalMs: 0,
+      followUps: true,
       resolver: { resolve: async (_o, id) => (images.has(id) ? { bytes: images.get(id)! } : null) },
     });
     await bridge.start();
@@ -379,7 +380,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
       .first()
       .waitFor({ timeout: 30_000 });
 
-    // One answer already delivered, so its correction can be captured.
+    // One answer already delivered, so the follow-up composer after it can be captured.
     await openId('answered');
     await page
       .getByRole('radio', { name: /Yes, rename/ })
@@ -474,18 +475,13 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
     await dictate().waitFor({ timeout: 15_000 });
   });
 
-  it('captures a correction and a sent answer', async () => {
+  it('captures a follow-up and a sent answer', async () => {
     await openId('answered');
     await sees(/Delivered to the agent’s terminal|Typed into the terminal/);
-    await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
-    await page.getByRole('menuitem', { name: 'Change answer' }).click();
-    await page
-      .getByRole('radio', { name: /Keep Canopy/ })
-      .first()
-      .check();
-    await typeDraft('Inbox collides with the mail integration’s name.');
-    await page.locator('.dock').getByRole('button', { name: 'Send correction' }).waitFor();
-    await shot('p-correction-light');
+    // The answer is final: what comes after it is a follow-up.
+    await typeDraft('Inbox collides with the mail integration’s name, so check with Sam first.');
+    await page.locator('.dock').getByRole('button', { name: 'Send follow-up' }).waitFor();
+    await shot('p-follow-up-light');
 
     await openId('send');
     await typeDraft('Drop it to three. Five retries kept a dead endpoint busy for an hour.');
@@ -515,7 +511,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
       'p-dictate-starting-light',
       'p-dictate-recording-light',
       'p-dictate-recording-dark',
-      'p-correction-light',
+      'p-follow-up-light',
       'p-sent-light',
       'w-choice-selected-light',
     ];

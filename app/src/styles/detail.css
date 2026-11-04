@@ -146,6 +146,59 @@
   line-height: 18px;
   color: var(--text-2);
 }
+/* The agent's later messages: the same incoming voice as its question, sized to their words. */
+.msg.in.note .bubble {
+  width: auto;
+  max-width: min(92%, 640px);
+}
+.msg-text {
+  max-width: 68ch;
+  color: var(--text);
+}
+.msg-text p {
+  margin: 0 0 0.5rem;
+}
+.msg-text p:last-child {
+  margin-bottom: 0;
+}
+/* Waiting on the person: the amber ring that marks Needs you in the list, beside the words that say so. */
+.msg-asking {
+  color: var(--text);
+  font-weight: 500;
+}
+.ask-ring {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--waiting) 12%, transparent);
+  box-shadow: inset 0 0 0 1.5px var(--waiting);
+}
+
+/* A follow-up the relay refused: the words stay, with what happened and what can be done. */
+.msg.out.failed .bubble {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--warning) 45%, transparent);
+}
+.msg-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: var(--text-xs);
+  line-height: 18px;
+  color: var(--text);
+}
+.msg-failure svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning-text);
+}
+.msg.out.failed .row {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .due {
   display: inline-flex;
   align-items: center;

@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import {
   DevicesResponse,
   KeyGrantsResponse,
+  MessagesPage,
   SettingsResponse,
   PROTOCOL_VERSION,
   type AttachmentDescriptor,
@@ -25,6 +26,7 @@ import { publicJson, Relay, RelayError } from '../data/relay.js';
 import { SnapshotStore } from '../data/snapshots.js';
 import { SyncEngine, type Connection } from '../data/sync.js';
 import { buildAnswerRequest, highestEpoch, type HumanActionKind } from '../domain/answer.js';
+import { buildMessageRequest } from '../domain/message.js';
 import { QuestionStore, type QuestionView } from '../domain/model.js';
 import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
@@ -36,6 +38,10 @@ import type { PairingInvitePayload, ProtocolFeature } from '@daintreehq/decision
 const SNAPSHOT_FEATURE: ProtocolFeature = 'pane-snapshots-v1';
 /** Set once this device has read every open question's snapshot after first declaring the feature. */
 const SNAPSHOT_BACKFILL_PREF = 'snapshot-backfill-v1';
+/** Thread messages: the person's follow-ups after an answer, and the agent's messages (docs/protocol.md section 16). */
+const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
+/** Set once this device has read every question's thread after first declaring the feature. */
+const THREAD_BACKFILL_PREF = 'thread-backfill-v1';
 
 export type ServerSettings = z.infer<typeof SettingsResponse>['settings'];
 
@@ -132,12 +138,13 @@ export class AppController {
   private loadInfo() {
     this.infoLoaded = publicJson<InfoResponse>(this.origin, 'GET', '/api/v1/info')
       .then((info) => {
-        const before = this.snapshotsServed();
+        const before = this.declaredFeatures().join(',');
         this.patch({ info });
-        // Info can arrive after sync has started: declare the feature now and read what was missed.
-        if (!before && this.snapshotsServed() && this.sync?.running) {
+        // Info can arrive after sync has started: declare the features now and read what was missed.
+        if (this.declaredFeatures().join(',') !== before && this.sync?.running) {
           this.sync.redeclare();
           void this.backfillSnapshots();
+          void this.backfillThreads();
         }
       })
       .catch(() => undefined);
@@ -146,6 +153,62 @@ export class AppController {
   /** Whether the relay advertises pane snapshots (`GET /info`); until it does, the app never asks for them. */
   private snapshotsServed(): boolean {
     return this.snap.info?.features?.includes(SNAPSHOT_FEATURE) ?? false;
+  }
+
+  /** Whether the relay advertises thread messages; until it does, the app neither reads nor sends any. */
+  threadsServed(): boolean {
+    return this.snap.info?.features?.includes(THREAD_FEATURE) ?? false;
+  }
+
+  /** What this app declares to the relay: only features the relay advertises (docs/protocol.md section 19). */
+  private declaredFeatures(): ProtocolFeature[] {
+    return [
+      ...(this.snapshotsServed() ? [SNAPSHOT_FEATURE] : []),
+      ...(this.threadsServed() ? [THREAD_FEATURE] : []),
+    ];
+  }
+
+  /**
+   * Whether the person can send follow-ups on this question: the relay serves threads and the desktop that asked it
+   * declared them too (it is what types them into the terminal). The relay refuses a message otherwise.
+   */
+  followUpsFor(view: QuestionView): 'yes' | 'desktop' | 'no' {
+    if (!this.threadsServed()) return 'no';
+    const d = this.snap.devices?.devices.find((x) => x.device_id === view.originatingDeviceId);
+    if (!d) return 'no';
+    return d.features?.includes(THREAD_FEATURE) ? 'yes' : 'desktop';
+  }
+
+  /**
+   * Read every question's thread once, the first time this device declares thread messages: the event cursor may
+   * already be past messages the relay never sent it. Each is verified as its event would be and cached like one.
+   */
+  private async backfillThreads(): Promise<void> {
+    const db = this.db;
+    const store = this.store;
+    const relay = this.relay;
+    if (!db || !store || !relay || !this.threadsServed()) return;
+    if ((await db.getPref<boolean>(THREAD_BACKFILL_PREF)) ?? false) return;
+    let complete = true;
+    for (const v of store.list()) {
+      if (!v.verification.ok) continue;
+      try {
+        let after = 0;
+        for (;;) {
+          const page = MessagesPage.parse(
+            await relay.json('GET', `/questions/${v.id}/messages`, { query: { after, limit: 50 } }),
+          );
+          if (page.messages.length)
+            await db.putEvents(await store.adoptMessages(v.id, page.messages));
+          if (!page.has_more || page.next_after <= after) break;
+          after = page.next_after;
+        }
+      } catch (e) {
+        // A deleted question has nothing to read; anything else is tried again on the next start.
+        if (!(e instanceof RelayError && (e.status === 404 || e.status === 410))) complete = false;
+      }
+    }
+    if (complete) await db.setPref(THREAD_BACKFILL_PREF, true);
   }
 
   private async backfillSnapshots(): Promise<void> {
@@ -208,6 +271,9 @@ export class AppController {
 
     this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
       onChange: () => this.patch({}),
+      // A follow-up the relay just committed is read back before its local copy goes, so it never blinks out of
+      // the thread (the thread hides the local copy once the committed one is in).
+      settle: (e) => (e.kind === 'message' ? this.sync?.catchUp() : undefined),
       onCommitted: () =>
         void this.sync
           ?.catchUp()
@@ -224,7 +290,7 @@ export class AppController {
         await this.store!.ingestAll(events);
         if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
       },
-      features: () => (this.snapshotsServed() ? [SNAPSHOT_FEATURE] : []),
+      features: () => this.declaredFeatures(),
       onServerTime: (iso) => this.snapshots?.setServerTime(iso),
       onConnection: (connection) => {
         this.patch({ connection });
@@ -243,6 +309,7 @@ export class AppController {
     void sync.start().then(() => {
       void this.outbox?.flush();
       void this.backfillSnapshots();
+      void this.backfillThreads();
     });
     void this.refreshDevices().catch(() => undefined);
   }
@@ -450,6 +517,33 @@ export class AppController {
       reason: args.reason ?? '',
     });
     await this.drafts?.delete(args.view.id);
+    void this.outbox.flush();
+  }
+
+  /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */
+  async sendMessage(args: { view: QuestionView; text: string }): Promise<void> {
+    if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+    const req = await buildMessageRequest({
+      installationId: this.snap.config.installationId,
+      deviceId: this.snap.config.deviceId,
+      signingKey: this.keys.signingPrivate,
+      epochKey: highestEpoch(this.epochKeys),
+      view: args.view,
+      text: args.text,
+    });
+    await this.outbox.enqueue({
+      id: newId(),
+      questionId: args.view.id,
+      kind: 'message',
+      messageId: req.messageId,
+      path: req.path,
+      bodyText: req.bodyText,
+      idempotencyKey: req.idempotencyKey,
+      expectedRevision: args.view.revision,
+      selected: [],
+      text: args.text,
+      reason: '',
+    });
     void this.outbox.flush();
   }
 

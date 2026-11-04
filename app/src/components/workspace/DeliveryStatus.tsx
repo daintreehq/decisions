@@ -25,6 +25,7 @@ const CAUSES: Record<string, string> = {
   no_target: 'Your computer couldn’t find the terminal it was asked from.',
   target_mismatch: 'Your computer couldn’t find the terminal it was asked from.',
   answer_unreadable: 'Your computer couldn’t open the answer.',
+  message_unreadable: 'Your computer couldn’t open the message.',
 };
 
 export function stageTone(p: DeliveryProgress): 'done' | 'progress' | 'attention' {
@@ -58,12 +59,15 @@ export function Receipt({
   fromPhone,
   note,
   steps = true,
+  subject,
 }: {
   progress: DeliveryProgress;
   fromPhone: boolean;
   /** A quiet extra after the label, e.g. that a queued answer sends once back online. */
   note?: string;
   steps?: boolean;
+  /** What is being delivered, for the words of a problem: "Your answer" (default), "Your follow-up". */
+  subject?: string;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -72,7 +76,7 @@ export function Receipt({
   if (tone === 'attention')
     return (
       <div className="receipt attention" aria-live="off">
-        <DeliveryStepper progress={progress} fromPhone={fromPhone} />
+        <DeliveryStepper progress={progress} fromPhone={fromPhone} subject={subject} />
       </div>
     );
   const face = (
@@ -110,7 +114,7 @@ export function Receipt({
         <ChevronDown size={14} />
       </button>
       <div id={id} className="receipt-steps" hidden={!open}>
-        {open && <DeliveryStepper progress={progress} fromPhone={fromPhone} />}
+        {open && <DeliveryStepper progress={progress} fromPhone={fromPhone} subject={subject} />}
       </div>
     </div>
   );
@@ -123,12 +127,14 @@ export function Receipt({
 export function DeliveryStepper({
   progress,
   fromPhone,
+  subject: named,
 }: {
   progress: DeliveryProgress;
   fromPhone: boolean;
+  subject?: string;
 }) {
   if (progress.step === 'attention') {
-    const subject = fromPhone ? 'Your answer' : 'The model answer';
+    const subject = named ?? (fromPhone ? 'Your answer' : 'The model answer');
     const uncertain = progress.detail === undefined && progress.label !== DELIVERY_LABELS.attention;
     const cause = progress.detail ? CAUSES[progress.detail] : undefined;
     return (

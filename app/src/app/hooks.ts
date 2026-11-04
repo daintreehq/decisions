@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { app, type AppSnapshot } from './controller.js';
 import type { QuestionView } from '../domain/model.js';
 import { agentStateView, type AgentStateView } from '../domain/agentState.js';
+import { needsAction } from '../domain/selectors.js';
 
 export function useApp(): AppSnapshot {
   return useSyncExternalStore(app.subscribe, app.getSnapshot);
@@ -12,6 +13,25 @@ export function useQuestions(): QuestionView[] {
   const snap = useApp();
   void snap.rev;
   return app.store ? app.store.list() : [];
+}
+
+/**
+ * Questions with a follow-up from this device that the relay refused for good (not sent; the words wait in the
+ * thread). Counted with the questions that need action, as a follow-up the computer could not type is.
+ */
+export function refusedFollowUps(): Set<string> {
+  return new Set(
+    (app.outbox?.list() ?? [])
+      .filter((e) => e.kind === 'message' && (e.state === 'rejected' || e.state === 'expired'))
+      .map((e) => e.questionId),
+  );
+}
+
+/** How many questions need action: `needsAction`, plus refused follow-ups, each question once. */
+export function useActionCount(now: number, except?: (v: QuestionView) => boolean): number {
+  const all = useQuestions();
+  const refused = refusedFollowUps();
+  return all.filter((v) => !except?.(v) && (needsAction(v, now) || refused.has(v.id))).length;
 }
 
 const noSubscribe = () => () => undefined;

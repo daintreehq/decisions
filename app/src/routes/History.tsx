@@ -59,10 +59,10 @@ function HistoryRow({
         Delivery issue
       </span>,
     );
-  if (e.hit === 'earlier')
+  if (e.hit === 'earlier' || e.hit === 'thread')
     meta.push(
       <span key="h" className="m hit">
-        Matched an earlier answer
+        {e.hit === 'earlier' ? 'Matched an earlier answer' : 'Matched a message'}
       </span>,
     );
   const closed = closedLine(e.status);

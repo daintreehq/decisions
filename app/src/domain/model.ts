@@ -4,13 +4,21 @@ import {
   type ActionKind,
   type DecisionContentV1,
   type LedgerEvent,
+  type MessageDeliveryInfo,
+  type MessageSide,
+  type MessageView as RelayMessageView,
   type Provenance,
   type QuestionStatus,
   type Requirement,
   type Role,
 } from '@daintreehq/decisions-protocol';
 import type { EpochKey } from '@daintreehq/decisions-crypto';
-import { verifyActionEvent, verifyQuestionEvent, type AnswerContent } from './verify.js';
+import {
+  verifyActionEvent,
+  verifyMessageEvent,
+  verifyQuestionEvent,
+  type AnswerContent,
+} from './verify.js';
 import { lastProxyAction } from './selectors.js';
 import type { TrustStore } from './trust.js';
 
@@ -41,6 +49,29 @@ export interface DeliveryView {
   errorCode?: string;
 }
 
+/**
+ * One message in a question's thread (docs/protocol.md section 16): a follow-up from the person or a message from the
+ * asking agent. It never changes the answer in force. `seq` is the ledger seq of its `decision.message.posted` event,
+ * which places it among the question's answers.
+ */
+export interface ThreadMessage {
+  messageId: string;
+  messageSeq: number;
+  seq: number;
+  side: MessageSide;
+  /** Agent only: the agent is waiting on the person. */
+  expectsReply: boolean;
+  createdAt: string;
+  committedAt: string;
+  signerDeviceId: string;
+  /** Verified, decrypted text; empty when it could not be verified. */
+  text: string;
+  verified: boolean;
+  error?: string;
+  /** Human only: where it has reached on its way into the pane, as the publishing desktop reported it. */
+  delivery: MessageDeliveryInfo | null;
+}
+
 export interface QuestionView {
   id: string;
   status: QuestionStatus;
@@ -58,6 +89,8 @@ export interface QuestionView {
   verification: { ok: true } | { ok: false; reason: string };
   content: DecisionContentV1 | null;
   actions: ActionView[];
+  /** The thread's messages in ledger order. */
+  messages: ThreadMessage[];
   deliveries: Record<number, DeliveryView>;
   attachmentsAvailable: Record<string, true>;
   integrityIssues: string[];
@@ -116,6 +149,26 @@ export class QuestionStore {
     for (const e of events) await this.ingest(e);
   }
 
+  /**
+   * Messages read from `GET /questions/{id}/messages` rather than the ledger (a device that turned the feature on
+   * after they were posted), as the ledger events they were: each is verified exactly as its event would be. Their
+   * current delivery comes with them. Returns the events so the caller can cache them like any other.
+   */
+  async adoptMessages(
+    questionId: string,
+    views: readonly RelayMessageView[],
+  ): Promise<LedgerEvent[]> {
+    const events = messageEvents(questionId, this.views.get(questionId)?.targetHostId ?? '', views);
+    for (const e of events) await this.ingest(e);
+    const view = this.views.get(questionId);
+    for (const m of views) {
+      const msg = view?.messages.find((x) => x.messageId === m.record.message_id);
+      if (msg && msg.side === 'human' && m.delivery) msg.delivery = m.delivery;
+    }
+    this.bump();
+    return events;
+  }
+
   /** Re-verify everything from scratch, e.g. after new epoch keys or certificates arrive. */
   async rebuild(events: LedgerEvent[]): Promise<void> {
     await this.chain;
@@ -167,6 +220,7 @@ export class QuestionStore {
       verification: { ok: false, reason },
       content: null,
       actions: [],
+      messages: [],
       deliveries: {},
       attachmentsAvailable: {},
       integrityIssues: [],
@@ -228,6 +282,7 @@ export class QuestionStore {
           verification: { ok: true },
           content: v.value.content,
           actions: [],
+          messages: [],
           deliveries: {},
           attachmentsAvailable: {},
           integrityIssues: issues,
@@ -329,6 +384,59 @@ export class QuestionStore {
         view.lastEventAt = ev.occurred_at;
         break;
       }
+      case 'decision.message.posted': {
+        if (!qid) break;
+        const parsed = EventData.messagePosted.safeParse(d);
+        const view = this.views.get(qid) ?? this.stub(qid, ev, 'question not found in ledger');
+        this.views.set(qid, view);
+        if (!parsed.success) {
+          this.malformedEvents++;
+          view.integrityIssues.push('malformed message event');
+          break;
+        }
+        const entry = parsed.data;
+        // Seen already (a backfilled copy, or the same message replayed): the first verified copy stands.
+        if (view.messages.some((m) => m.messageId === entry.record.message_id)) break;
+        const base = {
+          messageId: entry.record.message_id,
+          messageSeq: entry.message_seq,
+          seq: ev.seq,
+          side: entry.record.side,
+          expectsReply: entry.record.expects_reply,
+          createdAt: entry.record.created_at,
+          committedAt: entry.committed_at,
+          signerDeviceId: entry.record.signer_device_id,
+          delivery: null,
+        };
+        const v = view.verification.ok
+          ? await this.verifyWithRetry(() =>
+              verifyMessageEvent(d, ev.occurred_at, this.vctx(), qid, view.originatingDeviceId),
+            )
+          : ({ ok: false, reason: 'the question itself could not be verified' } as const);
+        if (!v.ok) {
+          // Kept in place (so the order stays honest) but never shown as anything anyone said.
+          view.messages.push({ ...base, text: '', verified: false, error: v.reason });
+          view.integrityIssues.push(`message: ${v.reason}`);
+        } else {
+          view.messages.push({ ...base, text: v.value.content.text, verified: true });
+        }
+        view.messages.sort((a, b) => a.seq - b.seq);
+        view.lastSeq = Math.max(view.lastSeq, ev.seq);
+        view.lastEventAt = ev.occurred_at;
+        break;
+      }
+      case 'delivery.message': {
+        const p = EventData.messageDelivery.safeParse(d);
+        const v = qid ? this.views.get(qid) : undefined;
+        if (!p.success || !v) break;
+        const m = v.messages.find((x) => x.messageId === p.data.message_id);
+        // Receipts describe human messages only, and only for the host the question was published to.
+        if (m && m.side === 'human' && p.data.target_host_id === v.targetHostId) {
+          const { message_id: _id, target_host_id: _host, ...info } = p.data;
+          m.delivery = info;
+        }
+        break;
+      }
       case 'decision.expired': {
         // Unsigned and relay-asserted: only believed once the SIGNED deadline has really passed by the relay's own clock.
         const v = qid ? this.views.get(qid) : undefined;
@@ -398,4 +506,32 @@ export class QuestionStore {
     }
     this.bump();
   }
+}
+
+/**
+ * The `decision.message.posted` events a page of `GET /questions/{id}/messages` stands for: same seq, same payload.
+ * Only the event id is local, since the relay never sent the event itself to this device.
+ */
+export function messageEvents(
+  questionId: string,
+  targetHostId: string,
+  views: readonly RelayMessageView[],
+): LedgerEvent[] {
+  return views.map((m) => ({
+    protocol_version: 1,
+    seq: m.event_seq,
+    event_id: `bf-${m.record.message_id}`.slice(0, 64),
+    event_type: 'decision.message.posted',
+    occurred_at: m.committed_at,
+    question_id: questionId,
+    question_revision: null,
+    origin_device_id: m.record.signer_device_id,
+    data: {
+      message_seq: m.message_seq,
+      committed_at: m.committed_at,
+      record: m.record,
+      envelope: m.envelope,
+      target_host_id: targetHostId,
+    },
+  }));
 }

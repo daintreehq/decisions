@@ -12,6 +12,7 @@ import {
   approveCandidate,
   claimRelay,
   createPairingInvite,
+  paneIdentityOf,
   revokeAndRotate,
   type LocateResult,
   type ProxyEngine,
@@ -218,6 +219,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   const images = new Map<string, Uint8Array>();
   const written: string[] = [];
   const ids: Record<string, string> = {};
+  const origins: Record<string, QuestionOrigin> = {};
 
   const settle = async () => {
     await page.evaluate(() => document.fonts.ready);
@@ -348,6 +350,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       proxy,
       policy: new PolicyRegistry({ proxyAllowlisted: true }),
       pumpIntervalMs: 0,
+      followUps: true,
       resolver: { resolve: async (_o, id) => (images.has(id) ? { bytes: images.get(id)! } : null) },
     });
     await bridge.start();
@@ -392,6 +395,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     const ask = async (key: string, o: QuestionOrigin, input: Record<string, unknown>) => {
       const r = await bridge.registerQuestion({ origin: o, input });
       ids[key] = r.questionId;
+      origins[key] = o;
     };
 
     // Created first so it has passed its expiry by the time the inbox is captured.
@@ -498,20 +502,35 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       .filter({ hasText: 'Typed into the terminal' })
       .waitFor({ timeout: 30_000 });
     await shot('15-detail-answered');
-    await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
-    await page.getByRole('menuitem', { name: 'Change answer' }).click();
-    await page
-      .getByRole('radio', { name: /Keep Canopy/ })
-      .first()
-      .check();
-    await typeAnswer('Canopy is the brand name; keep it.');
-    await shot('16-detail-override');
-    await page.getByRole('button', { name: 'Send correction' }).click();
-    await page.getByRole('dialog').waitFor();
-    await shot('17-dialog-overrule');
-    // Send it, so History and the activity timeline have a correction to show.
-    await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
-    await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 });
+    // The answer is final; more is a follow-up. Two of them, then the agent's reply in the same thread.
+    for (const words of [
+      'Also rename the route from /canopy to /inbox, with a redirect.',
+      'And update the screenshot in the docs.',
+    ]) {
+      await typeAnswer(words);
+      await page.getByRole('button', { name: 'Send follow-up' }).click();
+      await page
+        .locator('.ws .msg.out', { hasText: words })
+        .locator('.receipt')
+        .filter({ hasNotText: /Queued|Sending/ })
+        .first()
+        .waitFor({ timeout: 30_000 });
+    }
+    await bridge.postMessage(
+      {
+        question_id: ids.answered,
+        text: 'Done: the sidebar says Inbox, /canopy redirects to /inbox, and the docs screenshot is updated.',
+        expects_reply: false,
+      },
+      paneIdentityOf(origins.answered!),
+    );
+    await bridge.pump();
+    await page.locator('.ws .msg.note').waitFor({ timeout: 30_000 });
+    await page.evaluate(() => {
+      const b = document.querySelector('.ws-body');
+      if (b) b.scrollTop = b.scrollHeight;
+    });
+    await shot('16-detail-follow-up');
 
     await open('Approve the compact sidebar');
     await filesReady();
@@ -819,10 +838,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     // Phone: History, grouped; a search that only an earlier answer satisfies; a record with its timeline.
     await page.goto(relay.origin + '/history');
-    await page.getByText('Changed once').first().waitFor({ timeout: 30_000 });
+    await page.getByText('Rename “Canopy”').first().waitFor({ timeout: 30_000 });
     await shot('60-phone-history', { full: true });
-    await page.getByRole('searchbox', { name: 'Search history' }).fill('reads better');
-    await page.getByText('Matched an earlier answer').first().waitFor();
+    await page.getByRole('searchbox', { name: 'Search history' }).fill('redirect');
+    await page.getByText('Matched a message').first().waitFor();
     await shot('60-phone-history-search');
     await page.getByRole('button', { name: 'Clear search' }).click();
     await page.locator('.hrow', { hasText: 'Rename “Canopy”' }).click();
@@ -1140,13 +1159,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
         await filesReady();
         await shot(`40-ws-approval-${tag}`);
         await openId('answered');
-        await page.locator('.ws .receipt').waitFor({ timeout: 30_000 });
+        await page.locator('.ws .receipt').first().waitFor({ timeout: 30_000 });
         await shot(`40-ws-answered-${tag}`);
-        await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
-        await page.getByRole('menuitem', { name: /Change answer|Resume correction/ }).click();
-        await page.locator('#ws-correction').waitFor();
-        await shot(`40-ws-correction-${tag}`);
-        await page.locator('#ws-correction').getByRole('button', { name: 'Cancel' }).click();
         await openId('proxy');
         await page.locator('.ws .msg.model').waitFor({ timeout: 30_000 });
         await shot(`40-ws-model-${tag}`);
@@ -1165,7 +1179,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));
     await page.getByRole('radio', { name: /^Warn/ }).first().check();
     await page.getByRole('button', { name: 'Send answer' }).click();
-    await page.locator('.ws .receipt').waitFor({ timeout: 10_000 });
+    await page.locator('.ws .receipt').first().waitFor({ timeout: 10_000 });
     await shot('40-ws-queued-offline');
     conflictArmed = true;
     // The model passed on it when it was asked; let it look again now.

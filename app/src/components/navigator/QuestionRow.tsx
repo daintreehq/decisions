@@ -2,22 +2,26 @@ import { memo, type MouseEvent } from 'react';
 import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import {
-  answerSummary,
   choiceLine,
   closedLine,
   dueLabel,
   principalStatus,
+  rowSummary,
   type RowStatus,
 } from '../../domain/lists.js';
-import { hiddenQuestionText, originParts } from '../../domain/selectors.js';
+import { deliveryIssue, hiddenQuestionText, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { ageLabel } from '../../lib/time.js';
 import { AgentStateMark } from '../AgentState.js';
 import { ClockIcon, SendIcon, WarningIcon } from '../Icons.js';
 import { StatusGlyph } from './StatusGlyph.js';
 
-/** An answer from this device still in its outbox: what was chosen, and whether it is queued or in flight. */
+/**
+ * Something from this device still in its outbox: an answer (what was chosen) or a follow-up message, and whether it
+ * is queued or in flight.
+ */
 export interface PendingAnswer {
+  kind: 'answer' | 'message';
   state: 'queued' | 'sending';
   selected: string[];
   text: string;
@@ -25,6 +29,8 @@ export interface PendingAnswer {
 
 export interface RowExtras {
   pending: PendingAnswer | undefined;
+  /** A follow-up from this device was refused by the relay and waits, unsent, in the thread. */
+  refused?: boolean;
 }
 
 /**
@@ -64,11 +70,16 @@ export const QuestionRow = memo(function QuestionRow({
   onOpen: (e: MouseEvent<HTMLAnchorElement>, id: string) => void;
 }) {
   const pending = extras.pending;
-  // An answer that has not left this device is the person's, already decided: it reads as theirs, not as owed.
-  const status: RowStatus = pending ? 'sending' : principalStatus(v, now);
-  const answer = pending
-    ? { author: 'You' as const, text: choiceLine(v, pending.selected, pending.text) }
-    : answerSummary(v);
+  // An answer that has not left this device is the person's, already decided: it reads as theirs, not as owed. A
+  // follow-up still leaving never stands in for the answer: the row keeps the answer in force.
+  const base: RowStatus = pending ? 'sending' : principalStatus(v, now);
+  // A follow-up that was not sent is something to look at, like one the computer couldn't type.
+  const status: RowStatus =
+    extras.refused && (base === 'answered' || base === 'review') ? 'delivery' : base;
+  const answer =
+    pending?.kind === 'answer'
+      ? { author: 'You', text: choiceLine(v, pending.selected, pending.text) }
+      : rowSummary(v, now);
   const closed = closedLine(status);
   const due =
     !pending && v.expiresAt && Date.parse(v.expiresAt) - now < DUE_SOON_MS
@@ -101,7 +112,7 @@ export const QuestionRow = memo(function QuestionRow({
           </time>
         </span>
         {answer ? (
-          <span className="qrow-a">
+          <span className={'ask' in answer && answer.ask ? 'qrow-a ask' : 'qrow-a'}>
             <span className="who">{answer.author}:</span> {answer.text || 'No note'}
           </span>
         ) : (
@@ -129,14 +140,28 @@ export const QuestionRow = memo(function QuestionRow({
           {pending && (
             <span className="badge">
               <SendIcon size={12} />
-              {pending.state === 'queued' ? 'Queued on this device' : 'Sending…'}
+              {pending.kind === 'message'
+                ? pending.state === 'queued'
+                  ? 'Follow-up queued'
+                  : 'Sending follow-up…'
+                : pending.state === 'queued'
+                  ? 'Queued on this device'
+                  : 'Sending…'}
             </span>
           )}
-          {status === 'delivery' && (
+          {extras.refused ? (
             <span className="badge warn">
               <WarningIcon size={12} />
-              Delivery issue
+              Follow-up not sent
             </span>
+          ) : (
+            status === 'delivery' && (
+              <span className="badge warn">
+                <WarningIcon size={12} />
+                {/* Say which: the answer above is fine when only a follow-up is stuck. */}
+                {deliveryIssue(v) === 'follow-up' ? 'Follow-up delivery issue' : 'Delivery issue'}
+              </span>
+            )
           )}
           {/* Last, in a slot that never changes the line count: going stale or changing word only redraws it. */}
           {agent && (

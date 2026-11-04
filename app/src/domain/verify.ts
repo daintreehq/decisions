@@ -4,11 +4,16 @@ import {
   DecisionContentV1,
   EventData,
   HumanAnswerContentV1,
+  MESSAGE_RECORD_TYPE,
+  MessageContentV1,
   ProxyAnswerContentV1,
   QuestionRecord,
+  imagesMatchRecord,
+  messageEnvelopeIssues,
   provenanceForAction,
   type ActionKind,
   type ActionRecord,
+  type MessageRecord,
   type Provenance,
   type Role,
 } from '@daintreehq/decisions-protocol';
@@ -104,6 +109,71 @@ export async function verifyQuestionEvent(
   const content = DecisionContentV1.safeParse(plain);
   if (!content.success) return fail('question content is malformed');
   return { ok: true, value: { record, content: content.data } };
+}
+
+export interface VerifiedMessage {
+  record: MessageRecord;
+  signerRole: Role;
+  content: MessageContentV1;
+}
+
+/**
+ * A thread message (docs/protocol.md section 16): a human one signed by a paired phone or tablet, an agent one
+ * signed by the desktop that published the question (`publisherDeviceId`) and by no other. Its content is opened
+ * only once the signature, the envelope's bindings and the signer's role all hold, and it is shown only when the
+ * content says the same side and lists the same images as the signed record.
+ */
+export async function verifyMessageEvent(
+  data: unknown,
+  occurredAt: string,
+  ctx: VerifyCtx,
+  eventQuestionId: string | null,
+  publisherDeviceId: string,
+): Promise<Verified<VerifiedMessage>> {
+  const parsed = EventData.messagePosted.safeParse(data);
+  if (!parsed.success) return fail('malformed message event');
+  const { record, envelope } = parsed.data;
+  if (eventQuestionId !== record.question_id || envelope.aad.question_id !== record.question_id) {
+    return fail('question id does not match the signed record');
+  }
+  if (record.installation_id !== ctx.installationId)
+    return fail('message belongs to another installation');
+  if (messageEnvelopeIssues(record, envelope).length > 0) return fail('envelope binding mismatch');
+  const signer = ctx.trust.get(record.signer_device_id);
+  if (!signer) return fail('unknown signer');
+  if (record.side === 'human' && !HUMAN.includes(signer.role))
+    return fail(`a ${signer.role} cannot sign a human message`);
+  if (
+    record.side === 'agent' &&
+    (!DESKTOP.includes(signer.role) || record.signer_device_id !== publisherDeviceId)
+  )
+    return fail('only the desktop that asked the question speaks for its agent');
+  if (signer.revokedAt && occurredAt > signer.revokedAt)
+    return fail('signed by a device after it was revoked');
+  if (!(await verifyRecordAndEnvelope(record, envelope, signer.signingKey))) {
+    return fail('signature or ciphertext does not match');
+  }
+  if (!ctx.epochKeys.has(envelope.key_epoch)) return fail(NO_EPOCH_KEY);
+  let plain: unknown;
+  try {
+    plain = await decryptEnvelope(envelope, ctx.epochKeys, {
+      installationId: ctx.installationId,
+      questionId: record.question_id,
+      senderDeviceId: record.signer_device_id,
+      recordType: MESSAGE_RECORD_TYPE,
+      revision: 0,
+      purpose: 'message-content',
+    });
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : 'could not decrypt');
+  }
+  const content = MessageContentV1.safeParse(plain);
+  if (!content.success) return fail('message content is malformed');
+  if (content.data.side !== record.side) return fail('message content disagrees with its record');
+  const images = content.data.side === 'human' ? content.data.images : [];
+  if (!imagesMatchRecord(record.attachment_ids, images))
+    return fail('message images disagree with its record');
+  return { ok: true, value: { record, signerRole: signer.role, content: content.data } };
 }
 
 export type AnswerContent = HumanAnswerContentV1 | ProxyAnswerContentV1;

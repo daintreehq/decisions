@@ -5,11 +5,16 @@ import { RelayError } from './relay.js';
 
 export type OutboxState = 'queued' | 'sending' | 'conflicted' | 'rejected' | 'expired';
 
+/** What an entry sends: one of the person's actions on the question, or a follow-up message in its thread. */
+export type OutboxKind = HumanActionKind | 'message';
+
 export interface OutboxEntry {
   id: string;
   createdAt: number;
   questionId: string;
-  kind: HumanActionKind;
+  kind: OutboxKind;
+  /** A follow-up's signed message id (the same on every attempt). */
+  messageId?: string;
   path: string;
   /** Exact serialised request; identical on every attempt. */
   bodyText: string;
@@ -24,6 +29,8 @@ export interface OutboxEntry {
   attempts: number;
   /** Revision the relay reported when it refused (conflict). */
   latestRevision?: number;
+  /** The relay's error code when it refused for good. */
+  errorCode?: string;
 }
 
 export interface Poster {
@@ -32,14 +39,20 @@ export interface Poster {
 
 export interface OutboxHooks {
   onCommitted?: (e: OutboxEntry) => void;
+  /**
+   * Awaited after the relay commits an entry and before its local copy goes: reading the commit back first means
+   * the thread never shows a gap where the sent item was. A failure here never keeps the entry.
+   */
+  settle?: (e: OutboxEntry) => Promise<unknown> | undefined;
   onChange?: () => void;
 }
 
 const label = (id: string) => `outbox:${id}`;
 
 /**
- * Encrypted, durable queue of human actions. An action lives here from the moment the human taps Submit
- * until the relay has committed (or definitively refused) it. Nothing in it is plaintext at rest.
+ * Encrypted, durable queue of what the person sends: answers and other actions, and follow-up messages. Each lives
+ * here from the moment they tap Send until the relay has committed (or definitively refused) it, and goes out in the
+ * order it was sent. Nothing in it is plaintext at rest.
  */
 export class Outbox {
   private entries = new Map<string, OutboxEntry>();
@@ -92,6 +105,18 @@ export class Outbox {
       (x) => x.state === 'queued' || x.state === 'sending',
     );
     return e ? (e.state as 'queued' | 'sending') : undefined;
+  }
+
+  /** Put a refused entry back in the queue as it was (same request, same idempotency key) and send it. */
+  async retry(id: string): Promise<void> {
+    const e = this.entries.get(id);
+    if (!e || e.state === 'queued' || e.state === 'sending') return;
+    e.state = 'queued';
+    delete e.error;
+    delete e.errorCode;
+    await this.persist(e);
+    this.changed();
+    void this.flush();
   }
 
   private async persist(e: OutboxEntry): Promise<void> {
@@ -151,17 +176,21 @@ export class Outbox {
       this.changed();
       try {
         await this.poster().jsonRaw('POST', e.path, e.bodyText);
+        await Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
         await this.discard(e.id);
         this.hooks.onCommitted?.(e);
       } catch (err) {
         if (err instanceof RelayError && !err.retryable) {
+          // A message has no revision to conflict with: a closed thread or a full one simply refuses it.
           e.state =
-            err.code === 'revision_conflict' || err.code === 'invalid_state'
+            e.kind !== 'message' &&
+            (err.code === 'revision_conflict' || err.code === 'invalid_state')
               ? 'conflicted'
               : err.code === 'expired'
                 ? 'expired'
                 : 'rejected';
           e.error = err.message;
+          e.errorCode = err.code;
           const latest = err.details?.latest_revision;
           if (typeof latest === 'number') e.latestRevision = latest;
           await this.persist(e);
@@ -188,7 +217,7 @@ export interface Draft {
   reason: string;
   /** Absent on version 1 rows (written before drafts knew their revision). */
   v?: 2;
-  mode?: 'answer' | 'correction';
+  mode?: DraftMode;
   /** The question revision this draft was reviewed against; null when unknown (a version 1 row). */
   revision?: number | null;
   caret?: { field: 'text' | 'reason'; start: number; end: number } | null;
@@ -202,13 +231,16 @@ export interface Draft {
   } | null;
 }
 
+/** What a draft is for: the answer, a correction (overruling a model answer), or a follow-up message. */
+export type DraftMode = 'answer' | 'correction' | 'message';
+
 /**
  * The row a draft lives in. An answer draft keeps the question id as its key, so version 1 rows are read in place;
- * a correction draft sits beside it. Revision is inside the sealed draft, never in the key, so a draft written
- * against an earlier revision is still found (and flagged) rather than orphaned.
+ * a correction or follow-up draft sits beside it. Revision is inside the sealed draft, never in the key, so a draft
+ * written against an earlier revision is still found (and flagged) rather than orphaned.
  */
-export function draftRowId(questionId: string, mode: 'answer' | 'correction' = 'answer'): string {
-  return mode === 'answer' ? questionId : `${questionId}#correction`;
+export function draftRowId(questionId: string, mode: DraftMode = 'answer'): string {
+  return mode === 'answer' ? questionId : `${questionId}#${mode}`;
 }
 
 /** Normalises any stored version to the current shape, conservatively: a version 1 row knows no revision. */
@@ -218,7 +250,7 @@ export function upgradeDraft(d: Draft): Draft & { v: 2; revision: number | null 
     text: typeof d.text === 'string' ? d.text : '',
     reason: typeof d.reason === 'string' ? d.reason : '',
     v: 2,
-    mode: d.mode === 'correction' ? 'correction' : 'answer',
+    mode: d.mode === 'correction' || d.mode === 'message' ? d.mode : 'answer',
     revision: typeof d.revision === 'number' ? d.revision : null,
     caret: d.caret ?? null,
     passage: d.passage ?? null,

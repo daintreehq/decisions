@@ -1,5 +1,5 @@
-import type { ActionKind } from '@daintreehq/decisions-protocol';
-import type { ActionView, QuestionStore, QuestionView } from './model.js';
+import { threadAwaitsHuman, type ActionKind } from '@daintreehq/decisions-protocol';
+import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
@@ -32,8 +32,45 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
   return null;
 }
 
-export const needsYou = (v: QuestionView, now = Date.now()): boolean =>
+/** A question that can still be answered: open, verified and not past its deadline. */
+export const answerable = (v: QuestionView, now = Date.now()): boolean =>
   effectiveStatus(v, now) === 'open';
+
+const HUMAN_TURNS: ActionKind[] = ['answer', 'override', 'confirm-proxy'];
+
+/**
+ * The agent asked the person something in the thread and nothing human has come after it (a follow-up, an answer,
+ * an override or a confirmation): an answered question needs the person again (docs/protocol.md section 16.2).
+ * Only verified messages count; a closed or expired thread waits on nobody.
+ */
+export function awaitingReply(v: QuestionView, now = Date.now()): boolean {
+  const s = effectiveStatus(v, now);
+  if (s === 'unverified' || s === 'expired' || s === 'cancelled') return false;
+  let lastHumanActionSeq = 0;
+  for (const a of v.actions)
+    if (a.verified && HUMAN_TURNS.includes(a.action)) lastHumanActionSeq = a.seq;
+  return threadAwaitsHuman({
+    status: s,
+    messages: v.messages
+      .filter((m) => m.verified)
+      .map((m) => ({ side: m.side, expects_reply: m.expectsReply, event_seq: m.seq })),
+    lastHumanActionSeq,
+  });
+}
+
+/** The agent message that is waiting on the person, when there is one. */
+export function pendingAsk(v: QuestionView, now = Date.now()): ThreadMessage | null {
+  if (!awaitingReply(v, now)) return null;
+  for (let i = v.messages.length - 1; i >= 0; i--) {
+    const m = v.messages[i]!;
+    if (m.verified && m.side === 'agent') return m.expectsReply ? m : null;
+  }
+  return null;
+}
+
+/** Waiting on the person: a question to answer, or an agent message asking for a reply. */
+export const needsYou = (v: QuestionView, now = Date.now()): boolean =>
+  answerable(v, now) || awaitingReply(v, now);
 
 /** Open questions, plus answered ones whose delivery needs the owner to look at their computer. */
 export const needsAction = (v: QuestionView, now = Date.now()): boolean =>
@@ -75,6 +112,28 @@ export function statusLabel(s: EffectiveStatus, v?: QuestionView): string {
   }
 }
 
+const AGENT_NAMES: Record<string, string> = {
+  'claude-code': 'Claude Code',
+  claude: 'Claude Code',
+  codex: 'Codex',
+  gemini: 'Gemini',
+  'gemini-cli': 'Gemini',
+  cursor: 'Cursor',
+  aider: 'Aider',
+  opencode: 'OpenCode',
+  copilot: 'Copilot',
+};
+
+/** The asking agent's kind, as people say it ("Claude Code"), from the signed origin summary ("kind · worktree"). */
+export function agentName(v: QuestionView): string {
+  const kind = (v.content?.origin_summary ?? '').split(' · ')[0]!.trim().toLowerCase().slice(0, 40);
+  if (!kind) return 'Your agent';
+  const known = AGENT_NAMES[kind];
+  if (known) return known;
+  const words = kind.replace(/[-_]+/g, ' ').trim();
+  return words ? words[0]!.toUpperCase() + words.slice(1) : 'Your agent';
+}
+
 /** Project and machine kept apart, so the row can lead with the project and still always show the machine. */
 export function originParts(v: QuestionView): { project: string; machine: string } {
   const c = v.content;
@@ -95,6 +154,21 @@ export function submitKind(v: QuestionView, now = Date.now()): 'answer' | 'overr
   if (s === 'open') return 'answer';
   if (s === 'human-answered' || s === 'proxy-answered') return 'override';
   return null;
+}
+
+/**
+ * A model answer in force that the person has neither confirmed nor overruled: the only answer this app offers to
+ * replace. A person's own answer is final (docs/protocol.md section 16.1); saying more is a follow-up.
+ */
+export function canOverrule(v: QuestionView, now = Date.now()): boolean {
+  const a = currentAnswer(v);
+  return !!a && a.provenance === 'proxy' && proxyNeedsReview(v, now);
+}
+
+/** The thread takes messages: answered or still open, never expired or withdrawn (docs/protocol.md section 16). */
+export function threadOpen(v: QuestionView, now = Date.now()): boolean {
+  const s = effectiveStatus(v, now);
+  return s === 'open' || s === 'human-answered' || s === 'proxy-answered';
 }
 
 export type DeliveryStep =
@@ -120,12 +194,22 @@ export const DELIVERY_DONE_LABELS: Partial<Record<DeliveryStep, string>> = {
   sending: 'Sent',
 };
 
-/** True when the answer in force could not be confirmed as delivered and the owner should look at it. */
+/**
+ * True when the answer in force, or one of the person's follow-ups, could not be confirmed as typed into the terminal
+ * and the owner should look at their computer. The answer in force is untouched either way.
+ */
 export function deliveryNeedsAttention(v: QuestionView): boolean {
+  return deliveryIssue(v) !== null;
+}
+
+/** Which delivery needs the owner: the answer in force (named first), a follow-up, or none. */
+export function deliveryIssue(v: QuestionView): 'answer' | 'follow-up' | null {
+  const stuck = (s: string | undefined) => s === 'needs-attention' || s === 'delivery-uncertain';
   const a = currentAnswer(v);
-  if (!a) return false;
-  const d = v.deliveries[a.revision];
-  return d?.status === 'needs-attention' || d?.status === 'delivery-uncertain';
+  if (a && stuck(v.deliveries[a.revision]?.status)) return 'answer';
+  return v.messages.some((m) => m.verified && m.side === 'human' && stuck(m.delivery?.status))
+    ? 'follow-up'
+    : null;
 }
 
 /** Progress of the answer in force. `pending` is the local outbox state for this question, if any. */
@@ -154,6 +238,32 @@ export function deliveryProgress(
   return { step: 'confirmed', label: DELIVERY_LABELS.confirmed };
 }
 
+/**
+ * Where one of the person's follow-ups has reached. `pending` is its local outbox state while it has not left this
+ * device; once the relay has it, the publishing desktop's explicit receipts move it on. A ledger acknowledgement
+ * never marks a message received (docs/protocol.md section 16.4).
+ */
+export function messageProgress(
+  m: Pick<ThreadMessage, 'delivery'> | null,
+  pending?: 'queued' | 'sending',
+): DeliveryProgress {
+  if (pending) return { step: pending, label: DELIVERY_LABELS[pending] };
+  const d = m?.delivery;
+  if (d?.status === 'terminal-delivered')
+    return { step: 'terminal', label: DELIVERY_LABELS.terminal };
+  if (d?.status === 'needs-attention' || d?.status === 'delivery-uncertain')
+    return {
+      step: 'attention',
+      label:
+        d.status === 'delivery-uncertain'
+          ? 'Delivery couldn’t be confirmed'
+          : DELIVERY_LABELS.attention,
+      detail: d.status === 'delivery-uncertain' ? undefined : (d.error_code ?? undefined),
+    };
+  if (d?.status === 'received') return { step: 'desktop', label: DELIVERY_LABELS.desktop };
+  return { step: 'confirmed', label: DELIVERY_LABELS.confirmed };
+}
+
 /** Plain label for the project/machine filter: decrypted labels only, never raw ids. */
 export function originLabel(v: QuestionView): string {
   const c = v.content;
@@ -169,7 +279,7 @@ export function sortNeedsYou(
 ): QuestionView[] {
   // Only a question that can still be answered is urgent; an answered one with an old deadline is not.
   const urgent = (v: QuestionView) =>
-    needsYou(v, now) && v.expiresAt !== null && Date.parse(v.expiresAt) - now < 24 * 3_600_000;
+    answerable(v, now) && v.expiresAt !== null && Date.parse(v.expiresAt) - now < 24 * 3_600_000;
   return [...list].sort((a, b) => {
     if (newestFirst) return Date.parse(b.createdAt) - Date.parse(a.createdAt);
     const ua = urgent(a);

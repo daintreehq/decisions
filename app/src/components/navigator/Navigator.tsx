@@ -10,7 +10,14 @@ import {
   type ReactNode,
 } from 'react';
 import { app } from '../../app/controller.js';
-import { useAgentStates, useApp, useInteracting, useNow, useQuestions } from '../../app/hooks.js';
+import {
+  refusedFollowUps,
+  useAgentStates,
+  useApp,
+  useInteracting,
+  useNow,
+  useQuestions,
+} from '../../app/hooks.js';
 import {
   resolvePersistedFilters,
   rowClick,
@@ -251,19 +258,28 @@ export function NavigatorPanel({
   const filterLabel =
     activeFilters > 0 ? `Filter questions, ${activeFilters} active` : 'Filter questions';
 
-  /* ---- answers from this device still in its outbox ---- */
+  /* ---- answers and follow-ups from this device still in its outbox ---- */
   void snap.rev; // re-read outbox state on every app change
   const pendingById = new Map<string, PendingAnswer>();
-  for (const e of app.outbox?.list() ?? [])
-    if ((e.state === 'queued' || e.state === 'sending') && !pendingById.has(e.questionId))
-      pendingById.set(e.questionId, { state: e.state, selected: e.selected, text: e.text });
+  for (const e of app.outbox?.list() ?? []) {
+    if (e.state !== 'queued' && e.state !== 'sending') continue;
+    const kind = e.kind === 'message' ? 'message' : 'answer';
+    const had = pendingById.get(e.questionId);
+    // An answer on its way says more about the row than a follow-up behind it.
+    if (!had || (had.kind === 'message' && kind === 'answer'))
+      pendingById.set(e.questionId, { kind, state: e.state, selected: e.selected, text: e.text });
+  }
+  const refusedIds = refusedFollowUps();
+  const refusedKey = [...refusedIds].sort().join(',');
+  const refused = useMemo(() => new Set(refusedKey ? refusedKey.split(',') : []), [refusedKey]);
   const pendingKey = [...pendingById.keys()].sort().join(',');
   const pendingIds = useMemo(() => new Set(pendingKey ? pendingKey.split(',') : []), [pendingKey]);
 
   /* ---- sections, held still under the finger ---- */
   const sections = useMemo(
-    () => homeSections(all, { ...filters, sort: nav.sort, query, pending: pendingIds }, now),
-    [all, filters, nav.sort, query, pendingIds, now],
+    () =>
+      homeSections(all, { ...filters, sort: nav.sort, query, pending: pendingIds, refused }, now),
+    [all, filters, nav.sort, query, pendingIds, refused, now],
   );
   const byId = useMemo(() => {
     const m = new Map<string, { v: QuestionView; section: number }>();
@@ -439,7 +455,7 @@ export function NavigatorPanel({
                     v={v}
                     now={now}
                     selected={id === currentId}
-                    extras={{ pending: pendingById.get(id) }}
+                    extras={{ pending: pendingById.get(id), refused: refused.has(id) }}
                     agent={agentFor(v)}
                     onOpen={onOpen}
                   />

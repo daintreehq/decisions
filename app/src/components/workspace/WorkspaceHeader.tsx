@@ -13,7 +13,8 @@ export interface MenuItem {
  * - leading: the menu button's slot (below 1100px the floating button sits over it) and Back, only when the
  *   question was reached from inside the app;
  * - centre: the project over the computer, or, once the question has scrolled away, a one-line excerpt over
- *   "project · computer" that scrolls back to the question;
+ *   the answer in force ("Answer: Yes, rename") or, before there is one, "project · computer", which scrolls
+ *   back to the question;
  * - trailing: the terminal button (its slot stays reserved when the relay serves no snapshots), then the overflow
  *   menu.
  */
@@ -21,6 +22,7 @@ export function WorkspaceHeader({
   project,
   machine,
   excerpt,
+  answerLine,
   showExcerpt,
   onExcerpt,
   back,
@@ -30,6 +32,8 @@ export function WorkspaceHeader({
   project: string;
   machine: string;
   excerpt?: string;
+  /** The answer in force in one line, kept in view under the excerpt while follow-ups scroll by. */
+  answerLine?: string | null;
   showExcerpt?: boolean;
   onExcerpt?: () => void;
   /** Offer Back: navigation reached this question from a page inside the app. */
@@ -66,9 +70,18 @@ export function WorkspaceHeader({
           <button type="button" className="ws-excerpt" onClick={onExcerpt}>
             <span className="ws-title-main">{excerpt}</span>
             <span className="ws-title-sub">
-              <span className="sr-only">, from </span>
-              {project}
-              {machine && ` · ${machine}`}
+              {answerLine ? (
+                <>
+                  <span className="sr-only">. </span>
+                  {answerLine}
+                </>
+              ) : (
+                <>
+                  <span className="sr-only">, from </span>
+                  {project}
+                  {machine && ` · ${machine}`}
+                </>
+              )}
               <span className="sr-only">. Scroll to the question.</span>
             </span>
           </button>

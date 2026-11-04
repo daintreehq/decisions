@@ -53,6 +53,7 @@ function q(
       machine_label: machine,
     },
     actions: [],
+    messages: [],
     deliveries: {},
     attachmentsAvailable: {},
     integrityIssues: [],

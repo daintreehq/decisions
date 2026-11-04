@@ -1,7 +1,7 @@
 import { forwardRef, type ReactNode, type Ref } from 'react';
 import type { ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
-import type { ActionView, QuestionView } from '../../domain/model.js';
-import { originParts } from '../../domain/selectors.js';
+import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
+import { agentName, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
@@ -30,27 +30,7 @@ export const Thread = forwardRef(function Thread(
   );
 });
 
-const AGENT_NAMES: Record<string, string> = {
-  'claude-code': 'Claude Code',
-  claude: 'Claude Code',
-  codex: 'Codex',
-  gemini: 'Gemini',
-  'gemini-cli': 'Gemini',
-  cursor: 'Cursor',
-  aider: 'Aider',
-  opencode: 'OpenCode',
-  copilot: 'Copilot',
-};
-
-/** The asking agent's kind, as people say it ("Claude Code"), from the signed origin summary ("kind · worktree"). */
-export function agentName(v: QuestionView): string {
-  const kind = (v.content?.origin_summary ?? '').split(' · ')[0]!.trim().toLowerCase().slice(0, 40);
-  if (!kind) return 'Your agent';
-  const known = AGENT_NAMES[kind];
-  if (known) return known;
-  const words = kind.replace(/[-_]+/g, ' ').trim();
-  return words ? words[0]!.toUpperCase() + words.slice(1) : 'Your agent';
-}
+export { agentName } from '../../domain/selectors.js';
 
 function Time({ iso, now }: { iso: string; now: number }) {
   return (
@@ -102,6 +82,41 @@ export function AgentMessage({
         {choices}
       </div>
       {meta && <p className="msg-meta">{meta}</p>}
+    </div>
+  );
+}
+
+/**
+ * A message from the asking agent after its question: the agent's name and the time, then what it said. When it is
+ * waiting on the person, the words say so beneath it, beside the same amber ring that marks Needs you in the list.
+ */
+export function AgentNote({
+  view,
+  m,
+  now,
+  asking,
+}: {
+  view: QuestionView;
+  m: ThreadMessage;
+  now: number;
+  /** This message is the one the agent is waiting on a reply to. */
+  asking: boolean;
+}) {
+  return (
+    <div className={`msg in agent note${asking ? ' asking' : ''}`}>
+      <p className="msg-from">
+        <span className="msg-name">{agentName(view)}</span>
+        <Time iso={m.createdAt} now={now} />
+      </p>
+      <div className="bubble">
+        <SafeText text={m.text} className="msg-text" />
+      </div>
+      {asking && (
+        <p className="msg-meta msg-asking">
+          <span className="ask-ring" aria-hidden="true" />
+          Waiting for your reply
+        </p>
+      )}
     </div>
   );
 }
@@ -211,23 +226,29 @@ export function OutgoingMessage({
   );
 }
 
-/** A human answer or correction, as the person's reply. */
+/**
+ * A human answer, as the person's reply, named as the answer so it stays distinct from the follow-ups after it. An
+ * older app's correction of an answer reads "Changed answer".
+ */
 export function HumanAnswer({
   view,
   a,
+  changed,
   now,
   receipt,
   flagged,
 }: {
   view: QuestionView;
   a: ActionView;
+  /** It replaced the person's own earlier answer (an older app's correction). */
+  changed?: boolean;
   now: number;
   receipt?: ReactNode;
   flagged?: boolean;
 }) {
   return (
     <OutgoingMessage
-      label={a.action === 'override' ? 'Changed answer' : undefined}
+      label={changed ? 'Changed answer' : 'Your answer'}
       at={a.createdAt}
       now={now}
       receipt={receipt}
