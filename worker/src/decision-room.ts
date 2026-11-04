@@ -55,7 +55,10 @@ interface SocketAttachment {
   features?: ProtocolFeature[];
 }
 
-/** A socket `sync` replay is bounded by events and bytes; `caught_up.has_more` says to continue. */
+/**
+ * A socket `sync` replay is bounded by events and by UTF-8 bytes of the frames sent; `caught_up.has_more` says to
+ * continue.
+ */
 const SYNC_MAX_EVENTS = 2000;
 const SYNC_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -649,7 +652,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
           (ev) => {
             const text = JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame);
             frames.set(ev.seq, text);
-            return text.length;
+            return utf8ByteLength(text);
           },
         );
         for (const ev of page.events) {

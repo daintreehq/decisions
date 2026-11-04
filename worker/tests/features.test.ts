@@ -435,4 +435,29 @@ describe('feature negotiation with pane snapshots (docs/protocol.md section 19)'
     expect(tail.next_after).toBe(tail.high_water_seq);
     expect(tail.next_after).toBe(visible.at(-1)! + LIMITS.eventPageSize * 2);
   });
+
+  it('bounds a socket replay by the UTF-8 bytes of the frames it sends', async () => {
+    const w = await claimRelay();
+    // Ten events of about 900 kB in UTF-8 but 300 k characters each: 9 MB of frames, 3 M characters.
+    const wide = JSON.stringify({ note: '漢'.repeat(300_000) });
+    await inRoom((room) => {
+      for (let i = 0; i < 10; i++) {
+        room.run(
+          `INSERT INTO events (event_id, event_type, question_id, question_revision, origin_device_id, data, created_at)
+           VALUES (?, 'attachment.available', NULL, NULL, NULL, ?, ?)`,
+          newId(),
+          wide,
+          Date.now(),
+        );
+      }
+    });
+    const sock = await openSocket(w.owner);
+    sock.ws.send(JSON.stringify({ t: 'sync', after: 0 }));
+    const first = await sock.waitFor((f) => f.t === 'caught_up', 10_000);
+    const sent = sock.frames.filter((f) => f.t === 'event');
+    expect(first.has_more).toBe(true);
+    expect(sent).toHaveLength(9);
+    expect(first.high_water).toBe(sent.at(-1).event.seq);
+    sock.close();
+  });
 });

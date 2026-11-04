@@ -796,12 +796,22 @@ describe('edge cases', () => {
     }
   });
 
+  /** No job or alarm may run on its own and drain a backlog before the read under test. */
+  const quietAlarm = async () => {
+    await settle();
+    await inRoom(async (room, state) => {
+      room.run(`UPDATE scheduled_jobs SET status = 'done' WHERE status = 'pending'`);
+      await state.storage.deleteAlarm();
+    });
+  };
+
   it('retires the requested snapshot on read even past the sweep budget', async () => {
     const { w, phone, publisher, questionId } = await setup();
     await publish(w, publisher, questionId);
+    await quietAlarm();
     const now = Date.now();
     await inRoom((room) => {
-      // 2050 overdue rows ahead of it: more than one read's bounded sweep retires.
+      // 2050 overdue rows ahead of it: more than one read's bounded sweep (40 x 50) retires.
       for (let i = 0; i < 2050; i++) {
         room.run(
           `INSERT INTO question_snapshots (question_id, record_json, envelope_json, received_at, retain_until)
@@ -818,6 +828,55 @@ describe('edge cases', () => {
       );
     });
     expect((await getSnapshot(phone, questionId)).json.snapshot).toBeNull();
+    const row = await inRoom((room) =>
+      room.q1<Record<string, unknown>>(
+        `SELECT record_json, envelope_json FROM question_snapshots WHERE question_id = ?`,
+        questionId,
+      ),
+    );
+    expect(row).toEqual({ record_json: null, envelope_json: null });
+  });
+
+  it('expires the requested question on read even past the expiry sweep budget', async () => {
+    const { w, phone, publisher, questionId } = await setup();
+    await publish(w, publisher, questionId);
+    await quietAlarm();
+    const now = Date.now();
+    await inRoom((room) => {
+      // 2050 overdue open questions created before it: more than one read's bounded expiry sweep handles.
+      for (let i = 0; i < 2050; i++) {
+        room.run(
+          `INSERT INTO questions (question_id, creator_device_id, target_host_id, origin_ref, requirement,
+             key_epoch, record_json, envelope_json, envelope_digest, created_at, expires_at)
+           VALUES (?, ?, 'host_aaaaaaaa', ?, 'human-required', 1, '{}', '{}', ?, ?, ?)`,
+          `q_overdue${String(i).padStart(5, '0')}`,
+          w.owner.id,
+          `pane_${i}`,
+          'a'.repeat(64),
+          now - 10_000_000 + i,
+          now - 1,
+        );
+      }
+      room.run(`UPDATE questions SET expires_at = ? WHERE question_id = ?`, now - 1, questionId);
+    });
+    expect((await getSnapshot(phone, questionId)).json).toEqual({
+      question_id: questionId,
+      snapshot: null,
+      received_at: null,
+      refresh: null,
+    });
+    const after = await inRoom((room) => ({
+      status: room.q1<{ status: string }>(
+        `SELECT status FROM questions WHERE question_id = ?`,
+        questionId,
+      )!.status,
+      expired: room.q1<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM events WHERE question_id = ? AND event_type = 'decision.expired'`,
+        questionId,
+      )!.n,
+      row: room.q1(`SELECT record_json FROM question_snapshots WHERE question_id = ?`, questionId),
+    }));
+    expect(after).toEqual({ status: 'expired', expired: 1, row: { record_json: null } });
   });
 
   it('sets the alarm to the earliest deadline and moves it when that snapshot goes', async () => {
