@@ -22,5 +22,7 @@ export function deviceHasFeature(
   d: Pick<DeviceRow, 'features' | 'revoked_at'> | undefined,
   feature: ProtocolFeature,
 ): boolean {
-  return Boolean(d && d.revoked_at === null && knownFeatures(storedFeatures(d.features)).has(feature));
+  return Boolean(
+    d && d.revoked_at === null && knownFeatures(storedFeatures(d.features)).has(feature),
+  );
 }
