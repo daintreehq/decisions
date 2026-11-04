@@ -108,6 +108,8 @@ export const MoveIcon = icon(
   'M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20',
 );
 export const SearchIcon = icon('M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM21 21l-4.3-4.3');
+/** Lucide's list-filter: three narrowing lines (Settings already owns the sliders). */
+export const FilterIcon = icon('M3 6h18M7 12h10M10 18h4');
 export const MoreIcon = icon('M5 12h.01M12 12h.01M19 12h.01', 20);
 export const CopyIcon = icon(
   'M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zM4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2',

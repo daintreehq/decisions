@@ -43,9 +43,9 @@ afterEach(() => {
 });
 
 describe('list preferences', () => {
-  it('persists scope, sort and History mode per device, and filters only as digests', async () => {
+  it('persists the Needs you order and History mode per device, and filters only as digests', async () => {
     let m = await fresh();
-    m.setQuestions({ scope: 'model', sort: 'newest', project: 'billing-api', computer: 'Studio' });
+    m.setQuestions({ sort: 'newest', project: 'billing-api', computer: 'Studio' });
     m.setHistory({ mode: 'all', query: 'secret words' });
     const stored = window.localStorage.getItem('decisions:lists:v1')!;
     expect(stored).not.toContain('billing-api');
@@ -54,7 +54,7 @@ describe('list preferences', () => {
 
     m = await fresh();
     const s = m.getNavState();
-    expect(s.questions).toMatchObject({ scope: 'model', sort: 'newest', project: null, query: '' });
+    expect(s.questions).toMatchObject({ sort: 'newest', project: null, query: '' });
     expect(s.history).toMatchObject({ mode: 'all', query: '' });
     // The filter comes back once its label is on the device again.
     m.resolvePersistedFilters(['daintree', 'billing-api'], ['MacBook', 'Studio']);
@@ -63,9 +63,9 @@ describe('list preferences', () => {
 
   it('forgets everything on reset (unpair or revoke)', async () => {
     const m = await fresh();
-    m.setQuestions({ scope: 'all', query: 'x' });
+    m.setQuestions({ sort: 'newest', query: 'x' });
     m.resetNavState();
-    expect(m.getNavState().questions).toMatchObject({ scope: 'needs', query: '' });
+    expect(m.getNavState().questions).toMatchObject({ sort: 'due', query: '' });
     expect(window.localStorage.getItem('decisions:lists:v1')).toBeNull();
   });
 });

@@ -100,12 +100,10 @@ main.bare {
   background: var(--surface-page);
 }
 
-/* ---------- the menu button (below 1100px) ---------- */
-.menu-fab {
-  position: fixed;
-  top: var(--fab-y);
-  left: var(--fab-x);
-  z-index: 25;
+/* ---------- the menu button and Home's round buttons (below 1100px) ---------- */
+.menu-fab,
+.float-btn {
+  position: relative;
   display: grid;
   place-items: center;
   width: var(--fab-size);
@@ -121,13 +119,21 @@ main.bare {
   cursor: pointer;
   transition: background-color var(--dur) var(--ease-out);
 }
+.menu-fab {
+  position: fixed;
+  top: var(--fab-y);
+  left: var(--fab-x);
+  z-index: 25;
+}
 @media (hover: hover) {
-  .menu-fab:hover {
+  .menu-fab:hover,
+  .float-btn:hover {
     background: color-mix(in oklab, var(--surface-raised), var(--text) 5%);
   }
 }
 /* Press feedback snaps (no transition on transform). */
-.menu-fab:active {
+.menu-fab:active,
+.float-btn:active {
   transform: scale(0.96);
 }
 .menu-fab-dot {
@@ -473,6 +479,7 @@ main.bare {
 }
 /* The question workspace and History manage their own scrolling inside a column of definite height. */
 .shell[data-layout='column'][data-route='question'] main,
+.shell[data-layout='column'][data-route='inbox'] main,
 .shell[data-layout='column'][data-route='history'] main {
   padding: 0;
   overflow: hidden;
@@ -756,7 +763,8 @@ main.bare {
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
-  .menu-fab {
+  .menu-fab,
+  .float-btn {
     border: 1px solid ButtonText;
   }
   /* Backgrounds are overridden here, so the markers are drawn with borders. */

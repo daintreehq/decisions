@@ -7,12 +7,11 @@ import {
   filterOptions,
   groupByDay,
   historyEntries,
-  navigatorGroups,
+  homeSections,
   principalStatus,
-  scopeCounts,
   searchQuestion,
   stableOrder,
-  type NavQuery,
+  type ListQuery,
 } from '../src/domain/lists.js';
 
 const NOW = Date.parse('2026-11-03T15:00:00Z');
@@ -86,10 +85,14 @@ function act(
   };
 }
 
-const base: NavQuery = { scope: 'needs', sort: 'due', query: '', project: null, computer: null };
+const base: ListQuery = { sort: 'due', query: '', project: null, computer: null };
 const ids = (list: { id: string }[]) => list.map((v) => v.id);
+const needs = (list: QuestionView[], q: ListQuery = base) =>
+  ids(homeSections(list, q, NOW).find((s) => s.key === 'needs')!.items);
+const every = (list: QuestionView[], q: ListQuery = base) =>
+  homeSections(list, q, NOW).flatMap((s) => ids(s.items));
 
-describe('navigator sorting and filtering', () => {
+describe('Home sections, sorting and filtering', () => {
   it('orders Needs you by soonest deadline (inside a day), then oldest; newest first on request', () => {
     const old = q('old', { createdAt: iso(NOW - 10 * H) });
     const young = q('young', { createdAt: iso(NOW - 1 * H) });
@@ -97,14 +100,8 @@ describe('navigator sorting and filtering', () => {
     const dueSoon = q('due-soon', { createdAt: iso(NOW - 0.5 * H), expiresAt: iso(NOW + 1 * H) });
     const farDue = q('far-due', { createdAt: iso(NOW - 4 * H), expiresAt: iso(NOW + 72 * H) });
     const list = [old, young, dueLater, dueSoon, farDue];
-    expect(ids(navigatorGroups(list, base, NOW)[0]!.items)).toEqual([
-      'due-soon',
-      'due-later',
-      'old',
-      'far-due',
-      'young',
-    ]);
-    expect(ids(navigatorGroups(list, { ...base, sort: 'newest' }, NOW)[0]!.items)).toEqual([
+    expect(needs(list)).toEqual(['due-soon', 'due-later', 'old', 'far-due', 'young']);
+    expect(needs(list, { ...base, sort: 'newest' })).toEqual([
       'due-soon',
       'young',
       'due-later',
@@ -113,24 +110,39 @@ describe('navigator sorting and filtering', () => {
     ]);
   });
 
-  it('puts answered questions whose delivery needs attention in their own group', () => {
+  it('leads Needs you with answers whose delivery needs attention, and moves answers still sending out', () => {
     const open = q('open');
     const stuck = q('stuck', {
       status: 'human-answered',
       actions: [act('answer', NOW - H, { selected_option_ids: ['a'] }, 900)],
       deliveries: { 900: { status: 'needs-attention' } },
     });
-    const groups = navigatorGroups([open, stuck], base, NOW);
-    expect(groups.map((g) => [g.title, ids(g.items)])).toEqual([
-      [null, ['open']],
-      ['Delivery needs attention', ['stuck']],
+    const sections = homeSections([open, stuck], base, NOW);
+    expect(sections.map((s) => [s.title, ids(s.items)])).toEqual([
+      ['Needs you', ['stuck', 'open']],
+    ]);
+    // An answer from this device still in its outbox is the person's, not owed: it leaves Needs you.
+    const sending = homeSections([open, stuck], { ...base, pending: new Set(['open']) }, NOW);
+    expect(sending.map((s) => [s.kind, ids(s.items)])).toEqual([
+      ['needs', ['stuck']],
+      ['sending', ['open']],
     ]);
     expect(principalStatus(stuck, NOW)).toBe('delivery');
   });
 
-  it('All is most recent activity first; Model answers holds only unreviewed model answers', () => {
-    const a = q('a', { lastSeq: 5 });
-    const b = q('b', { lastSeq: 9 });
+  it('lists model answers to review, then everything else by recent activity, grouped by day', () => {
+    // Days are local, so the times are too.
+    const now = new Date(2026, 10, 3, 15, 0).getTime();
+    const at = (d: number, h: number) => new Date(2026, 10, d, h, 0).getTime();
+    const answered = (id: string, lastSeq: number, t: number) =>
+      q(id, {
+        status: 'human-answered',
+        lastSeq,
+        lastEventAt: iso(t),
+        actions: [act('answer', t, { selected_option_ids: ['a'] })],
+      });
+    const a = answered('a', 5, at(2, 10));
+    const b = answered('b', 9, at(3, 14));
     const model = q('m', {
       status: 'proxy-answered',
       lastSeq: 7,
@@ -139,25 +151,34 @@ describe('navigator sorting and filtering', () => {
     const confirmed = q('c', {
       status: 'proxy-answered',
       lastSeq: 8,
+      lastEventAt: iso(at(3, 12)),
       actions: [
         act('proxy-answer', NOW - 2 * H, { selected_option_ids: ['a'] }),
         act('confirm-proxy', NOW - H),
       ],
     });
-    const list = [a, b, model, confirmed];
-    expect(ids(navigatorGroups(list, { ...base, scope: 'all' }, NOW)[0]!.items)).toEqual([
-      'b',
-      'c',
-      'm',
-      'a',
+    const open = q('open');
+    const list = [a, b, model, confirmed, open];
+    const sections = homeSections(list, base, now, 'en-GB');
+    expect(sections.map((s) => [s.kind, ids(s.items)])).toEqual([
+      ['needs', ['open']],
+      ['review', ['m']],
+      ['day', ['b', 'c']],
+      ['day', ['a']],
     ]);
-    expect(ids(navigatorGroups(list, { ...base, scope: 'model' }, NOW)[0]!.items)).toEqual(['m']);
-    expect(principalStatus(model, NOW)).toBe('review');
-    expect(principalStatus(confirmed, NOW)).toBe('answered');
+    expect(sections[2]!.title).toBe('Today');
+    expect(sections[3]!.title).toBe('Yesterday');
+    // Needs you keeps its place when nothing needs you; the other sections appear only when they hold something.
+    expect(homeSections([a], base, now).map((s) => [s.kind, s.items.length])).toEqual([
+      ['needs', 0],
+      ['day', 1],
+    ]);
+    expect(principalStatus(model, now)).toBe('review');
+    expect(principalStatus(confirmed, now)).toBe('answered');
     expect(answerSummary(confirmed)).toMatchObject({ author: 'Model', confirmed: true });
   });
 
-  it('filters by project and computer separately; counts follow filters but never the search', () => {
+  it('filters by project and computer separately, and searches every section', () => {
     const list = [
       q('1', { project: 'billing-api', machine: 'MacBook' }),
       q('2', { project: 'billing-api', machine: 'Studio' }),
@@ -168,13 +189,10 @@ describe('navigator sorting and filtering', () => {
       computers: ['MacBook', 'Studio'],
     });
     const studio = { ...base, computer: 'Studio' };
-    expect(ids(navigatorGroups(list, studio, NOW)[0]!.items).sort()).toEqual(['2', '3']);
+    expect(every(list, studio).sort()).toEqual(['2', '3']);
     const both = { ...base, project: 'billing-api', computer: 'Studio' };
-    expect(ids(navigatorGroups(list, both, NOW)[0]!.items)).toEqual(['2']);
-    expect(scopeCounts(list, { project: 'billing-api', computer: null }, NOW).needs).toBe(2);
-    const searched = navigatorGroups(list, { ...base, query: 'sidebar' }, NOW)[0]!.items;
-    expect(ids(searched)).toEqual(['3']);
-    expect(scopeCounts(list, { project: null, computer: null }, NOW).needs).toBe(3);
+    expect(every(list, both)).toEqual(['2']);
+    expect(every(list, { ...base, query: 'sidebar' })).toEqual(['3']);
   });
 
   it('shows a due time only for answerable questions, in the warning hue inside a day', () => {

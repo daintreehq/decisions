@@ -530,11 +530,13 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('13-detail-text');
     await typeAnswer('');
 
+    // Home lists every question in sections: model answers to review sit below Needs you.
     await page.goto(relay.origin + '/');
-    await page.getByRole('button', { name: /Model answers/ }).click();
-    await page.getByText('Should the changelog entry').first().waitFor({ timeout: 30_000 });
+    const proxyRow = page.locator('main .qrow', { hasText: 'Should the changelog entry' });
+    await proxyRow.waitFor({ timeout: 30_000 });
+    await proxyRow.scrollIntoViewIfNeeded();
     await shot('19-inbox-proxy-tab');
-    await page.getByText('Should the changelog entry').first().click();
+    await proxyRow.click();
     await page.locator('.ws .msg.model').waitFor({ timeout: 30_000 });
     await shot('14-detail-proxy', { full: true });
 
@@ -542,14 +544,13 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     const wait = expiresAt + 2_000 - Date.now();
     if (wait > 0) await page.waitForTimeout(wait);
     await page.goto(relay.origin + '/');
-    await page.getByRole('button', { name: /^All/ }).click();
-    await page.getByText('Publish the draft release notes').first().waitFor({ timeout: 30_000 });
+    const expiredRow = page.locator('main .qrow', { hasText: 'Publish the draft release notes' });
+    await expiredRow.waitFor({ timeout: 30_000 });
     await shot('20-inbox-all-tab', { full: true });
-    await page.getByText('Publish the draft release notes').first().click();
+    await expiredRow.click();
     await shot('18-detail-expired');
     await page.goto(relay.origin + '/');
-    await page.getByRole('button', { name: /^All/ }).click();
-    await page.getByText('Drop the legacy').first().click();
+    await page.locator('main .qrow', { hasText: 'Drop the legacy' }).click();
     await shot('18-detail-cancelled');
   });
 
@@ -771,26 +772,27 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // Phone: the Questions page, search, filter chips and the filtered empty state.
     await page.setViewportSize(PHONE);
     await page.goto(relay.origin + '/');
-    await page.getByRole('button', { name: /Needs you/ }).click();
     await waitRows();
     await shot('60-phone-questions');
+    await page.getByRole('button', { name: 'Search questions' }).click();
     await page.getByRole('searchbox', { name: 'Search questions' }).fill('retry');
-    await page.getByText('Which retry strategy').first().waitFor();
+    await page.locator('main').getByText('Which retry strategy').first().waitFor();
     await page.waitForTimeout(300);
     await shot('60-phone-search');
-    await page.getByRole('button', { name: 'Clear search' }).click();
-    await page.getByLabel('Filter by project').selectOption('billing-api');
-    await page.getByRole('button', { name: /Project: billing-api/ }).waitFor();
+    await page.getByRole('button', { name: 'Close search' }).click();
+    await page.getByRole('button', { name: /^Filter questions/ }).click();
+    await page
+      .locator('dialog.filter-sheet[open] label.facet-opt', { hasText: 'billing-api' })
+      .click();
+    await shot('60-phone-filter-sheet');
+    await page.locator('dialog.filter-sheet[open]').getByRole('button', { name: 'Done' }).click();
+    await page.getByRole('button', { name: /Remove filter: Project billing-api/ }).waitFor();
     await shot('60-phone-filter-chip');
-    await page.getByRole('button', { name: /Project: billing-api/ }).click();
-    await page.getByLabel('Filter by project').selectOption('docs-site');
-    await page.getByText('No questions match these filters.').waitFor();
-    await shot('60-phone-filter-empty');
-    await page.getByRole('button', { name: 'Clear filters' }).first().click();
+    await page.getByRole('button', { name: /Remove filter: Project billing-api/ }).click();
     await waitRows();
 
     // Phone: open a question from the list, open the navigator over it, then Back restores the list.
-    await page.getByText('Which retry strategy').first().click();
+    await page.locator('main .qrow', { hasText: 'Which retry strategy' }).click();
     await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
@@ -824,28 +826,21 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.goto(relay.origin + '/');
     await waitRows();
     await shot('60-phone-questions-dark');
-    await page.getByRole('button', { name: /Model answers/ }).click();
-    await page.getByText('Should the changelog entry').first().click();
+    await page.locator('main .qrow', { hasText: 'Should the changelog entry' }).click();
     await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();
     await page.locator('dialog.nav-sheet .sheet-title').focus();
     await shot('60-phone-navigator-sheet-dark');
     await page.keyboard.press('Escape');
-    await page
-      .getByRole('button', { name: /Needs you/ })
-      .first()
-      .click()
-      .catch(() => undefined);
     await theme('light');
 
     // Tablet: one centred surface, top navigation, the navigator as a side sheet, the record from the right.
     await page.setViewportSize(TABLET);
     await page.goto(relay.origin + '/');
-    await page.getByRole('button', { name: /Needs you/ }).click();
     await waitRows();
     await shot('60-tablet-questions');
-    await page.getByText('Approve the compact sidebar').first().click();
+    await page.locator('main .qrow', { hasText: 'Approve the compact sidebar' }).click();
     await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await page.keyboard.press('Control+K');
     await page.locator('dialog.nav-sheet[open] .qrow').first().waitFor();

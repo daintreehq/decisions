@@ -5,7 +5,7 @@ import { STATUS_LABEL } from '../../domain/lists.js';
  * One glyph per principal status, all drawn on the same 16px ring so a column of them reads as one family
  * (Daintree's agent-state rule): the amber waiting ring for Needs you, the model diamond for review, a ring with a
  * check for answered, a clock for expired, a slashed ring for withdrawn, the warning triangle for delivery
- * attention. Colour sits on the glyph only; the words are always available (visible or to screen readers).
+ * attention, a ring with a rising arrow for an answer still waiting to leave this device. Colour sits on the glyph only; the words are always available (visible or to screen readers).
  */
 export function StatusGlyph({ status, label = true }: { status: RowStatus; label?: boolean }) {
   return (
@@ -49,6 +49,12 @@ export function StatusGlyph({ status, label = true }: { status: RowStatus; label
           <>
             <circle cx="8" cy="8" r="5.5" />
             <path d="m6 6 4 4M10 6l-4 4" />
+          </>
+        )}
+        {status === 'sending' && (
+          <>
+            <circle cx="8" cy="8" r="5.5" />
+            <path d="M8 10.6V5.6M5.9 7.6 8 5.5l2.1 2.1" />
           </>
         )}
         {status === 'unreadable' && (

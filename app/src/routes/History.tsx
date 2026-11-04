@@ -16,6 +16,7 @@ import { SearchField, useDebounced } from '../components/navigator/SearchField.j
 import { StatusGlyph } from '../components/navigator/StatusGlyph.js';
 import { SafeText } from '../components/SafeText.js';
 import {
+  closedLine,
   groupByDay,
   historyEntries,
   STATUS_LABEL,
@@ -28,14 +29,6 @@ import { previewText } from '../lib/safe-text.js';
 
 const clock = (iso: string) =>
   new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-
-function closedLine(e: HistoryEntry): string | null {
-  if (e.status === 'expired') return 'Expired before anyone answered';
-  if (e.status === 'withdrawn') return 'Withdrawn by your agent';
-  if (e.status === 'unreadable') return 'This device holds no key for it';
-  if (e.status === 'unverified') return 'Could not be verified';
-  return null;
-}
 
 function HistoryRow({
   e,
@@ -72,7 +65,7 @@ function HistoryRow({
         Matched an earlier answer
       </span>,
     );
-  const closed = closedLine(e);
+  const closed = closedLine(e.status);
   return (
     <li className="qrow-item">
       <button
