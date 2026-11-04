@@ -215,6 +215,16 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     // The held sockets got every 0.3.0 event live and nothing else; the modern one got the thread too.
     await legacy.until((f) => f.t === 'event' && f.event.seq === visible.at(-1).seq);
     await modern.until((f) => f.t === 'event' && f.event.seq === highWater);
+    // Before any further replay, the desktop's held socket already had every 0.3.0 event (its first replay plus
+    // the live frames), so nothing the live path dropped is papered over by a resync.
+    const liveSeqs = [
+      ...new Set(
+        legacySocketReceive(legacy.frames).accepted.flatMap((f) =>
+          f.t === 'event' ? [f.event.seq] : [],
+        ),
+      ),
+    ].sort((a, b) => a - b);
+    expect(liveSeqs).toEqual(visible.map((e: any) => e.seq));
     legacyCursor = await legacy.sync(legacyCursor);
     expect(legacyCursor).toBe(highWater);
     await legacyPhone.until((f) => f.t === 'event' && f.event.seq === visible.at(-1).seq);

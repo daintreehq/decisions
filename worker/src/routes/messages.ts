@@ -5,6 +5,7 @@ import {
   MessageReceiptBody,
   applyMessage,
   canonicalize,
+  utf8ByteLength,
   type CryptoEnvelope,
   type MessageDeliveryStatus,
   type MessageRecord,
@@ -113,7 +114,18 @@ export const postMessage: Handler = async (room, c) => {
           'message id already used by a different message',
         );
       }
-      return json(200, receiptOf(dup));
+      // The retry's own key now names this message too, so reusing it for another message is a collision.
+      const res = json(200, receiptOf(dup));
+      room.run(
+        `INSERT INTO command_receipts (device_id, idempotency_key, request_digest, status, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        auth.deviceId,
+        body.idempotency_key,
+        digest,
+        res.status,
+        res.body,
+        t,
+      );
+      return res;
     }
     const q = room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, qid);
     if (!q) throw new ApiError('not_found', 'no such question');
@@ -221,9 +233,11 @@ export const listMessages: Handler = async (room, c) => {
   const qid = c.params[0]!;
   const params = new URLSearchParams(c.req.query);
   const after = Number(params.get('after') ?? '0');
-  const limit = Math.min(
-    Math.max(Number(params.get('limit') ?? String(LIMITS.messagePageSize)) || 1, 1),
-    LIMITS.messagePageSize,
+  const limit = Math.floor(
+    Math.min(
+      Math.max(Number(params.get('limit') ?? String(LIMITS.messagePageSize)) || 1, 1),
+      LIMITS.messagePageSize,
+    ),
   );
   if (!Number.isSafeInteger(after) || after < 0)
     throw new ApiError('validation_error', 'bad cursor');
@@ -268,7 +282,7 @@ export const listMessages: Handler = async (room, c) => {
         : null,
     };
     // Bounded like an events page, so a tunnelled response stays small; a page always holds one message.
-    const size = r.record_json.length + r.envelope_json.length;
+    const size = utf8ByteLength(r.record_json) + utf8ByteLength(r.envelope_json);
     if (messages.length > 0 && bytes + size > LIMITS.eventPageBytes) {
       hasMore = true;
       break;

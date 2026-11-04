@@ -555,40 +555,93 @@ describe('reply pushes', () => {
     expect(calls).toEqual([]);
   });
 
-  it('drops a reply push once the person has written back or the thread has closed', async () => {
-    await subscriber(phone);
-    // Quiet hours hold reply pushes back, the way they hold every push.
-    const quiet = (enabled: boolean) =>
-      inRoom((room) =>
-        room.setMeta(
-          'settings',
-          JSON.stringify({
-            quiet_hours: { enabled, start: '00:00', end: '23:59', time_zone: 'UTC' },
-          }),
-        ),
-      );
-    // The person writes back before the deferred push goes out.
-    const answeredInThread = await asked();
+  /** Quiet hours from an hour ago to an hour from now (UTC), so the hold is certain whenever the test runs. */
+  const quiet = (enabled: boolean) => {
+    const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+    return inRoom((room) =>
+      room.setMeta(
+        'settings',
+        JSON.stringify({
+          quiet_hours: {
+            enabled,
+            start: hhmm(Date.now() - 3_600_000),
+            end: hhmm(Date.now() + 3_600_000),
+            time_zone: 'UTC',
+          },
+        }),
+      ),
+    );
+  };
+  const replyJobs = async (questionId: string) =>
+    (await pending('notify_reply')).filter((j) => j.question_id === questionId);
+
+  it('holds a reply push through quiet hours, and sends it after', async () => {
+    const s = await subscriber(phone);
+    const questionId = await asked();
     await quiet(true);
-    await say(w, w.owner, answeredInThread, { expectsReply: true });
-    await say(w, phone, answeredInThread);
-    await quiet(false);
+    await say(w, w.owner, questionId, { expectsReply: true });
     await runDue('notify_reply');
     expect(calls).toEqual([]);
-    expect((await pending('notify_reply')).map((j) => j.status)).toEqual(['done']);
+    const [held] = await replyJobs(questionId);
+    expect(held!.status).toBe('pending');
+    expect(held!.run_at).toBeGreaterThan(Date.now() + 30 * 60_000);
+    await quiet(false);
+    await runDue('notify_reply');
+    expect(calls).toHaveLength(1);
+    expect(await s.open(calls[0]!.init.body as Uint8Array)).toEqual({
+      type: 'decision-reply',
+      question_id: questionId,
+    });
+  });
 
-    // A later asking message replaces an unsent one: one push per question at a time.
+  it('drops a held reply push once the person has answered it, in the thread or otherwise', async () => {
+    await subscriber(phone);
+    // The person writes back.
+    const wroteBack = await asked();
+    await quiet(true);
+    await say(w, w.owner, wroteBack, { expectsReply: true });
+    await say(w, phone, wroteBack);
+    // The person confirms the model's answer: a human action after the request, though it cancels no push job.
+    const proxied = await asked({ requirement: 'proxy-ok' });
+    const proxy = await act(w, w.owner, 'proxy-answer', proxied, 0, {
+      content: {
+        selected_option_ids: ['approve'],
+        model_id: 'm',
+        prompt_template_version: '1',
+        confidence: 0.9,
+      },
+    });
+    expect(proxy.res.status).toBe(201);
+    await say(w, w.owner, proxied, { expectsReply: true });
+    const confirm = await act(w, phone, 'confirm-proxy', proxied, 1, {
+      content: null,
+      confirmsActionId: proxy.signed.record.action_id,
+    });
+    expect(confirm.res.status).toBe(201);
+    expect((await replyJobs(proxied)).map((j) => j.status)).toEqual(['pending']);
+    // The agent withdraws its request with a message that asks nothing.
+    const withdrawn = await asked();
+    await say(w, w.owner, withdrawn, { expectsReply: true });
+    await say(w, w.owner, withdrawn, { expectsReply: false });
+
+    await quiet(false);
+    calls.length = 0;
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+    for (const q of [wroteBack, proxied, withdrawn])
+      expect((await replyJobs(q)).map((j) => j.status)).toEqual(['done']);
+  });
+
+  it('keeps one reply push per question, and a cancelled question takes it along', async () => {
+    await subscriber(phone);
     const twice = await asked();
     await quiet(true);
     await say(w, w.owner, twice, { expectsReply: true });
     await say(w, w.owner, twice, { expectsReply: true });
-    const jobs = (await pending('notify_reply')).filter((j) => j.question_id === twice);
-    expect(jobs.map((j) => j.status).sort()).toEqual(['cancelled', 'pending']);
+    expect((await replyJobs(twice)).map((j) => j.status).sort()).toEqual(['cancelled', 'pending']);
+    expect((await act(w, w.owner, 'cancel', twice, 0)).res.status).toBe(201);
+    expect((await replyJobs(twice)).map((j) => j.status)).toEqual(['cancelled', 'cancelled']);
     await quiet(false);
-
-    // A cancelled question takes its pending reply push with it.
-    await act(w, w.owner, 'cancel', twice, 0);
-    calls.length = 0;
     await runDue('notify_reply');
     expect(calls).toEqual([]);
   });

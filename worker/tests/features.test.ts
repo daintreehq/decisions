@@ -169,13 +169,33 @@ describe('filtering the socket', () => {
     );
     expect(caught.high_water).toBe(replayed.at(-1).event.seq);
 
+    // The device's declaration changes with its next ticket (minted, never connected); the open socket keeps
+    // the declaration it was accepted with, for live frames and for replays.
+    await phone.call('POST', '/api/v1/socket-ticket', {});
+    expect(
+      ((await phone.call('GET', '/api/v1/devices')).json.devices as any[]).find(
+        (d) => d.device_id === phone.id,
+      ).features,
+    ).toEqual([]);
+    const live = await say(w, w.owner, (await ask(w)).questionId);
+    expect(live.res.status).toBe(201);
+    await modern.until((f) => f.t === 'event' && f.event.seq === live.res.json.event_seq);
+    const seen = modern.frames.length;
+    modern.ws.send(JSON.stringify({ t: 'sync', after: caught.high_water }));
+    await modern.until((f) => f.t === 'caught_up' && modern.frames.indexOf(f) >= seen);
+    expect(
+      modern.frames
+        .slice(seen)
+        .some((f) => f.t === 'event' && f.event.seq === live.res.json.event_seq),
+    ).toBe(true);
+
     // A baseline socket from the same device: no message events, and the cursor still reaches the end.
     const baseline = await socket(
       (await phone.call('POST', '/api/v1/socket-ticket', {})).json.ticket,
     );
     baseline.ws.send(JSON.stringify({ t: 'sync', after: 0 }));
     const done = await baseline.until((f) => f.t === 'caught_up');
-    expect(done).toMatchObject({ high_water: caught.high_water, has_more: false });
+    expect(done).toMatchObject({ high_water: live.res.json.event_seq, has_more: false });
     expect(
       baseline.frames.some(
         (f) => f.t === 'event' && f.event.event_type.startsWith('decision.message'),
@@ -199,8 +219,7 @@ describe('filtering the socket', () => {
     const tunnelled = JSON.parse(res.body);
     expect(
       tunnelled.events.filter((e: any) => e.event_type === 'decision.message.posted'),
-    ).toHaveLength(5);
-    void w;
+    ).toHaveLength(6);
     modern.ws.close(1000, 'bye');
     baseline.ws.close(1000, 'bye');
   });

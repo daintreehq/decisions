@@ -3,6 +3,7 @@ import { testEnv as env } from './env.js';
 import { runInDurableObject } from 'cloudflare:test';
 import {
   MESSAGE_RECORD_TYPE,
+  MessagesPage,
   PROTOCOL_VERSION,
   bytesToBase64Url,
   type CryptoEnvelope,
@@ -574,6 +575,7 @@ export async function thread(a: Actor, questionId: string, limit = 50): Promise<
       `after=${after}&limit=${limit}`,
     );
     if (r.status !== 200) throw new Error(`thread failed ${r.status} ${r.text}`);
+    MessagesPage.parse(r.json);
     out.push(...r.json.messages);
     after = r.json.next_after;
     if (!r.json.has_more) return out;

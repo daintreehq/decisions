@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EventData,
   HumanMessageContentV1,
+  LIMITS,
   MESSAGE_RECORD_TYPE,
   MessageContentV1,
+  MessageReceipt,
   MessagesPage,
   PROTOCOL_VERSION,
   imagesMatchRecord,
@@ -45,6 +48,33 @@ async function setup() {
 const question = async (a: Actor, id: string) =>
   (await a.call('GET', `/api/v1/questions/${id}`)).json;
 
+/** Copies of one stored message under new ids and seqs, written directly: the relay never reads them. */
+const seed = (questionId: string, from: number, to: number, envelope?: (e: any) => any) =>
+  inRoom((room) => {
+    const row = room.q1<Record<string, unknown>>(
+      `SELECT * FROM messages WHERE question_id = ? ORDER BY message_seq LIMIT 1`,
+      questionId,
+    )!;
+    const env = envelope
+      ? JSON.stringify(envelope(JSON.parse(row.envelope_json as string)))
+      : (row.envelope_json as string);
+    for (let seq = from; seq <= to; seq++) {
+      room.run(
+        `INSERT INTO messages (message_id, question_id, message_seq, side, expects_reply, signer_device_id,
+           record_json, envelope_json, committed_at, event_seq) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+        newId(),
+        questionId,
+        seq,
+        row.side as string,
+        row.signer_device_id as string,
+        row.record_json as string,
+        env,
+        Date.now(),
+        row.event_seq as number,
+      );
+    }
+  });
+
 const modernEvents = (a: Actor, after = 0) =>
   a
     .call('GET', '/api/v1/events', undefined, `after=${after}&features=${THREADS}&limit=100`)
@@ -56,10 +86,25 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     const tablet = await pairDevice(w, 'tablet', 'Test iPad');
     const human = await say(w, phone, questionId);
     expect(human.res.status).toBe(201);
-    expect(human.res.json).toMatchObject({
+    const receipt = MessageReceipt.parse(human.res.json);
+    expect(receipt).toMatchObject({
       question_id: questionId,
       message_id: human.messageId,
       message_seq: 1,
+    });
+    // The event carries exactly the committed entry: the signed record and its ciphertext, untouched.
+    const [posted] = (await modernEvents(phone)).filter(
+      (e) => e.event_type === 'decision.message.posted',
+    );
+    expect(posted.seq).toBe(receipt.event_seq);
+    expect(posted.question_id).toBe(questionId);
+    expect(posted.origin_device_id).toBe(phone.id);
+    expect(EventData.messagePosted.parse(posted.data)).toEqual({
+      message_seq: 1,
+      committed_at: receipt.committed_at,
+      record: human.record,
+      envelope: human.envelope,
+      target_host_id: 'host_aaaaaaaa',
     });
     expect((await say(w, tablet, questionId)).res.json.message_seq).toBe(2);
     const agent = await say(w, w.owner, questionId, { expectsReply: true });
@@ -87,7 +132,9 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     await refused(say(w, host, questionId));
     await refused(say(world, w.owner, hosted));
     // Sides follow roles: a phone never speaks for the agent, a desktop never for the person.
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
     await refused(say(w, phone, questionId, { side: 'agent' }));
+    await refused(say(w, tablet, questionId, { side: 'agent', expectsReply: true }));
     await refused(say(w, w.owner, questionId, { side: 'human' }));
     await refused(say(world, host, hosted, { side: 'human' }));
 
@@ -98,7 +145,7 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     });
     expect(unsigned.status).toBe(401);
     const lost = await pairDevice(w, 'phone', 'Lost phone');
-    const rotation = await buildRotation(w, [phone, host]);
+    const rotation = await buildRotation(w, [phone, host, tablet]);
     expect(
       (await w.owner.call('POST', `/api/v1/devices/${lost.id}/revoke`, rotation.body)).status,
     ).toBe(200);
@@ -111,7 +158,13 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
   it('checks the signature, the envelope binding and the record before anything is stored', async () => {
     const { w, phone, questionId } = await setup();
     const other = await pairDevice(w, 'phone', 'Other phone');
-    const status = async (p: Promise<{ res: { status: number } }>) => (await p).res.status;
+    const why = async (p: Promise<{ res: { status: number; json: any } }>) => {
+      const { res } = await p;
+      expect(res.status).toBe(400);
+      return res.json.message as string;
+    };
+    const post = (body: unknown) =>
+      phone.call('POST', `/api/v1/questions/${questionId}/messages`, body);
 
     const base = await say(w, phone, questionId);
     expect(base.res.status).toBe(201);
@@ -131,15 +184,18 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     expect(tampered.status).toBe(400);
     expect(tampered.json.message).toMatch(/digest/);
 
-    // The envelope must say it is this message's content, from this signer, for this question.
+    // A message that is complete and validly signed, but by another device: it is not this phone's to send.
+    const borrowed = await say(w, other, questionId, { post: false });
+    expect((await post(borrowed.body)).json.message).toMatch(/does not belong/);
+    // The same for a record of another installation, consistently bound and signed.
+    const foreign = await say({ ...w, installationId: newId() }, phone, questionId, {
+      post: false,
+    });
+    expect((await post(foreign.body)).json.message).toMatch(/does not belong/);
+    // The envelope must say it is this message's content, from this signer.
     expect(
-      await status(
-        say(w, phone, questionId, { edit: (r) => void (r.signer_device_id = other.id) }),
-      ),
-    ).toBe(400);
-    expect(
-      await status(say(w, phone, questionId, { edit: (r) => void (r.installation_id = newId()) })),
-    ).toBe(400);
+      await why(say(w, phone, questionId, { edit: (r) => void (r.signer_device_id = other.id) })),
+    ).toMatch(/envelope/);
     // The path names the question.
     const elsewhere = await say(w, phone, questionId);
     const moved = await phone.call(
@@ -148,23 +204,33 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
       { ...elsewhere.body, idempotency_key: newId() },
     );
     expect(moved.status).toBe(400);
+    expect(moved.json.message).toMatch(/question id mismatch/);
     // A key epoch the relay has never had.
     const future = { ...w.epoch, epoch: 9 };
-    expect(await status(say(w, phone, questionId, { epoch: future }))).toBe(400);
+    expect(await why(say(w, phone, questionId, { epoch: future }))).toMatch(/key epoch/);
     // Phone images need the image extension, which this relay does not implement yet.
-    expect(await status(say(w, phone, questionId, { attachmentIds: [newId()] }))).toBe(400);
+    expect(await why(say(w, phone, questionId, { attachmentIds: [newId()] }))).toMatch(
+      /phone images/,
+    );
     // A human message never expects a reply; an envelope over the limit never parses.
-    expect(await status(say(w, phone, questionId, { expectsReply: true }))).toBe(400);
+    expect(await why(say(w, phone, questionId, { expectsReply: true }))).toMatch(/expects_reply/);
     const big = await say(w, phone, questionId);
-    const oversize = await phone.call('POST', `/api/v1/questions/${questionId}/messages`, {
-      ...big.body,
-      idempotency_key: newId(),
-      message: {
-        ...big.body.message,
-        envelope: { ...big.envelope, ciphertext: 'A'.repeat(184_321) },
-      },
+    const oversize = await say(w, phone, questionId, { post: false });
+    const huge = {
+      ...oversize.envelope,
+      ciphertext: 'A'.repeat(LIMITS.envelopeCiphertextChars + 1),
+    };
+    const { signature: _o, ...unsignedHuge } = oversize.record as Record<string, unknown>;
+    const hugeRecord = await signObject(phone.keys.signing.privateKey, {
+      ...unsignedHuge,
+      envelope_digest: await envelopeDigest(huge),
     });
-    expect(oversize.status).toBe(400);
+    const tooBig = await post({
+      ...oversize.body,
+      message: { record: hugeRecord, envelope: huge },
+    });
+    expect(tooBig.status).toBe(400);
+    expect(tooBig.json.message).toMatch(/ciphertext/);
     // Unknown questions.
     const ghost = newId();
     expect((await say(w, phone, ghost)).res.status).toBe(404);
@@ -204,13 +270,17 @@ describe('idempotency', () => {
     const again = await phone.call('POST', `/api/v1/questions/${questionId}/messages`, first.body);
     expect(again.status).toBe(201);
     expect(again.json).toEqual(first.res.json);
-    // Same record under a fresh key.
+    // Same record under a fresh key; that key now names this message, so reusing it for another collides.
+    const freshKey = newId();
     const sameRecord = await phone.call('POST', `/api/v1/questions/${questionId}/messages`, {
       ...first.body,
-      idempotency_key: newId(),
+      idempotency_key: freshKey,
     });
     expect(sameRecord.status).toBe(200);
     expect(sameRecord.json).toEqual(first.res.json);
+    const reused = await say(w, phone, questionId, { idempotencyKey: freshKey });
+    expect(reused.res.status).toBe(409);
+    expect(reused.res.json.code).toBe('idempotency_collision');
     // The same record signed again (ECDSA signatures differ every time) is still the same message.
     const { signature: _s, ...unsignedFirst } = first.record as Record<string, unknown>;
     const resigned = await signObject(phone.keys.signing.privateKey, unsignedFirst);
@@ -256,6 +326,25 @@ describe('idempotency', () => {
     expect(retry.status).toBe(200);
     expect(retry.json).toEqual(first.res.json);
     expect((await say(w, phone, questionId)).res.json.code).toBe('invalid_state');
+
+    // And after expiry, under the original key and a fresh one.
+    const expiring = (await ask(w)).questionId;
+    const sent = await say(w, phone, expiring);
+    await inRoom((room) =>
+      room.run(
+        `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
+        Date.now() - 1,
+        expiring,
+      ),
+    );
+    expect((await say(w, phone, expiring)).res.status).toBe(410);
+    const post = (body: unknown) =>
+      phone.call('POST', `/api/v1/questions/${expiring}/messages`, body);
+    expect((await post(sent.body)).json).toEqual(sent.res.json);
+    const fresh = await post({ ...sent.body, idempotency_key: newId() });
+    expect(fresh.status).toBe(200);
+    expect(fresh.json).toEqual(sent.res.json);
+    expect(await thread(phone, expiring)).toHaveLength(1);
   });
 });
 
@@ -271,7 +360,10 @@ describe('ordering', () => {
       say(w, w.owner, questionId, { text: 'five', expectsReply: true }),
       say(w, tablet, questionId, { text: 'six' }),
     ]);
-    for (const p of posts) expect(p.res.status).toBe(201);
+    for (const p of posts) {
+      expect(p.res.status).toBe(201);
+      MessageReceipt.parse(p.res.json);
+    }
     const seqs = posts.map((p) => p.res.json.message_seq).sort((a, b) => a - b);
     expect(seqs).toEqual([1, 2, 3, 4, 5, 6]);
 
@@ -287,7 +379,11 @@ describe('ordering', () => {
     expect(posted.map((e) => e.seq)).toEqual(eventSeqs);
     for (const e of posted) {
       expect(e.question_revision).toBeNull();
-      expect(e.data.target_host_id).toBe('host_aaaaaaaa');
+      const data = EventData.messagePosted.parse(e.data);
+      const sent = posts.find((p) => p.res.json.message_seq === data.message_seq)!;
+      expect(data.record).toEqual(sent.record);
+      expect(data.envelope).toEqual(sent.envelope);
+      expect(data.target_host_id).toBe('host_aaaaaaaa');
     }
 
     // An answer moves the revision; the thread order carries on from where it was.
@@ -330,6 +426,37 @@ describe('ordering', () => {
     );
     expect(bad.status).toBe(400);
     expect((await phone.call('GET', `/api/v1/questions/${newId()}/messages`)).status).toBe(404);
+    const fractional = await phone.call(
+      'GET',
+      `/api/v1/questions/${questionId}/messages`,
+      undefined,
+      'limit=1.5',
+    );
+    expect(fractional.status).toBe(200);
+    expect(fractional.json.messages).toHaveLength(1);
+  });
+
+  it('caps a page at 50 messages and at 256 KiB of UTF-8, always holding one', async () => {
+    const { w, phone, questionId } = await setup();
+    await say(w, phone, questionId);
+    await seed(questionId, 2, 60);
+    const capped = (
+      await phone.call('GET', `/api/v1/questions/${questionId}/messages`, undefined, 'limit=500')
+    ).json;
+    expect(capped.messages).toHaveLength(LIMITS.messagePageSize);
+    expect(capped).toMatchObject({ next_after: 50, has_more: true });
+
+    // Envelopes carrying a forward-compatible field of 150 KB of UTF-8 (50,000 characters) each: two fit a
+    // character count but not the byte budget, so each page holds one, and the cursor visits every message.
+    const wide = (await ask(w)).questionId;
+    await say(w, phone, wide);
+    await seed(wide, 2, 3, (e) => ({ ...e, x_note: '漢'.repeat(50_000) }));
+    const first = (
+      await phone.call('GET', `/api/v1/questions/${wide}/messages`, undefined, 'after=1')
+    ).json;
+    expect(first.messages.map((m: any) => m.message_seq)).toEqual([2]);
+    expect(first.has_more).toBe(true);
+    expect((await thread(phone, wide)).map((m) => m.message_seq)).toEqual([1, 2, 3]);
   });
 });
 
@@ -340,7 +467,9 @@ describe('question states', () => {
       status: q.status,
       revision: q.revision,
       proxy_abstained: q.proxy_abstained,
-      actions: q.actions.length,
+      expires_at: q.expires_at,
+      resolved_at: q.resolved_at,
+      actions: q.actions,
       deliveries: q.deliveries,
     };
   }
@@ -379,6 +508,16 @@ describe('question states', () => {
     expect((await say(w, w.owner, proxied)).res.status).toBe(201);
     expect(await snapshot(phone, proxied)).toEqual(afterProxy);
 
+    // A question whose proxy abstained stays abstained.
+    const abstained = (await ask(w, { requirement: 'proxy-first' })).questionId;
+    expect(
+      (await act(w, w.owner, 'proxy-abstain', abstained, 0, { content: null })).res.status,
+    ).toBe(201);
+    const afterAbstain = await snapshot(phone, abstained);
+    expect(afterAbstain.proxy_abstained).toBe(true);
+    for (const r of await bothSides(w, phone, abstained)) expect(r.status).toBe(201);
+    expect(await snapshot(phone, abstained)).toEqual(afterAbstain);
+
     // No message event is deliverable, and none carries a revision.
     for (const e of (await modernEvents(phone)).filter(
       (e) => e.event_type === 'decision.message.posted',
@@ -397,6 +536,8 @@ describe('question states', () => {
       expect(r.status).toBe(409);
       expect(r.json.code).toBe('invalid_state');
     }
+    // A withdrawn thread stays readable while it is closed.
+    expect((await thread(phone, questionId)).map((m) => m.message_seq)).toEqual([1]);
     expect((await act(w, w.owner, 'reopen', questionId, 0, { content: null })).res.status).toBe(
       201,
     );
@@ -404,6 +545,7 @@ describe('question states', () => {
     expect(reopened.res.json.message_seq).toBe(2);
 
     const expiring = (await ask(w)).questionId;
+    const early = await say(w, w.owner, expiring);
     await inRoom((room) =>
       room.run(
         `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
@@ -416,36 +558,18 @@ describe('question states', () => {
       expect(r.json.code).toBe('expired');
     }
     expect((await question(phone, expiring)).status).toBe('expired');
-    expect(await thread(phone, expiring)).toEqual([]);
+    expect((await thread(phone, expiring)).map((m) => m.record.message_id)).toEqual([
+      early.messageId,
+    ]);
     // Closed threads stay readable.
     expect((await thread(phone, questionId)).map((m) => m.message_seq)).toEqual([1, 2]);
   });
 
   it('enforces the lifetime limit per question, across both sides and reopens', async () => {
     const { w, phone, questionId } = await setup();
-    const seed = await say(w, phone, questionId);
+    await say(w, phone, questionId);
     // Fill the thread to one under the limit directly; each message is a signed record the relay never reads.
-    await inRoom((room) => {
-      const row = room.q1<Record<string, unknown>>(
-        `SELECT * FROM messages WHERE message_id = ?`,
-        seed.messageId,
-      )!;
-      for (let seq = 2; seq <= 199; seq++) {
-        room.run(
-          `INSERT INTO messages (message_id, question_id, message_seq, side, expects_reply, signer_device_id,
-             record_json, envelope_json, committed_at, event_seq) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
-          newId(),
-          questionId,
-          seq,
-          'human',
-          phone.id,
-          row.record_json as string,
-          row.envelope_json as string,
-          Date.now(),
-          row.event_seq as number,
-        );
-      }
-    });
+    await seed(questionId, 2, LIMITS.messagesPerQuestion - 1);
     const last = await say(w, w.owner, questionId);
     expect(last.res.status).toBe(201);
     expect(last.res.json.message_seq).toBe(200);
@@ -453,6 +577,11 @@ describe('question states', () => {
       expect(r.status).toBe(409);
       expect(r.json.code).toBe('invalid_state');
     }
+    // A full thread still recognises a retry of its last message, under either key.
+    const post = (body: unknown) =>
+      w.owner.call('POST', `/api/v1/questions/${questionId}/messages`, body);
+    expect((await post(last.body)).json).toEqual(last.res.json);
+    expect((await post({ ...last.body, idempotency_key: newId() })).json).toEqual(last.res.json);
     expect((await act(w, w.owner, 'cancel', questionId, 0)).res.status).toBe(201);
     expect((await act(w, w.owner, 'reopen', questionId, 0, { content: null })).res.status).toBe(
       201,
@@ -476,6 +605,7 @@ describe('message receipts (section 16.4)', () => {
     const { w, phone, questionId } = await setup();
     const one = await say(w, phone, questionId);
     const two = await say(w, phone, questionId);
+    const three = await say(w, phone, questionId);
     const agent = await say(w, w.owner, questionId);
     expect(await deliveryOf(phone, questionId, one.messageId)).toEqual({
       status: 'relay-queued',
@@ -518,14 +648,14 @@ describe('message receipts (section 16.4)', () => {
       (await receipt(w.owner, { ...ids, status: 'terminal-delivered', injection_id: injection }))
         .status,
     ).toBe(200);
-    expect(
-      (await receipt(w.owner, { ...ids, status: 'terminal-delivered', injection_id: newId() })).json
-        .code,
-    ).toBe('invalid_state');
-    expect(
-      (await receipt(w.owner, { ...ids, status: 'needs-attention', error_code: 'pane_gone' })).json
-        .code,
-    ).toBe('invalid_state');
+    const conflict = async (body: Record<string, unknown>) => {
+      const r = await receipt(w.owner, { ...ids, ...body });
+      expect(r.status).toBe(409);
+      expect(r.json.code).toBe('invalid_state');
+    };
+    await conflict({ status: 'terminal-delivered', injection_id: newId() });
+    await conflict({ status: 'needs-attention', error_code: 'pane_gone' });
+    await conflict({ status: 'delivery-uncertain', error_code: 'pane_gone' });
     expect((await receipt(w.owner, { ...ids, status: 'received' })).status).toBe(200);
     expect((await deliveryOf(phone, questionId, one.messageId)).status).toBe('terminal-delivered');
 
@@ -541,17 +671,39 @@ describe('message receipts (section 16.4)', () => {
       received_at: null,
     });
     expect((await receipt(w.owner, { ...two_, status: 'received' })).status).toBe(200);
-    expect(await deliveryOf(phone, questionId, two.messageId)).toMatchObject({
-      status: 'needs-attention',
-    });
+    const late = await deliveryOf(phone, questionId, two.messageId);
+    expect(late).toMatchObject({ status: 'needs-attention', error_code: 'pane_busy' });
+    expect(late.received_at).not.toBeNull();
+    const recovered = newId();
     expect(
-      (await receipt(w.owner, { ...two_, status: 'terminal-delivered', injection_id: newId() }))
+      (await receipt(w.owner, { ...two_, status: 'terminal-delivered', injection_id: recovered }))
         .status,
     ).toBe(200);
     expect(await deliveryOf(phone, questionId, two.messageId)).toMatchObject({
       status: 'terminal-delivered',
       error_code: null,
+      injection_id: recovered,
+      received_at: late.received_at,
     });
+
+    // An uncertain attempt, then typed with no `received` before it: typing implies receipt.
+    const three_ = { question_id: questionId, message_id: three.messageId };
+    expect(
+      (await receipt(w.owner, { ...three_, status: 'delivery-uncertain', error_code: 'crashed' }))
+        .status,
+    ).toBe(200);
+    expect(await deliveryOf(phone, questionId, three.messageId)).toMatchObject({
+      status: 'delivery-uncertain',
+      error_code: 'crashed',
+      received_at: null,
+    });
+    expect(
+      (await receipt(w.owner, { ...three_, status: 'terminal-delivered', injection_id: newId() }))
+        .status,
+    ).toBe(200);
+    const typed = await deliveryOf(phone, questionId, three.messageId);
+    expect(typed).toMatchObject({ status: 'terminal-delivered', error_code: null });
+    expect(typed.received_at).toBe(typed.terminal_delivered_at);
 
     // The phone sees the same changes as `delivery.message` events, in order.
     const deliveries = (await modernEvents(phone)).filter(
@@ -563,21 +715,51 @@ describe('message receipts (section 16.4)', () => {
       [two.messageId, 'needs-attention'],
       [two.messageId, 'needs-attention'],
       [two.messageId, 'terminal-delivered'],
+      [three.messageId, 'delivery-uncertain'],
+      [three.messageId, 'terminal-delivered'],
     ]);
     for (const e of deliveries) {
       expect(e.question_revision).toBeNull();
-      expect(e.data.target_host_id).toBe('host_aaaaaaaa');
+      EventData.messageDelivery.parse(e.data);
+    }
+    // Each message's latest event says exactly what the thread now shows.
+    for (const m of [one, two, three]) {
+      const lastEvent = deliveries.filter((e) => e.data.message_id === m.messageId).at(-1)!;
+      expect(lastEvent.data).toEqual({
+        ...(await deliveryOf(phone, questionId, m.messageId)),
+        message_id: m.messageId,
+        target_host_id: 'host_aaaaaaaa',
+      });
     }
   });
 
   it('accepts receipts only from the publishing desktop, for its own human messages', async () => {
     const { w, phone, questionId } = await setup();
-    const { host } = await enrollHost(w);
+    const { host, world } = await enrollHost(w);
     const human = await say(w, phone, questionId);
     const agent = await say(w, w.owner, questionId);
     const ids = { question_id: questionId, message_id: human.messageId, status: 'received' };
-    expect((await receipt(host, ids)).json.code).toBe('forbidden');
-    expect((await receipt(phone, ids)).status).toBe(403);
+    const forbidden = async (r: Promise<{ status: number; json: any }>) => {
+      const res = await r;
+      expect(res.status).toBe(403);
+      expect(res.json.code).toBe('forbidden');
+    };
+    await forbidden(receipt(host, ids));
+    await forbidden(receipt(phone, ids));
+    // A host's own questions are the host's to report on, never the owner's.
+    await declare(host);
+    const hosted = (await ask(world, { host: 'host_remote001' })).questionId;
+    const theirs = await say(w, phone, hosted);
+    expect(theirs.res.status).toBe(201);
+    const hostIds = {
+      question_id: hosted,
+      message_id: theirs.messageId,
+      host_id: 'host_remote001',
+      status: 'received',
+    };
+    await forbidden(receipt(w.owner, hostIds));
+    expect((await receipt(host, hostIds)).status).toBe(200);
+    expect((await deliveryOf(phone, hosted, theirs.messageId)).status).toBe('received');
     expect((await receipt(w.owner, { ...ids, host_id: 'host_bbbbbbbb' })).status).toBe(404);
     expect((await receipt(w.owner, { ...ids, message_id: agent.messageId })).status).toBe(404);
     expect((await receipt(w.owner, { ...ids, question_id: newId() })).status).toBe(404);
@@ -710,8 +892,12 @@ describe('export and delete', () => {
 
   it('counts messages in diagnostics, without content', async () => {
     const { w, phone, questionId } = await setup();
-    await say(w, phone, questionId);
-    const d = await w.owner.call('GET', '/api/v1/admin/diagnostics');
-    expect(d.json.counts.messages).toBe(1);
+    const count = async () => (await w.owner.call('GET', '/api/v1/admin/diagnostics')).json;
+    expect((await count()).counts.messages).toBe(0);
+    const sent = await say(w, phone, questionId);
+    await say(w, w.owner, questionId);
+    const d = await count();
+    expect(d.counts.messages).toBe(2);
+    expect(JSON.stringify(d)).not.toContain(sent.envelope.ciphertext);
   });
 });
