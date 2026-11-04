@@ -63,11 +63,11 @@ export const LIMITS = {
   snapshotTerminalLines: 200,
   /** UTF-8 bytes of the terminal lines joined with `\n`. */
   snapshotTerminalBytes: 32 * 1024,
-  /** A snapshot observed longer ago than this is stale. */
+  /** A snapshot the relay received longer ago than this is stale (relay time). */
   snapshotFreshMs: 60 * 1000,
   /** A refresh with no new snapshot after this long is stale; the relay sets `deadline_at` from it. */
   snapshotRefreshTimeoutMs: 15 * 1000,
-  /** The relay deletes a stored snapshot's ciphertext this long after it was observed. */
+  /** The relay deletes a stored snapshot's ciphertext this long after it received it. */
   snapshotRetentionMs: 24 * 60 * 60 * 1000,
   /** Refresh requests per human device per minute, across questions. */
   snapshotRefreshesPerDeviceMinute: 6,

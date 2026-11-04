@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EventData,
   HumanAnswerContentV1,
+  LIMITS,
   MessageContentV1,
   MessageDeliveryInfo,
   MessageRecord,
@@ -54,7 +55,16 @@ describe('shared fixtures', () => {
         record.side === 'agent' ? t.desktop_device_id : t.phone_device_id,
       );
       expect(m.event_seq).toBeGreaterThan(t.answer_event_seq);
+      expect(Date.parse(record.created_at)).toBeLessThanOrEqual(Date.parse(m.committed_at));
+      expect(Date.parse(m.committed_at)).toBeGreaterThan(Date.parse(t.answer.committed_at));
     }
+    // ledger seqs and commit times both increase with message_seq
+    const seqs = t.messages.map((m) => m.event_seq);
+    const times = t.messages.map((m) => Date.parse(m.committed_at));
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(seqs.length);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+    expect(Math.max(...times)).toBeLessThanOrEqual(NOW);
     expect(
       threadAwaitsHuman({
         status: t.status,
@@ -94,15 +104,15 @@ describe('shared fixtures', () => {
   });
 
   it('snapshots are fresh, stale by age, stale by a timed-out refresh, and off', () => {
-    const label = (s: {
-      record: { observed_at: string; sharing: 'on' | 'off' };
-      refresh: unknown;
-    }) =>
+    const label = (
+      s: { record: { sharing: 'on' | 'off' }; received_at: string },
+      refresh: { deadline_at: string } | null,
+    ) =>
       snapshotFreshness({
         now: NOW,
         status: THREAD_FIXTURE.status,
-        snapshot: s.record,
-        refresh: s.refresh as { deadline_at: string } | null,
+        snapshot: { received_at: s.received_at, sharing: s.record.sharing },
+        refresh,
       });
     for (const s of [
       SNAPSHOT_FIXTURE,
@@ -115,11 +125,23 @@ describe('shared fixtures', () => {
       ).toBe(true);
       const c = PaneSnapshotContentV1.parse(s.content);
       expect(c.observed_at).toBe(s.record.observed_at);
-      if (s.refresh) expect(SnapshotRefresh.safeParse(s.refresh).success).toBe(true);
+      // observed (desktop time) before received (relay time), both before now
+      expect(Date.parse(s.record.observed_at)).toBeLessThanOrEqual(Date.parse(s.received_at));
+      expect(Date.parse(s.received_at)).toBeLessThanOrEqual(NOW);
     }
-    expect(label(SNAPSHOT_FIXTURE)).toBe('fresh');
-    expect(label(STALE_SNAPSHOT_FIXTURE.aged)).toBe('stale');
-    expect(label(STALE_SNAPSHOT_FIXTURE.refreshTimedOut)).toBe('stale');
+    expect(label(SNAPSHOT_FIXTURE, SNAPSHOT_FIXTURE.refresh)).toBe('fresh');
+    expect(label(STALE_SNAPSHOT_FIXTURE.aged, STALE_SNAPSHOT_FIXTURE.aged.refresh)).toBe('stale');
+    // the timed-out case is stale because of its refresh, not its age
+    const timedOut = STALE_SNAPSHOT_FIXTURE.refreshTimedOut;
+    expect(label(timedOut, null)).toBe('fresh');
+    expect(label(timedOut, timedOut.refresh)).toBe('stale');
+    expect(SnapshotRefresh.safeParse(timedOut.refresh).success).toBe(true);
+    expect(
+      Date.parse(timedOut.refresh.deadline_at) - Date.parse(timedOut.refresh.requested_at),
+    ).toBe(LIMITS.snapshotRefreshTimeoutMs);
+    expect(Date.parse(timedOut.refresh.requested_at)).toBeGreaterThan(
+      Date.parse(timedOut.received_at),
+    );
     expect(
       PaneSnapshotRecord.safeParse({
         ...SHARING_OFF_FIXTURE,
@@ -127,7 +149,7 @@ describe('shared fixtures', () => {
         signature: SIG,
       }).success,
     ).toBe(true);
-    expect(label({ record: SHARING_OFF_FIXTURE, refresh: null })).toBe('off');
+    expect(SHARING_OFF_FIXTURE.sharing).toBe('off');
   });
 
   it('hold no signatures or ciphertext that could pass for trusted ones', () => {

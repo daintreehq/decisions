@@ -60,12 +60,16 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     const w = await claimRelay();
     const phone = await pairDevice(w);
     const answered = await ask(w);
-    await act(w, phone, 'answer', answered.questionId, 0);
+    expect(answered.res.status).toBe(201);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
     const cancelled = await ask(w);
-    await act(w, w.owner, 'cancel', cancelled.questionId, 0);
-    await ask(w);
+    expect((await act(w, w.owner, 'cancel', cancelled.questionId, 0)).res.status).toBe(201);
+    expect((await ask(w)).res.status).toBe(201);
     const all = await events(w.owner);
-    expect(all.length).toBeGreaterThanOrEqual(5);
+    const types = all.map((e) => e.event_type);
+    expect(types.filter((t) => t === 'decision.created')).toHaveLength(3);
+    expect(types).toContain('decision.answer.committed');
+    expect(types).toContain('decision.cancelled');
 
     const pages = (a: Actor) => async (after: number) =>
       (await a.call('GET', '/api/v1/events', undefined, `after=${after}&limit=2`)).json;
@@ -82,6 +86,8 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
 
     // The relay advertises an extension only once it implements it; today it implements none.
     const info = await raw('GET', '/api/v1/info');
+    expect(info.status).toBe(200);
+    expect(info.json.name).toBe('daintree-decisions');
     expect(info.json.features).toBeUndefined();
   });
 

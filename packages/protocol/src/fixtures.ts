@@ -1,10 +1,10 @@
 import type { HumanAnswerContentV1, PhoneImageReference } from './schema.js';
-import type { PaneSnapshotContentV1, PaneSnapshotRecord, SnapshotRefresh } from './snapshot.js';
+import type { PaneSnapshotContentV1, SnapshotRefresh, SnapshotSharing } from './snapshot.js';
 import type {
   AgentMessageContentV1,
   HumanMessageContentV1,
   MessageDeliveryInfo,
-  MessageRecord,
+  MessageSide,
 } from './thread.js';
 
 export {
@@ -22,7 +22,7 @@ export type { LegacyCatchUp } from './legacy-0.3.0.js';
  * own device keys. Nothing here is a trusted signature or ciphertext. Times are fixed against `FIXTURE_NOW`.
  */
 
-/** The clock every fixture is relative to. Evaluate freshness with `Date.parse(FIXTURE_NOW)`. */
+/** The clock every fixture is relative to, in relay time. Evaluate freshness with `Date.parse(FIXTURE_NOW)`. */
 export const FIXTURE_NOW = '2026-11-01T10:00:00.000Z';
 const at = (secondsBeforeNow: number) =>
   new Date(Date.parse(FIXTURE_NOW) - secondsBeforeNow * 1000).toISOString();
@@ -40,8 +40,32 @@ export const FIXTURE_IDS = {
   message_image_id: 'att_msgimage01',
 } as const;
 
-export type UnsignedMessageRecord = Omit<MessageRecord, 'envelope_digest' | 'signature'>;
-export type UnsignedSnapshotRecord = Omit<PaneSnapshotRecord, 'envelope_digest' | 'signature'>;
+/** A `MessageRecord` before encryption and signing: add `envelope_digest` and `signature`. */
+export interface UnsignedMessageRecord {
+  v: 1;
+  type: 'thread.message';
+  installation_id: string;
+  question_id: string;
+  message_id: string;
+  side: MessageSide;
+  expects_reply: boolean;
+  attachment_ids: string[];
+  created_at: string;
+  signer_device_id: string;
+}
+
+/** A `PaneSnapshotRecord` before encryption and signing: add `envelope_digest` and `signature`. */
+export interface UnsignedSnapshotRecord {
+  v: 1;
+  type: 'pane.snapshot';
+  installation_id: string;
+  question_id: string;
+  snapshot_id: string;
+  question_revision: number;
+  observed_at: string;
+  sharing: SnapshotSharing;
+  signer_device_id: string;
+}
 
 /** A png the phone attached to its answer: what the answer content references and the action record lists. */
 export const ANSWER_IMAGE_FIXTURE: PhoneImageReference = {
@@ -81,7 +105,7 @@ export const ANSWER_FIXTURE = {
   } satisfies HumanAnswerContentV1,
 };
 
-interface ThreadMessageFixture<C> {
+export interface ThreadMessageFixture<C> {
   message_seq: number;
   /** Ledger seq of its `decision.message.posted` event. */
   event_seq: number;
@@ -110,6 +134,60 @@ const messageRecord = (
   signer_device_id: signer,
 });
 
+const THREAD_MESSAGES: [
+  ThreadMessageFixture<AgentMessageContentV1>,
+  ThreadMessageFixture<HumanMessageContentV1>,
+  ThreadMessageFixture<AgentMessageContentV1>,
+] = [
+  {
+    message_seq: 1,
+    event_seq: 4,
+    committed_at: at(300),
+    record: messageRecord('msg_agent0001', 'agent', FIXTURE_IDS.desktop_device_id, 300, {
+      expects_reply: true,
+    }),
+    content: {
+      content_version: 1,
+      side: 'agent',
+      text: 'Done with option B. Should the migration also keep the old column?',
+    },
+    delivery: null,
+  },
+  {
+    message_seq: 2,
+    event_seq: 6,
+    committed_at: at(240),
+    record: messageRecord('msg_human0001', 'human', FIXTURE_IDS.phone_device_id, 240, {
+      attachment_ids: [FIXTURE_IDS.message_image_id],
+    }),
+    content: {
+      content_version: 1,
+      side: 'human',
+      text: 'Yes, keep it for one release. The whiteboard has the plan.',
+      images: [MESSAGE_IMAGE_FIXTURE],
+    },
+    delivery: {
+      status: 'terminal-delivered',
+      received_at: at(238),
+      terminal_delivered_at: at(236),
+      injection_id: 'inj_msghuman01',
+      error_code: null,
+    },
+  },
+  {
+    message_seq: 3,
+    event_seq: 8,
+    committed_at: at(120),
+    record: messageRecord('msg_agent0002', 'agent', FIXTURE_IDS.desktop_device_id, 120),
+    content: {
+      content_version: 1,
+      side: 'agent',
+      text: 'Kept the old column; it is marked for removal in the next release.',
+    },
+    delivery: null,
+  },
+];
+
 /**
  * A human-answered question whose thread runs in both directions after the answer: the agent asks a follow-up
  * and waits, the person replies with a photo, the agent confirms without asking anything. The answer, revision and
@@ -122,55 +200,7 @@ export const THREAD_FIXTURE = {
   /** Ledger seq of the human answer, for `threadAwaitsHuman`. */
   answer_event_seq: 2,
   answer: ANSWER_FIXTURE,
-  messages: [
-    {
-      message_seq: 1,
-      event_seq: 4,
-      committed_at: at(300),
-      record: messageRecord('msg_agent0001', 'agent', FIXTURE_IDS.desktop_device_id, 300, {
-        expects_reply: true,
-      }),
-      content: {
-        content_version: 1,
-        side: 'agent',
-        text: 'Done with option B. Should the migration also keep the old column?',
-      },
-      delivery: null,
-    } satisfies ThreadMessageFixture<AgentMessageContentV1>,
-    {
-      message_seq: 2,
-      event_seq: 6,
-      committed_at: at(240),
-      record: messageRecord('msg_human0001', 'human', FIXTURE_IDS.phone_device_id, 240, {
-        attachment_ids: [FIXTURE_IDS.message_image_id],
-      }),
-      content: {
-        content_version: 1,
-        side: 'human',
-        text: 'Yes, keep it for one release. The whiteboard has the plan.',
-        images: [MESSAGE_IMAGE_FIXTURE],
-      },
-      delivery: {
-        status: 'terminal-delivered',
-        received_at: at(238),
-        terminal_delivered_at: at(236),
-        injection_id: 'inj_msghuman01',
-        error_code: null,
-      },
-    } satisfies ThreadMessageFixture<HumanMessageContentV1>,
-    {
-      message_seq: 3,
-      event_seq: 8,
-      committed_at: at(120),
-      record: messageRecord('msg_agent0002', 'agent', FIXTURE_IDS.desktop_device_id, 120),
-      content: {
-        content_version: 1,
-        side: 'agent',
-        text: 'Kept the old column; it is marked for removal in the next release.',
-      },
-      delivery: null,
-    } satisfies ThreadMessageFixture<AgentMessageContentV1>,
-  ],
+  messages: THREAD_MESSAGES,
 };
 
 const snapshotRecord = (snapshot_id: string, secondsBeforeNow: number): UnsignedSnapshotRecord => ({
@@ -185,9 +215,13 @@ const snapshotRecord = (snapshot_id: string, secondsBeforeNow: number): Unsigned
   signer_device_id: FIXTURE_IDS.desktop_device_id,
 });
 
-/** A snapshot observed 20 seconds before `FIXTURE_NOW`: `fresh`. */
+/**
+ * A snapshot the relay received 19 seconds before `FIXTURE_NOW` (observed a second earlier, desktop time): `fresh`.
+ * `received_at` is what `PaneSnapshotResponse` carries beside the signed snapshot.
+ */
 export const SNAPSHOT_FIXTURE = {
   record: snapshotRecord('snap_fresh0001', 20),
+  received_at: at(19),
   content: {
     content_version: 1,
     observed_at: at(20),
@@ -205,13 +239,14 @@ export const SNAPSHOT_FIXTURE = {
 };
 
 /**
- * Stale snapshots. `aged`: observed five minutes before `FIXTURE_NOW`, past `LIMITS.snapshotFreshMs`.
- * `refreshTimedOut`: observed 30 seconds before, but a refresh asked 20 seconds before passed its 15 second
- * deadline with no new snapshot.
+ * Stale snapshots. `aged`: received five minutes before `FIXTURE_NOW`, past `LIMITS.snapshotFreshMs`.
+ * `refreshTimedOut`: received 29 seconds before (fresh on its own), but a refresh asked 20 seconds before passed its
+ * 15 second deadline with no new snapshot.
  */
 export const STALE_SNAPSHOT_FIXTURE = {
   aged: {
     record: snapshotRecord('snap_aged00001', 300),
+    received_at: at(299),
     content: {
       ...SNAPSHOT_FIXTURE.content,
       observed_at: at(300),
@@ -222,6 +257,7 @@ export const STALE_SNAPSHOT_FIXTURE = {
   },
   refreshTimedOut: {
     record: snapshotRecord('snap_timeout01', 30),
+    received_at: at(29),
     content: { ...SNAPSHOT_FIXTURE.content, observed_at: at(30) } satisfies PaneSnapshotContentV1,
     refresh: {
       refresh_id: 'rfr_timeout001',

@@ -446,13 +446,13 @@ question_revision, observed_at, sharing: "on" | "off", envelope_digest, signer_d
 has purpose `snapshot-content`, `record_id = snapshot_id`, `aad.record_type = "pane.snapshot"` and `aad.revision = 0`.
 Content is `PaneSnapshotContentV1`:
 
-| Field            | Meaning                                                                                          | Limit                            |
-| ---------------- | ------------------------------------------------------------------------------------------------ | -------------------------------- |
-| `observed_at`    | when the desktop read the pane; equals the record's                                              |                                  |
-| `agent_state`    | `idle`, `working`, `waiting`, `directing`, `completed`, `exited`; anything newer reads `unknown` |                                  |
-| `waiting_reason` | `prompt`, `question`, `approval`, `error` or `null`; anything newer reads `null`                 |                                  |
-| `pane_title`     | plain text                                                                                       | 240 characters                   |
-| `terminal_lines` | the newest terminal lines, oldest first, plain text                                              | 200 lines, 32 KiB joined by `\n` |
+| Field            | Meaning                                                          | Limit                                                                                |
+| ---------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `observed_at`    | when the desktop read the pane; equals the record's              |                                                                                      |
+| `agent_state`    | `idle`, `working`, `waiting`, `directing`, `completed`, `exited` | a lowercase token; a newer one parses and `snapshotAgentState` reads it as `unknown` |
+| `waiting_reason` | `prompt`, `question`, `approval`, `error` or `null`              | a lowercase token or null; a newer one reads as `null` (`snapshotWaitingReason`)     |
+| `pane_title`     | plain text                                                       | 240 characters                                                                       |
+| `terminal_lines` | the newest terminal lines, oldest first, plain text              | 200 lines, 32 KiB joined by `\n`                                                     |
 
 Plain text means no control characters (tab excepted), escape sequences or line breaks inside a line.
 `boundTerminalLines` turns raw terminal text into lines within these limits.
@@ -474,20 +474,24 @@ idempotency_key}` → `SnapshotRefresh {refresh_id, requested_by_device_id, requ
 another returns the same one; a device may ask 6 times a minute. The publishing desktop gets
 `decision.snapshot.refresh_requested`, reads the pane after receiving it and publishes; the first snapshot the relay
 accepts after the request fulfils it. `GET /questions/{id}/snapshot` (any paired device) →
-`PaneSnapshotResponse {question_id, snapshot, refresh}`, where `refresh` is the outstanding request or null.
+`PaneSnapshotResponse {question_id, snapshot, received_at, refresh}`, where `received_at` is when the relay accepted
+the snapshot and `refresh` is the outstanding request or null.
 
-**Stale** (`snapshotFreshness`, at the phone's `now`):
+**Stale** (`snapshotFreshness`). Freshness is measured in relay time only, so the desktop's, relay's and phone's clocks
+are never compared: `now` is the phone's clock corrected by the offset it measures from the relay (`hello.server_time`),
+age runs from `received_at`, and the refresh deadline is the relay's. `observed_at` (desktop time) is shown to the
+person but never compared with another clock.
 
-| Result    | When                                                                                                                                                  |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `none`    | the question is expired or cancelled, or there is no snapshot and no outstanding request                                                              |
-| `off`     | the desktop said sharing is off                                                                                                                       |
-| `pending` | a refresh is outstanding and its deadline has not passed                                                                                              |
-| `stale`   | a refresh passed its deadline with no new snapshot (however recent the last one), or the snapshot was observed more than 60 s ago (`snapshotFreshMs`) |
-| `fresh`   | otherwise                                                                                                                                             |
+| Result    | When                                                                                                                                                        |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `none`    | the question is expired or cancelled, or there is no snapshot and no outstanding request                                                                    |
+| `off`     | the desktop said sharing is off                                                                                                                             |
+| `pending` | a refresh is outstanding and its deadline has not passed                                                                                                    |
+| `stale`   | a refresh passed its deadline with no new snapshot (however recent the last one), or the relay received the snapshot more than 60 s ago (`snapshotFreshMs`) |
+| `fresh`   | otherwise                                                                                                                                                   |
 
 **Cleared** when the question expires, is cancelled or is deleted, when the desktop turns sharing off, and 24 hours
-after `observed_at` (`snapshotRetentionMs`). A reopened question starts with no snapshot and no outstanding request.
+after the relay received it (`snapshotRetentionMs`). A reopened question starts with no snapshot and no outstanding request.
 An answer does not clear it: the thread is still live.
 
 **Events and push.** `decision.snapshot.updated {snapshot_id, observed_at, sharing, target_host_id}` and
@@ -533,7 +537,8 @@ sent.
 **Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive and opt-in, and a client that declares nothing
 sees exactly the 0.3.0 protocol. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
 `HumanAnswerContentV1.images`, `InfoResponse.features`, `DeviceInfo.features`, `SocketTicketBody.features`) parse
-under 0.3.0 schemas, and `attachment_ids` appears only on events a 0.3.0 client is never sent.
+under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0 client is never sent (an empty
+list is harmless).
 
 **Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
 desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and

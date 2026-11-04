@@ -14,7 +14,7 @@ import { PROTOCOL_VERSION } from './version.js';
 /** `aad.record_type` and the signed record's `type`. */
 export const SNAPSHOT_RECORD_TYPE = 'pane.snapshot' as const;
 
-/** Daintree's observed agent states. A state this version does not know reads as `unknown`. */
+/** Daintree's observed agent states, plus `unknown` for one this version does not know. */
 export const SnapshotAgentState = z.enum([
   'idle',
   'working',
@@ -26,9 +26,24 @@ export const SnapshotAgentState = z.enum([
 ]);
 export type SnapshotAgentState = z.infer<typeof SnapshotAgentState>;
 
-/** Why a `waiting` agent waits. A reason this version does not know reads as `null`. */
+/** Why a `waiting` agent waits. */
 export const SnapshotWaitingReason = z.enum(['prompt', 'question', 'approval', 'error']);
 export type SnapshotWaitingReason = z.infer<typeof SnapshotWaitingReason>;
+
+/**
+ * The wire form of an agent state or waiting reason: an open vocabulary, so a newer desktop's value still parses.
+ * Read it with `snapshotAgentState` / `snapshotWaitingReason`, which map values this version does not know.
+ */
+export const SnapshotToken = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/, 'invalid state token');
+
+export const snapshotAgentState = (token: string): SnapshotAgentState => {
+  const s = SnapshotAgentState.safeParse(token);
+  return s.success ? s.data : 'unknown';
+};
+export const snapshotWaitingReason = (token: string | null): SnapshotWaitingReason | null => {
+  const r = SnapshotWaitingReason.safeParse(token);
+  return r.success ? r.data : null;
+};
 
 /** C0 controls except tab, DEL and C1 controls: whatever could steer a terminal or a renderer. */
 const CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
@@ -43,8 +58,10 @@ export const PaneSnapshotContentV1 = z.object({
   content_version: z.literal(1).default(1),
   /** When the desktop read the pane. Equals the signed record's `observed_at`. */
   observed_at: IsoTime,
-  agent_state: SnapshotAgentState.catch('unknown'),
-  waiting_reason: SnapshotWaitingReason.nullable().catch(null),
+  /** A `SnapshotAgentState`, or a newer one (`snapshotAgentState` reads it as `unknown`). */
+  agent_state: SnapshotToken,
+  /** A `SnapshotWaitingReason`, a newer one (`snapshotWaitingReason` reads it as `null`), or null. */
+  waiting_reason: SnapshotToken.nullable(),
   pane_title: PlainLine(LIMITS.snapshotPaneTitleChars),
   /** The newest lines of the terminal, oldest first, as plain text (no escape sequences). */
   terminal_lines: z
@@ -145,6 +162,8 @@ export const SnapshotRefreshBody = z.object({
 export const PaneSnapshotResponse = z.object({
   question_id: Id,
   snapshot: SignedPaneSnapshot.nullable(),
+  /** Relay time when the relay accepted `snapshot`; freshness is measured from it. Null with no snapshot. */
+  received_at: IsoTime.nullable(),
   refresh: SnapshotRefresh.nullable(),
 });
 export type PaneSnapshotResponse = z.infer<typeof PaneSnapshotResponse>;
@@ -154,41 +173,52 @@ export type PaneSnapshotResponse = z.infer<typeof PaneSnapshotResponse>;
 export type SnapshotFreshness = 'none' | 'off' | 'pending' | 'fresh' | 'stale';
 
 /**
- * How a phone labels a question's snapshot at `now` (epoch ms):
+ * How a phone labels a question's snapshot. Every time is relay time, so the desktop's, relay's and phone's clocks
+ * never meet: `now` is the phone's clock corrected by the offset it measures from the relay (`hello.server_time`),
+ * `received_at` is when the relay accepted the snapshot, and `deadline_at` is the relay's refresh deadline.
  * - `none`: the question is closed, or there is no snapshot and no request;
  * - `off`: the desktop said sharing is off;
  * - `pending`: a refresh is outstanding and its deadline has not passed;
- * - `stale`: a refresh passed its deadline with no new snapshot (whatever the age of the last one), or the
- *   snapshot was observed more than `LIMITS.snapshotFreshMs` ago;
+ * - `stale`: a refresh passed its deadline with no new snapshot (however recent the last one), or the relay
+ *   received the snapshot more than `LIMITS.snapshotFreshMs` ago;
  * - `fresh`: otherwise.
+ * `observed_at`, in desktop time, is shown to the person but never compared with another clock.
  */
 export function snapshotFreshness(i: {
+  /** Relay time, epoch ms. */
   now: number;
   status: QuestionStatus;
-  snapshot: { observed_at: string; sharing: SnapshotSharing } | null;
+  snapshot: { received_at: string; sharing: SnapshotSharing } | null;
   refresh: { deadline_at: string } | null;
 }): SnapshotFreshness {
   if (isThreadClosedStatus(i.status)) return 'none';
   if (i.snapshot?.sharing === 'off') return 'off';
   if (i.refresh) return i.now < Date.parse(i.refresh.deadline_at) ? 'pending' : 'stale';
   if (!i.snapshot) return 'none';
-  return i.now - Date.parse(i.snapshot.observed_at) <= LIMITS.snapshotFreshMs ? 'fresh' : 'stale';
+  return i.now - Date.parse(i.snapshot.received_at) <= LIMITS.snapshotFreshMs ? 'fresh' : 'stale';
 }
 
-const ANSI =
-  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+/**
+ * Terminal escape sequences, 7-bit (ESC) and 8-bit (C1) forms: control strings (DCS, SOS, PM, APC, OSC) with their
+ * payloads, across line breaks; CSI sequences; and the remaining escapes (charset selection, keypad modes, ...).
+ */
+const ESCAPES =
+  /(?:\u001b[P^_X]|[\u0090\u0098\u009e\u009f])[\s\S]*?(?:\u001b\\|\u009c)|(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c)|(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]|\u001b[ -/]*[0-~]/g;
 const CONTROL_ALL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
 
 /**
- * Turns raw terminal text into snapshot lines within the limits: strips escape sequences and control characters,
- * keeps the newest `LIMITS.snapshotTerminalLines` lines, then drops the oldest until the joined text fits
- * `LIMITS.snapshotTerminalBytes`, keeping the end of a single line that is too long on its own.
+ * Turns terminal text into snapshot lines within the limits: removes escape sequences (before splitting, so a
+ * control string spanning lines goes whole), then the remaining control characters, keeps the newest
+ * `LIMITS.snapshotTerminalLines` lines, and drops the oldest until the joined text fits
+ * `LIMITS.snapshotTerminalBytes`, keeping the end of a single line that is too long on its own. Pass the rendered
+ * screen text: a carriage return is read as a line break, not as an overwrite.
  */
 export function boundTerminalLines(text: string): string[] {
   const lines = text
+    .replace(ESCAPES, '')
     .replace(/\r\n?/g, '\n')
     .split('\n')
-    .map((l) => l.replace(ANSI, '').replace(CONTROL_ALL, ''));
+    .map((l) => l.replace(CONTROL_ALL, ''));
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const kept = lines.slice(-LIMITS.snapshotTerminalLines);
   let bytes = terminalBytes(kept);

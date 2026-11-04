@@ -319,3 +319,89 @@ describe('events pages for any client', () => {
     }
   });
 });
+
+describe('each feature set sees exactly its events', () => {
+  // Seqs of mixedLedger(), worked out by hand from the contract, not from isEventVisible.
+  const cases: [string, ProtocolFeature[], number[]][] = [
+    ['nothing (0.3.0)', [], [1, 2, 7, 10, 12]],
+    ['threads', ['thread-messages-v1'], [1, 2, 3, 4, 7, 10, 12, 14]],
+    ['snapshots', ['pane-snapshots-v1'], [1, 2, 5, 6, 7, 10, 12, 13]],
+    // an image-bearing message also needs threads, so images alone show only image-bearing answers
+    ['images', ['phone-images-v1'], [1, 2, 7, 9, 10, 11, 12]],
+    [
+      'threads and images',
+      ['thread-messages-v1', 'phone-images-v1'],
+      [1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 14],
+    ],
+    ['everything', [...ProtocolFeature.options], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]],
+  ];
+  it.each(cases)('%s', (_name, declared, want) => {
+    const ledger = mixedLedger();
+    const features = new Set(declared);
+    expect(relay(ledger, features, 100)(0).events.map((e) => e.seq)).toEqual(want);
+    // paged two at a time, the same events arrive and the cursor ends at high water
+    const seen: number[] = [];
+    let after = 0;
+    for (;;) {
+      const page = relay(ledger, features, 2)(after);
+      seen.push(...page.events.map((e) => e.seq));
+      after = page.next_after;
+      if (!page.has_more) break;
+    }
+    expect(seen).toEqual(want);
+    expect(after).toBe(14);
+  });
+  it('a refresh request needs snapshots and nothing else', () => {
+    expect(requiredFeaturesForEvent(event(1, 'decision.snapshot.refresh_requested'))).toEqual([
+      'pane-snapshots-v1',
+    ]);
+  });
+});
+
+describe('the frozen 0.3.0 loops are as strict as the real ones', () => {
+  const page = (o: Partial<{ events: LedgerEvent[]; next_after: number; has_more: boolean }>) => ({
+    protocol_version: 1,
+    from_exclusive: 0,
+    high_water_seq: 10,
+    events: [],
+    next_after: 0,
+    has_more: false,
+    ...o,
+  });
+  const script = (pages: object[]) => {
+    let i = 0;
+    return () => pages[Math.min(i++, pages.length - 1)];
+  };
+
+  it('both fail on a page holding an event type 0.3.0 does not know', async () => {
+    const bad = page({ events: [event(1, 'delivery.message')], next_after: 1 });
+    await expect(legacyDesktopCatchUp(script([bad]))).rejects.toThrow();
+    await expect(legacyPhoneCatchUp(script([bad]))).rejects.toThrow();
+  });
+
+  it('the desktop fails on a page that says more but does not advance', async () => {
+    const stuck = page({ events: [], next_after: 0, has_more: true });
+    await expect(legacyDesktopCatchUp(script([stuck]))).rejects.toThrow(/does not advance/);
+  });
+
+  it('the desktop moves to next_after; the phone moves only to its last event on a partial page', async () => {
+    const partial = page({ events: [event(2, 'decision.created')], next_after: 5, has_more: true });
+    const end = page({ events: [], next_after: 5, has_more: false });
+    expect((await legacyDesktopCatchUp(script([partial, end]))).cursor).toBe(5);
+    const phone = await legacyPhoneCatchUp((after) => (after === 0 ? partial : end));
+    expect(phone.cursor).toBe(5);
+    // the phone asked again from 2, its last event, not from next_after
+    const asked: number[] = [];
+    await legacyPhoneCatchUp((after) => {
+      asked.push(after);
+      return after === 0 ? partial : end;
+    });
+    expect(asked).toEqual([0, 2]);
+  });
+
+  it('the phone stops on an empty page even when it says more, and never moves its cursor', async () => {
+    const empty = page({ events: [], next_after: 0, has_more: true });
+    const r = await legacyPhoneCatchUp(script([empty]), 0);
+    expect(r).toMatchObject({ cursor: 0, pages: 1, events: [] });
+  });
+});

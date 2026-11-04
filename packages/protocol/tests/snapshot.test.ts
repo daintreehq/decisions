@@ -7,7 +7,9 @@ import {
   PaneSnapshotResponse,
   SignedPaneSnapshot,
   boundTerminalLines,
+  snapshotAgentState,
   snapshotFreshness,
+  snapshotWaitingReason,
   utf8ByteLength,
   type CryptoEnvelope,
 } from '../src/index.js';
@@ -76,17 +78,27 @@ describe('snapshot content', () => {
       }).success,
     ).toBe(false);
   });
-  it('reads a newer agent state or waiting reason as unknown rather than failing', () => {
+  it('parses a newer agent state or waiting reason, which reads as unknown', () => {
     const c = PaneSnapshotContentV1.parse({
       ...content,
       agent_state: 'meditating',
       waiting_reason: 'coffee',
     });
-    expect(c.agent_state).toBe('unknown');
-    expect(c.waiting_reason).toBeNull();
-    expect(
-      PaneSnapshotContentV1.parse({ ...content, waiting_reason: undefined }).waiting_reason,
-    ).toBe(null);
+    expect(c.agent_state).toBe('meditating');
+    expect(snapshotAgentState(c.agent_state)).toBe('unknown');
+    expect(snapshotWaitingReason(c.waiting_reason)).toBeNull();
+    expect(snapshotAgentState(content.agent_state)).toBe('waiting');
+    expect(snapshotWaitingReason(content.waiting_reason)).toBe('question');
+    expect(snapshotWaitingReason(null)).toBeNull();
+  });
+  it('rejects a state or reason that is not a token', () => {
+    const ok = (patch: object) => PaneSnapshotContentV1.safeParse({ ...content, ...patch }).success;
+    expect(ok({ agent_state: {} })).toBe(false);
+    expect(ok({ agent_state: 'Working Hard' })).toBe(false);
+    expect(ok({ agent_state: undefined })).toBe(false);
+    expect(ok({ waiting_reason: [] })).toBe(false);
+    expect(ok({ waiting_reason: undefined })).toBe(false);
+    expect(ok({ waiting_reason: null })).toBe(true);
   });
 });
 
@@ -104,6 +116,9 @@ describe('snapshot records', () => {
       { ...envelope, record_id: 'snap_other001' },
       { ...envelope, aad: { ...envelope.aad, revision: 1 } },
       { ...envelope, aad: { ...envelope.aad, sender_device_id: 'dev_phone0001' } },
+      { ...envelope, aad: { ...envelope.aad, installation_id: 'inst_another1' } },
+      { ...envelope, aad: { ...envelope.aad, question_id: 'q_another001' } },
+      { ...envelope, aad: { ...envelope.aad, record_type: 'thread.message' } },
     ]) {
       expect(SignedPaneSnapshot.safeParse({ record, envelope: env }).success).toBe(false);
     }
@@ -120,7 +135,16 @@ describe('snapshot records', () => {
       PaneSnapshotResponse.safeParse({
         question_id: record.question_id,
         snapshot: { record, envelope },
+        received_at: SNAPSHOT_FIXTURE.received_at,
         refresh: STALE_SNAPSHOT_FIXTURE.refreshTimedOut.refresh,
+      }).success,
+    ).toBe(true);
+    expect(
+      PaneSnapshotResponse.safeParse({
+        question_id: record.question_id,
+        snapshot: null,
+        received_at: null,
+        refresh: null,
       }).success,
     ).toBe(true);
   });
@@ -128,30 +152,36 @@ describe('snapshot records', () => {
 
 describe('snapshot freshness', () => {
   const at = (ms: number) => new Date(NOW - ms).toISOString();
-  const shared = (msAgo: number) => ({ observed_at: at(msAgo), sharing: 'on' as const });
+  const shared = (msAgo: number) => ({ received_at: at(msAgo), sharing: 'on' as const });
   const f = (
-    snapshot: { observed_at: string; sharing: 'on' | 'off' } | null,
+    snapshot: { received_at: string; sharing: 'on' | 'off' } | null,
     refresh: { deadline_at: string } | null = null,
     status: 'open' | 'human-answered' | 'proxy-answered' | 'expired' | 'cancelled' = 'open',
     now = NOW,
   ) => snapshotFreshness({ now, status, snapshot, refresh });
+  const fixture = (s: { record: { sharing: 'on' | 'off' }; received_at: string }) => ({
+    received_at: s.received_at,
+    sharing: s.record.sharing,
+  });
 
   it('labels the fixtures', () => {
-    expect(f(SNAPSHOT_FIXTURE.record)).toBe('fresh');
-    expect(f(STALE_SNAPSHOT_FIXTURE.aged.record)).toBe('stale');
-    expect(
-      f(
-        STALE_SNAPSHOT_FIXTURE.refreshTimedOut.record,
-        STALE_SNAPSHOT_FIXTURE.refreshTimedOut.refresh,
-      ),
-    ).toBe('stale');
-    expect(f(SHARING_OFF_FIXTURE)).toBe('off');
+    expect(f(fixture(SNAPSHOT_FIXTURE))).toBe('fresh');
+    expect(f(fixture(STALE_SNAPSHOT_FIXTURE.aged))).toBe('stale');
+    const timedOut = STALE_SNAPSHOT_FIXTURE.refreshTimedOut;
+    expect(f(fixture(timedOut))).toBe('fresh');
+    expect(f(fixture(timedOut), timedOut.refresh)).toBe('stale');
+    expect(f({ received_at: at(0), sharing: SHARING_OFF_FIXTURE.sharing })).toBe('off');
   });
   it('is fresh up to the window and stale one millisecond after', () => {
     expect(f(shared(LIMITS.snapshotFreshMs))).toBe('fresh');
     expect(f(shared(LIMITS.snapshotFreshMs + 1))).toBe('stale');
-    // a desktop clock slightly ahead is still fresh
-    expect(f(shared(-5_000))).toBe('fresh');
+  });
+  it('measures in relay time only, whatever the desktop clock said', () => {
+    // The desktop clock is ten minutes behind or ahead: observed_at plays no part in freshness.
+    const behind = { ...shared(1_000), observed_at: at(600_000) };
+    const ahead = { ...shared(LIMITS.snapshotFreshMs + 1), observed_at: at(-600_000) };
+    expect(f(behind)).toBe('fresh');
+    expect(f(ahead)).toBe('stale');
   });
   it('is pending until the refresh deadline, then stale whatever the age of the last snapshot', () => {
     const deadline = { deadline_at: at(-1) };
@@ -182,6 +212,14 @@ describe('boundTerminalLines', () => {
     expect(lines).toEqual(['✓ ok', 'next', 'last']);
     expect(valid(lines)).toBe(true);
   });
+  it('removes 8-bit, string and charset sequences whole, payloads included, even across lines', () => {
+    expect(boundTerminalLines('\u009b31mred\u009b0m')).toEqual(['red']);
+    expect(boundTerminalLines('a\u001bP1$r0m\u001b\\b')).toEqual(['ab']);
+    expect(boundTerminalLines('a\u0090payload\u009cb')).toEqual(['ab']);
+    expect(boundTerminalLines('\u001b(Bplain\u001b)0')).toEqual(['plain']);
+    expect(boundTerminalLines('\u001b_apc\u001b\\x\u009d8;;http://x\u009cy')).toEqual(['xy']);
+    expect(boundTerminalLines('one\u001b]0;multi\nline title\u0007\ntwo')).toEqual(['one', 'two']);
+  });
   it('keeps the newest lines within the line cap', () => {
     const text = Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n');
     const lines = boundTerminalLines(text);
@@ -192,8 +230,11 @@ describe('boundTerminalLines', () => {
   it('drops the oldest lines to fit the byte cap', () => {
     const text = Array.from({ length: 100 }, (_, i) => `${i}`.padEnd(1_000, 'x')).join('\n');
     const lines = boundTerminalLines(text);
+    // 32 lines of 1,000 bytes and 31 newlines fit 32 KiB; a 33rd would not
+    expect(lines).toHaveLength(32);
+    expect(lines[0]!.startsWith('68x')).toBe(true);
+    expect(lines.at(-1)!.startsWith('99x')).toBe(true);
     expect(utf8ByteLength(lines.join('\n'))).toBeLessThanOrEqual(LIMITS.snapshotTerminalBytes);
-    expect(lines.at(-1)!.startsWith('99')).toBe(true);
     expect(valid(lines)).toBe(true);
   });
   it('keeps the end of a single line that is too long, never splitting a character', () => {

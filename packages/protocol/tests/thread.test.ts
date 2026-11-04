@@ -25,6 +25,7 @@ import {
   threadAwaitsHuman,
   type ActionKind,
   type CryptoEnvelope,
+  type MessageTransition,
   type QuestionState,
   type Role,
 } from '../src/index.js';
@@ -98,6 +99,7 @@ describe('message records', () => {
       ['revision', { ...env, aad: { ...env.aad, revision: 1 } }],
       ['sender', { ...env, aad: { ...env.aad, sender_device_id: 'dev_someone01' } }],
       ['question', { ...env, aad: { ...env.aad, question_id: 'q_another001' } }],
+      ['installation', { ...env, aad: { ...env.aad, installation_id: 'inst_another1' } }],
     ];
     for (const [what, envelope] of bad) {
       expect(SignedMessage.safeParse({ record, envelope }).success, what).toBe(false);
@@ -118,6 +120,21 @@ describe('message content', () => {
     for (const m of THREAD_FIXTURE.messages) {
       expect(MessageContentV1.safeParse(m.content).success, m.record.message_id).toBe(true);
     }
+  });
+  it('the content union applies the rules of each side and refuses anything else', () => {
+    const ok = (c: unknown) => MessageContentV1.safeParse(c).success;
+    const img = (i: number) => ({ ...MESSAGE_IMAGE_FIXTURE, attachment_id: `att_image${i}xx` });
+    expect(ok({ side: 'human', text: 'hi' })).toBe(true);
+    expect(ok({ side: 'agent', text: 'hi' })).toBe(true);
+    expect(ok({ side: 'system', text: 'hi' })).toBe(false);
+    expect(ok({ text: 'hi' })).toBe(false);
+    expect(ok({ side: 'human', text: ' ' })).toBe(false);
+    expect(ok({ side: 'agent', text: '' })).toBe(false);
+    expect(ok({ side: 'agent' })).toBe(false);
+    expect(ok({ side: 'agent', text: bytes(LIMITS.messageTextBytes + 1) })).toBe(false);
+    expect(ok({ side: 'human', text: bytes(LIMITS.messageTextBytes + 1) })).toBe(false);
+    expect(ok({ side: 'human', images: [img(1), img(1)] })).toBe(false);
+    expect(ok({ side: 'human', content_version: 2, text: 'hi' })).toBe(false);
   });
   it('needs text or an image from the person, and text from the agent', () => {
     expect(HumanMessageContentV1.safeParse({ side: 'human', text: '  ' }).success).toBe(false);
@@ -247,6 +264,12 @@ describe('phone images on answers', () => {
     const legacy = Legacy030.HumanAnswerContentV1.parse(THREAD_FIXTURE.answer.content);
     expect('images' in legacy).toBe(false);
     expect(legacy.text).toBe(THREAD_FIXTURE.answer.content.text);
+    // the frozen schema keeps 0.3.0's text limit: 16 KiB of UTF-8
+    const fits = (text: string) => Legacy030.HumanAnswerContentV1.safeParse({ text }).success;
+    expect(fits('a'.repeat(16 * 1024))).toBe(true);
+    expect(fits('a'.repeat(16 * 1024 + 1))).toBe(false);
+    expect(fits('é'.repeat(8 * 1024))).toBe(true);
+    expect(fits('é'.repeat(8 * 1024 + 1))).toBe(false);
   });
   it('reserves one image for one answer or message', () => {
     const body = {
@@ -346,7 +369,22 @@ describe('thread state rules', () => {
     expect(isThreadClosedStatus('human-answered')).toBe(false);
   });
 
+  /** The outcome the contract (docs/protocol.md section 16) gives each sender and state, worked out independently. */
+  const expected = (
+    status: QuestionState['status'],
+    role: Role,
+    side: 'human' | 'agent',
+    signerIsPublisher: boolean,
+  ): string => {
+    const human = role === 'phone' || role === 'tablet';
+    if (side === 'human' ? !human : human || !signerIsPublisher) return 'forbidden';
+    if (status === 'expired') return 'expired';
+    if (status === 'cancelled') return 'invalid_state';
+    return 'ok';
+  };
+
   it('never changes the answer, revision, deliverable or approval, in any state, from any sender', () => {
+    let accepted = 0;
     for (const status of STATUSES) {
       for (const role of ROLES) {
         for (const side of ['human', 'agent'] as const) {
@@ -354,14 +392,19 @@ describe('thread state rules', () => {
             const state = stateOf(status);
             const frozen = structuredClone(state);
             const label = `${status} ${role} ${side} publisher=${signerIsPublisher}`;
-            let t;
+            const want = expected(status, role, side, signerIsPublisher);
+            let t: MessageTransition;
             try {
               t = applyMessage(state, { side, role, signerIsPublisher, messageCount: 0 });
             } catch (e) {
               expect(e, label).toBeInstanceOf(ApiError);
+              expect((e as ApiError).code, label).toBe(want);
               expect(state, label).toEqual(frozen); // a refusal mutates nothing either
               continue;
             }
+            expect(want, label).toBe('ok');
+            accepted++;
+            expect(t.state, label).not.toBe(state);
             expect(t.state, label).toEqual(frozen);
             expect(t.deliverable, label).toBe(false);
             expect(t.approval, label).toBe(false);
@@ -371,6 +414,8 @@ describe('thread state rules', () => {
         }
       }
     }
+    // 3 accepting statuses x (2 human roles, either publisher flag, + 2 desktop roles as the publisher)
+    expect(accepted).toBe(18);
   });
 
   it('takes human messages from paired phones and agent messages only from the publishing desktop', () => {
@@ -484,7 +529,11 @@ describe('whose turn it is', () => {
       expects_reply: m.record.expects_reply,
       event_seq: m.event_seq,
     }));
-  const awaits = (n: number, status = THREAD_FIXTURE.status, lastHumanActionSeq?: number) =>
+  const awaits = (
+    n: number,
+    status: QuestionStatus = THREAD_FIXTURE.status,
+    lastHumanActionSeq?: number,
+  ) =>
     threadAwaitsHuman({
       status,
       messages: msgs(n),
@@ -495,6 +544,27 @@ describe('whose turn it is', () => {
     expect(awaits(1)).toBe(true);
     expect(awaits(2)).toBe(false);
     expect(awaits(3)).toBe(false);
+  });
+  it('orders by ledger seq, not by array position', () => {
+    const shuffled = [
+      { side: 'agent' as const, expects_reply: true, event_seq: 9 },
+      { side: 'human' as const, expects_reply: false, event_seq: 7 },
+      { side: 'agent' as const, expects_reply: false, event_seq: 5 },
+    ];
+    expect(threadAwaitsHuman({ status: 'human-answered', messages: shuffled })).toBe(true);
+    const replied = [
+      { side: 'human' as const, expects_reply: false, event_seq: 10 },
+      { side: 'agent' as const, expects_reply: true, event_seq: 9 },
+    ];
+    expect(threadAwaitsHuman({ status: 'human-answered', messages: replied })).toBe(false);
+  });
+  it('counts no human action when none is given', () => {
+    const ask = [{ side: 'agent' as const, expects_reply: true, event_seq: 3 }];
+    expect(threadAwaitsHuman({ status: 'open', messages: ask })).toBe(true);
+    expect(threadAwaitsHuman({ status: 'open', messages: ask, lastHumanActionSeq: null })).toBe(
+      true,
+    );
+    expect(threadAwaitsHuman({ status: 'open', messages: ask, lastHumanActionSeq: 4 })).toBe(false);
   });
   it('a later agent message that asks nothing withdraws the request', () => {
     const list = [

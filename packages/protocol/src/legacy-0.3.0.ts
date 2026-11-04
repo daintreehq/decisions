@@ -84,7 +84,10 @@ const ServerFrame = z.discriminatedUnion('t', [
 const HumanAnswerContentV1 = z.object({
   content_version: z.literal(1).default(1),
   selected_option_ids: z.array(z.string().max(64)).max(12).default([]),
-  text: z.string().optional(),
+  text: z
+    .string()
+    .refine((v) => new TextEncoder().encode(v).length <= 16 * 1024, 'answer text too large')
+    .optional(),
   reviewed_attachment_digests: z.array(z.string().regex(/^[0-9a-f]{64}$/)).default([]),
   explicit_approval: z.boolean().optional(),
   reason: z.string().max(2_000).optional(),
