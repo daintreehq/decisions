@@ -742,6 +742,59 @@ describe('crash recovery', () => {
     await restarted.stop();
   });
 
+  it('through such a store, an unreconciled follow-up still never holds the answers', async () => {
+    class LossyStore extends MemoryLocalStore {
+      override async putIntent(i: InjectionIntent) {
+        await super.putIntent({ ...i, message_id: null });
+      }
+    }
+    const store = new LossyStore();
+    const env = { ...(await asked({ store })), store };
+    dieWhileTyping(env, { typed: false });
+    const ev = await say(env, 'Maybe typed.');
+    void env.bridge.catchUp();
+    await untilTyped(env, 1);
+    const restarted = await restart(env, store);
+    expect((await messageOf(env, idOf(ev))).delivery!.status).toBe('delivery-uncertain');
+    await answer(env);
+    await restarted.catchUp();
+    expect(env.sink.typed.map((t) => blockKinds(t.text))).toEqual([['answer']]);
+    await restarted.stop();
+  });
+
+  it('an open attempt known only by the follow-up’s attempt id holds that follow-up, not the answers', async () => {
+    const env = await asked();
+    env.sink.panes.get('pane-1')!.idle = false;
+    const ev = await say(env, 'Waiting.');
+    await env.bridge.catchUp();
+    const row = (await env.store.getQuestion(env.qid))!;
+    const held = parseMessages(row.messages_json).map((m) => ({
+      ...m,
+      delivery: { ...m.delivery!, attempt_id: 'orphan_attempt' },
+    }));
+    await env.store.updateQuestion(env.qid, { messages_json: JSON.stringify(held) });
+    await env.store.putIntent({
+      injection_id: 'orphan_attempt',
+      question_id: env.qid,
+      answer_revision: 0,
+      message_id: null,
+      host_id: 'host-local',
+      pane_id: 'pane-1',
+      terminal_generation: 1,
+      ownership_principal: 'principal-1',
+      agent_incarnation: 'inc-1',
+      state: 'intent',
+      created_at: 1,
+      updated_at: 1,
+    });
+    await answer(env);
+    await env.bridge.catchUp();
+    env.sink.panes.get('pane-1')!.idle = true;
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed.map((t) => blockKinds(t.text))).toEqual([['answer']]);
+    expect((await messageOf(env, idOf(ev))).delivery!.status).toBe('received');
+  });
+
   it('a batch that crashed is reconciled block by block', async () => {
     const env = await asked();
     env.sink.panes.get('pane-1')!.idle = false;

@@ -1126,9 +1126,10 @@ export class DeliveryEngine {
         ...(uncertainIntentId ? { injection_id: uncertainIntentId } : {}),
       }));
       if (uncertainIntentId) {
+        // The intent names its follow-up again, so the answers' uncertainty guard never counts it.
         await ctx.store.settleIntent(
           uncertainIntentId,
-          { state: 'uncertain', updated_at: now },
+          { state: 'uncertain', message_id: m.message_id, updated_at: now },
           q.question_id,
           { messages_json: messages },
         );
