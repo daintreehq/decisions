@@ -148,24 +148,17 @@ describe.skipIf(!chromiumPath)('Home: one compact list of every question', () =>
       });
       ids.push(r.questionId);
     };
-    // A phone that has only just paired can miss what is asked in its first moments (a sync race outside Home), so
-    // ask a first question until the phone shows it, and only then the rest.
-    for (let attempt = 0; ; attempt++) {
-      await ask(0, `p0-${attempt}`);
-      await bridge.pump();
-      const seen = await until(async () => (await rows().count()) > 0, 10_000, 'a first question')
-        .then(() => true)
-        .catch(() => false);
-      if (seen) break;
-      if (attempt === 5) throw new Error('the phone never showed a question');
-    }
-    for (let i = 1; i < 14; i++) await ask(i, `p${i}`);
+    // All at once, while the phone's socket may still be on its first sync: it must keep every one.
+    for (let i = 0; i < 14; i++) await ask(i, `p${i}`);
     await bridge.pump();
     await home();
     // Questions that arrive after the first sync are held behind "N new questions" (rows never reshuffle under the
     // finger), so take them in the way a person would.
     await until(
       async () => {
+        // `registerQuestion` pumps in the background and `pump()` hands back one already running, whose flush may
+        // have read the outbox before the last questions joined it: pump again until every one is out.
+        await bridge.pump();
         const pill = page.locator('main .nav-new');
         if (await pill.isVisible().catch(() => false)) await pill.click();
         return (await rows().count()) >= 14;

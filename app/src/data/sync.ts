@@ -74,7 +74,13 @@ export class SyncEngine {
   private reconnectTimer: unknown = null;
   private pingTimer: unknown = null;
   private pollTimer: unknown = null;
-  private replaying = false;
+  /**
+   * The socket replay under way (docs/protocol.md section 8), at most one per socket. The relay pushes live events to
+   * a socket from the moment it connects, so one can overtake the replay of earlier events, and only the replay's
+   * `caught_up` marker says which events the relay has sent. Every event that arrives while a replay runs waits here;
+   * at each marker the events up to its `high_water` are committed in ledger order and the cursor moves to it.
+   */
+  private replay: { ws: WebSocketLike; events: Map<number, LedgerEvent> } | null = null;
   private queue: Promise<void> = Promise.resolve();
   private catchingUp: Promise<void> | null = null;
   /**
@@ -119,6 +125,7 @@ export class SyncEngine {
     this.untimer(this.pollTimer);
     const ws = this.ws;
     this.ws = null;
+    this.replay = null;
     if (ws) {
       ws.onclose = ws.onmessage = ws.onerror = ws.onopen = null;
       try {
@@ -135,6 +142,7 @@ export class SyncEngine {
     if (this.stopped) return;
     const ws = this.ws;
     this.ws = null;
+    this.replay = null;
     this.untimer(this.pingTimer);
     if (ws) {
       ws.onclose = ws.onmessage = ws.onerror = ws.onopen = null;
@@ -160,15 +168,21 @@ export class SyncEngine {
       this.untimer(this.reconnectTimer);
       this.attempt = 0;
       this.connect();
-    } else {
-      this.send({ t: 'sync', after: this.cursor });
-      this.replaying = true;
+    } else if (this.replay?.ws !== this.ws) {
+      // Re-sync the live socket, unless a replay is already under way on it.
+      this.beginReplay(this.ws);
     }
     void this.safeCatchUp();
   }
 
   private send(f: ClientFrame) {
     if (this.ws?.readyState === OPEN) this.ws.send(JSON.stringify(f));
+  }
+
+  /** Ask the socket for every event after the cursor; what arrives until the replay's marker waits for it. */
+  private beginReplay(ws: WebSocketLike): void {
+    this.replay = { ws, events: new Map() };
+    this.send({ t: 'sync', after: this.cursor });
   }
 
   private connect(): void {
@@ -193,18 +207,20 @@ export class SyncEngine {
           ? this.d.wsFactory(url)
           : (new WebSocket(url) as unknown as WebSocketLike);
         this.ws = ws;
+        this.replay = null;
         ws.onopen = () => {
+          if (this.ws !== ws) return;
           this.attempt = 0;
-          this.replaying = true;
-          this.send({ t: 'sync', after: this.cursor });
+          this.beginReplay(ws);
           this.startPing();
         };
-        ws.onmessage = (ev) => this.onMessage(ev.data);
+        ws.onmessage = (ev) => this.onMessage(ws, ev.data);
         ws.onerror = () => undefined;
         ws.onclose = (ev) => {
           // A superseded socket closing (the relay replaced it, or a redeclaration closed it) changes nothing.
           if (this.ws !== ws) return;
           this.ws = null;
+          this.replay = null;
           this.untimer(this.pingTimer);
           if (ev.code === 4401) {
             this.stopped = true;
@@ -259,8 +275,9 @@ export class SyncEngine {
     this.pollTimer = this.timer(tick, this.d.pollMs ?? 30_000);
   }
 
-  private onMessage(data: unknown): void {
-    if (typeof data !== 'string' || data === 'pong') return;
+  private onMessage(ws: WebSocketLike, data: unknown): void {
+    // A superseded socket (replaced, redeclared, or stopped) says nothing about the current one.
+    if (this.ws !== ws || typeof data !== 'string' || data === 'pong') return;
     let frame;
     try {
       frame = ServerFrame.safeParse(JSON.parse(data));
@@ -277,17 +294,17 @@ export class SyncEngine {
         this.pollTimer = null;
         break;
       case 'event':
-        this.enqueue(() => this.acceptPushed(f.event));
+        this.enqueue(ws, () => this.acceptPushed(ws, f.event));
         break;
       case 'caught_up':
-        this.enqueue(async () => {
-          if (f.has_more) {
-            // The relay cut the replay short (budget); ask for the rest from where we are now.
-            this.send({ t: 'sync', after: this.cursor });
-            return;
-          }
-          this.replaying = false;
-          this.d.onSynced?.(Date.now());
+        this.enqueue(ws, () => this.acceptCaughtUp(ws, f.high_water, f.has_more));
+        break;
+      case 'error':
+        // A refused `sync` (rate limited) never gets its `caught_up`: end the replay and read the ledger over HTTP.
+        this.enqueue(ws, async () => {
+          if (this.replay?.ws !== ws) return;
+          this.replay = null;
+          await this.catchUpNow();
         });
         break;
       case 'revoked':
@@ -299,19 +316,65 @@ export class SyncEngine {
     }
   }
 
-  private enqueue(fn: () => Promise<void>) {
-    this.queue = this.queue.then(fn).catch((e) => this.d.onError?.(e));
+  /** Frames are handled one at a time, in arrival order, and only while their socket is still the current one. */
+  private enqueue(ws: WebSocketLike, fn: () => Promise<void>) {
+    this.queue = this.queue
+      .then(() => (this.ws === ws ? fn() : undefined))
+      .catch((e) => this.d.onError?.(e));
   }
 
-  private async acceptPushed(ev: LedgerEvent): Promise<void> {
+  private async acceptPushed(ws: WebSocketLike, ev: LedgerEvent): Promise<void> {
     if (ev.seq <= this.cursor) return;
-    // During a replay the relay streams in order and sequence numbers may have holes (deleted questions).
-    // For live pushes anything but the very next number could mean a missed event: ask HTTP for the truth.
-    if (!this.replaying && ev.seq !== this.cursor + 1) {
+    const replay = this.replay;
+    if (replay?.ws === ws) {
+      // Replayed, or pushed live ahead of the replay: either way it waits for the replay's marker.
+      replay.events.set(ev.seq, ev);
+      return;
+    }
+    // Outside a replay anything but the very next number could mean a missed event: ask HTTP for the truth.
+    if (ev.seq !== this.cursor + 1) {
       await this.catchUpNow();
       return;
     }
     await this.commit([ev], ev.seq);
+  }
+
+  /**
+   * The relay has sent every event it holds for this socket up to `highWater`. Sequence numbers may have holes
+   * (deleted questions, events this socket is not sent), so the marker, not the events, moves the cursor there.
+   */
+  private async acceptCaughtUp(
+    ws: WebSocketLike,
+    highWater: number,
+    hasMore: boolean,
+  ): Promise<void> {
+    const replay = this.replay;
+    if (replay?.ws !== ws) return; // no replay was asked for on this socket
+    const batch = [...replay.events.values()]
+      .filter((e) => e.seq > this.cursor && e.seq <= highWater)
+      .sort((a, b) => a.seq - b.seq);
+    try {
+      if (batch.length || highWater > this.cursor) {
+        await this.commit(batch, Math.max(this.cursor, highWater));
+      }
+    } catch (e) {
+      // Nothing past the failure may be skipped: drop the replay, and the next gap or catch-up retries over HTTP.
+      if (this.replay === replay) this.replay = null;
+      throw e;
+    }
+    if (this.replay !== replay) return; // the socket was replaced while committing
+    for (const seq of replay.events.keys()) if (seq <= this.cursor) replay.events.delete(seq);
+    if (hasMore) {
+      // The relay cut the replay short (budget); ask for the rest from the marker.
+      this.send({ t: 'sync', after: this.cursor });
+      return;
+    }
+    this.replay = null;
+    // The relay sends live events after the marker, so nothing should be left; if something is, treat it as live.
+    for (const ev of [...replay.events.values()].sort((a, b) => a.seq - b.seq)) {
+      await this.acceptPushed(ws, ev);
+    }
+    this.d.onSynced?.(Date.now());
   }
 
   private async commit(events: LedgerEvent[], newCursor: number): Promise<void> {

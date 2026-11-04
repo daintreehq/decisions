@@ -65,6 +65,8 @@ async function harness(opts: { ledger?: number[]; pageSize?: number; ingestFails
   const errors: unknown[] = [];
   const state = { revoked: 0, ticket401: false, pageFail: false };
   const calls: string[] = [];
+  /** Every cursor the engine saved, with what the cache held at that moment. */
+  const cursorWrites: { cursor: number; cached: number[] }[] = [];
 
   const relay: SyncJson = {
     json: (async (method: string, path: string, o?: { query?: Record<string, number> }) => {
@@ -100,7 +102,14 @@ async function harness(opts: { ledger?: number[]; pageSize?: number; ingestFails
 
   const engine = new SyncEngine({
     relay,
-    db,
+    db: {
+      putEvents: (events) => db.putEvents(events),
+      getCursor: () => db.getCursor(),
+      setCursor: async (seq) => {
+        cursorWrites.push({ cursor: seq, cached: (await db.eventsAfter(0)).map((e) => e.seq) });
+        return db.setCursor(seq);
+      },
+    },
     origin: 'https://relay.example',
     ingest: async (events) => {
       if (failures > 0) {
@@ -131,6 +140,11 @@ async function harness(opts: { ledger?: number[]; pageSize?: number; ingestFails
     pollMs: 5000,
   });
   const lastSocket = () => sockets.at(-1)!;
+  /** Events the relay holds that a saved cursor had already passed without them being cached: always none. */
+  const hidden = () =>
+    cursorWrites.flatMap((w) =>
+      ledger.seqs.filter((seq) => seq <= w.cursor && !w.cached.includes(seq)),
+    );
   const connected = async () => {
     await vi.waitFor(() => expect(sockets.length).toBeGreaterThan(0));
     return lastSocket();
@@ -148,6 +162,11 @@ async function harness(opts: { ledger?: number[]; pageSize?: number; ingestFails
     calls,
     lastSocket,
     connected,
+    hidden,
+    /** Make the next `n` ingests fail. */
+    failIngest: (count: number) => {
+      failures = count;
+    },
   };
 }
 
@@ -224,6 +243,136 @@ describe('sync engine', () => {
     await vi.waitFor(() => expect(h.engine.cursor).toBe(7));
     expect(h.ingested).toEqual([3, 7]);
     expect(h.calls.filter((c) => c.startsWith('GET /events')).length).toBe(1); // only the initial catch-up
+  });
+
+  it('keeps every event when a live push arrives ahead of the replay of earlier ones', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start(); // cursor 1 from catch-up
+    h.ledger.seqs.push(2, 3, 4, 5);
+    const ws = await h.connected();
+    ws.open();
+    expect(ws.frames()).toEqual([{ t: 'sync', after: 1 }]);
+    // The relay pushes 5 the moment it commits, before it has handled this socket's `sync`...
+    ws.push({ t: 'event', event: ev(5) });
+    // ...and then replays everything after 1.
+    for (const seq of [2, 3, 4, 5]) ws.push({ t: 'event', event: ev(seq) });
+    ws.push({ t: 'caught_up', high_water: 5, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(5));
+    expect(h.ingested).toEqual([1, 2, 3, 4, 5]); // once each, in ledger order
+    expect((await h.db.eventsAfter(0)).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(await h.db.getCursor()).toBe(5);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('keeps every event pushed ahead of a replay the relay cut short', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(2, 3, 4, 5, 6, 7);
+    const ws = await h.connected();
+    ws.open();
+    ws.push({ t: 'event', event: ev(6) }); // live, ahead of the first page
+    for (const seq of [2, 3]) ws.push({ t: 'event', event: ev(seq) });
+    ws.push({ t: 'caught_up', high_water: 3, has_more: true });
+    await vi.waitFor(() => expect(ws.frames()).toHaveLength(2));
+    expect(ws.frames()[1]).toEqual({ t: 'sync', after: 3 }); // the next page starts at the marker
+    expect(h.engine.cursor).toBe(3);
+    ws.push({ t: 'event', event: ev(7) }); // live, between the pages
+    for (const seq of [4, 5, 6, 7]) ws.push({ t: 'event', event: ev(seq) });
+    ws.push({ t: 'caught_up', high_water: 7, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(7));
+    expect(h.ingested).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(await h.db.getCursor()).toBe(7);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('never lets a replay marker pass events that failed to ingest', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(2, 3);
+    const ws = await h.connected();
+    ws.open();
+    h.failIngest(1);
+    for (const seq of [2, 3]) ws.push({ t: 'event', event: ev(seq) });
+    ws.push({ t: 'caught_up', high_water: 3, has_more: false });
+    await vi.waitFor(() => expect(h.errors).toHaveLength(1));
+    expect(h.engine.cursor).toBe(1);
+    expect(await h.db.getCursor()).toBe(1);
+    // The replay is over; the next catch-up reads the truth again...
+    await h.engine.catchUp();
+    expect(h.engine.cursor).toBe(3);
+    expect(h.ingested).toEqual([1, 2, 3]);
+    // ...and the next live event applies directly, with no marker and no HTTP request.
+    const requests = h.calls.length;
+    h.ledger.seqs.push(4);
+    ws.push({ t: 'event', event: ev(4) });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(4));
+    expect(h.calls).toHaveLength(requests);
+    expect(h.ingested).toEqual([1, 2, 3, 4]);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('moves the cursor to the marker, past events this phone is not sent', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(3); // the rest (2, 4-8) were deleted or are hidden from this phone
+    const ws = await h.connected();
+    ws.open();
+    ws.push({ t: 'event', event: ev(3) });
+    ws.push({ t: 'caught_up', high_water: 5, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(5));
+    expect(await h.db.getCursor()).toBe(5);
+    // A replay with nothing this phone may see still moves the cursor to its marker (the kick's HTTP catch-up finds
+    // nothing new, so only the marker can).
+    h.engine.kick();
+    await vi.waitFor(() => expect(ws.frames().at(-1)).toEqual({ t: 'sync', after: 5 }));
+    ws.push({ t: 'caught_up', high_water: 8, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(8));
+    expect(await h.db.getCursor()).toBe(8);
+    expect(h.ingested).toEqual([1, 3]);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('reads the ledger over HTTP when the relay refuses a sync', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(2, 3);
+    const ws = await h.connected();
+    ws.open();
+    ws.push({ t: 'event', event: ev(3) }); // live, ahead of a replay that never comes
+    ws.push({ t: 'error', code: 'rate_limited', message: 'too many sync requests' });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(3));
+    expect(h.ingested).toEqual([1, 2, 3]);
+    // The replay is over: the next live event applies directly.
+    h.ledger.seqs.push(4);
+    ws.push({ t: 'event', event: ev(4) });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(4));
+    expect(h.calls.filter((c) => c.startsWith('GET /events'))).toEqual([
+      'GET /events?after=0',
+      'GET /events?after=1',
+    ]);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('ignores what a replaced socket had queued', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(2, 3);
+    const old = await h.connected();
+    old.open();
+    // The old socket's marker arrives, but the socket is replaced before it is handled.
+    old.push({ t: 'event', event: ev(3) });
+    old.push({ t: 'caught_up', high_water: 3, has_more: false });
+    h.engine.redeclare();
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
+    const ws = h.lastSocket();
+    ws.open();
+    expect(h.engine.cursor).toBe(1);
+    expect(ws.frames()).toEqual([{ t: 'sync', after: 1 }]);
+    for (const seq of [2, 3]) ws.push({ t: 'event', event: ev(seq) });
+    ws.push({ t: 'caught_up', high_water: 3, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(3));
+    expect(h.ingested).toEqual([1, 2, 3]);
+    expect(h.hidden()).toEqual([]);
   });
 
   it('never moves the cursor past an event that failed to ingest', async () => {
@@ -304,6 +453,10 @@ describe('sync engine', () => {
     await h.engine.start();
     const ws = await h.connected();
     ws.open();
+    h.engine.kick(); // the first replay is still under way: no second one
+    expect(ws.frames().filter((f) => f.t === 'sync')).toHaveLength(1);
+    ws.push({ t: 'caught_up', high_water: 1, has_more: false });
+    await new Promise((r) => setTimeout(r, 0));
     h.engine.kick();
     expect(ws.frames().filter((f) => f.t === 'sync')).toHaveLength(2);
     ws.drop();
