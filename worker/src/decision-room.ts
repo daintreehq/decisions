@@ -6,10 +6,15 @@ import {
   PROTOCOL_VERSION,
   WS_CLOSE,
   base64UrlToBytes,
+  buildEventsPage,
   bytesToBase64Url,
+  isEventVisible,
+  knownFeatures,
   parseAuthHeader,
   utf8ByteLength,
+  type EventsPage,
   type LedgerEvent,
+  type ProtocolFeature,
   type Role,
   type ServerFrame,
 } from '@daintreehq/decisions-protocol';
@@ -42,7 +47,16 @@ export type RpcResult<T> = { ok: true; value: T } | { ok: false; status: number;
 interface SocketAttachment {
   deviceId: string;
   role: Role;
+  /**
+   * What the socket's ticket declared (docs/protocol.md section 19). It decides which events the socket is sent;
+   * a socket accepted before features existed has none, which is the 0.3.0 baseline.
+   */
+  features?: ProtocolFeature[];
 }
+
+/** A socket `sync` replay is bounded by events and bytes; `caught_up.has_more` says to continue. */
+const SYNC_MAX_EVENTS = 2000;
+const SYNC_MAX_BYTES = 8 * 1024 * 1024;
 
 const DEFAULT_SETTINGS: Settings = {
   quiet_hours: { enabled: false, start: '22:00', end: '07:00', time_zone: 'UTC' },
@@ -91,7 +105,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     }
     const events = this.outbox;
     this.outbox = [];
-    for (const ev of events) this.broadcast({ t: 'event', event: ev });
+    for (const ev of events) this.broadcastEvent(ev);
     if (this.alarmDirty) {
       this.alarmDirty = false;
       await this.refreshAlarm();
@@ -526,6 +540,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     server.serializeAttachment({
       deviceId: device.device_id,
       role: device.role,
+      features: [...knownFeatures(t.payload.features as string[] | undefined)],
     } satisfies SocketAttachment);
     this.run(`UPDATE devices SET last_seen_at = ? WHERE device_id = ?`, nowMs(), device.device_id);
     server.send(
@@ -546,11 +561,12 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     return this.q1<{ m: number | null }>(`SELECT MAX(seq) AS m FROM events`)?.m ?? 0;
   }
 
-  private broadcast(frame: ServerFrame): void {
-    const text = JSON.stringify(frame);
+  /** Sends a committed event to every socket whose declared features allow it (section 19). */
+  private broadcastEvent(ev: LedgerEvent): void {
+    const text = JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame);
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as SocketAttachment | null;
-      if (!att) continue;
+      if (!att || !isEventVisible(ev, knownFeatures(att.features))) continue;
       try {
         ws.send(text);
       } catch {
@@ -620,31 +636,26 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
             message: 'too many sync requests',
           });
         }
-        // Replay is bounded by events and bytes; `has_more` tells the client to continue from `high_water`.
-        let after = f.after;
-        let sent = 0;
-        let bytes = 0;
-        let more = false;
-        replay: for (;;) {
-          const rows = this.eventRows(after, LIMITS.eventPageSize);
-          if (rows.length === 0) break;
-          for (const ev of rows) {
-            const text = JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame);
-            if (sent > 0 && (sent >= 2000 || bytes + text.length > 8 * 1024 * 1024)) {
-              more = true;
-              break replay;
-            }
-            try {
-              ws.send(text);
-            } catch {
-              return;
-            }
-            after = ev.seq;
-            sent++;
-            bytes += text.length;
+        // Replay is bounded by events and bytes, and carries only what the socket declared it understands;
+        // `has_more` tells the client to continue from `high_water`, which may skip events it is not sent.
+        const page = this.eventsPage(
+          f.after,
+          knownFeatures(att.features),
+          SYNC_MAX_EVENTS,
+          SYNC_MAX_BYTES,
+        );
+        for (const ev of page.events) {
+          try {
+            ws.send(JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame));
+          } catch {
+            return;
           }
         }
-        return this.sendFrame(ws, { t: 'caught_up', high_water: after, has_more: more });
+        return this.sendFrame(ws, {
+          t: 'caught_up',
+          high_water: page.next_after,
+          has_more: page.has_more,
+        });
       }
       case 'ack': {
         if (device.role !== 'owner-desktop' && device.role !== 'desktop-host') return;
@@ -699,6 +710,37 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     } catch {
       /* ignore */
     }
+  }
+
+  /** The ledger after `after`, up to `highWater`, in seq order, read in batches as far as the caller iterates. */
+  private *ledgerFrom(after: number, highWater: number): Generator<LedgerEvent> {
+    let cursor = after;
+    while (cursor < highWater) {
+      const rows = this.eventRows(cursor, LIMITS.eventPageSize);
+      if (rows.length === 0) return;
+      for (const ev of rows) {
+        if (ev.seq > highWater) return;
+        yield ev;
+      }
+      cursor = rows[rows.length - 1]!.seq;
+    }
+  }
+
+  eventsPage(
+    after: number,
+    features: ReadonlySet<ProtocolFeature>,
+    limit: number,
+    maxBytes: number,
+  ): EventsPage {
+    const highWater = this.highWater();
+    return buildEventsPage({
+      after,
+      highWater,
+      events: this.ledgerFrom(after, highWater),
+      features,
+      limit,
+      maxBytes,
+    });
   }
 
   eventRows(after: number, limit: number): LedgerEvent[] {

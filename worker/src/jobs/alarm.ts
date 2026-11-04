@@ -1,4 +1,9 @@
-import { DEFAULTS, bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import {
+  DEFAULTS,
+  bytesToBase64Url,
+  threadAwaitsHuman,
+  type MessageSide,
+} from '@daintreehq/decisions-protocol';
 import { sha256 } from '@daintreehq/decisions-crypto';
 import { nextAllowed } from '../push/quiet-hours.js';
 import type { Room } from '../room/types.js';
@@ -116,6 +121,24 @@ async function pushJob(
   }
 }
 
+/**
+ * Whether an agent message still waits on the person (`threadAwaitsHuman`): a reply push deferred by quiet hours
+ * or a retry is dropped once the person has written or answered since, or the thread closed.
+ */
+function threadAwaitsPerson(room: Room, questionId: string, status: QuestionRow['status']): boolean {
+  const messages = room
+    .q<{ side: MessageSide; expects_reply: number; event_seq: number }>(
+      `SELECT side, expects_reply, event_seq FROM messages WHERE question_id = ?`,
+      questionId,
+    )
+    .map((m) => ({ side: m.side, expects_reply: Boolean(m.expects_reply), event_seq: m.event_seq }));
+  const lastHuman = room.q1<{ s: number | null }>(
+    `SELECT MAX(event_seq) AS s FROM actions WHERE question_id = ? AND provenance = 'human'`,
+    questionId,
+  )?.s;
+  return threadAwaitsHuman({ status, messages, lastHumanActionSeq: lastHuman ?? null });
+}
+
 /** Marks every not-yet-removed attachment of a question as deleted, synchronously, and returns what to purge. */
 function claimAttachmentsForDeletion(
   room: Room,
@@ -148,6 +171,11 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
       if (type === 'decision-new' && q.status !== 'open') return;
       if (type === 'decision-proxy' && q.status !== 'proxy-answered') return;
       return pushJob(room, job, q, type, 'high');
+    }
+    case 'notify_reply': {
+      const q = getQuestion(room, job.question_id);
+      if (!q || isOverdue(q) || !threadAwaitsPerson(room, q.question_id, q.status)) return;
+      return pushJob(room, job, q, 'decision-reply', 'high');
     }
     case 'remind': {
       const q = getQuestion(room, job.question_id);

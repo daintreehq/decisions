@@ -1,6 +1,8 @@
 import type {
   ApiError,
+  EventsPage,
   LedgerEvent,
+  ProtocolFeature,
   Role,
   ServerFrame,
   SettingsBody,
@@ -20,6 +22,8 @@ export interface DeviceRow {
   revoked_at: number | null;
   last_seen_at: number | null;
   last_ack_seq: number;
+  /** JSON array of the feature tokens the device declared on its latest socket ticket (section 19). */
+  features: string;
 }
 
 export interface Auth {
@@ -38,6 +42,7 @@ export interface JobInput {
 
 export type JobKind =
   | 'notify_new'
+  | 'notify_reply'
   | 'remind'
   | 'proxy_review'
   | 'expire'
@@ -92,6 +97,13 @@ export interface Room {
     ttlMs: number,
   ): Promise<string>;
   alarmAt(): Promise<number | null>;
+  /** One page of the ledger as a client that declared `features` may see it (`buildEventsPage`). */
+  eventsPage(
+    after: number,
+    features: ReadonlySet<ProtocolFeature>,
+    limit: number,
+    maxBytes: number,
+  ): EventsPage;
 }
 
 export interface RouteCtx {

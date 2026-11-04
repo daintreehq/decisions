@@ -46,6 +46,7 @@ import {
   VoiceCorrectResponse,
   VoiceSessionResponse,
 } from './api.js';
+import { MessageBody, MessageReceipt, MessageReceiptBody, MessagesPage } from './thread.js';
 import { API_PREFIX, PROTOCOL_VERSION } from './version.js';
 
 export interface RouteSpec {
@@ -269,6 +270,25 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
   },
   {
     method: 'POST',
+    path: '/questions/{id}/messages',
+    auth: 'signed',
+    roles: 'any',
+    summary:
+      'Post a thread message: human from a phone or tablet, agent from the publishing desktop (thread-messages-v1)',
+    request: MessageBody,
+    response: MessageReceipt,
+    status: 201,
+  },
+  {
+    method: 'GET',
+    path: '/questions/{id}/messages',
+    auth: 'signed',
+    roles: 'any',
+    summary: "A question's thread messages in order, with each human message's delivery",
+    response: MessagesPage,
+  },
+  {
+    method: 'POST',
     path: '/attachments/reservations',
     auth: 'signed',
     roles: DESKTOPS,
@@ -365,6 +385,15 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     roles: DESKTOPS,
     summary: 'Delivery needs attention or is uncertain',
     request: DeliveryFailedBody,
+  },
+  {
+    method: 'POST',
+    path: '/deliveries/messages',
+    auth: 'signed',
+    roles: DESKTOPS,
+    summary: 'The publishing desktop reports one human message received, typed, or needing attention',
+    request: MessageReceiptBody,
+    response: ok,
   },
   {
     method: 'GET',
@@ -590,7 +619,10 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
     LedgerEvent: s.LedgerEvent,
     ServerFrame: api.ServerFrame,
     ClientFrame: api.ClientFrame,
-    /* Extensions (docs/protocol.md sections 16-19). Their routes join the manifest when the relay serves them. */
+    /*
+     * Extensions (docs/protocol.md sections 16-19). Their routes join the manifest when the relay serves them;
+     * the thread-message routes already have.
+     */
     ProtocolFeature: s.ProtocolFeature,
     PhoneImageReference: s.PhoneImageReference,
     PhoneImageReserveBody: s.PhoneImageReserveBody,

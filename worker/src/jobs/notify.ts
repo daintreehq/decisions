@@ -1,3 +1,4 @@
+import { PushPayload } from '@daintreehq/decisions-protocol';
 import type { Room } from '../room/types.js';
 import { nowMs } from '../util.js';
 import { sendWebPush, type VapidKeys } from '../push/webpush.js';
@@ -8,9 +9,7 @@ export interface NotifyResult {
   ok: boolean;
 }
 
-export type PushPayload =
-  | { type: 'test' }
-  | { type: 'decision-new' | 'decision-reminder' | 'decision-proxy'; question_id: string };
+export type { PushPayload };
 
 interface SubRow {
   subscription_id: string;
@@ -22,7 +21,8 @@ interface SubRow {
 
 /**
  * Sends a generic push to every enabled subscription of paired human devices. The payload is an
- * attention signal only (type and question id): no project, no question text, no answer.
+ * attention signal only (type and question id): no project, no question text, no answer, no message. It is
+ * checked against the protocol's strict `PushPayload` before anything is sent, so no other field can slip in.
  */
 export async function sendNotification(
   room: Room,
@@ -34,6 +34,7 @@ export async function sendNotification(
     skip?: ReadonlySet<string>;
   } = {},
 ): Promise<NotifyResult[]> {
+  const body = PushPayload.parse(payload);
   const vapid = room.vapid();
   if (!vapid) return [];
   const keys: VapidKeys = { privateJwk: vapid.privateJwk, publicKey: vapid.publicKey };
@@ -52,7 +53,7 @@ export async function sendNotification(
     try {
       status = await sendWebPush(
         { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth },
-        payload,
+        body,
         keys,
         room.env.PUSH_SUBJECT || room.getMeta('origin') || 'https://localhost',
         { urgency: opts.urgency ?? 'normal', ...(opts.topic ? { topic: opts.topic } : {}) },

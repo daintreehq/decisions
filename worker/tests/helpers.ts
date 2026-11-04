@@ -2,6 +2,7 @@ import { exports } from 'cloudflare:workers';
 import { testEnv as env } from './env.js';
 import { runInDurableObject } from 'cloudflare:test';
 import {
+  MESSAGE_RECORD_TYPE,
   PROTOCOL_VERSION,
   bytesToBase64Url,
   type CryptoEnvelope,
@@ -17,6 +18,7 @@ import {
   createEpochGrant,
   encryptAttachment,
   encryptEnvelope,
+  envelopeDigest,
   exportPublicKey,
   generateDeviceKeys,
   generateEpochKeyBytes,
@@ -25,7 +27,9 @@ import {
   inviteDigest,
   issueDeviceCert,
   newId,
+  nowIso,
   openEpochGrant,
+  signObject,
   signPairingPop,
   signRequest,
   verifyDeviceCert,
@@ -448,6 +452,130 @@ export async function uploadImage(
 }
 
 export { sha256Hex, bytesToBase64Url, type PairingInvitePayload };
+
+/** Declares `features` the way a client does, on a socket ticket; the relay records it for the device. */
+export async function declare(a: Actor, features: string[] = ['thread-messages-v1']): Promise<string> {
+  const r = await a.call('POST', '/api/v1/socket-ticket', {
+    protocol_version: PROTOCOL_VERSION,
+    features,
+  });
+  if (r.status !== 200) throw new Error(`ticket failed ${r.status} ${r.text}`);
+  return r.json.ticket as string;
+}
+
+/** Enrolls a `desktop-host` device; `world` is the same relay with the host as the asking desktop. */
+export async function enrollHost(w: World): Promise<{ host: Actor; world: World }> {
+  const host = await Actor.create('desktop-host', 'Remote Host');
+  host.installationId = w.installationId;
+  const cert = await issueDeviceCert({
+    issuerDeviceId: w.owner.id,
+    issuerSigningKey: w.owner.keys.signing.privateKey,
+    installationId: w.installationId,
+    deviceId: host.id,
+    role: 'desktop-host',
+    label: host.label,
+    signingPub: host.signingPub,
+    exchangePub: host.exchangePub,
+  });
+  const grant = await createEpochGrant({
+    issuerDeviceId: w.owner.id,
+    issuerSigningKey: w.owner.keys.signing.privateKey,
+    installationId: w.installationId,
+    recipientDeviceId: host.id,
+    recipientExchangePub: host.exchangePub,
+    epoch: w.epoch.epoch,
+    epochKeyRaw: w.epochRaw,
+  });
+  const res = await w.owner.call('POST', '/api/v1/devices/enroll-host', {
+    protocol_version: PROTOCOL_VERSION,
+    cert,
+    grant,
+  });
+  if (res.status !== 201) throw new Error(`enroll failed ${res.status} ${res.text}`);
+  host.epochs.set(w.epoch.epoch, w.epoch);
+  return { host, world: { ...w, owner: host } };
+}
+
+export interface SayOpts {
+  side?: 'human' | 'agent';
+  text?: string;
+  expectsReply?: boolean;
+  messageId?: string;
+  idempotencyKey?: string;
+  attachmentIds?: string[];
+  epoch?: EpochKey;
+  /** Edits the record before it is signed (for binding tests). */
+  edit?: (record: Record<string, unknown>) => void;
+  /** Signs with this key instead of the actor's (forgery tests). */
+  signingKey?: CryptoKey;
+  /** Build the body without posting it. */
+  post?: boolean;
+}
+
+/** Encrypts, signs and posts a thread message. The side follows the actor's role unless given. */
+export async function say(w: World, actor: Actor, questionId: string, o: SayOpts = {}) {
+  const human = actor.role === 'phone' || actor.role === 'tablet';
+  const side = o.side ?? (human ? 'human' : 'agent');
+  const messageId = o.messageId ?? newId();
+  const text = o.text ?? (side === 'human' ? 'Also check the footer' : 'Which footer?');
+  const envelope = await encryptEnvelope({
+    epochKey: o.epoch ?? actor.epoch ?? w.epoch,
+    installationId: w.installationId,
+    questionId,
+    recordId: messageId,
+    recordType: MESSAGE_RECORD_TYPE,
+    revision: 0,
+    senderDeviceId: actor.id,
+    purpose: 'message-content',
+    plaintext:
+      side === 'human'
+        ? { content_version: 1, side, text, images: [] }
+        : { content_version: 1, side, text },
+  });
+  const unsigned: Record<string, unknown> = {
+    v: PROTOCOL_VERSION,
+    type: MESSAGE_RECORD_TYPE,
+    installation_id: w.installationId,
+    question_id: questionId,
+    message_id: messageId,
+    side,
+    expects_reply: o.expectsReply ?? false,
+    attachment_ids: o.attachmentIds ?? [],
+    created_at: nowIso(),
+    envelope_digest: await envelopeDigest(envelope),
+    signer_device_id: actor.id,
+  };
+  o.edit?.(unsigned);
+  const record = await signObject(o.signingKey ?? actor.keys.signing.privateKey, unsigned);
+  const body = {
+    protocol_version: PROTOCOL_VERSION,
+    idempotency_key: o.idempotencyKey ?? newId(),
+    message: { record, envelope },
+  };
+  const res =
+    o.post === false
+      ? (null as unknown as Res)
+      : await actor.call('POST', `/api/v1/questions/${questionId}/messages`, body);
+  return { res, record, envelope, body, messageId };
+}
+
+/** Every message of a question, following `next_after` across pages. */
+export async function thread(a: Actor, questionId: string, limit = 50): Promise<any[]> {
+  const out: any[] = [];
+  let after = 0;
+  for (;;) {
+    const r = await a.call(
+      'GET',
+      `/api/v1/questions/${questionId}/messages`,
+      undefined,
+      `after=${after}&limit=${limit}`,
+    );
+    if (r.status !== 200) throw new Error(`thread failed ${r.status} ${r.text}`);
+    out.push(...r.json.messages);
+    after = r.json.next_after;
+    if (!r.json.has_more) return out;
+  }
+}
 
 /**
  * Alarms also fire on their own in the test runtime, so after forcing jobs due we wait until nothing due is

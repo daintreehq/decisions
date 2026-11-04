@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -182,6 +182,40 @@ const V1 = [
   )`,
 ];
 
+/**
+ * Thread messages (docs/protocol.md section 16) and feature negotiation (section 19). `message_id` is unique
+ * within the installation; `message_seq` orders one question's thread and is never reused, so a question's
+ * lifetime message count is its highest `message_seq`. Only human messages have a delivery row.
+ */
+const V2 = [
+  `ALTER TABLE devices ADD COLUMN features TEXT NOT NULL DEFAULT '[]'`,
+  `CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL,
+    message_seq INTEGER NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('human','agent')),
+    expects_reply INTEGER NOT NULL DEFAULT 0,
+    signer_device_id TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    committed_at INTEGER NOT NULL,
+    event_seq INTEGER NOT NULL,
+    UNIQUE (question_id, message_seq)
+  )`,
+  `CREATE TABLE IF NOT EXISTS message_deliveries (
+    message_id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL,
+    target_host_id TEXT NOT NULL,
+    status TEXT NOT NULL
+      CHECK(status IN ('relay-queued','received','terminal-delivered','needs-attention','delivery-uncertain')),
+    received_at INTEGER,
+    terminal_delivered_at INTEGER,
+    injection_id TEXT,
+    error_code TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS message_deliveries_question_idx ON message_deliveries(question_id)`,
+];
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -191,6 +225,7 @@ export function migrate(sql: SqlStorage): void {
     throw new Error(`database schema ${current} is newer than this Worker (${SCHEMA_VERSION})`);
   }
   if (current < 1) for (const stmt of V1) sql.exec(stmt);
+  if (current < 2) for (const stmt of V2) sql.exec(stmt);
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),
