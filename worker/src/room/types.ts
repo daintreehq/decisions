@@ -77,6 +77,16 @@ export interface Room {
   devicePublicKey(d: Pick<DeviceRow, 'device_id' | 'signing_pub'>): Promise<CryptoKey>;
   forgetDeviceKey(id: string): void;
   schedule(job: JobInput): void;
+  /** Recomputes the alarm after the current `tx` commits (for deadlines kept outside `scheduled_jobs`). */
+  markAlarmDirty(): void;
+  /** One page of the ledger after `after`, holding only events the declared features allow (section 19). */
+  eventsPage(
+    after: number,
+    features: ReadonlySet<ProtocolFeature>,
+    limit: number,
+    maxBytes: number,
+    size?: (ev: LedgerEvent) => number,
+  ): EventsPage;
   cancelJobs(where: { questionId: string; kinds?: JobKind[] }): void;
   hit(key: string, limit: number, windowMs: number): void;
   /** Throws rate_limited if `key` already used up its budget, without consuming any. */
@@ -97,13 +107,6 @@ export interface Room {
     ttlMs: number,
   ): Promise<string>;
   alarmAt(): Promise<number | null>;
-  /** One page of the ledger as a client that declared `features` may see it (`buildEventsPage`). */
-  eventsPage(
-    after: number,
-    features: ReadonlySet<ProtocolFeature>,
-    limit: number,
-    maxBytes: number,
-  ): EventsPage;
 }
 
 export interface RouteCtx {

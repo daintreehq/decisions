@@ -30,6 +30,7 @@ import type { Auth, DeviceRow, Handler, JobInput, Room, RouteCtx, Settings } fro
 import { ROUTES } from './routes/index.js';
 import { processDueJobs } from './jobs/alarm.js';
 import { applyAck } from './room/ack.js';
+import { nextSnapshotRetention, sweepSnapshotRetention } from './room/snapshots.js';
 import {
   errorResponse,
   iso,
@@ -54,7 +55,10 @@ interface SocketAttachment {
   features?: ProtocolFeature[];
 }
 
-/** A socket `sync` replay is bounded by events and bytes; `caught_up.has_more` says to continue. */
+/**
+ * A socket `sync` replay is bounded by events and by UTF-8 bytes of the frames sent; `caught_up.has_more` says to
+ * continue.
+ */
 const SYNC_MAX_EVENTS = 2000;
 const SYNC_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -638,15 +642,22 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
         }
         // Replay is bounded by events and bytes, and carries only what the socket declared it understands;
         // `has_more` tells the client to continue from `high_water`, which may skip events it is not sent.
+        // The byte bound counts each whole frame as sent.
+        const frames = new Map<number, string>();
         const page = this.eventsPage(
           f.after,
           knownFeatures(att.features),
           SYNC_MAX_EVENTS,
           SYNC_MAX_BYTES,
+          (ev) => {
+            const text = JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame);
+            frames.set(ev.seq, text);
+            return utf8ByteLength(text);
+          },
         );
         for (const ev of page.events) {
           try {
-            ws.send(JSON.stringify({ t: 'event', event: ev } satisfies ServerFrame));
+            ws.send(frames.get(ev.seq)!);
           } catch {
             return;
           }
@@ -731,6 +742,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     features: ReadonlySet<ProtocolFeature>,
     limit: number,
     maxBytes: number,
+    size?: (ev: LedgerEvent) => number,
   ): EventsPage {
     const highWater = this.highWater();
     return buildEventsPage({
@@ -740,6 +752,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
       features,
       limit,
       maxBytes,
+      ...(size ? { size } : {}),
     });
   }
 
@@ -781,6 +794,10 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     this.alarmDirty = true;
   }
 
+  markAlarmDirty(): void {
+    this.alarmDirty = true;
+  }
+
   cancelJobs(where: { questionId: string; kinds?: string[] }): void {
     if (where.kinds && where.kinds.length > 0) {
       const marks = where.kinds.map(() => '?').join(',');
@@ -801,10 +818,13 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
     return await this.ctx.storage.getAlarm();
   }
 
+  /** One alarm serves every pending job and every snapshot retention deadline. */
   private async refreshAlarm(): Promise<void> {
-    const next = this.q1<{ m: number | null }>(
+    const job = this.q1<{ m: number | null }>(
       `SELECT MIN(run_at) AS m FROM scheduled_jobs WHERE status = 'pending'`,
     )?.m;
+    const snapshot = nextSnapshotRetention(this);
+    const next = job == null ? snapshot : snapshot == null ? job : Math.min(job, snapshot);
     const current = await this.ctx.storage.getAlarm();
     if (next == null) {
       if (current != null) await this.ctx.storage.deleteAlarm();
@@ -814,6 +834,7 @@ export class DecisionRoom extends DurableObject<Env> implements Room {
   }
 
   override async alarm(): Promise<void> {
+    await sweepSnapshotRetention(this);
     await processDueJobs(this);
     await this.refreshAlarm();
   }

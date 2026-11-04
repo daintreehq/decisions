@@ -70,6 +70,7 @@ export const deleteData: Handler = async (room, c) => {
       'deliveries',
       'messages',
       'message_deliveries',
+      'question_snapshots',
       'questions',
       'attachments',
       'events',

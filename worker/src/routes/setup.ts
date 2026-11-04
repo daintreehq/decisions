@@ -15,7 +15,10 @@ import type { Handler } from '../room/types.js';
 import { iso, json, nowMs } from '../util.js';
 
 /** The extensions this relay implements (docs/protocol.md section 19), advertised in `GET /info`. */
-export const RELAY_FEATURES: readonly ProtocolFeature[] = ['thread-messages-v1'];
+export const RELAY_FEATURES: readonly ProtocolFeature[] = [
+  'pane-snapshots-v1',
+  'thread-messages-v1',
+];
 
 export const info: Handler = async (room) =>
   json(200, {

@@ -18,6 +18,7 @@ import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
 import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { nextAllowed } from '../push/quiet-hours.js';
+import { clearSnapshot, deleteSnapshotState } from '../room/snapshots.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
@@ -112,6 +113,7 @@ export function expireQuestionNow(room: Room, q: QuestionRow): boolean {
     runAt: t + retentionMs(room),
     questionId: q.question_id,
   });
+  clearSnapshot(room, q.question_id);
   return true;
 }
 
@@ -552,6 +554,8 @@ function scheduleAfterAction(
     case 'cancel':
       room.cancelJobs({ questionId: id });
       room.schedule({ kind: 'delete_attachments', runAt: t + retentionMs(room), questionId: id });
+      // An answer leaves the thread live, and its snapshot with it; a cancelled question shows none.
+      if (kind === 'cancel') clearSnapshot(room, id);
       break;
     case 'override':
     case 'confirm-proxy':
@@ -584,6 +588,8 @@ function scheduleAfterAction(
       room.schedule({ kind: 'notify_new', runAt: t, questionId: id });
       break;
     case 'reopen':
+      // A reopened question starts with no snapshot and no outstanding refresh.
+      clearSnapshot(room, id);
       room.cancelJobs({ questionId: id, kinds: ['delete_attachments'] });
       room.schedule({ kind: 'notify_new', runAt: t, questionId: id });
       scheduleReminders(room, id, t);
@@ -709,6 +715,7 @@ export const deleteQuestion: Handler = async (room, c) => {
     room.run(`DELETE FROM deliveries WHERE question_id = ?`, id);
     room.run(`DELETE FROM messages WHERE question_id = ?`, id);
     room.run(`DELETE FROM message_deliveries WHERE question_id = ?`, id);
+    deleteSnapshotState(room, id);
     room.run(`DELETE FROM events WHERE question_id = ?`, id);
     room.run(`DELETE FROM questions WHERE question_id = ?`, id);
     room.schedule({

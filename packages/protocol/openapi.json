@@ -5169,6 +5169,702 @@
         }
       }
     },
+    "/api/v1/questions/{id}/snapshot": {
+      "put": {
+        "summary": "Replace the question's pane snapshot, or say sharing is off (the publishing desktop only)",
+        "operationId": "put_questions_id_snapshot",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": [
+          "owner-desktop",
+          "desktop-host"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "question_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "proxy-answered",
+                        "human-answered",
+                        "cancelled",
+                        "expired"
+                      ]
+                    },
+                    "event_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "question_id",
+                    "revision",
+                    "status",
+                    "event_seq"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  "snapshot": {
+                    "type": "object",
+                    "properties": {
+                      "record": {
+                        "type": "object",
+                        "properties": {
+                          "v": {
+                            "type": "number",
+                            "const": 1
+                          },
+                          "type": {
+                            "type": "string",
+                            "const": "pane.snapshot"
+                          },
+                          "installation_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                          },
+                          "question_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                          },
+                          "snapshot_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                          },
+                          "question_revision": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "observed_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                          },
+                          "sharing": {
+                            "type": "string",
+                            "enum": [
+                              "on",
+                              "off"
+                            ]
+                          },
+                          "envelope_digest": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "signer_device_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                          },
+                          "signature": {
+                            "type": "string",
+                            "minLength": 86,
+                            "maxLength": 86,
+                            "pattern": "^[A-Za-z0-9_-]*$"
+                          }
+                        },
+                        "required": [
+                          "v",
+                          "type",
+                          "installation_id",
+                          "question_id",
+                          "snapshot_id",
+                          "question_revision",
+                          "observed_at",
+                          "sharing",
+                          "envelope_digest",
+                          "signer_device_id",
+                          "signature"
+                        ],
+                        "additionalProperties": {}
+                      },
+                      "envelope": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "crypto_version": {
+                                "type": "number",
+                                "const": 1
+                              },
+                              "suite": {
+                                "type": "string",
+                                "const": "P256-ECDH-HKDF-SHA256-A256GCM-ECDSA-P256"
+                              },
+                              "key_epoch": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              "record_id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                              },
+                              "purpose": {
+                                "type": "string",
+                                "enum": [
+                                  "question-content",
+                                  "answer-content",
+                                  "history-export",
+                                  "message-content",
+                                  "snapshot-content"
+                                ]
+                              },
+                              "nonce": {
+                                "type": "string",
+                                "minLength": 16,
+                                "maxLength": 16,
+                                "pattern": "^[A-Za-z0-9_-]*$"
+                              },
+                              "ciphertext": {
+                                "type": "string",
+                                "minLength": 22,
+                                "maxLength": 184320,
+                                "pattern": "^[A-Za-z0-9_-]*$"
+                              },
+                              "aad": {
+                                "type": "object",
+                                "properties": {
+                                  "installation_id": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                  },
+                                  "question_id": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                  },
+                                  "record_type": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 32
+                                  },
+                                  "revision": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "sender_device_id": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                  }
+                                },
+                                "required": [
+                                  "installation_id",
+                                  "question_id",
+                                  "record_type",
+                                  "revision",
+                                  "sender_device_id"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "crypto_version",
+                              "suite",
+                              "key_epoch",
+                              "record_id",
+                              "purpose",
+                              "nonce",
+                              "ciphertext",
+                              "aad"
+                            ],
+                            "additionalProperties": {}
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "record",
+                      "envelope"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "protocol_version",
+                  "idempotency_key",
+                  "snapshot"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "The latest pane snapshot (ciphertext) and any outstanding refresh request",
+        "operationId": "get_questions_id_snapshot",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": "any",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "question_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "snapshot": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "record": {
+                              "type": "object",
+                              "properties": {
+                                "v": {
+                                  "type": "number",
+                                  "const": 1
+                                },
+                                "type": {
+                                  "type": "string",
+                                  "const": "pane.snapshot"
+                                },
+                                "installation_id": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                },
+                                "question_id": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                },
+                                "snapshot_id": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                },
+                                "question_revision": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "observed_at": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                                },
+                                "sharing": {
+                                  "type": "string",
+                                  "enum": [
+                                    "on",
+                                    "off"
+                                  ]
+                                },
+                                "envelope_digest": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "pattern": "^[0-9a-f]{64}$"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "signer_device_id": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                },
+                                "signature": {
+                                  "type": "string",
+                                  "minLength": 86,
+                                  "maxLength": 86,
+                                  "pattern": "^[A-Za-z0-9_-]*$"
+                                }
+                              },
+                              "required": [
+                                "v",
+                                "type",
+                                "installation_id",
+                                "question_id",
+                                "snapshot_id",
+                                "question_revision",
+                                "observed_at",
+                                "sharing",
+                                "envelope_digest",
+                                "signer_device_id",
+                                "signature"
+                              ],
+                              "additionalProperties": {}
+                            },
+                            "envelope": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "crypto_version": {
+                                      "type": "number",
+                                      "const": 1
+                                    },
+                                    "suite": {
+                                      "type": "string",
+                                      "const": "P256-ECDH-HKDF-SHA256-A256GCM-ECDSA-P256"
+                                    },
+                                    "key_epoch": {
+                                      "type": "integer",
+                                      "minimum": 1,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "record_id": {
+                                      "type": "string",
+                                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                    },
+                                    "purpose": {
+                                      "type": "string",
+                                      "enum": [
+                                        "question-content",
+                                        "answer-content",
+                                        "history-export",
+                                        "message-content",
+                                        "snapshot-content"
+                                      ]
+                                    },
+                                    "nonce": {
+                                      "type": "string",
+                                      "minLength": 16,
+                                      "maxLength": 16,
+                                      "pattern": "^[A-Za-z0-9_-]*$"
+                                    },
+                                    "ciphertext": {
+                                      "type": "string",
+                                      "minLength": 22,
+                                      "maxLength": 184320,
+                                      "pattern": "^[A-Za-z0-9_-]*$"
+                                    },
+                                    "aad": {
+                                      "type": "object",
+                                      "properties": {
+                                        "installation_id": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                        },
+                                        "question_id": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                        },
+                                        "record_type": {
+                                          "type": "string",
+                                          "minLength": 1,
+                                          "maxLength": 32
+                                        },
+                                        "revision": {
+                                          "type": "integer",
+                                          "minimum": 0,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "sender_device_id": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                                        }
+                                      },
+                                      "required": [
+                                        "installation_id",
+                                        "question_id",
+                                        "record_type",
+                                        "revision",
+                                        "sender_device_id"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "crypto_version",
+                                    "suite",
+                                    "key_epoch",
+                                    "record_id",
+                                    "purpose",
+                                    "nonce",
+                                    "ciphertext",
+                                    "aad"
+                                  ],
+                                  "additionalProperties": {}
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "record",
+                            "envelope"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "received_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "refresh": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "refresh_id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            },
+                            "requested_by_device_id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                            },
+                            "requested_at": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                            },
+                            "deadline_at": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                            }
+                          },
+                          "required": [
+                            "refresh_id",
+                            "requested_by_device_id",
+                            "requested_at",
+                            "deadline_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "question_id",
+                    "snapshot",
+                    "received_at",
+                    "refresh"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/questions/{id}/snapshot/refresh": {
+      "post": {
+        "summary": "Ask the publishing desktop for a fresh snapshot (coalesced while one is outstanding)",
+        "operationId": "post_questions_id_snapshot_refresh",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": [
+          "phone",
+          "tablet"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "refresh_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "requested_by_device_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "requested_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    },
+                    "deadline_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "refresh_id",
+                    "requested_by_device_id",
+                    "requested_at",
+                    "deadline_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  }
+                },
+                "required": [
+                  "protocol_version",
+                  "idempotency_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/questions/{id}/messages": {
       "post": {
         "summary": "Post a thread message: human from a phone or tablet, agent from the publishing desktop (thread-messages-v1)",

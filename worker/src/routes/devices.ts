@@ -9,6 +9,7 @@ import {
   type EpochGrant,
 } from '@daintreehq/decisions-protocol';
 import { verifyDeviceCert, verifyObject } from '@daintreehq/decisions-crypto';
+import { storedFeatures } from '../room/features.js';
 import type { Auth, DeviceRow, Handler, Room } from '../room/types.js';
 import { iso, isoOrNull, json, nowMs } from '../util.js';
 
@@ -105,15 +106,6 @@ export const enrollHost: Handler = async (room, c) => {
     room.emit('device.approved', { deviceId: auth.deviceId, data: { cert } });
   });
   return json(201, { device_id: cert.device_id });
-};
-
-const storedFeatures = (raw: string | null | undefined): string[] => {
-  try {
-    const v = JSON.parse(raw ?? '[]') as unknown;
-    return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : [];
-  } catch {
-    return [];
-  }
 };
 
 /** The features a device declared on its latest socket ticket (section 19); empty for a 0.3.0 client. */

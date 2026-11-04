@@ -43,6 +43,25 @@ const envelope: CryptoEnvelope = {
 };
 
 describe('snapshot content', () => {
+  it('encrypts within the relay ciphertext cap at its largest', () => {
+    // Every limit full, every character doubled by JSON escaping: quotes in the lines, lone surrogates
+    // (escaped as \uXXXX) in the title, the longest tokens.
+    const lines = LIMITS.snapshotTerminalLines;
+    const perLine = Math.floor((LIMITS.snapshotTerminalBytes - (lines - 1)) / lines);
+    const largest = {
+      content_version: 1,
+      observed_at: FIXTURE_NOW,
+      agent_state: 'a'.repeat(40),
+      waiting_reason: 'w'.repeat(40),
+      pane_title: '\ud800'.repeat(LIMITS.snapshotPaneTitleChars),
+      terminal_lines: Array.from({ length: lines }, () => '"'.repeat(perLine)),
+    };
+    expect(PaneSnapshotContentV1.safeParse(largest).success).toBe(true);
+    // AES-GCM adds a 16-byte tag, and base64url without padding is ceil(4n / 3) characters.
+    const ciphertextChars = Math.ceil(((utf8ByteLength(JSON.stringify(largest)) + 16) * 4) / 3);
+    expect(ciphertextChars).toBeLessThanOrEqual(LIMITS.snapshotCiphertextChars);
+    expect(ciphertextChars).toBeGreaterThan(LIMITS.snapshotCiphertextChars * 0.9);
+  });
   it('parses the fixtures', () => {
     for (const c of [content, STALE_SNAPSHOT_FIXTURE.aged.content]) {
       expect(PaneSnapshotContentV1.safeParse(c).success).toBe(true);

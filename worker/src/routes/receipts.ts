@@ -2,6 +2,44 @@ import { ApiError } from '@daintreehq/decisions-protocol';
 import type { Room } from '../room/types.js';
 import { nowMs, type ApiResponse } from '../util.js';
 
+/** The stored response for a repeated (device, key), or undefined. A different body is a collision. */
+export function priorReceipt(
+  room: Room,
+  deviceId: string,
+  key: string,
+  digest: string,
+): ApiResponse | undefined {
+  const hit = room.q1<{ request_digest: string; status: number; response_json: string }>(
+    `SELECT request_digest, status, response_json FROM command_receipts WHERE device_id = ? AND idempotency_key = ?`,
+    deviceId,
+    key,
+  );
+  if (!hit) return undefined;
+  if (hit.request_digest !== digest) {
+    throw new ApiError('idempotency_collision', 'idempotency key reused with a different body');
+  }
+  return { status: hit.status, body: hit.response_json };
+}
+
+export function storeReceipt(
+  room: Room,
+  deviceId: string,
+  key: string,
+  digest: string,
+  res: ApiResponse,
+): ApiResponse {
+  room.run(
+    `INSERT INTO command_receipts (device_id, idempotency_key, request_digest, status, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    deviceId,
+    key,
+    digest,
+    res.status,
+    res.body,
+    nowMs(),
+  );
+  return res;
+}
+
 /**
  * Device-scoped idempotency for commands. Runs `fn` at most once per (device, key): a repeat with an
  * identical body returns the original response; a repeat with a different body is a collision.
@@ -14,26 +52,7 @@ export function withReceipt(
   digest: string,
   fn: () => ApiResponse,
 ): ApiResponse {
-  const hit = room.q1<{ request_digest: string; status: number; response_json: string }>(
-    `SELECT request_digest, status, response_json FROM command_receipts WHERE device_id = ? AND idempotency_key = ?`,
-    deviceId,
-    key,
+  return (
+    priorReceipt(room, deviceId, key, digest) ?? storeReceipt(room, deviceId, key, digest, fn())
   );
-  if (hit) {
-    if (hit.request_digest !== digest) {
-      throw new ApiError('idempotency_collision', 'idempotency key reused with a different body');
-    }
-    return { status: hit.status, body: hit.response_json };
-  }
-  const res = fn();
-  room.run(
-    `INSERT INTO command_receipts (device_id, idempotency_key, request_digest, status, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    deviceId,
-    key,
-    digest,
-    res.status,
-    res.body,
-    nowMs(),
-  );
-  return res;
 }

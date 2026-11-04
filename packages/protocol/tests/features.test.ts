@@ -218,6 +218,22 @@ describe('a client pinned to 0.3.0', () => {
     expect(desktop.pages).toBeGreaterThan(2);
   });
 
+  it('measures events with the caller’s size, so a socket can count whole frames', () => {
+    const ledger = mixedLedger();
+    const page = buildEventsPage({
+      after: 0,
+      highWater: ledger.at(-1)!.seq,
+      events: ledger,
+      features: ALL,
+      limit: 100,
+      maxBytes: 25,
+      size: () => 10,
+    });
+    expect(page.events).toHaveLength(2);
+    expect(page.has_more).toBe(true);
+    expect(page.next_after).toBe(page.events[1]!.seq);
+  });
+
   it('receives a socket replay it can parse in full', () => {
     const ledger = mixedLedger();
     const frames: unknown[] = [];

@@ -150,7 +150,8 @@ ciphertext; `decision.expired` is relay-asserted and unsigned (it never authoris
 NOT advance its cursor past a partial page and MUST persist events before acknowledging them.
 
 **Sequence numbers can have holes.** Deleting a question (`DELETE /questions/{id}`) removes its events and appends a
-`decision.deleted` tombstone, so the surviving `seq` values are not contiguous. Therefore a "contiguous" cursor means
+`decision.deleted` tombstone, and a pane snapshot hint replaces the question's earlier hint of its type (section 18),
+so the surviving `seq` values are not contiguous. Therefore a "contiguous" cursor means
 "everything the relay holds up to here": a client advances to `next_after` after a complete page, and after a pushed
 `event` frame it advances only if the frame is the next one the relay holds for it (otherwise it re-requests from its
 cursor via `sync` or `GET /events` rather than trusting a gap). Receiving the same `event_id` again is harmless.
@@ -471,7 +472,9 @@ Plain text means no control characters (tab excepted), escape sequences or line 
 `boundTerminalLines` turns raw terminal text into lines within these limits.
 
 **Publishing.** `PUT /questions/{id}/snapshot` `PaneSnapshotBody {protocol_version, idempotency_key, snapshot}`
-(the publishing desktop only). The relay refuses a snapshot for a closed question (`410 expired`, `409
+(the publishing desktop only: the owner cannot publish for another desktop's pane) → `200 CommandReceipt`. A retry
+with the same `idempotency_key` and body returns the original receipt and changes nothing, so it never brings back an
+older snapshot. The relay refuses a snapshot for a closed question (`410 expired`, `409
 invalid_state`), for a revision other than the question's current one (`409 revision_conflict`), with an
 `observed_at` no later than the last it accepted for the question (`409 revision_conflict`; the relay keeps that time
 after clearing, so a delayed older snapshot never returns), or with an `observed_at` more than 120 s ahead of relay
@@ -479,14 +482,24 @@ time (`400 validation_error`). That cap is the clock allowance every signed requ
 asks nothing more of a desktop, and it stops a desktop clock running ahead from setting an order watermark that its
 corrected clock could not pass.
 
+**Limits.** 30 snapshots per question per minute, shared and sharing-off records together
+(`snapshotWritesPerQuestionMinute`, `429 rate_limited` beyond it); a desktop coalesces rapid changes so it never
+reaches this. The envelope's ciphertext is at most 96 KiB of base64url (`snapshotCiphertextChars`, `413
+payload_too_large`): the largest valid `PaneSnapshotContentV1` encrypts to about 91 KiB. The relay cannot check the
+content limits inside the ciphertext; readers do, with `PaneSnapshotContentV1`.
+
 **Sharing off.** A record with `sharing: "off"` and no envelope replaces and clears the snapshot and says the desktop
-does not share its panes. The relay then refuses refresh requests (`409 invalid_state`) until the desktop publishes a
-shared snapshot again.
+does not share its panes. It is also how a desktop clears a snapshot on purpose. The relay then refuses refresh
+requests (`409 invalid_state`) until the desktop publishes a shared snapshot again, across a reopen too.
 
 **Refresh.** `POST /questions/{id}/snapshot/refresh` (phone, tablet) `SnapshotRefreshBody {protocol_version,
 idempotency_key}` → `SnapshotRefresh {refresh_id, requested_by_device_id, requested_at, deadline_at}`, where
-`deadline_at` is `requested_at` + 15 s (`snapshotRefreshTimeoutMs`), in relay time. While a refresh is outstanding,
-another returns the same one; a device may ask 6 times a minute. The publishing desktop gets
+`deadline_at` is `requested_at` + 15 s (`snapshotRefreshTimeoutMs`), in relay time. While a refresh is outstanding
+(its deadline has not passed), another, from any phone, returns the same one and notifies nobody again; a device may
+ask 6 times a minute, coalesced requests included. A request past its deadline stays in `GET` responses, so phones can
+call the snapshot stale, until a snapshot fulfils it, the next request replaces it, or the snapshot is cleared. The
+relay also refuses a refresh while the publishing desktop's latest socket-ticket declaration (section 19) lacks
+`pane-snapshots-v1` (`409 invalid_state`). The publishing desktop gets
 `decision.snapshot.refresh_requested`, reads the pane after receiving it and publishes; the first snapshot the relay
 accepts after the request fulfils it. `GET /questions/{id}/snapshot` (any paired device) →
 `PaneSnapshotResponse {question_id, snapshot, received_at, refresh}`, where `received_at` is when the relay accepted
@@ -507,12 +520,25 @@ person and orders one desktop's snapshots, but freshness never uses it.
 
 **Cleared** when the question expires, is cancelled or is deleted, when the desktop turns sharing off, and 24 hours
 after the relay received it (`snapshotRetentionMs`). A reopened question starts with no snapshot and no outstanding request.
-An answer does not clear it: the thread is still live.
+An answer does not clear it: the thread is still live. Clearing removes the ciphertext from relay storage, by the
+relay's alarm and before any read. `DELETE /questions/{id}` and both `POST /admin/delete-data` scopes remove a
+question's snapshot state entirely; otherwise the relay keeps only the order watermark and the sharing-off choice.
 
 **Events and push.** `decision.snapshot.updated {snapshot_id, observed_at, sharing, target_host_id}` and
 `decision.snapshot.refresh_requested {SnapshotRefresh, target_host_id}` are hints: they carry no title, state or
-terminal text, and readers fetch the current snapshot, so replaying an old hint shows the latest one. Snapshots never
-trigger a push, and no snapshot field fits a `PushPayload`.
+terminal text, and readers fetch the current snapshot, so replaying an old hint shows the latest one. Their
+`question_revision` is null. The relay keeps only the latest hint of each type per question: a new one removes the
+one before, an accepted snapshot removes the refresh hint it fulfils, and closing, reopening or deleting the question
+removes both, so the ledger holds no history of snapshots. When retention removes a snapshot (with any refresh waiting on it),
+the relay appends a `decision.snapshot.updated` hint naming it (with a null `origin_device_id`), and a reader that
+fetches finds none.
+Snapshots never trigger a push, and no snapshot field fits a `PushPayload`.
+
+| Route                                   | Role                   | Notes                                                     |
+| --------------------------------------- | ---------------------- | --------------------------------------------------------- |
+| `PUT /questions/{id}/snapshot`          | the publishing desktop | `PaneSnapshotBody` → `200 CommandReceipt`                 |
+| `GET /questions/{id}/snapshot`          | any                    | `PaneSnapshotResponse`; nulls for a closed question       |
+| `POST /questions/{id}/snapshot/refresh` | phone, tablet          | `SnapshotRefreshBody` → `200 SnapshotRefresh` (coalesced) |
 
 ## 19. Feature negotiation and 0.3.0 clients
 
