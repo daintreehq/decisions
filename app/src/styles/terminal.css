@@ -1,0 +1,417 @@
+/* ---------- the asking agent's terminal (TerminalDrawer.tsx) ----------
+ * The chat header's terminal button, and the drawer it opens: a modal panel from the right below 1100px (the
+ * sidebar's mirror image, over the dimmed chat), a column beside the chat from 1100px. The lines sit on Daintree's
+ * terminal surface, dark in both themes.
+ */
+
+/* The button: the header's trailing slot. Its dot sits on the glyph's top-right shoulder, ringed in the header's own
+   colour so it reads as a separate mark on both themes. */
+.ws-terminal {
+  position: relative;
+  color: var(--text);
+}
+.ws-terminal[data-open] {
+  /* The sidebar's selected fill: neutral, and visible on both themes. */
+  background: var(--sidebar-active-bg, var(--selected));
+}
+.ws-terminal-dot.agent-state {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  display: flex;
+  pointer-events: none;
+}
+.ws-terminal-dot .agent-dot {
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px var(--surface-chrome);
+}
+.ws-terminal-dot.agent-state[data-fresh='stale'] .agent-dot {
+  background: var(--surface-chrome);
+  box-shadow:
+    inset 0 0 0 1.5px var(--text-2),
+    0 0 0 2px var(--surface-chrome);
+}
+
+/* ---------- the drawer (below 1100px) ---------- */
+.term-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(85vw, 440px);
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  /* The hairline keeps the panel's edge on a dimmed dark page, where the shadow cannot. */
+  border-left: 1px solid var(--line-strong);
+  border-radius: var(--radius-sheet) 0 0 var(--radius-sheet);
+  background: var(--surface-chrome);
+  color: var(--text);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  transition: transform var(--dur-exit) var(--ease-exit);
+}
+.term-drawer[open] {
+  animation: term-in var(--dur-enter) var(--ease-enter);
+}
+.term-drawer[data-closing] {
+  transform: translateX(100%);
+}
+.term-drawer[data-dragging] {
+  transition: none;
+}
+.term-drawer::backdrop {
+  background: var(--theme-scrim-strong);
+  backdrop-filter: blur(var(--scrim-blur));
+  -webkit-backdrop-filter: blur(var(--scrim-blur));
+  animation: side-fade var(--dur-enter) var(--ease-enter);
+  transition: opacity var(--dur-exit) var(--ease-exit);
+}
+.term-drawer[data-closing]::backdrop {
+  opacity: 0;
+}
+@keyframes term-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-drawer {
+    transition: opacity var(--dur-exit) var(--ease-out);
+  }
+  .term-drawer[open] {
+    animation-name: side-fade;
+  }
+  .term-drawer[data-closing] {
+    transform: none;
+    opacity: 0;
+  }
+}
+
+/* ---------- the column beside the chat (1100px and up) ---------- */
+.ws[data-terminal='docked'] {
+  grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 440px);
+}
+.ws > .term-dock {
+  grid-row: 1 / 4;
+  grid-column: 2;
+  display: flex;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface-chrome);
+}
+
+/* ---------- the panel's contents, the same in both ---------- */
+.term-panel-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  /* Vertical scrolling and pinch zoom stay native; a horizontal drag is the swipe that closes the drawer. */
+  touch-action: pan-y pinch-zoom;
+}
+.term-drawer .term-panel-body {
+  padding: var(--safe-t) var(--safe-r) 0 0;
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  min-height: 56px;
+  /* Its text starts on the terminal text's column, so the drawer has one left edge for words. */
+  padding: 6px 6px 6px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.term-dock .term-head {
+  /* Level with the chat header beside it. */
+  min-height: 52px;
+  padding-block: 0;
+}
+.term-titles {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.term-eyebrow {
+  font-size: 0.75rem;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.term-title {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.term-title:focus {
+  outline: none;
+}
+.term-title:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.term-status {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  padding: 10px 8px 12px 20px;
+}
+.term-status p {
+  margin: 0;
+}
+/* The summary takes the row; when it cannot share it with Refresh (narrow, or larger text) Refresh moves below. */
+.term-status-text {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+.term-state {
+  font-size: var(--text-md);
+  line-height: 24px;
+}
+/* The row mark keeps its words on one line; here the longer drawer words may wrap beside the dot. */
+.term-state.agent-state {
+  white-space: normal;
+  align-items: first baseline;
+}
+.term-state .agent-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.term-state .agent-dot {
+  width: 8px;
+  height: 8px;
+  /* Centred on the first line of the words, however many lines they take. */
+  align-self: flex-start;
+  margin-top: 8px;
+}
+.term-fresh {
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+  /* Under the state's words, not under its dot. */
+  padding-left: 14px;
+}
+.term-stale {
+  font-weight: 600;
+  color: var(--text);
+}
+.term-status .term-note {
+  flex: 1 0 100%;
+  margin-top: 2px;
+  padding-right: 8px;
+  padding-left: 14px;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+/* Refresh sits beside the freshness it changes. Busy, it says so and spins; it never fades. */
+.term-refresh {
+  gap: 0;
+  min-height: var(--tap-min);
+  padding: 0 10px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+}
+.term-refresh-label {
+  display: grid;
+}
+.term-refresh-label > span {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* In the status row the face sits flush right, on the Close glyph's edge; under an empty state, centred. */
+  justify-self: end;
+  visibility: hidden;
+}
+.term-empty .term-refresh-label > span {
+  justify-self: center;
+}
+.term-refresh-label > span[data-on] {
+  visibility: visible;
+}
+.term-refresh[aria-disabled='true'] {
+  opacity: 1;
+  cursor: default;
+}
+.term-refresh[data-busy] [data-on] svg {
+  animation: term-spin 900ms linear infinite;
+}
+@keyframes term-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-refresh[data-busy] [data-on] svg {
+    animation: none;
+  }
+}
+
+.term-screen {
+  /* As tall as its lines, up to the rest of the drawer: a short snapshot is a short card, not an empty well. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0 8px calc(8px + var(--safe-b));
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--term-bg);
+  color: var(--term-fg);
+  /* The edge carries the surface on Daintree, where the terminal is the canvas's own near-black. */
+  box-shadow: inset 0 0 0 1px var(--line-default);
+}
+.term-screen:focus {
+  outline: none;
+}
+.term-screen:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.term-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+  user-select: text;
+  -webkit-user-select: text;
+}
+/*
+ * One block per terminal line. A long line wraps under its own first word of text (a hanging indent: --i is that
+ * column, past the line's indent and any leading marker such as "● " or "⎿  "), so a wrapped line reads as one. A
+ * drawn frame line (a prompt box's edge, a rule) clips at the panel edge instead of wrapping into broken shapes;
+ * nothing scrolls sideways.
+ */
+.term-line {
+  display: block;
+  min-height: 18px;
+  padding-left: calc(var(--i, 0) * 1ch);
+  text-indent: calc(var(--i, 0) * -1ch);
+}
+.term-frame {
+  display: flex;
+  white-space: pre;
+  /* The font's own line height, so a box's sides join from row to row as they do in a terminal. */
+  line-height: 1.32;
+  min-height: 0;
+  /* Its own leading spaces place it; no hanging indent. */
+  padding-left: 0;
+  text-indent: 0;
+}
+.term-frame-run {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.term-frame-end {
+  flex: none;
+}
+/* A symbol from a fallback font (⎿, ⏺, ✻ …) is held to one column, as a terminal cell would hold it. */
+.term-cell {
+  display: inline-block;
+  width: 1ch;
+  text-indent: 0;
+  text-align: center;
+}
+.term-text::selection,
+.term-text *::selection {
+  background: var(--term-selection);
+  color: var(--term-fg);
+}
+.term-blank {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 18px;
+  color: var(--term-dim);
+}
+
+.term-empty {
+  /* Scrolls on its own when a short window or larger text leaves too little room, so Refresh is never out of reach. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 56px 24px calc(24px + var(--safe-b));
+}
+.term-empty:focus {
+  outline: none;
+}
+.term-empty:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.term-empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+.term-empty-inner > * {
+  flex: none;
+}
+.term-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  border: 1px solid var(--line-default);
+  color: var(--text-2);
+}
+.term-empty-title {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: 24px;
+  font-weight: 600;
+  color: var(--text);
+}
+.term-empty .term-refresh {
+  margin-top: 8px;
+}
+.term-empty-text {
+  margin: 0;
+  max-width: 30ch;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+@media (forced-colors: active) {
+  .ws-terminal-dot .agent-dot {
+    box-shadow: none;
+  }
+  .term-screen {
+    border: 1px solid CanvasText;
+  }
+}

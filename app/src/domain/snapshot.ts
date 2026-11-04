@@ -34,6 +34,11 @@ export interface SnapshotState {
   observation: PaneObservation | null;
   /** Relay time; past it with no newer snapshot, the observation is stale however recent it was. */
   refreshDeadline: string | null;
+  /**
+   * This observation has already outlived a refresh nobody answered (the computer asleep or offline). Asking again
+   * is not newer evidence, so it stays stale, whatever the next request's deadline, until a newer snapshot arrives.
+   */
+  missedRefresh?: boolean;
 }
 
 const DESKTOP = new Set(['owner-desktop', 'desktop-host']);

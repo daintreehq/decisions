@@ -1,4 +1,9 @@
-import { LIMITS, isThreadClosedStatus, type LedgerEvent } from '@daintreehq/decisions-protocol';
+import {
+  LIMITS,
+  SnapshotRefresh,
+  isThreadClosedStatus,
+  type LedgerEvent,
+} from '@daintreehq/decisions-protocol';
 import type { QuestionView } from '../domain/model.js';
 import type { SnapshotState } from '../domain/snapshot.js';
 import type { Verified } from '../domain/verify.js';
@@ -9,6 +14,8 @@ export interface SnapshotStoreDeps {
   fetch: (questionId: string) => Promise<unknown>;
   verify: (raw: unknown, view: QuestionView) => Promise<Verified<SnapshotState>>;
   view: (questionId: string) => QuestionView | undefined;
+  /** `POST /questions/{id}/snapshot/refresh`, signed: asks the publishing desktop for a fresh snapshot. */
+  refresh?: (questionId: string) => Promise<unknown>;
   /** The phone's clock. */
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -83,6 +90,101 @@ export class SnapshotStore {
   private emit() {
     this.version++;
     for (const l of this.listeners) l();
+    this.emitDetail();
+  }
+
+  /*
+   * The terminal drawer shows everything in a snapshot (its title and lines too), so it listens to every change:
+   * each new snapshot, each refresh asked for or refused, each freshness boundary. Only an open chat subscribes.
+   */
+  private detail = new Set<() => void>();
+  private detailVersion = 0;
+  /** Each question's latest refresh request: its number (so each outcome is told once) and, once done, how it went. */
+  private attempts = new Map<string, { n: number; outcome?: RefreshOutcome }>();
+  subscribeDetail = (l: () => void): (() => void) => {
+    this.detail.add(l);
+    return () => this.detail.delete(l);
+  };
+  getDetailVersion = (): number => this.detailVersion;
+  private emitDetail() {
+    this.detailVersion++;
+    for (const l of this.detail) l();
+  }
+  /** Why the latest refresh request did not go through, until the next one does. */
+  refreshRefusal(questionId: string): RefreshOutcome | undefined {
+    const o = this.attempts.get(questionId)?.outcome;
+    return o && o !== 'asked' ? o : undefined;
+  }
+  /** The latest refresh request: `n` counts them, `outcome` is set when it has finished. */
+  lastAttempt(questionId: string): { n: number; outcome?: RefreshOutcome } | undefined {
+    return this.attempts.get(questionId);
+  }
+  /**
+   * This phone's accepted refresh request per question, until a snapshot received after it answers it. A read that
+   * the relay served before the request existed says "no refresh", and must not wipe the deadline out.
+   */
+  private asked = new Map<string, { requestedAt: number; deadline: string }>();
+  /** Refresh requests on their way to the relay, so the drawer says it is asking from the tap, not the reply. */
+  private requesting = new Set<string>();
+  isRequesting(questionId: string): boolean {
+    return this.requesting.has(questionId);
+  }
+
+  /**
+   * Asks the question's publishing desktop for a fresh snapshot (the relay coalesces requests from every phone).
+   * The outstanding request's deadline joins the question's state, so a desktop that never answers (asleep, offline)
+   * turns the last snapshot stale when it passes; the snapshot that answers arrives as an ordinary hint.
+   */
+  async requestRefresh(questionId: string): Promise<RefreshOutcome> {
+    if (this.stopped || !this.d.refresh) return 'failed';
+    if (this.requesting.has(questionId)) return 'asked';
+    this.requesting.add(questionId);
+    const n = (this.attempts.get(questionId)?.n ?? 0) + 1;
+    this.attempts.set(questionId, { n });
+    this.emitDetail();
+    let raw: unknown;
+    try {
+      raw = await this.d.refresh(questionId);
+    } catch (e) {
+      this.requesting.delete(questionId);
+      const outcome: RefreshOutcome = !(e instanceof RelayError)
+        ? 'failed'
+        : e.status === 0
+          ? 'offline'
+          : e.status === 429
+            ? 'limited'
+            : e.status === 409
+              ? 'unavailable'
+              : 'failed';
+      if (this.stopped) return outcome;
+      this.attempts.set(questionId, { n, outcome });
+      this.emitDetail();
+      return outcome;
+    }
+    this.requesting.delete(questionId);
+    if (this.stopped) return 'failed';
+    const r = SnapshotRefresh.safeParse(raw);
+    this.attempts.set(questionId, { n, outcome: r.success ? 'asked' : 'failed' });
+    if (!r.success) {
+      this.emitDetail();
+      return 'failed';
+    }
+    const cur = this.states.get(questionId);
+    // A snapshot that already answered this request (it can arrive before the response) is not made stale by it.
+    const answered =
+      !!cur?.observation &&
+      Date.parse(cur.observation.receivedAt) >= Date.parse(r.data.requested_at);
+    if (!answered) {
+      this.asked.set(questionId, {
+        requestedAt: Date.parse(r.data.requested_at),
+        deadline: r.data.deadline_at,
+      });
+      this.replace(questionId, {
+        observation: cur?.observation ?? null,
+        refreshDeadline: r.data.deadline_at,
+      });
+    } else this.emitDetail();
+    return 'asked';
   }
 
   /** What a row shows from a state; a change in this key is what listeners hear about. */
@@ -93,6 +195,7 @@ export class SnapshotStore {
     return `${o.agentState}:${this.isFresh(s!) ? 'fresh' : 'stale'}`;
   }
   private isFresh(s: SnapshotState): boolean {
+    if (s.missedRefresh) return false;
     const now = this.relayNow();
     if (s.refreshDeadline && now >= Date.parse(s.refreshDeadline)) return false;
     return !!s.observation && now - Date.parse(s.observation.receivedAt) <= LIMITS.snapshotFreshMs;
@@ -184,11 +287,26 @@ export class SnapshotStore {
   }
 
   private replace(id: string, next: SnapshotState | undefined) {
-    const before = this.shown(this.states.get(id));
+    const prev = this.states.get(id);
+    const before = this.shown(prev);
+    const ask = this.asked.get(id);
+    if (ask) {
+      if (!next || (next.observation && Date.parse(next.observation.receivedAt) >= ask.requestedAt))
+        this.asked.delete(id); // answered, or the snapshot was cleared
+      else if (!next.refreshDeadline) next = { ...next, refreshDeadline: ask.deadline };
+    }
+    // The same observation keeps having missed a refresh: a new request's deadline does not make it current again.
+    if (next && prev?.observation && next.observation?.snapshotId === prev.observation.snapshotId) {
+      const missed =
+        prev.missedRefresh ||
+        (!!prev.refreshDeadline && this.relayNow() >= Date.parse(prev.refreshDeadline));
+      if (missed && !next.missedRefresh) next = { ...next, missedRefresh: true };
+    }
     if (next) this.states.set(id, next);
     else this.states.delete(id);
     this.schedule();
     if (this.shown(next) !== before) this.emit();
+    else this.emitDetail();
   }
 
   /** Wakes at the next moment a shown observation turns stale, so rows step down without a new event. */
@@ -226,6 +344,15 @@ export class SnapshotStore {
     this.hints.clear();
     this.queue = [];
     this.again.clear();
+    this.attempts.clear();
+    this.asked.clear();
+    this.requesting.clear();
     this.emit();
   }
 }
+
+/**
+ * How a refresh request went: `asked` (the desktop has until the deadline), `unavailable` (the relay refused it:
+ * sharing is off, or the desktop does not take requests), `offline`, `limited` (asked too often), or `failed`.
+ */
+export type RefreshOutcome = 'asked' | 'unavailable' | 'offline' | 'limited' | 'failed';

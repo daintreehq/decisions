@@ -14,6 +14,11 @@
   /* The file stage is the darkest plane in both themes, so screenshots read true (Bondi keeps a dark stage as it
      keeps a dark terminal). */
   --surface-stage: var(--theme-surface-grid);
+  /* The agent's terminal, in Daintree's own terminal colours: dark in both themes (Bondi keeps a dark terminal). */
+  --term-bg: var(--theme-terminal-background);
+  --term-fg: var(--theme-terminal-foreground);
+  --term-dim: var(--theme-terminal-bright-black);
+  --term-selection: var(--theme-terminal-selection);
 
   --text: var(--theme-text-primary);
   --text-2: var(--theme-text-secondary);

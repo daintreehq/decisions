@@ -213,6 +213,21 @@ Question details, Copy question, Copy question ID, View activity, and Change ans
 
 A change to the question while answering stops capture, keeps the text, locks Send and shows "This question changed. Your draft is saved; review the update before sending." **Review update** clears the old selection and rebinds the draft to the new revision. Delivery and connection changes never reset the draft or the file view.
 
+### 4.5 The agent's terminal
+
+The header's trailing slot holds the **terminal button** (Lucide's square-terminal, never a bare chevron that would read as Forward). A dot on its shoulder carries the asking agent's observed state in the agent-state colours (`app/src/domain/agentState.ts`: working green, waiting amber, neutral otherwise), a hollow ring once the observation is old; its accessible name says the state in words. The button is hidden, its slot still reserved, when the relay does not serve pane snapshots or the question cannot be verified.
+
+It opens the **terminal drawer**: below 1100 px a modal panel from the right (85% of the width, at most 440 px), the sidebar overlay's mirror image over the dimmed chat; from 1100 px a column beside the chat (30%, 320–440 px) that leaves the chat and its dock usable. It is a snapshot, never a live terminal, and nothing in it sends input:
+
+- **Head:** "Terminal snapshot" over the pane's title as Daintree shows it; Close.
+- **State:** Daintree's word, with the waiting reason spelled out: Working, Waiting at its prompt, Waiting on a question, Waiting for approval, Waiting after an error (Daintree's own "Blocked by an error" interprets), Directing, Idle, Finished, Exited. Under it "as of 12 s ago", in relay time from when the relay received the snapshot.
+- **Stale:** received over a minute ago, or a refresh went unanswered: the ring, "Stale · as of 4 min ago", and "Greg's MacBook Pro didn't send a newer snapshot. It may be asleep or offline." An observation that has outlived an unanswered refresh stays stale while it is asked for again, here and on Home and Recent rows, until a newer one arrives.
+- **Refresh** sits beside the freshness it changes and says "Asking…" from the tap, keeping its size and place. Opening the drawer asks once; the relay allows a phone six requests a minute, and none is spent on a desktop that does not share. Each refusal says what happened (offline, asked several times in a row, not taking requests). There is no pull to refresh: the lines open at their newest, so a pull at the top would need every line scrolled first, and a page pull is the browser's reload.
+- **Lines:** plain text on Daintree's terminal surface, dark in both themes, JetBrains Mono 12/18, selectable, opened at the newest line and followed only while the reader is at the end. A long line wraps under its own first word (past its indent and a leading marker such as "●" or "⎿"); a drawn frame line (a prompt box's edge, a rule) clips at the edge instead of breaking into pieces. Nothing scrolls sideways. A short snapshot is a short card.
+- **Nothing to show:** "Not shared" (sharing is off on that computer, a Daintree setting there), "No snapshot yet" (asking, didn't reply, or an older Daintree), "Not available" (the question closed).
+- **Closing:** a right swipe, Back, Escape, a tap on the dimmed chat, or Close; focus returns to the button. A second finger cancels the swipe, so pinch zoom works. While the drawer covers the chat, the dock's shortcuts do nothing.
+- **Announcements** come from a status region inside the drawer (the page's own is inert behind a modal): a refresh's outcome, the first snapshot, a change of state. The ticking age and the lines stay silent.
+
 ## 5. Files
 
 ### 5.1 One sequence

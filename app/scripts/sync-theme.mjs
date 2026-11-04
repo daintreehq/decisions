@@ -54,9 +54,13 @@ const commit = (() => {
   }
 })();
 
-/** Only the shared semantic tokens and the grain tile; Daintree's IDE-specific extensions stay behind. */
+/**
+ * Only the shared semantic tokens and the grain tile; Daintree's IDE-specific extensions stay behind. The terminal's
+ * plain colours come along (the chat's terminal drawer shows plain text on Daintree's terminal surface); its ANSI
+ * palette, cursor and scrollbar do not.
+ */
 const ideOnly =
-  /^--theme-(terminal|diff|pr|search|panel-state|category|knob|state-modified)|^--theme-syntax-(?!keyword)/;
+  /^--theme-(terminal-(?!(background|foreground|selection|bright-black)$)|diff|pr|search|panel-state|category|knob|state-modified)|^--theme-syntax-(?!keyword)/;
 const keep = (k) =>
   (k.startsWith('--theme-') && !ideOnly.test(k)) ||
   k === '--grain-image' ||

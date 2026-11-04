@@ -8,6 +8,7 @@
 @import './styles/navigator.css';
 @import './styles/history.css';
 @import './styles/workspace.css';
+@import './styles/terminal.css';
 @import './styles/detail.css';
 @import './styles/files.css';
 @import './styles/voice.css';

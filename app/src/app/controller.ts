@@ -199,6 +199,10 @@ export class AppController {
           epochKeys: this.epochKeys,
         }),
       view: (id) => this.store?.get(id),
+      refresh: (id) =>
+        this.relay!.json('POST', `/questions/${id}/snapshot/refresh`, {
+          body: { protocol_version: PROTOCOL_VERSION, idempotency_key: newId() },
+        }),
     });
     this.snapshots.noteEvents(cached, false);
 
