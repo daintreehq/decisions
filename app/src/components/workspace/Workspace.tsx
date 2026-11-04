@@ -10,11 +10,9 @@ import {
 import { app } from '../../app/controller.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
-import { openNavigator } from '../../app/navigator.js';
 import { StaleQuestionError } from '../../domain/answer.js';
 import {
   composeShape,
-  formatBytes,
   verdict as computeVerdict,
   type ComposeMode,
   type FieldId,
@@ -25,13 +23,12 @@ import {
   deliveryProgress,
   effectiveStatus,
   lastProxyAction,
-  needsAction,
   originParts,
   proxyNeedsReview,
   submitKind,
   unreadableHere,
 } from '../../domain/selectors.js';
-import { drafts, fieldValue, useDraft } from '../../features/compose/draftStore.js';
+import { drafts, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
 import { announce } from '../../lib/announce.js';
 import { previewText } from '../../lib/safe-text.js';
@@ -55,12 +52,11 @@ import {
   UndoIcon,
   WarningIcon,
 } from '../Icons.js';
-import { AllQaButton, AnswerDock, DictateButton } from './AnswerDock.js';
-import { ChoiceSheet, ConsentSheet } from './ChoiceSheet.js';
-import { composeCentre, composeSummary, TranscriptPanel } from './ComposeDock.js';
-import { AnswerBody, ConflictCard, CopyButton, OptionCards, optionLabel } from './DecisionArea.js';
+import { AnswerDock } from './AnswerDock.js';
+import { Composer } from './Composer.js';
+import { ConsentSheet } from './ConsentSheet.js';
+import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
 import { Receipt } from './DeliveryStatus.js';
-import { EditorSheet, FIELD_LABEL } from './EditorSheet.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
 import { Sheet } from './Sheet.js';
@@ -101,6 +97,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const headingRef = useRef<HTMLDivElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<GalleryHandle | null>(null);
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   useKeyboardInset(rootRef);
@@ -108,15 +105,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const dictAll = useDictation();
   const [review, setReview] = useState<Review>(NO_REVIEW);
   const [correcting, setCorrecting] = useState(false);
-  const [editor, setEditor] = useState<{ open: boolean; expanded: boolean }>({
-    open: false,
-    expanded: false,
-  });
   const [field, setField] = useState<FieldId | null>(null);
-  const [choiceOpen, setChoiceOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
-  const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [headingAway, setHeadingAway] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -185,10 +176,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           capturing,
         })
       : null;
-  const waiting = all.filter((v) => needsAction(v, now)).length;
   const next = nextQuestion(all, id, now);
   const { project, machine } = originParts(view);
   const excerpt = content ? previewText(content.question, 90) : '';
+  const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
 
   // A draft emptied by a revision change simply follows the question; one with words in it waits for Review update.
   // Capture for it settles first: words still arriving belong to the revision they were spoken for.
@@ -263,24 +254,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     else dictation.request(binding());
   };
 
-  const allQa = () => {
-    if (dictation.isActive()) void dictation.stop();
-    openNavigator();
-  };
-
   const select = (optionId: string) => {
     if (stale) return;
     drafts.edit(draft.key, { selected: [optionId] });
-  };
-
-  const openChoice = () => {
-    const opts = content?.options ?? [];
-    const long = opts.length > 3 || opts.some((o) => (o.description?.length ?? 0) > 90);
-    const el = document.getElementById('ws-options');
-    if (!long && el) {
-      el.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
-      el.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
-    } else setChoiceOpen(true);
   };
 
   const commit = async () => {
@@ -310,7 +286,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       dictation.release(d.key);
       await drafts.sent(d.key);
       setConfirmOpen(false);
-      setEditor({ open: false, expanded: false });
       setCorrecting(false);
       announce(
         navigator.onLine
@@ -414,16 +389,18 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       label: hasWords(correctionDraft) ? 'Resume correction' : 'Change answer',
       onSelect: startCorrection,
     });
+  // Clearing is an explicit loss with Undo, so it lives here rather than in the composer.
+  if (composing && hasWords(draft))
+    menu.push({
+      label: 'Clear draft',
+      onSelect: () => {
+        if (dictation.isActive()) dictation.release(draft.key);
+        drafts.clear(draft.key);
+      },
+    });
 
   /* ---------- dock ---------- */
 
-  const qa = (
-    <AllQaButton
-      waiting={waiting}
-      recording={!!mine && (mine.phase === 'starting' || mine.phase === 'recording')}
-      onClick={allQa}
-    />
-  );
   // A lateral move keeps the first question's origin, so Back still returns to the list it came from.
   const goNext = () => {
     if (!next) return;
@@ -432,22 +409,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       refocus: false,
     });
   };
-  const nextButton = next ? (
-    <button type="button" className="btn primary dock-next" onClick={goNext}>
-      Next question
-      <ArrowRight size={18} />
-    </button>
-  ) : (
-    <span className="dock-none">No more questions need you</span>
-  );
-  /** Moving on, as the dock's whole centre: the one thing left to do once an answer is on its way. */
+  /** Moving on, as the dock's whole width: the one thing left to do once an answer is on its way. */
   const moveOn = (strong: boolean) =>
     next ? (
-      <button
-        type="button"
-        className={`btn${strong ? ' primary' : ''} dock-next wide`}
-        onClick={goNext}
-      >
+      <button type="button" className={`btn${strong ? ' primary' : ''} dock-next`} onClick={goNext}>
         Next question
         <ArrowRight size={18} />
       </button>
@@ -458,180 +423,146 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       </span>
     );
   let dock: ReactNode;
-  let dockExpanded = false;
   if (!verified || !content) {
     dock = (
-      <AnswerDock
-        left={qa}
-        summary={
-          <div className="dock-status">
-            <span className="status">
-              {unreadableHere(view)
-                ? 'This device can’t read this question, so it can’t be answered here.'
-                : 'This question could not be verified, so it can’t be answered.'}
-            </span>
-          </div>
-        }
-        right={next ? nextButton : undefined}
-      />
+      <AnswerDock>
+        <p className="dock-line">
+          {unreadableHere(view)
+            ? 'This device can’t read this question, so it can’t be answered here.'
+            : 'This question could not be verified, so it can’t be answered.'}
+        </p>
+        {next && moveOn(false)}
+      </AnswerDock>
     );
   } else if (pendingEntry) {
     // The reply and its receipt are in the thread; the dock offers what comes next.
-    dock = <AnswerDock left={qa} centre={moveOn(true)} />;
+    dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
   } else if (failed.length > 0) {
     dock = (
-      <AnswerDock
-        left={qa}
-        summary={
-          <div className="dock-status">
-            <span className="status warn" role="status">
-              Your answer was not applied. Your words are kept.
-            </span>
-          </div>
-        }
-        centre={
-          <button
-            type="button"
-            className="dock-field"
-            onClick={() =>
-              document.getElementById('ws-conflict')?.scrollIntoView({ block: 'start' })
-            }
-          >
-            <span className="dock-placeholder strong">Review change</span>
-          </button>
-        }
-      />
+      <AnswerDock>
+        <p className="dock-line warn" role="status">
+          Your answer was not applied. Your words are kept.
+        </p>
+        <button
+          type="button"
+          className="btn dock-next"
+          onClick={() => document.getElementById('ws-conflict')?.scrollIntoView({ block: 'start' })}
+        >
+          Review change
+        </button>
+      </AnswerDock>
     );
   } else if (composing && shape && verdict) {
-    const placeholder =
-      activeField === 'reason'
-        ? 'Why are you changing it?'
-        : mode === 'correction'
-          ? 'Write the corrected answer'
-          : shape.textIsAnswer
-            ? 'Type an answer'
-            : 'Add a note';
-    const fieldNoun =
-      activeField === 'reason'
-        ? 'reason'
-        : shape.textIsAnswer || mode === 'correction'
-          ? 'answer'
-          : 'note';
-    const selectionLabel = draft.selected.length
-      ? draft.selected.map((s) => optionLabel(view, s)).join(', ')
-      : null;
-    const input = {
-      shape,
-      draft,
-      verdict,
-      field: activeField,
-      fieldNoun,
-      dict: mine,
-      stale,
-      error,
-      sending: busy,
-      selectionLabel,
-      canUseOriginal: dictation.canUseOriginal(draft),
-      onSend: send,
-      onChoose: openChoice,
-      onReviewUpdate: () => {
-        void dictation.rebind(draft.key, view.revision);
-        setError(null);
-        announce('Updated. Your choice was cleared; review the question before sending.');
-      },
-      onShowRemaining: () => galleryRef.current?.showFirstUnreviewed(),
-      onReviewWords: () => {
-        const u = mine?.unsure;
-        if (u) setField(u.field);
-        setEditor({ open: true, expanded: false });
-      },
-      onOpenEditor: () => setEditor({ open: true, expanded: false }),
-      onToggleTranscript: () => setTranscriptOpen((o) => !o),
-      onDictate: toggleDictation,
-      onDismissError: () => setError(null),
-    };
-    const limit =
-      verdict.textOver > 0 && activeField === 'text'
-        ? `${formatBytes(verdict.textOver)} over the limit. Nothing is cut; shorten it to send.`
-        : verdict.reasonOver > 0 && activeField === 'reason'
-          ? `${verdict.reasonOver} characters over the 2,000-character limit.`
-          : null;
-    dockExpanded = editor.open && editor.expanded;
-    const v = app.getSnapshot().prefs.voice;
+    const voice = !dictation.unavailable();
+    const reason = activeField === 'reason';
+    const placeholder = reason
+      ? 'Why are you changing it?'
+      : mode === 'correction'
+        ? 'Write the corrected answer'
+        : shape.textIsAnswer
+          ? voice
+            ? 'Type or hold to talk'
+            : 'Type an answer'
+          : 'Add a note';
+    const focusedPlaceholder = reason
+      ? 'Why are you changing it?'
+      : mode === 'correction'
+        ? 'Write the corrected answer'
+        : shape.textIsAnswer
+          ? 'Type an answer'
+          : 'Add a note';
+    const fieldNoun = reason
+      ? 'reason'
+      : shape.textIsAnswer || mode === 'correction'
+        ? 'answer'
+        : 'note';
+    const fieldLabel = reason
+      ? 'Reason for the change'
+      : mode === 'correction'
+        ? 'Corrected answer'
+        : shape.textIsAnswer
+          ? 'Answer'
+          : 'Note';
+    const two = shape.fields.length > 1;
     dock = (
-      <AnswerDock
-        expanded={dockExpanded}
-        above={
-          <>
-            {transcriptOpen && mine && dictation.isActive() && (
-              <TranscriptPanel dict={mine} onClose={() => setTranscriptOpen(false)} />
-            )}
-            {editor.open && shape.fields.length > 0 && (
-              <EditorSheet
-                draft={draft}
-                field={activeField}
-                fields={shape.fields}
-                fieldLabels={{
-                  text:
-                    mode === 'correction'
-                      ? 'Corrected answer'
-                      : shape.textIsAnswer
-                        ? 'Answer'
-                        : 'Note',
-                  reason: FIELD_LABEL.reason,
-                }}
-                placeholder={placeholder}
-                maxBytesHint={limit}
-                questionExcerpt={excerpt}
-                expanded={editor.expanded}
-                onExpand={(x) => setEditor({ open: true, expanded: x })}
-                onClose={() => {
-                  setEditor({ open: false, expanded: false });
-                  void drafts.flush(draft.key).catch(() => undefined);
-                }}
-                onField={setField}
-                onSend={send}
-              />
-            )}
-          </>
-        }
-        summary={composeSummary(input)}
-        left={qa}
-        centre={composeCentre({
-          ...input,
-          editorOpen: editor.open,
-          placeholder,
-          onCloseEditor: () => setEditor({ open: false, expanded: false }),
-        })}
-        right={
-          shape.fields.length > 0 ? (
-            <DictateButton
-              dict={mine ?? { ...dictAll, phase: 'idle' }}
-              holdMode={v.mode === 'hold'}
-              fieldLabel={fieldNoun}
-              onToggle={toggleDictation}
-              onHoldStart={() => {
-                if (!mine || mine.phase === 'idle' || mine.phase === 'cleaning') toggleDictation();
-              }}
-              onHoldEnd={() => {
-                const p = dictation.getState().phase;
-                if (
-                  dictation.getState().binding?.key === draft.key &&
-                  (p === 'starting' || p === 'recording')
-                )
-                  void dictation.stop();
-              }}
-            />
-          ) : undefined
-        }
-      />
+      <AnswerDock>
+        <Composer
+          shape={shape}
+          draft={draft}
+          verdict={verdict}
+          field={activeField}
+          fieldLabel={fieldLabel}
+          fieldNoun={fieldNoun}
+          placeholder={placeholder}
+          focusedPlaceholder={focusedPlaceholder}
+          fieldTabs={
+            two
+              ? [
+                  { id: 'text', label: 'Corrected answer' },
+                  { id: 'reason', label: 'Reason · required' },
+                ]
+              : null
+          }
+          caption={mode === 'correction' && reason ? 'Reason · required' : null}
+          dict={mine}
+          voice={voice}
+          stale={stale}
+          error={error}
+          sending={busy}
+          // The choice is pinned beside the field in both modes; a correction marks the answer in force.
+          options={
+            (offerChoices || (inCorrection && shape.hasOptions)) && content
+              ? content.options.map((o) => ({ id: o.id, label: o.label }))
+              : null
+          }
+          optionsLabel={
+            inCorrection
+              ? 'Corrected answer'
+              : content?.kind === 'approval'
+                ? 'Your decision'
+                : 'Choose one'
+          }
+          currentOptions={inCorrection ? (currentContent?.selected_option_ids ?? []) : undefined}
+          selected={draft.selected}
+          disabled={busy}
+          canUseOriginal={dictation.canUseOriginal(draft)}
+          fieldRef={fieldRef}
+          onSelect={select}
+          onClearChoice={
+            shape.mixed && draft.selected.length > 0 && draft.text.trim()
+              ? () => drafts.edit(draft.key, { selected: [] })
+              : null
+          }
+          onSend={send}
+          onReviewUpdate={() => {
+            void dictation.rebind(draft.key, view.revision);
+            setError(null);
+            announce('Updated. Your choice was cleared; review the question before sending.');
+          }}
+          onShowRemaining={() => galleryRef.current?.showFirstUnreviewed()}
+          onDismissError={() => setError(null)}
+          onField={setField}
+          onDictate={toggleDictation}
+          onHoldStart={() => {
+            if (!mine || mine.phase === 'idle' || mine.phase === 'cleaning') toggleDictation();
+          }}
+          onHoldEnd={() => {
+            const p = dictation.getState().phase;
+            if (
+              dictation.getState().binding?.key === draft.key &&
+              (p === 'starting' || p === 'recording')
+            )
+              void dictation.stop();
+          }}
+        />
+      </AnswerDock>
     );
   } else if (modelReview && proxy) {
     // Confirm and Overrule live on the model's message; moving on stays here, quieter than Confirm.
-    dock = <AnswerDock left={qa} centre={moveOn(false)} />;
+    dock = <AnswerDock>{moveOn(false)}</AnswerDock>;
   } else {
     // Answered, expired or withdrawn: the thread says which; the dock offers the next question.
-    dock = <AnswerDock left={qa} centre={moveOn(true)} />;
+    dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
   }
 
   /* ---------- the thread ---------- */
@@ -647,7 +578,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     ) : null;
   const inForce =
     (answer?.content as { selected_option_ids?: string[] } | null)?.selected_option_ids ?? [];
-  const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
   const closed = status === 'expired' || status === 'cancelled';
   const items: ReactNode[] = [];
   if (content) {
@@ -901,11 +831,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             onSelect={select}
             onReason={() => {
               setField('reason');
-              setEditor({ open: true, expanded: false });
+              setTimeout(() => fieldRef.current?.focus(), 0);
             }}
             onCancel={() => {
               if (dictation.isActive()) void dictation.stop();
-              setEditor({ open: false, expanded: false });
               setCorrecting(false);
             }}
             onDiscard={() => setDiscardOpen(true)}
@@ -1010,11 +939,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div
-      ref={rootRef}
-      className={`ws${dockExpanded ? ' editor-full' : ''}`}
-      data-state={composing ? 'compose' : status}
-    >
+    <div ref={rootRef} className="ws" data-state={composing ? 'compose' : status}>
       <WorkspaceHeader
         project={project}
         machine={machine}
@@ -1059,16 +984,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       </div>
       <div id="workspace-overlay" className="ws-overlay" />
       {dock}
-      {content && (
-        <ChoiceSheet
-          open={choiceOpen}
-          view={view}
-          selected={draft.selected}
-          currentIds={inCorrection ? (currentContent?.selected_option_ids ?? []) : undefined}
-          onSelect={select}
-          onClose={() => setChoiceOpen(false)}
-        />
-      )}
       <ConsentSheet
         open={dictAll.phase === 'consent' && dictAll.binding?.key === draft.key}
         provider={app.getSnapshot().prefs.voice.transcription === 'xai' ? 'xAI (Grok)' : 'OpenAI'}
@@ -1138,7 +1053,6 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 dictation.release(correctionDraft.key);
                 void drafts.sent(correctionDraft.key);
                 setDiscardOpen(false);
-                setEditor({ open: false, expanded: false });
                 setCorrecting(false);
               }}
             >

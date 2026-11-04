@@ -265,11 +265,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.goto(`${relay.origin}/q/${ids[key]}`);
     await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
   };
-  /** Types into the dock's editor (opening it from the draft field) and closes it again. */
+  /** Types into the composer's field; unless kept focused, the keyboard goes away again. */
   const typeAnswer = async (text: string, keepOpen = false) => {
-    await page.locator('.dock .dock-field').first().click();
-    await page.locator('#ws-editor').fill(text);
-    if (!keepOpen) await page.locator('.dock-field.done').click();
+    const field = page.locator('.dock .composer-field textarea');
+    await field.fill(text);
+    if (keepOpen) await field.focus();
+    else await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   };
 
   beforeAll(async () => {
@@ -484,7 +485,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     // Answer the rename question through the UI, so one item is answered and delivered.
     await open('Rename “Canopy”');
-    await page.getByRole('radio', { name: /Yes, rename/ }).check();
+    await page
+      .getByRole('radio', { name: /Yes, rename/ })
+      .first()
+      .check();
     await shot('30-ws-approval-selected');
     // A note, so History and its timeline show an answer with words in it.
     await typeAnswer('Inbox reads better in the sidebar.');
@@ -496,7 +500,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('15-detail-answered');
     await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
     await page.getByRole('menuitem', { name: 'Change answer' }).click();
-    await page.getByRole('radio', { name: /Keep Canopy/ }).check();
+    await page
+      .getByRole('radio', { name: /Keep Canopy/ })
+      .first()
+      .check();
     await typeAnswer('Canopy is the brand name; keep it.');
     await shot('16-detail-override');
     await page.getByRole('button', { name: 'Send correction' }).click();
@@ -510,9 +517,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await filesReady();
     await shot('09-detail-approval');
     await shot('09-detail-approval-full', { full: true });
-    await page.getByRole('radio', { name: /^Approve/ }).check();
+    await page
+      .getByRole('radio', { name: /^Approve/ })
+      .first()
+      .check();
     await shot('10-detail-approval-selected');
-    // The README hero: the choice made, a note for the agent, Send armed above Dictate.
+    // The README hero: the choice made, a note for the agent, Send in the composer.
     await typeAnswer('Ship it. Keep the tooltips on every icon.');
     await shot('10-detail-approval-note');
     await typeAnswer('');
@@ -613,10 +623,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('dialog').waitFor();
     await shot('72-dictation-consent');
     await page.getByRole('button', { name: /turn on dictation/ }).click();
-    await page.getByText('Tap to start', { exact: true }).waitFor();
+    await page.getByText('Speech to text', { exact: true }).waitFor();
     await shot('72-dictation-on', { full: true });
     await page.getByRole('switch', { name: 'Dictation' }).click();
-    await page.getByText('Tap to start', { exact: true }).waitFor({ state: 'hidden' });
+    await page.getByText('Speech to text', { exact: true }).waitFor({ state: 'hidden' });
     await page.unroute('**/api/v1/info');
 
     await page.goto(relay.origin + '/settings/notifications');
@@ -1117,11 +1127,14 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
         await shot(`40-ws-text-empty-${tag}`);
         await typeAnswer('Describe v3 only, and move the v2 steps to an appendix.', true);
         await shot(`40-ws-editor-${tag}`);
-        await page.locator('.dock-field.done').click();
+        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
         await shot(`40-ws-draft-${tag}`);
         await typeAnswer('');
         await openId('choice');
-        await page.getByRole('radio', { name: /Exponential backoff/ }).check();
+        await page
+          .getByRole('radio', { name: /Exponential backoff/ })
+          .first()
+          .check();
         await shot(`40-ws-choice-selected-${tag}`);
         await openId('design');
         await filesReady();
@@ -1150,7 +1163,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await openId('conflict');
     await context.setOffline(true);
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));
-    await page.getByRole('radio', { name: /^Warn/ }).check();
+    await page.getByRole('radio', { name: /^Warn/ }).first().check();
     await page.getByRole('button', { name: 'Send answer' }).click();
     await page.locator('.ws .receipt').waitFor({ timeout: 10_000 });
     await shot('40-ws-queued-offline');

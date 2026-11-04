@@ -179,7 +179,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
   ) => {
     await go(`/q/${ids[key]}`);
     await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
-    await page.getByRole('radio', { name: option }).check();
+    await page.getByRole('radio', { name: option }).first().check();
     await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
     await page.locator('.ws .receipt').filter({ hasText: settled }).waitFor({ timeout: 30_000 });
   };
@@ -672,7 +672,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     // The question at the top, so the queued answer is in view beside the offline state.
     await page.locator('main a.qrow', { hasText: 'Raise the webhook rate limit' }).first().click();
     await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
-    await page.getByRole('radio', { name: /Raise to 200/ }).check();
+    await page
+      .getByRole('radio', { name: /Raise to 200/ })
+      .first()
+      .check();
     await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
     await page
       .locator('.ws .receipt')

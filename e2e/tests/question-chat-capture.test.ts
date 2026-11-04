@@ -161,11 +161,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
       'every thumbnail to load',
     );
   };
-  /** Types into the dock's editor (opened from the draft field) and closes it again. */
+  /** Types into the composer's field and puts the keyboard away again. */
   const typeAnswer = async (text: string) => {
-    await page.locator('.dock .dock-field').first().click();
-    await page.locator('#ws-editor').fill(text);
-    await page.locator('.dock-field.done').click();
+    await page.locator('.dock .composer-field textarea').fill(text);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   };
   const send = () =>
     page.getByRole('button', { name: /^Send (decision|answer)$/ }).click({ timeout: 15_000 });
@@ -339,7 +338,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
 
     // Answers through the dock: one delivered, one held by an offline host, one whose pane is gone.
     await openId('rename');
-    await page.getByRole('radio', { name: /Yes, rename/ }).check();
+    await page
+      .getByRole('radio', { name: /Yes, rename/ })
+      .first()
+      .check();
     await typeAnswer('Inbox reads better in the sidebar.');
     await send();
     await sees(/Delivered to the agent’s terminal|Typed into the terminal/);
@@ -352,7 +354,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
     await sees('Received by your computer');
 
     await openId('problem');
-    await page.getByRole('radio', { name: /Merge it/ }).check();
+    await page
+      .getByRole('radio', { name: /Merge it/ })
+      .first()
+      .check();
     await send();
     await sees(/Needs attention on your computer/);
 
@@ -379,7 +384,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
     });
     await settle(700);
     await shot('p-open-choice-scrolled-light');
-    await page.getByRole('radio', { name: /Compact sidebar/ }).check();
+    await page
+      .getByRole('radio', { name: /Compact sidebar/ })
+      .first()
+      .check();
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.getByRole('button', { name: /^Send (decision|answer)$/ }).waitFor();
     await shot('p-open-choice-selected-light');

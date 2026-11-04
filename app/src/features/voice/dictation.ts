@@ -496,7 +496,10 @@ export class DictationController {
     const gen = this.gen;
     if (session.phase === 'starting') {
       this.cancelCapture();
-      this.set({ ...IDLE, message: note ? { text: note, tone: 'info' } : null });
+      // Keep the binding, so a note about why (the question changed, the app was hidden) reaches its composer.
+      this.set({ ...IDLE, binding: b, message: note ? { text: note, tone: 'info' } : null });
+      // Nothing was recorded: say it ended (a note about why is spoken in its place).
+      if (!note) announce('Dictation cancelled.');
       return;
     }
     this.clearTimers();
@@ -545,6 +548,8 @@ export class DictationController {
     drafts.write(b.key, { epoch: b.epoch, revision: b.revision }, () => ({ passage }));
     if (opts.cleanup === false || !this.cleanupProvider()) {
       this.set({ ...IDLE, binding: b, message });
+      // The words are in and nothing will change them: say so (a note about how it ended is spoken in its place).
+      if (!message) announce('Your words are in the answer.');
       return;
     }
     // The person's own edit reached into the passage: their wording stands as it is.
@@ -611,6 +616,8 @@ export class DictationController {
     const cleaned = outcome.result.corrected_text;
     if (!outcome.changed && outcome.spans.length === 0) {
       settle(message);
+      // The tidy-up had nothing to change: the words stand, and are ready.
+      if (!message) announce('Your words are in the answer.');
       return;
     }
     let landed: Passage | null = null;
@@ -725,7 +732,10 @@ export class DictationController {
     this.cancelCapture();
     this.set({ ...IDLE });
     const d = drafts.get(b.key);
-    if (!d || d.epoch !== b.epoch || !region) return;
+    if (!d || d.epoch !== b.epoch || !region) {
+      announce('Dictation discarded.');
+      return;
+    }
     const before = fieldValue(d, b.field);
     // Untouched since dictation began: back to exactly what was there. Otherwise only the passage goes.
     const next =

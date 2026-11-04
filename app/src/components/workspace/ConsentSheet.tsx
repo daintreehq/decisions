@@ -1,44 +1,7 @@
-import type { QuestionView } from '../../domain/model.js';
-import { OptionCards } from './DecisionArea.js';
 import { Sheet } from './Sheet.js';
 
 /**
- * Every option with its full description, for questions whose options are long or many. Choosing closes the sheet and
- * returns a summary to the dock. Nothing here sends.
- */
-export function ChoiceSheet({
-  open,
-  view,
-  selected,
-  currentIds,
-  onSelect,
-  onClose,
-}: {
-  open: boolean;
-  view: QuestionView;
-  selected: readonly string[];
-  currentIds?: readonly string[];
-  onSelect: (id: string) => void;
-  onClose: () => void;
-}) {
-  return (
-    <Sheet open={open} title="Choose an option" onClose={onClose} className="choice-sheet">
-      <OptionCards
-        view={view}
-        selected={selected}
-        currentIds={currentIds}
-        legend="Options"
-        onSelect={(id) => {
-          onSelect(id);
-          onClose();
-        }}
-      />
-    </Sheet>
-  );
-}
-
-/**
- * The first tap on Dictate: say plainly where audio goes before the microphone is asked for. Consent is recorded only
+ * The first press on the mic (or a hold on the empty field): say plainly where audio goes before the microphone is asked for. Consent is recorded only
  * by "Enable and start dictation".
  */
 export function ConsentSheet({

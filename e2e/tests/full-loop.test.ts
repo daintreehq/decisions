@@ -202,7 +202,10 @@ describe.skipIf(!chromiumPath)(
         await tabs.nth(i).click();
         await page.locator('.fx-inline-stage .fs-slide.is-active img').waitFor({ timeout: 30_000 });
       }
-      await page.getByRole('radio', { name: /Approve/ }).check();
+      await page
+        .getByRole('radio', { name: /Approve/ })
+        .first()
+        .check();
       await page.getByRole('button', { name: 'Send decision' }).click();
 
       // the answer travels phone -> relay -> hibernatable socket -> desktop -> terminal

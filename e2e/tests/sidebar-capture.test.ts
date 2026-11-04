@@ -302,7 +302,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     // Answer the rename question through the UI, so one row is answered by the person.
     await go(`/q/${ids.rename}`);
     await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
-    await page.getByRole('radio', { name: /Yes, rename/ }).check();
+    await page
+      .getByRole('radio', { name: /Yes, rename/ })
+      .first()
+      .check();
     await page.getByRole('button', { name: 'Send decision' }).click();
     await page
       .locator('.ws .receipt')

@@ -246,7 +246,10 @@ describe.skipIf(!chromiumPath)(
       expect(before.structuredContent).toMatchObject({ status: 'open', provenance: null });
 
       await openFromInbox('Use optimistic updates for the todo list?');
-      await page.getByRole('radio', { name: /Yes, optimistic/ }).check();
+      await page
+        .getByRole('radio', { name: /Yes, optimistic/ })
+        .first()
+        .check();
       await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
 
       await until(async () => sink.typed.length > 0, 30_000, 'the answer to be typed');
@@ -286,13 +289,17 @@ describe.skipIf(!chromiumPath)(
       // Change answer lives in the question's overflow menu.
       await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
       await page.getByRole('menuitem', { name: 'Change answer' }).click();
-      await page.getByRole('radio', { name: /No, wait for the server/ }).check();
-      // The reason is its own field: in the page when the correction also has text, otherwise the dock's field.
+      await page
+        .getByRole('radio', { name: /No, wait for the server/ })
+        .first()
+        .check();
+      // The reason is the composer's field (with a switch to it when the correction also has text).
       const why = page.getByRole('button', { name: /Why are you changing it/ });
       if (await why.isVisible()) await why.click();
-      else await page.locator('.dock .dock-field').first().click();
-      await page.locator('#ws-editor').fill('Conflicts are too common on shared lists');
-      await page.locator('.dock-field.done').click();
+      await page
+        .locator('.dock')
+        .getByRole('textbox', { name: 'Reason for the change' })
+        .fill('Conflicts are too common on shared lists');
       await page.locator('.dock').getByRole('button', { name: 'Send correction' }).click();
       await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
 
@@ -366,7 +373,10 @@ describe.skipIf(!chromiumPath)(
       await bridge.pump();
 
       await openFromInbox('Show completed todos by default?');
-      await page.getByRole('radio', { name: /Hide them/ }).check();
+      await page
+        .getByRole('radio', { name: /Hide them/ })
+        .first()
+        .check();
       await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
 
       await until(async () => sink.typed.length > typedBefore, 30_000, "pane B's answer");

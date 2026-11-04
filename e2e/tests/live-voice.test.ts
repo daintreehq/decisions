@@ -476,23 +476,20 @@ describe.skipIf(!LIVE)('live dictation: real Grok, Anthropic and OpenAI through 
                 .catch(() => false)
             )
               return 'cleaned';
-            const t = (await page.locator('.dock-status').allInnerTexts()).join(' ');
+            const t = (await page.locator('.dock .composer-lane').allInnerTexts()).join(' ');
             return /Kept your original wording|edited the text/.test(t) ? t : null;
           },
           60_000,
           'the clean-up to finish',
         );
-        const box = page.locator('#ws-editor');
-        await page.locator('.dock .dock-field').first().click();
+        // The composer's field is inline: its value is the draft.
+        const box = page.locator('.dock .composer-field textarea');
         const cleaned = await box.inputValue();
-        await page.locator('.dock-field.done').click();
         const canGoBack = await back.first().isVisible();
         let heard = cleaned;
         if (canGoBack) {
           await back.first().click();
-          await page.locator('.dock .dock-field').first().click();
           heard = await box.inputValue();
-          await page.locator('.dock-field.done').click();
         }
         const last = corrections.at(-1);
         console.log(

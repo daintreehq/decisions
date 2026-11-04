@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react';
 import { app } from '../../app/controller.js';
-import { useApp, useNow, useQuestions } from '../../app/hooks.js';
+import { useApp } from '../../app/hooks.js';
 import { cameFromApp } from '../../app/listState.js';
-import { openNavigator } from '../../app/navigator.js';
-import { needsAction } from '../../domain/selectors.js';
 import { RefreshIcon } from '../Icons.js';
-import { AllQaButton, AnswerDock } from './AnswerDock.js';
+import { AnswerDock } from './AnswerDock.js';
 import { WorkspaceHeader } from './WorkspaceHeader.js';
 
 /**
@@ -14,14 +12,11 @@ import { WorkspaceHeader } from './WorkspaceHeader.js';
  */
 export function WorkspaceOpening() {
   const snap = useApp();
-  const now = useNow();
-  const all = useQuestions();
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setSlow(true), 5_000);
     return () => clearTimeout(t);
   }, []);
-  const waiting = all.filter((v) => needsAction(v, now)).length;
   const offline = !snap.online;
   const synced = snap.lastSyncedAt !== null && !snap.syncing;
   let body;
@@ -72,9 +67,12 @@ export function WorkspaceOpening() {
         <div className="ws-column">{body}</div>
       </div>
       <div id="workspace-overlay" className="ws-overlay" />
-      <AnswerDock
-        left={<AllQaButton waiting={waiting} recording={false} onClick={openNavigator} />}
-      />
+      {/* The composer's place is held, so nothing moves when the question arrives. */}
+      <AnswerDock>
+        <div className="composer" aria-hidden="true">
+          <div className="composer-pill placeholder" />
+        </div>
+      </AnswerDock>
     </div>
   );
 }

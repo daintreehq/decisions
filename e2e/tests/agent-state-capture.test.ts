@@ -398,7 +398,10 @@ describe.skipIf(!OUT || !chromiumPath)(
       // Answer the rename question through the UI, so one row is answered by the person.
       await go(`/q/${ids.rename}`);
       await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
-      await page.getByRole('radio', { name: /Yes, rename/ }).check();
+      await page
+        .getByRole('radio', { name: /Yes, rename/ })
+        .first()
+        .check();
       await page.getByRole('button', { name: 'Send decision' }).click();
       await page
         .locator('.ws .receipt')
@@ -438,10 +441,10 @@ describe.skipIf(!OUT || !chromiumPath)(
         throw new Error('the list reordered when an agent state changed');
       await shot('p-home-changed-light');
 
-      // The Questions & answers sheet inside a question uses the same rows.
+      // The Questions & answers sheet inside a question (Ctrl/⌘+K) uses the same rows.
       await go(`/q/${ids.design}`);
       await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
-      await page.locator('.dock-qa').click();
+      await page.keyboard.press('ControlOrMeta+K');
       await page.locator('.navigator[data-presentation="sheet"]').waitFor({ timeout: 10_000 });
       await expectRows('.navigator[data-presentation="sheet"]', needs);
       await shot('p-sheet-light');
