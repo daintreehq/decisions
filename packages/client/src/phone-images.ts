@@ -19,8 +19,7 @@ import type { QuestionOrigin } from './types.js';
 
 /** The answer or message an image belongs to. */
 export type PhoneImageCarrier =
-  | { kind: 'answer'; actionId: string }
-  | { kind: 'message'; messageId: string };
+  { kind: 'answer'; actionId: string } | { kind: 'message'; messageId: string };
 
 /** One verified phone image, handed to the host. The library keeps no copy of the bytes. */
 export interface PhoneImageFile {

@@ -190,7 +190,8 @@ export function formatImageLines(images: readonly ResolvedPhoneImage[]): string[
   const lines: string[] = [];
   images.forEach((m, i) => {
     const n = i + 1;
-    const unavailable = 'path' in m ? (isTypablePath(m.path) ? null : 'store_failed') : m.unavailable;
+    const unavailable =
+      'path' in m ? (isTypablePath(m.path) ? null : 'store_failed') : m.unavailable;
     lines.push(
       unavailable === null ? `image_${n}: ${m.path}` : `image_${n}_unavailable: ${unavailable}`,
     );

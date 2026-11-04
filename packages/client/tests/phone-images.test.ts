@@ -136,7 +136,10 @@ describe('phone images reach the agent as files the host stored', () => {
     await answerWith(env, [ref]);
     const text = env.sink.typed[0]!.text;
     expect(text).toContain('comment: See the photo.');
-    expect(imageLines(text)).toEqual(['image_1_unavailable: digest_mismatch', 'image_1_alt: Label']);
+    expect(imageLines(text)).toEqual([
+      'image_1_unavailable: digest_mismatch',
+      'image_1_alt: Label',
+    ]);
     expect(images.calls).toHaveLength(0);
   });
 
@@ -192,7 +195,10 @@ describe('phone images reach the agent as files the host stored', () => {
     // The path is kept on the answer entry, so a restart finds it too.
     const entry = parseAnswers((await env.store.getQuestion(env.qid))!.answers_json)[0]!;
     expect(entry.stored_images).toEqual([
-      { attachment_id: ref.attachment_id, path: `/home/dev/.daintree/images/${ref.attachment_id}.png` },
+      {
+        attachment_id: ref.attachment_id,
+        path: `/home/dev/.daintree/images/${ref.attachment_id}.png`,
+      },
     ]);
 
     // A restarted bridge over the same store.
@@ -250,7 +256,10 @@ describe('phone images reach the agent as files the host stored', () => {
     const env = await asked(images);
     const short = await upload(env, env.qid, PNG);
     const long = await upload(env, env.qid, PNG);
-    env.relay.blobs.set(short.attachment_id, env.relay.blobs.get(short.attachment_id)!.slice(0, -1));
+    env.relay.blobs.set(
+      short.attachment_id,
+      env.relay.blobs.get(short.attachment_id)!.slice(0, -1),
+    );
     const padded = env.relay.blobs.get(long.attachment_id)!;
     env.relay.blobs.set(long.attachment_id, new Uint8Array([...padded, 0]));
     await answerWith(env, [short, long]);
@@ -267,7 +276,10 @@ describe('phone images reach the agent as files the host stored', () => {
     await answerWith(env, [ref], { signed: [] });
     const text = env.sink.typed[0]!.text;
     expect(text).toContain('comment: See the photo.');
-    expect(imageLines(text)).toEqual(['image_1_unavailable: record_mismatch', 'image_1_alt: Unsigned']);
+    expect(imageLines(text)).toEqual([
+      'image_1_unavailable: record_mismatch',
+      'image_1_alt: Unsigned',
+    ]);
     expect(env.relay.downloads).toEqual([]);
   });
 
@@ -440,9 +452,11 @@ describe('declaring phone-images-v1', () => {
       });
     let next = streamed;
     const client = new RelayClient({ identity, maxRetries: 0, fetch: async () => next() });
-    await expect(client.downloadAttachment('img_a000000', { maxBytes: 100 })).rejects.toMatchObject({
-      code: 'payload_too_large',
-    });
+    await expect(client.downloadAttachment('img_a000000', { maxBytes: 100 })).rejects.toMatchObject(
+      {
+        code: 'payload_too_large',
+      },
+    );
     next = declared;
     await expect(client.downloadAttachment('img_a000000', { maxBytes: 63 })).rejects.toMatchObject({
       code: 'payload_too_large',
