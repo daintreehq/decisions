@@ -857,16 +857,16 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('60-tablet-history-record');
     await page.keyboard.press('Escape');
 
-    // Desktop: the rail beside a question, the calm Questions column, History with a record, search, offline.
+    // Desktop: the sidebar column beside Home, a question, History with a record, search, offline.
     for (const [vp, tag] of [
       [WIDE, '1280'],
       [WIDER, '1440'],
     ] as const) {
       await page.setViewportSize(vp);
       await page.goto(relay.origin + '/');
-      await page.locator('.rail .qrow').first().waitFor({ timeout: 30_000 });
-      await shot(`60-desktop-${tag}-choose`);
-      await page.locator('.rail .qrow', { hasText: 'Approve the compact sidebar' }).click();
+      await page.locator('main .qrow').first().waitFor({ timeout: 30_000 });
+      await shot(`60-desktop-${tag}-home`);
+      await page.locator('main .qrow', { hasText: 'Approve the compact sidebar' }).click();
       await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
       await page.waitForTimeout(600);
       await shot(`60-desktop-${tag}-question`);
@@ -891,7 +891,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
     await theme('dark');
     await page.goto(relay.origin + '/');
-    await page.locator('.rail .qrow', { hasText: 'Which retry strategy' }).click();
+    await page.locator('main .qrow', { hasText: 'Which retry strategy' }).click();
     await page.locator('.ws .ws-column').waitFor({ timeout: 30_000 });
     await shot('60-desktop-question-dark');
     await page.goto(relay.origin + '/history');

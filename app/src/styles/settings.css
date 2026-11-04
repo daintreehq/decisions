@@ -81,7 +81,7 @@
 }
 .s-aside {
   position: sticky;
-  top: calc(var(--safe-t) + var(--header-h) + 16px);
+  top: calc(var(--safe-t) + var(--top-row) + 8px);
 }
 .s-split .s-index-list {
   border: 0;
@@ -595,10 +595,10 @@ input.s-switch:disabled {
   font-size: var(--text-sm);
   color: var(--text-2);
 }
-/* While dirty the bar stays in view above the tab bar, lifted, with the modified marker. */
+/* While dirty the bar stays in view at the foot of the screen, lifted, with the modified marker. */
 .s-savebar.dirty {
   position: sticky;
-  bottom: calc(var(--tabbar-h) + var(--safe-b) + 12px);
+  bottom: calc(var(--safe-b) + 12px);
   z-index: 5;
   background: var(--surface-raised);
   border-color: var(--line-strong);

@@ -76,16 +76,16 @@ Colour values are generated, not hand-written. `app/scripts/sync-theme.mjs` impo
 
 The app consumes the generated `--theme-*` variables through a small semantic layer in `app/src/styles/tokens.css`. Components never reference a raw hex. The names follow Daintree's vocabulary so the two codebases read the same:
 
-| Role             | Variables                                                                                                                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Surfaces         | `--theme-surface-grid` (app field), `-sidebar` (rail, tab bar), `-canvas`, `-panel` (content cards), `-panel-elevated` (sheets, popovers), `-input`, `-inset` (recessed wells) |
-| Text             | `--theme-text-primary`, `-secondary`, `-muted`, `-placeholder`, `-inverse`, `-link`                                                                                            |
-| Borders          | `--theme-border-default`, `-subtle`, `-strong`, `-divider`, `-input`                                                                                                           |
-| Accent           | `--theme-accent-primary`, `-foreground`, `-soft`, `-muted`, `--theme-focus-ring`                                                                                               |
-| Status           | `--theme-status-{success,warning,danger,info}`, their `-surface` and `-text` variants, `--theme-activity-waiting`                                                              |
-| Overlays         | `--theme-overlay-{subtle,hover,active,selected,raised}`, `--theme-scrim-{soft,medium,strong}`, `--theme-scrim-blur`                                                            |
-| Depth            | `--theme-shadow-{ambient,floating,dialog}`, `--theme-material-blur`, grain via `--grain-image` and `--theme-grain-opacity`                                                     |
-| Model provenance | `--theme-syntax-keyword` (Daintree's violet; `#c89ce8` dark, `#644395` light), always paired with the words "Model answer"                                                     |
+| Role             | Variables                                                                                                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Surfaces         | `--theme-surface-grid` (app field), `-sidebar` (the sidebar), `-canvas`, `-panel` (content cards), `-panel-elevated` (sheets, popovers), `-input`, `-inset` (recessed wells) |
+| Text             | `--theme-text-primary`, `-secondary`, `-muted`, `-placeholder`, `-inverse`, `-link`                                                                                          |
+| Borders          | `--theme-border-default`, `-subtle`, `-strong`, `-divider`, `-input`                                                                                                         |
+| Accent           | `--theme-accent-primary`, `-foreground`, `-soft`, `-muted`, `--theme-focus-ring`                                                                                             |
+| Status           | `--theme-status-{success,warning,danger,info}`, their `-surface` and `-text` variants, `--theme-activity-waiting`                                                            |
+| Overlays         | `--theme-overlay-{subtle,hover,active,selected,raised}`, `--theme-scrim-{soft,medium,strong}`, `--theme-scrim-blur`                                                          |
+| Depth            | `--theme-shadow-{ambient,floating,dialog}`, `--theme-material-blur`, grain via `--grain-image` and `--theme-grain-opacity`                                                   |
+| Model provenance | `--theme-syntax-keyword` (Daintree's violet; `#c89ce8` dark, `#644395` light), always paired with the words "Model answer"                                                   |
 
 **Resolved:** Spec A gave the model-provenance marker its own purple; this keeps it but takes the value from the theme so it stays in family.
 
@@ -127,7 +127,7 @@ Daintree's tiers, all under 300 ms: state changes 150 ms ease-out; panel and she
 
 - One icon set drawn as inline SVG (the CSP forbids external assets). Glyphs follow Lucide's geometry at 1.75 stroke so they match Daintree; one glyph per recurring action (copy, refresh, edit, close, chevrons, mic, stop square, send, files, expand, compare).
 - Severity glyphs are fixed: error `XCircle`, warning `AlertTriangle`, info `Info`, success `CheckCircle2`.
-- Decisions wears Daintree's own mark (canopy, trunk and roots) on Daintree's icon tile (`#151616` with the mint mark), so the two apps read as one family. Header branding is a small mark plus "Decisions"; never a large logo on a working screen. See `docs/brand/README.md`.
+- Decisions wears Daintree's own mark (canopy, trunk and roots) on Daintree's icon tile (`#151616` with the mint mark), so the two apps read as one family. The sidebar's head carries the mark and "Daintree", set large in the system face at display size (issue #40); working screens carry no logo. See `docs/brand/README.md`.
 
 ## 3. Layout, navigation and platforms
 
@@ -148,13 +148,13 @@ Never put question text, answers, file names, search terms, pairing secrets or k
 
 ### 3.2 Responsive modes
 
-| Width          | Layout                                                                                                                                                                                                    |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Under 720 px   | One surface at a time. List screens have a bottom tab bar (Questions, History, Settings). **Inside a question the tab bar is replaced by the answer dock**; there is never a second bar stacked under it. |
-| 720–1099 px    | One centred surface (max 760 px reading column). The navigator opens as a side sheet from the left. Tab bar becomes a compact top navigation in the header.                                               |
-| 1100 px and up | Persistent 320–360 px rail (navigator) on the left with the three destinations at its top; the workspace fills the rest; the dock belongs to the workspace column, not the window.                        |
+| Width          | Layout                                                                                                                                                                                                                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Under 720 px   | One surface at a time, with no title bar and no tab bar. A round 48 px menu button floats top-left inside the safe area (in a question it takes the header's leading slot) and opens the sidebar from the left: the mark and name, Home, History and Settings, Recent questions, and the connection and update state. |
+| 720–1099 px    | One centred surface (max 760 px reading column). The sidebar is still an overlay; the navigator opens as a side sheet from the left.                                                                                                                                                                                  |
+| 1100 px and up | The sidebar is a persistent 300–320 px column on the left, in the same style; the page or workspace fills the rest; the dock belongs to the workspace column, not the window.                                                                                                                                         |
 
-**Resolved:** Spec A put the first breakpoint at 768 px and Spec B at 720 px; 720 px wins so iPad split view and small tablets in portrait stay single-surface. Both agreed on the 1100 px rail. The current 900 px split is retired. Breakpoints are evaluated with container queries on the shell where practical so large text forces the simpler layout.
+**Resolved:** Spec A put the first breakpoint at 768 px and Spec B at 720 px; 720 px wins so iPad split view and small tablets in portrait stay single-surface. Both agreed on a persistent column at 1100 px. **Resolved (issue #40):** the owner replaced the tab bar, the top navigation and the navigator rail with the menu button and sidebar. The current 900 px split is retired. Breakpoints are evaluated with container queries on the shell where practical so large text forces the simpler layout.
 
 ### 3.3 Workspace geometry
 
@@ -409,7 +409,7 @@ Change answer opens correction mode in the workspace: the current answer read-on
 
 ## 12. Questions & answers navigator
 
-One navigation model, two presentations: a full-height sheet titled **Questions & answers** on phones (opened from All Q&A), and the persistent rail at 1100 px and up. Same counts, same selection, same filters.
+One navigation model, two presentations: Home's list, and a sheet titled **Questions & answers** (opened from All Q&A or Ctrl/⌘ + K; full height on phones, from the left from 720 px). Same counts, same selection, same filters.
 
 - **Scopes:** Needs you (answerable questions, with a separate "Delivery needs attention" group), Model answers (still needing review), All. Segmented control with counts.
 - **Search** (local over decrypted content, 150–250 ms debounce) and separate **Project** and **Computer** filters (replacing the combined origin select). Active filters show as removable chips; **Clear filters** keeps the search.
@@ -452,10 +452,10 @@ Unpaired welcome: the mark, one sentence, **Scan pairing code** (primary), **Pas
 
 ## 16. Offline, sync and updates
 
-- Connection lives as a small status in the header: nothing in normal operation beyond a quiet dot; a single compact strip for offline or long reconnects. Polling is not a failure; a WebSocket reconnect is not data loss.
+- Connection lives in the sidebar's foot: a quiet dot and the last sync in normal operation; a tinted block for offline or long reconnects. While the sidebar is closed, the menu button carries a dot for offline, a long reconnect or an update. Polling is not a failure; a WebSocket reconnect is not data loss.
 - Offline: saved questions readable; drafts editable; Send queues ("Queued on this device. It will send when you're back online."); dictation unavailable with a reason; relay settings and pairing need a connection.
 - New questions arriving while reading or dictating update counts and add a quiet affordance; they never replace the open question, scroll it or interrupt recording.
-- Updates: a quiet "Update available" row (header status and About) replaces the banner. **Restart to update** first stops capture, flushes drafts and confirms the outbox is durable, then reloads to the same route and draft. Never reload during capture.
+- Updates: a quiet "Update available" row (the sidebar's foot and About) replaces the banner. **Restart to update** first stops capture, flushes drafts and confirms the outbox is durable, then reloads to the same route and draft. Never reload during capture.
 - Unpair and revocation stop capture, sync, retries, file loads and cleanup; revoke object URLs; and guard every late async result by session generation so nothing repopulates the screen.
 
 ## 17. Back, focus and keyboard
@@ -507,5 +507,5 @@ The full scenario lists in both source specs remain the test plan; these are the
 - Back from a question opened through filtered History restores the query, filters and row.
 - Both themes pass AA contrast for text and 3:1 for control boundaries on every surface they use; the focus ring is visible everywhere.
 - Reduced motion removes all movement without losing any state signal.
-- On desktop (1280 × 820) the rail and workspace coexist, the dock belongs to the workspace column, and the shortcuts in 3.4 work.
+- On desktop (1280 × 820) the sidebar column and workspace coexist, the dock belongs to the workspace column, and the shortcuts in 3.4 work.
 - The installed app is no longer locked to portrait.

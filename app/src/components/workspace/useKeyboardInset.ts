@@ -3,13 +3,15 @@ import { useEffect, type RefObject } from 'react';
 /**
  * Keeps the workspace (and so the editor, Send and Stop) above an on-screen keyboard. The keyboard is inferred only
  * when a text field in the workspace has focus and the page is not zoomed, never from height alone (pinch zoom
- * shrinks the visual viewport too). It sets `--vv-h` and `--vv-top` and `data-kb` on the workspace root.
+ * shrinks the visual viewport too). It sets `--vv-h` and `--vv-top` and `data-kb` on the workspace root, and
+ * `--vv-top` on the shell too, so the floating menu button stays in the raised header's leading slot.
  */
 export function useKeyboardInset(root: RefObject<HTMLElement | null>): void {
   useEffect(() => {
     const vv = typeof window !== 'undefined' ? window.visualViewport : null;
     const el = root.current;
     if (!vv || !el) return;
+    const shell = el.closest<HTMLElement>('.shell');
     let raf = 0;
     const update = () => {
       cancelAnimationFrame(raf);
@@ -27,10 +29,12 @@ export function useKeyboardInset(root: RefObject<HTMLElement | null>): void {
           el.dataset.kb = '';
           el.style.setProperty('--vv-h', `${vv.height}px`);
           el.style.setProperty('--vv-top', `${vv.offsetTop}px`);
+          shell?.style.setProperty('--vv-top', `${vv.offsetTop}px`);
         } else if ('kb' in el.dataset) {
           delete el.dataset.kb;
           el.style.removeProperty('--vv-h');
           el.style.removeProperty('--vv-top');
+          shell?.style.removeProperty('--vv-top');
         }
       });
     };
@@ -40,6 +44,7 @@ export function useKeyboardInset(root: RefObject<HTMLElement | null>): void {
     el.addEventListener('focusout', update);
     return () => {
       cancelAnimationFrame(raf);
+      shell?.style.removeProperty('--vv-top');
       vv.removeEventListener('resize', update);
       vv.removeEventListener('scroll', update);
       el.removeEventListener('focusin', update);

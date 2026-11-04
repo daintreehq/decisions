@@ -1,18 +1,34 @@
 /*
  * The app frame. Breakpoints are in em (45em = 720px, 68.75em = 1100px) so a larger default text size falls back
- * to the simpler layout; app/media.ts uses the same values.
+ * to the simpler layout; app/media.ts uses the same values. There is no title bar and no tab bar at any width.
  *
- *   < 720px     .topbar (sticky) · main (document scroll) · .tabbar (fixed). Inside a question the workspace owns
- *               the frame: no .topbar, no .tabbar.
- *   720–1099px  .topbar with a compact top navigation · one centred surface (760px) · no tab bar.
- *   ≥ 1100px    .shell is a two-column grid of definite height: .rail (320–360px) | .frame (100dvh). main is the
+ *   < 1100px    main (document scroll) · .menu-fab floating top-left inside the safe area · the sidebar as an
+ *               overlay (.sidebar-sheet). A page's title shares the button's row; inside a question the button
+ *               takes the workspace header's leading slot. From 720px the page is one centred surface (760px).
+ *   ≥ 1100px    .shell is a two-column grid of definite height: .sidebar (272–304px) | .frame (100dvh). main is the
  *               right column's scroll container; on question and History routes it has no padding and does not
  *               scroll, so the page inside fills it (`height: 100%`).
  */
 .shell {
-  --rail-w: clamp(320px, 26vw, 360px);
+  --side-w: clamp(300px, 25vw, 320px);
   --content-w: 760px;
+  /* The floating menu button and the row it sits in. */
+  --fab-size: 48px;
+  /* Where a page's content starts. The button sits on that edge, or in the margin beside the centred column when
+     the margin has room for it; a page's first row moves right only as far as it must to clear the button. */
+  --content-left: calc(var(--gutter) + var(--safe-l));
+  --fab-x: max(
+    calc(var(--gutter) + var(--safe-l)),
+    calc(var(--content-left) - var(--fab-size) - 12px)
+  );
+  --fab-y: calc(var(--safe-t) + 6px);
+  --title-clear: max(0px, calc(var(--fab-x) + var(--fab-size) + 12px - var(--content-left)));
   min-height: 100dvh;
+}
+@media (min-width: 45em) {
+  .shell {
+    --content-left: max(24px, calc((100vw - var(--content-w)) / 2));
+  }
 }
 .frame {
   display: flex;
@@ -21,119 +37,444 @@
   min-width: 0;
 }
 
-/* ---------- header (below 1100px) ---------- */
-.topbar {
-  position: sticky;
+/* ---------- main ---------- */
+main {
+  flex: 1;
+  width: 100%;
+  padding: calc(var(--safe-t) + 6px) calc(var(--gutter) + var(--safe-r)) calc(32px + var(--safe-b))
+    calc(var(--gutter) + var(--safe-l));
+}
+main.bare {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-top: calc(var(--safe-t) + 16px);
+  padding-bottom: calc(24px + var(--safe-b));
+}
+@media (min-width: 45em) {
+  /* One centred surface. Padding (not a max-width on main) centres every page, whoever owns it. */
+  main {
+    padding: calc(var(--safe-t) + 6px) max(24px, calc((100% - var(--content-w)) / 2))
+      calc(48px + var(--safe-b));
+  }
+}
+
+/* A page's first row shares the menu button's row: its title (or back link) sits beside the button, centred on it. */
+.shell[data-layout='single'] :is(.page-title, .s-page-title) {
+  display: flex;
+  align-items: center;
+  min-height: var(--fab-size);
+  margin-top: 0;
+  margin-left: var(--title-clear);
+}
+.shell[data-layout='single'] .page-head {
+  min-height: var(--fab-size);
+}
+.shell[data-layout='single'] .s-back {
+  margin-top: 2px;
+  margin-left: calc(var(--title-clear) - 10px);
+}
+/* Settings' column is 680px inside the 760px page, so its title needs 40px less room. */
+@media (min-width: 45em) {
+  .shell[data-layout='single'] .s-page {
+    --title-clear: max(
+      0px,
+      calc(
+        var(--fab-x) + var(--fab-size) + 12px - max(24px, calc((100vw - var(--content-w)) / 2)) -
+          40px
+      )
+    );
+  }
+}
+
+/* Content scrolls under the opaque button. The status bar (the top safe area of an installed app) keeps the page's
+   surface, so nothing scrolls under the clock. */
+.shell[data-layout='single']::before {
+  content: '';
+  position: fixed;
   top: 0;
-  z-index: 20;
+  left: 0;
+  right: 0;
+  z-index: 19;
+  height: var(--safe-t);
+  pointer-events: none;
+  background: var(--surface-page);
+}
+
+/* ---------- the menu button (below 1100px) ---------- */
+.menu-fab {
+  position: fixed;
+  top: var(--fab-y);
+  left: var(--fab-x);
+  z-index: 25;
+  display: grid;
+  place-items: center;
+  width: var(--fab-size);
+  height: var(--fab-size);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  box-shadow:
+    var(--shadow-2),
+    inset 0 0 0 1px var(--line-subtle);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease-out);
+}
+@media (hover: hover) {
+  .menu-fab:hover {
+    background: color-mix(in oklab, var(--surface-raised), var(--text) 5%);
+  }
+}
+/* Press feedback snaps (no transition on transform). */
+.menu-fab:active {
+  transform: scale(0.96);
+}
+.menu-fab-dot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--surface-raised);
+}
+.menu-fab[data-attention='update'] .menu-fab-dot {
+  background: var(--info);
+}
+/* Waiting work the page does not already count (History, Settings): on the circle's top-right shoulder, clear of
+   the glyph and of the screen's edge. */
+.menu-fab-count.count {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  min-width: 18px;
+  padding: 0 5px;
+  font-size: 0.6875rem;
+  line-height: 18px;
+  box-shadow: 0 0 0 2px var(--surface-page);
+}
+/* The keyboard is up: the workspace is raised to the visual viewport (workspace.css), and the button stays in its
+   header's leading slot, above it. */
+.shell:has(.ws[data-kb]) .menu-fab {
+  top: calc(var(--vv-top, 0px) + var(--fab-y));
+  z-index: 31;
+}
+/* The file viewer and the full-height editor bring their own top bars; the button steps aside for them. */
+.shell:has(.ws-overlay:not(:empty)) .menu-fab,
+.shell:has(.ws.editor-full) .menu-fab {
+  display: none;
+}
+
+/* Inside a question the button takes the header's leading slot, so Back is the sidebar's Home (and the system's
+   Back) and the header row is the button's row. */
+.shell[data-layout='single'] .ws-back {
+  display: none;
+}
+.shell[data-layout='single'] .ws-head {
+  min-height: calc(var(--safe-t) + var(--fab-size) + 12px);
+  padding-left: calc(var(--fab-x) + var(--fab-size) + 4px);
+}
+/* In the header's row the button sits on a bar rather than floating over content, so it casts the resting shadow. */
+.shell[data-layout='single'][data-route='question'] .menu-fab {
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--line-subtle);
+}
+
+/* ---------- the sidebar: shared by the overlay and the column ---------- */
+.side {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-chrome);
+  color: var(--text);
+}
+.side-head {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-height: calc(var(--header-h) + var(--safe-t));
-  padding: var(--safe-t) calc(var(--gutter) + var(--safe-r) - 4px) 0
-    calc(var(--gutter) + var(--safe-l));
-  background: var(--material-bg);
-  backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  border-bottom: 1px solid var(--line);
+  flex: none;
+  padding: calc(var(--safe-t) + 20px) 20px 16px calc(20px + var(--safe-l));
 }
-.topbar-end {
-  margin-left: auto;
+.side-mark.brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+/* The name, set large in the display face (the system face at display size, as Daintree sets type). */
+.side-name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.625rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+.side-name:focus {
+  outline: none;
+}
+.side-close {
+  width: var(--tap);
+  height: var(--tap);
+  margin: 0 -10px 0 auto;
+  color: var(--text-2);
+}
+/* The destinations stay put; Recent scrolls on its own, so revealing a lower row never hides Home. */
+.side-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 4px 10px 0 calc(10px + var(--safe-l));
+}
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  padding-bottom: 18px;
+}
+.side-recent {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.side-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-weight: 600;
-  font-size: var(--text-md);
-  letter-spacing: -0.01em;
+  gap: 14px;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border-radius: var(--radius-lg);
   color: var(--text);
+  font-size: var(--text-md);
+  font-weight: 500;
   text-decoration: none;
-  min-height: var(--tap-min);
-  border-radius: var(--radius-md);
+  transition: background-color var(--dur) var(--ease-out);
 }
-.brand:hover {
-  text-decoration: none;
-}
-.brand-mark {
-  display: grid;
-  place-items: center;
+.side-row svg {
   flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  background: var(--theme-surface-grid);
+  color: var(--text-2);
+}
+.side-row .count {
+  margin-left: auto;
+}
+/* The page the sidebar is showing takes the neutral lift (Daintree's sidebar selection), never accent. */
+.side-row.on {
+  background: var(--sidebar-active-bg, var(--selected));
   box-shadow: inset 0 0 0 1px var(--line-subtle);
-  color: var(--accent);
+  font-weight: 600;
 }
-/* On Bondi the tile stays Daintree's dark tile, as the app icon does. */
-:root[data-theme='bondi'] .brand-mark {
-  background: #151616;
-  color: #36ce94;
-  box-shadow: none;
+.side-row.on svg {
+  color: var(--text);
 }
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) .brand-mark {
-    background: #151616;
-    color: #36ce94;
-    box-shadow: none;
+.side-eyebrow {
+  margin: 0 12px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.side-qlist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 0 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+/* The question and its project share a baseline; the row's height comes from its padding. */
+.side-q {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-height: var(--tap-min);
+  padding: 10px 12px 10px 10px;
+  line-height: 24px;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-md);
+  text-decoration: none;
+  transition: background-color var(--dur) var(--ease-out);
+}
+.side-q-dot {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+/* Waiting on you: Daintree's waiting signal, with the words for screen readers. */
+.side-q-dot[data-on] {
+  background: var(--waiting);
+}
+.side-q-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-q-project {
+  flex: none;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
+.side-q[aria-current] {
+  background: var(--sidebar-active-bg, var(--selected));
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+}
+@media (hover: hover) {
+  .side-row:not(.on):hover,
+  .side-q:not([aria-current]):hover {
+    background: var(--sidebar-hover-bg, var(--hover));
+  }
+}
+.side-row:focus-visible,
+.side-q:focus-visible {
+  outline-offset: -2px;
+}
+.side-empty {
+  margin: 2px 12px 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+.side-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  padding: 10px 10px calc(14px + var(--safe-b)) calc(10px + var(--safe-l));
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- the overlay (below 1100px) ---------- */
+.sidebar-sheet {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: min(84vw, 360px);
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  /* The hairline keeps the panel's edge on a dimmed dark page, where the shadow cannot. */
+  border-right: 1px solid var(--line-strong);
+  border-radius: 0 var(--radius-sheet) var(--radius-sheet) 0;
+  background: var(--surface-chrome);
+  color: var(--text);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  transition: transform var(--dur-exit) var(--ease-exit);
+}
+.sidebar-sheet[open] {
+  animation: side-in var(--dur-enter) var(--ease-enter);
+}
+.sidebar-sheet[data-closing] {
+  transform: translateX(-100%);
+}
+/* While a finger drags it the panel follows exactly; it animates only once released. */
+.sidebar-sheet[data-dragging] {
+  transition: none;
+}
+.sidebar-sheet::backdrop {
+  /* The strong scrim: on Daintree the medium one dims the page to the panel's own value, and the edge is lost. */
+  background: var(--theme-scrim-strong);
+  backdrop-filter: blur(var(--scrim-blur));
+  -webkit-backdrop-filter: blur(var(--scrim-blur));
+  animation: side-fade var(--dur-enter) var(--ease-enter);
+  transition: opacity var(--dur-exit) var(--ease-exit);
+}
+.sidebar-sheet[data-closing]::backdrop {
+  opacity: 0;
+}
+.side-sheet-body {
+  /* Vertical scrolling stays native; a horizontal drag is the swipe that closes the panel. */
+  touch-action: pan-y;
+}
+@keyframes side-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes side-fade {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-sheet {
+    transition: opacity var(--dur-exit) var(--ease-out);
+  }
+  .sidebar-sheet[open] {
+    animation-name: side-fade;
+  }
+  .sidebar-sheet[data-closing] {
+    transform: none;
+    opacity: 0;
   }
 }
 
-/* Tablet: the compact top navigation. Hidden on phones, where the tab bar does the job. */
-.topnav {
-  display: none;
+/* ---------- the column (1100px and up) ---------- */
+.shell[data-layout='column'] {
+  display: grid;
+  grid-template-columns: var(--side-w) minmax(0, 1fr);
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
-@media (min-width: 45em) {
-  .topbar {
-    /* Lined up with the centred column below. */
-    padding-left: max(calc(24px + var(--safe-l)), calc((100% - var(--content-w)) / 2));
-    padding-right: max(calc(16px + var(--safe-r)), calc((100% - var(--content-w)) / 2 - 8px));
-  }
-  .topnav {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    margin-left: 12px;
-  }
-  .topnav a {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 40px;
-    padding: 0 12px;
-    border-radius: var(--radius-md);
-    color: var(--text-2);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    text-decoration: none;
-    transition:
-      background-color var(--dur) var(--ease-out),
-      color var(--dur) var(--ease-out);
-  }
-  .topnav a svg {
-    color: var(--text-2);
-  }
-  @media (hover: hover) {
-    .topnav a:not(.on):hover {
-      background: var(--sidebar-hover-bg, var(--hover));
-      color: var(--text);
-    }
-  }
-  /* The page the navigation is showing takes the neutral highlight, like Daintree's settings nav. */
-  .topnav a.on {
-    background: var(--sidebar-active-bg, var(--selected));
-    color: var(--text);
-  }
-  .topnav a.on svg {
-    color: var(--text);
-  }
+.shell[data-layout='column'] .frame {
+  height: 100dvh;
+  min-height: 0;
+}
+.shell[data-layout='column'] main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 28px max(32px, calc((100% - var(--content-w)) / 2)) 48px;
+}
+/* The question workspace and History manage their own scrolling inside a column of definite height. */
+.shell[data-layout='column'][data-route='question'] main,
+.shell[data-layout='column'][data-route='history'] main {
+  padding: 0;
+  overflow: hidden;
+}
+.workspace-host {
+  height: 100%;
+  min-height: 0;
+}
+.shell[data-layout='column'] .workspace-host {
+  overflow: hidden;
+}
+.sidebar {
+  position: relative;
+  z-index: 2;
+  height: 100dvh;
+  border-right: 1px solid var(--line-default);
+}
+/* The name's row lines up with the page title's row in the column beside it. */
+.sidebar .side-head {
+  padding-top: calc(var(--safe-t) + 28px);
 }
 
-/* ---------- connection ---------- */
+/* ---------- connection, in the sidebar's foot ---------- */
 .conn {
   display: inline-flex;
   align-items: center;
@@ -147,7 +488,8 @@
   font-weight: 500;
   color: var(--text-2);
 }
-.conn .dot {
+.conn .dot,
+.conn-line .dot {
   width: 7px;
   height: 7px;
   flex: none;
@@ -156,7 +498,8 @@
   background: var(--text-2);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--text-2) 14%, transparent);
 }
-.conn[data-state='wait'] .dot {
+.conn[data-state='wait'] .dot,
+.conn-line[data-state='wait'] .dot {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--text-2);
   animation: pulse 1.6s ease-in-out infinite;
@@ -170,41 +513,47 @@
   background: var(--warning);
   box-shadow: none;
 }
-
-/* One compact strip, only for offline and long reconnects. */
-.conn-strip {
+.conn-line {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px calc(var(--gutter) + var(--safe-r)) 9px calc(var(--gutter) + var(--safe-l));
-  font-size: var(--text-sm);
-  line-height: 1.4;
-  color: var(--text);
-  background: var(--subtle);
-  border-bottom: 1px solid var(--line);
-}
-.conn-strip > svg {
-  flex: none;
+  gap: 9px;
+  min-height: 28px;
+  margin: 0;
+  /* The dot lines up with Recent's dots above it. */
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
   color: var(--text-2);
 }
-.conn-strip.off {
+/* Something is off: a tinted block that says what still works. */
+.conn-line[role='status'] {
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--subtle);
+  color: var(--text);
+}
+.conn-line[data-state='off'] {
   background: var(--warning-surface);
 }
-.conn-strip.off > svg {
+.conn-line > svg {
+  flex: none;
+  margin-top: 1px;
   color: var(--warning-text);
 }
-.conn-strip .spinner {
+.conn-line .spinner {
   width: 14px;
   height: 14px;
   flex: none;
+  margin-top: 2px;
 }
 .strip-action {
   margin-left: auto;
   flex: none;
   font: inherit;
   font-weight: 600;
-  min-height: 36px;
-  padding: 0 10px;
+  min-height: 28px;
+  padding: 0 4px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -214,79 +563,85 @@
   cursor: pointer;
 }
 
-/* ---------- update ---------- */
+/* ---------- update, in the sidebar's foot ---------- */
 .update {
-  position: relative;
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .update-btn {
   font: inherit;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--tap-min);
+  padding: 0 12px;
   border: 0;
-  border-radius: 999px;
-  background: var(--subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
   box-shadow: inset 0 0 0 1px var(--line-strong);
-  color: var(--text-2);
-  font-size: var(--text-xs);
+  color: var(--text);
+  font-size: var(--text-sm);
   font-weight: 500;
-  white-space: nowrap;
+  text-align: left;
   cursor: pointer;
-  transition:
-    background-color var(--dur) var(--ease-out),
-    color var(--dur) var(--ease-out);
+  transition: background-color var(--dur) var(--ease-out);
 }
 .update-btn svg {
+  flex: none;
   color: var(--text-2);
 }
 .update-act {
-  color: var(--text);
+  margin-left: auto;
   font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }
 @media (hover: hover) {
   .update-btn:not(:disabled):hover {
     background: var(--hover);
-    color: var(--text);
   }
 }
 .update-btn:disabled {
   cursor: progress;
 }
-@media (max-width: 23.75em) {
-  .update-long {
-    display: none;
-  }
-}
 .update-note {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 30;
-  width: min(280px, calc(100vw - 32px));
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--line-default);
-  background: var(--surface-dialog);
-  box-shadow: var(--shadow-2);
+  margin: 0;
+  padding: 0 4px;
   font-size: var(--text-xs);
   line-height: 1.45;
   color: var(--text);
-  white-space: normal;
 }
 
-/* ---------- iOS install nudge: one small row ---------- */
+/* ---------- iOS install nudge: a card at the foot of the screen, or a row in the sidebar ---------- */
 .nudge {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px calc(var(--gutter) + var(--safe-r) - 8px) 2px calc(var(--gutter) + var(--safe-l));
+  padding: 2px 2px 2px 12px;
+  border-radius: var(--radius-md);
   font-size: var(--text-xs);
   color: var(--text-2);
-  background: var(--surface-chrome);
-  border-bottom: 1px solid var(--line);
+  background: var(--subtle);
+}
+.frame > .nudge {
+  position: fixed;
+  left: calc(12px + var(--safe-l));
+  right: calc(12px + var(--safe-r));
+  bottom: calc(12px + var(--safe-b));
+  z-index: 20;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 4px 4px 4px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow:
+    var(--shadow-2),
+    inset 0 0 0 1px var(--line-default);
+}
+.shell:has(.frame > .nudge) main {
+  padding-bottom: calc(96px + var(--safe-b));
 }
 .nudge > span {
   flex: 1;
@@ -312,31 +667,35 @@
   cursor: pointer;
 }
 
-/* ---------- main ---------- */
-main {
-  flex: 1;
-  width: 100%;
-  padding: 12px calc(var(--gutter) + var(--safe-r)) calc(var(--tabbar-h) + 32px + var(--safe-b))
-    calc(var(--gutter) + var(--safe-l));
-}
-main.bare {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding-top: calc(var(--safe-t) + 16px);
-  padding-bottom: calc(24px + var(--safe-b));
-}
-@media (min-width: 45em) {
-  /* One centred surface. Padding (not a max-width on main) centres every page, whoever owns it. */
-  main {
-    padding: 20px max(24px, calc((100% - var(--content-w)) / 2)) calc(48px + var(--safe-b));
-  }
-}
-
 /* ---------- splash: the mark on Daintree's tile, faded in only when loading is slow ---------- */
 .splash {
   display: grid;
   place-items: center;
   min-height: 100dvh;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--theme-surface-grid);
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  color: var(--accent);
+}
+/* On Bondi the tile stays Daintree's dark tile, as the app icon does. */
+:root[data-theme='bondi'] .brand-mark {
+  background: #151616;
+  color: #36ce94;
+  box-shadow: none;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .brand-mark {
+    background: #151616;
+    color: #36ce94;
+    box-shadow: none;
+  }
 }
 .splash-tile.brand-mark {
   width: 72px;
@@ -346,229 +705,46 @@ main.bare {
   animation: appear var(--dur-enter) var(--ease-enter) 300ms forwards;
 }
 
-/* ---------- tab bar (phones) ---------- */
-.tabbar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  background: var(--material-bg);
-  backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  border-top: 1px solid var(--line);
-  padding: 0 var(--safe-r) var(--safe-b) var(--safe-l);
-}
-.tabbar-inner {
-  display: flex;
-  max-width: 480px;
-  margin: 0 auto;
-}
-.tabbar a {
-  flex: 1;
-  min-height: var(--tabbar-h);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  padding-top: 2px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  color: var(--text-2);
-  text-decoration: none;
-  transition: color var(--dur) var(--ease-out);
-}
-.tabbar .tab-icon {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 60px;
-  height: 30px;
-  border-radius: 999px;
-  transition: background-color var(--dur) var(--ease-out);
-}
-@media (hover: hover) {
-  .tabbar a:hover {
-    color: var(--text);
-  }
-}
-/* The current tab lifts (Daintree's sidebar selection), so it is never told apart by colour alone. */
-.tabbar a.on {
-  color: var(--text);
-  font-weight: 600;
-}
-.tabbar a.on .tab-icon {
-  background: var(--sidebar-active-bg, var(--selected));
-  box-shadow: inset 0 0 0 1px var(--line-subtle);
-}
-.tabbar .count {
-  position: absolute;
-  top: -3px;
-  left: calc(50% + 7px);
-  box-shadow: 0 0 0 2px var(--theme-surface-sidebar);
-}
-@media (min-width: 45em) {
-  .tabbar {
-    display: none;
-  }
-}
-
-/* Below 1100px the question workspace owns the whole frame (workspace.css). */
-
-/* ---------- the rail (1100px and up) ---------- */
-.shell[data-layout='rail'] {
-  display: grid;
-  grid-template-columns: var(--rail-w) minmax(0, 1fr);
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-}
-.shell[data-layout='rail'] .frame {
-  height: 100dvh;
-  min-height: 0;
-}
-.shell[data-layout='rail'] main {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 28px max(32px, calc((100% - var(--content-w)) / 2)) 48px;
-}
-/* The question workspace and History manage their own scrolling inside a column of definite height. */
-.shell[data-layout='rail'][data-route='question'] main,
-.shell[data-layout='rail'][data-route='history'] main,
-.shell[data-layout='rail'][data-route='inbox'] main {
-  padding: 0;
-  overflow: hidden;
-}
-.workspace-host {
-  height: 100%;
-  min-height: 0;
-}
-.shell[data-layout='rail'] .workspace-host {
-  overflow: hidden;
-}
-
-.rail {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  height: 100dvh;
-  background: var(--surface-chrome);
-  border-right: 1px solid var(--line-default);
-}
-.rail-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  min-height: 56px;
-  padding: 0 10px 0 14px;
-}
-.rail-head-end {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.rail-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: none;
-  padding: 2px 8px 10px;
-}
-.rail-nav a {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-height: 40px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
-  color: var(--text-2);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  text-decoration: none;
-  transition:
-    background-color var(--dur) var(--ease-out),
-    color var(--dur) var(--ease-out);
-}
-.rail-nav a .count {
-  margin-left: auto;
-}
-@media (hover: hover) {
-  .rail-nav a:not(.on):hover {
-    background: var(--sidebar-hover-bg, var(--hover));
-    color: var(--text);
-  }
-}
-.rail-nav a.on {
-  background: var(--sidebar-active-bg, var(--selected));
-  color: var(--text);
-}
-.rail-nav a:focus-visible {
-  outline-offset: -2px;
-}
-.rail .conn-strip {
-  margin: 0 10px 10px;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: var(--radius-md);
-  font-size: var(--text-xs);
-}
-.rail .conn-strip .strip-action {
-  min-height: 28px;
-  padding: 0 4px;
-}
-
 /* ---------- installed on desktop with the window-controls overlay ---------- */
 @media (display-mode: window-controls-overlay) {
-  /* Below 1100px the header is the title bar. */
-  .topbar {
-    padding-top: env(titlebar-area-y, 0px);
-    padding-left: max(var(--gutter), calc(env(titlebar-area-x, 0px) + 8px));
-    min-height: max(var(--header-h), env(titlebar-area-height, 0px));
-    -webkit-app-region: drag;
-    app-region: drag;
+  /* Everything starts below the title-bar area, which stays a draggable strip over the whole window. */
+  :root {
+    --safe-t: env(titlebar-area-height, 0px);
   }
-  /* At 1100px and up the rail's top is the title bar, and the right column keeps a draggable strip clear of the
-     window controls. */
-  .rail-head {
-    padding-top: env(titlebar-area-y, 0px);
-    padding-left: max(14px, calc(env(titlebar-area-x, 0px) + 8px));
-    min-height: max(56px, env(titlebar-area-height, 0px));
-    -webkit-app-region: drag;
-    app-region: drag;
-  }
-  .shell[data-layout='rail'] .frame::before {
+  .shell::after {
     content: '';
-    flex: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 40;
     height: env(titlebar-area-height, 0px);
     -webkit-app-region: drag;
     app-region: drag;
   }
-  .topbar a,
-  .topbar button,
-  .topbar .conn,
-  .topbar .update,
-  .rail-head a,
-  .rail-head button,
-  .rail-head .conn,
-  .rail-head .update {
-    -webkit-app-region: no-drag;
-    app-region: no-drag;
+  .shell[data-layout='column'] .frame::before {
+    content: '';
+    flex: none;
+    height: env(titlebar-area-height, 0px);
   }
 }
 
 @media (forced-colors: active) {
-  .tabbar a.on .tab-icon,
-  .topnav a.on,
-  .rail-nav a.on {
+  .side-row.on,
+  .side-q[aria-current] {
     outline: 2px solid Highlight;
     outline-offset: -2px;
+  }
+  .menu-fab {
+    border: 1px solid ButtonText;
+  }
+  /* Backgrounds are overridden here, so the markers are drawn with borders. */
+  .side-q-dot[data-on],
+  .menu-fab-dot {
+    background: none;
+    border: 4px solid CanvasText;
+  }
+  .menu-fab-count.count {
+    border: 1px solid CanvasText;
   }
 }

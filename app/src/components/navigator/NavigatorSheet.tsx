@@ -8,7 +8,7 @@ import { NavigatorPanel } from './Navigator.js';
 
 let wantSearch = false;
 
-/** Open the navigator with its search focused (Ctrl/⌘+K below 1100px). */
+/** Open the navigator with its search focused (Ctrl/⌘+K, when Home's own search is not on screen). */
 export function openNavigatorWithSearch(): void {
   const open = document.querySelector<HTMLInputElement>(
     'dialog.nav-sheet[open] input[type="search"]',
@@ -23,7 +23,7 @@ export function openNavigatorWithSearch(): void {
 }
 
 /**
- * The navigator as a sheet below 1100px: full height from the bottom on phones, from the left on tablets. It is
+ * The navigator as a sheet: full height from the bottom on phones, from the left from 720px. It is
  * a workspace layer (Back and Escape close it) and a modal dialog (focus stays inside, and returns to whatever
  * opened it). Choosing a question replaces the sheet's history entry, so Back never reopens it.
  */

@@ -68,7 +68,7 @@
   margin: 0;
 }
 
-/* ---------- Questions at 1100px and up: a calm right column ---------- */
+/* ---------- a calm empty pane (History's record column) ---------- */
 .choose {
   display: flex;
   flex-direction: column;
@@ -102,23 +102,4 @@
   border: 1px solid var(--line-default);
   box-shadow: var(--shadow-1);
   color: var(--text-2);
-}
-.choose-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 24px !important;
-  font-size: var(--text-xs);
-}
-.choose-hint kbd {
-  min-width: 22px;
-  text-align: center;
-}
-.choose-hint kbd:last-of-type {
-  margin-right: 4px;
-}
-@media (hover: none) {
-  .choose-hint {
-    display: none;
-  }
 }

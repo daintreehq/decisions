@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 
 /**
  * The layout breakpoints (guide 3.2), in em so a larger default text size falls back to the simpler layout.
- * 45em = 720px (one centred surface, top navigation), 68.75em = 1100px (the persistent rail).
+ * 45em = 720px (one centred surface), 68.75em = 1100px (the sidebar becomes a persistent column).
  * styles/shell.css uses the same values.
  */
 export const TABLET_QUERY = '(min-width: 45em)';
@@ -21,7 +21,7 @@ function useMedia(query: string): boolean {
   );
 }
 
-/** 1100px and up: the rail is on screen and the navigator lives in it. */
+/** 1100px and up: the sidebar is a persistent column rather than an overlay. */
 export const useWide = (): boolean => useMedia(WIDE_QUERY);
 /** 720px and up. */
 export const useTablet = (): boolean => useMedia(TABLET_QUERY);

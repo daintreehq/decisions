@@ -16,23 +16,16 @@
   gap: 10px;
   flex: none;
 }
-.navigator[data-presentation='rail'],
 .navigator[data-presentation='sheet'] {
   flex: 1;
 }
-.navigator[data-presentation='rail'] .nav-controls,
 .navigator[data-presentation='sheet'] .nav-controls {
   padding: 10px 12px 12px;
   border-bottom: 1px solid var(--line);
 }
-.navigator[data-presentation='rail'] .nav-controls {
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
-}
 .navigator[data-presentation='page'] .nav-controls {
   margin-bottom: 14px;
 }
-.navigator[data-presentation='rail'] .nav-scroll,
 .navigator[data-presentation='sheet'] .nav-scroll {
   position: relative;
   flex: 1;
@@ -47,17 +40,6 @@
 .nav-scopes button {
   padding: 0 8px;
 }
-.navigator[data-presentation='rail'] .nav-scopes button {
-  min-height: 34px;
-  font-size: var(--text-xs);
-  gap: 5px;
-}
-.navigator[data-presentation='rail'] .nav-scopes .count {
-  min-width: 18px;
-  line-height: 18px;
-  font-size: 0.6875rem;
-}
-
 /* ---------- search (Daintree's SearchField: a recessed well, neutral focus) ---------- */
 .search-field {
   position: relative;
@@ -81,10 +63,6 @@
   transition:
     border-color var(--dur) var(--ease-out),
     background-color var(--dur) var(--ease-out);
-}
-.navigator[data-presentation='rail'] .search-field input {
-  min-height: 38px;
-  font-size: var(--text-sm);
 }
 /* The magnifier names the field, so the placeholder is its visible label: secondary ink, not the placeholder tier. */
 .search-field input::placeholder {
@@ -419,40 +397,25 @@
   background: var(--pressed);
 }
 
-/* Rail and sheet: Daintree's sidebar rows. A resting plane per row, a 2px gutter of the surface behind. */
-.navigator[data-presentation='rail'] .qrow,
+/* Sheet: Daintree's sidebar rows. A resting plane per row, a 2px gutter of the surface behind. */
 .navigator[data-presentation='sheet'] .qrow {
   min-height: 0;
   padding: 11px 16px 12px 14px;
   background: var(--sidebar-card-bg, var(--theme-overlay-soft));
   box-shadow: var(--sidebar-card-shadow, 0 0 #0000);
 }
-.navigator[data-presentation='rail'] .qrow-item + .qrow-item,
 .navigator[data-presentation='sheet'] .qrow-item + .qrow-item {
   border-top: 2px solid var(--nav-gutter, var(--surface-chrome));
 }
 .navigator[data-presentation='sheet'] {
   --nav-gutter: var(--sheet-surface);
 }
-.navigator[data-presentation='rail'] .qrow-q {
-  -webkit-line-clamp: 2;
-  font-size: var(--text-sm);
-}
-.navigator[data-presentation='rail'] .qrow-a {
-  -webkit-line-clamp: 1;
-  font-size: var(--text-xs);
-}
-.navigator[data-presentation='rail'] .qrow-meta {
-  font-size: 0.75rem;
-}
 @media (hover: hover) {
-  .navigator[data-presentation='rail'] .qrow:not([aria-current]):hover,
   .navigator[data-presentation='sheet'] .qrow:not([aria-current]):hover {
     background: var(--sidebar-hover-bg, var(--hover));
   }
 }
 /* The current question: the neutral lift and a text-secondary edge on the side facing the workspace. */
-.navigator[data-presentation='rail'] .qrow[aria-current],
 .navigator[data-presentation='sheet'] .qrow[aria-current] {
   background: var(--sidebar-active-bg, var(--selected));
   box-shadow: inset -2px 0 0 var(--text-2);
@@ -474,7 +437,6 @@
   text-transform: uppercase;
   color: var(--text-2);
 }
-.navigator[data-presentation='rail'] .qgroup-title,
 .navigator[data-presentation='sheet'] .qgroup-title {
   margin: 0;
   padding: 14px 16px 8px;
@@ -517,8 +479,11 @@
   transform: rotate(45deg);
 }
 .navigator[data-presentation='page'] .nav-new {
-  top: calc(var(--header-h) + var(--safe-t) + 8px);
+  top: calc(var(--top-row) + var(--safe-t) + 8px);
   margin-top: 0;
+}
+.shell[data-layout='column'] .navigator[data-presentation='page'] .nav-new {
+  top: 8px;
 }
 .nav-empty {
   display: flex;
@@ -700,8 +665,6 @@
 
 /* Counts sit on the optical centre of the label beside them, not on the line box. */
 .seg .count,
-.topnav .count,
-.rail-nav .count,
 .qgroup-title .count {
   display: inline-grid;
   place-items: center;

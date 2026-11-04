@@ -36,9 +36,9 @@ html {
   -webkit-tap-highlight-color: transparent;
   background: var(--surface-page);
   color: var(--text);
-  /* Whatever gets focus or is scrolled to stays clear of the header and the bottom bars. */
-  scroll-padding-top: calc(var(--safe-t) + var(--header-h) + 16px);
-  scroll-padding-bottom: calc(var(--tabbar-h) + var(--safe-b) + 24px);
+  /* Whatever gets focus or is scrolled to stays clear of the floating menu button's row. */
+  scroll-padding-top: calc(var(--safe-t) + var(--top-row) + 8px);
+  scroll-padding-bottom: calc(var(--safe-b) + 24px);
   scrollbar-color: var(--theme-scrollbar-thumb) transparent;
 }
 body {
