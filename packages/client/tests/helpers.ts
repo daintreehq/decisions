@@ -111,7 +111,13 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 export class FakeRelay {
   questions = new Map<string, { signed: SignedQuestion; idem: string }>();
   events: LedgerEvent[] = [];
-  calls: { method: string; path: string; body: unknown; headers: Record<string, string> }[] = [];
+  calls: {
+    method: string;
+    path: string;
+    query: string;
+    body: unknown;
+    headers: Record<string, string>;
+  }[] = [];
   devices: DeviceCert[] = [];
   down = 0; // number of upcoming requests that should fail with a network error
   status5xx = 0;
@@ -143,6 +149,10 @@ export class FakeRelay {
   dropMessageReply = 0;
   /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
   holdMessages: Promise<void> | null = null;
+  /** Every accepted `PUT /questions/{id}/snapshot` body, in order. */
+  snapshots: { questionId: string; body: unknown }[] = [];
+  /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
+  snapshotReplies: { status: number; body: Record<string, unknown> }[] = [];
 
   constructor(private readonly owner: Identity) {}
 
@@ -168,7 +178,7 @@ export class FakeRelay {
     let body: unknown = undefined;
     if (typeof init?.body === 'string') body = JSON.parse(init.body);
     else if (init?.body) body = { bytes: (init.body as Uint8Array).length };
-    this.calls.push({ method, path: url.pathname, body, headers });
+    this.calls.push({ method, path: url.pathname, query: url.search, body, headers });
     const p = url.pathname;
     let m: RegExpMatchArray | null;
     if (
@@ -335,6 +345,12 @@ export class FakeRelay {
     if (method === 'POST' && /^\/api\/v1\/attachments\/[^/]+\/complete$/.test(p))
       return json(200, { ok: true });
     if (method === 'POST' && p.startsWith('/api/v1/deliveries/')) return json(200, { ok: true });
+    if (method === 'PUT' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/snapshot$/))) {
+      const reply = this.snapshotReplies.shift();
+      if (reply) return json(reply.status, reply.body);
+      this.snapshots.push({ questionId: m[1]!, body });
+      return json(200, { ok: true });
+    }
     if (method === 'POST' && p === '/api/v1/socket-ticket') {
       return json(200, {
         ticket: 'tkt',

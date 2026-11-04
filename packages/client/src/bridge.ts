@@ -33,6 +33,13 @@ import { Mutex, TransientError } from './mutex.js';
 import { RelayClient } from './relay.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
 import type { PhoneImageStore } from './phone-images.js';
+import {
+  SNAPSHOT_FEATURE,
+  SnapshotPublisher,
+  type PaneSnapshotInput,
+  type SnapshotOptions,
+  type SnapshotPublishResult,
+} from './snapshots.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
 import type { LocalStore } from './store.js';
 import type { QuestionOrigin, QuestionRow } from './types.js';
@@ -70,6 +77,12 @@ export interface BridgeOptions {
   batch?: boolean;
   /** Background retry cadence for the outbox and busy panes. Default 30 s; 0 disables. */
   pumpIntervalMs?: number;
+  /**
+   * Pane snapshots (`publishSnapshot`, `clearSnapshots`) and the refresh callback. Setting it declares
+   * `pane-snapshots-v1` to the relay, alongside `BRIDGE_FEATURES`, so refresh requests reach this bridge;
+   * without it, both methods throw `not_configured` and the feature is never declared.
+   */
+  snapshots?: SnapshotOptions;
 }
 
 export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
@@ -182,6 +195,9 @@ export class DecisionsBridge {
   readonly inbox: Inbox;
   readonly delivery: DeliveryEngine;
   readonly socket: RelaySocket;
+  readonly snapshots: SnapshotPublisher;
+  /** What this bridge declares to the relay: `BRIDGE_FEATURES`, and `pane-snapshots-v1` when snapshots are on. */
+  readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
@@ -219,7 +235,13 @@ export class DecisionsBridge {
     };
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
-    this.inbox = new Inbox(this.ctx, this.verifier, { onRevokedSelf: () => this.markRevoked() });
+    this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
+    this.features = o.snapshots ? [...BRIDGE_FEATURES, SNAPSHOT_FEATURE] : BRIDGE_FEATURES;
+    this.inbox = new Inbox(this.ctx, this.verifier, {
+      onRevokedSelf: () => this.markRevoked(),
+      onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
+      onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
+    });
     this.delivery = new DeliveryEngine(this.ctx, {
       sink: o.sink,
       ...(o.adapters ? { adapters: o.adapters } : {}),
@@ -228,7 +250,7 @@ export class DecisionsBridge {
     });
     this.socket = new RelaySocket({
       client,
-      features: BRIDGE_FEATURES,
+      features: this.features,
       getCursor: () => this.ctx.store.getCursor(),
       ...(o.webSocket ? { webSocket: o.webSocket } : {}),
       handlers: {
@@ -314,6 +336,7 @@ export class DecisionsBridge {
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
+    this.snapshots.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -330,6 +353,7 @@ export class DecisionsBridge {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.socket.stop();
+    this.snapshots.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -340,6 +364,7 @@ export class DecisionsBridge {
     this.state = 'revoked';
     this.delivery.stopped = true;
     this.socket.stop();
+    this.snapshots.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -386,6 +411,35 @@ export class DecisionsBridge {
     const r = await this.publisher.enqueueMessage(row.question_id, parsed.data);
     void this.pump().catch((e) => this.emitError(e as Error));
     return r;
+  }
+
+  /**
+   * Publish what the asking pane looks like as the question's latest snapshot. The host supplies the text,
+   * already redacted; the library bounds it to the protocol's caps, encrypts it and sends it in the
+   * background. Updates closer together than `snapshots.minIntervalMs` are coalesced, so only the newest
+   * of a burst is sent. Resolves once it is queued, not sent: transient failures are retried, and a refusal
+   * other than a closed question or a stale observation is reported on `error`.
+   */
+  async publishSnapshot(
+    questionId: string,
+    input: PaneSnapshotInput,
+    pane?: PaneIdentity,
+  ): Promise<SnapshotPublishResult> {
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const row = await this.owned(questionId, pane);
+    return this.snapshots.publish(row, input);
+  }
+
+  /**
+   * Stop sharing: replace the snapshot of one question, or of every open question this device published,
+   * with a sharing-off record, so phones show "not shared" instead of a stale snapshot. A snapshot waiting
+   * to be sent is dropped. Resolves once every record is settled (see `SnapshotPublisher.clear`). Publishing
+   * again shares again; whether sharing is on is the host's decision.
+   */
+  async clearSnapshots(questionId?: string, pane?: PaneIdentity): Promise<void> {
+    const row = questionId === undefined ? undefined : await this.owned(questionId, pane);
+    return this.snapshots.clear(row);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
@@ -485,6 +539,7 @@ export class DecisionsBridge {
     this.pumping = (async () => {
       try {
         const flushed = await this.publisher.flush();
+        if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
         if (flushed.created.length > 0) await this.publisher.flush();
         await this.inbox.processPending();
@@ -569,7 +624,7 @@ export class DecisionsBridge {
   async catchUp(): Promise<number> {
     let after = await this.ctx.store.getCursor();
     for (;;) {
-      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, BRIDGE_FEATURES);
+      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, this.features);
       for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
       await this.ctx.store.advanceCursor();
       if (page.next_after > after) {
