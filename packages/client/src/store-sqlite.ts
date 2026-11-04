@@ -109,6 +109,13 @@ const MIGRATIONS: Migration[] = [
     name: 'sealed question content',
     up: `ALTER TABLE questions ADD COLUMN content_sealed TEXT;`,
   },
+  {
+    // Thread messages live beside the answers, each sealed. An intent names the follow-up it typed, or none for
+    // an answer: every intent written before this step was an answer's.
+    name: 'thread messages and message intents',
+    up: `ALTER TABLE questions ADD COLUMN messages_json TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE injection_intents ADD COLUMN message_id TEXT;`,
+  },
 ];
 
 /** The schema version a fully migrated database reports in `PRAGMA user_version`. */
@@ -142,6 +149,7 @@ const Q_COLS = [
   'content_json',
   'content_sealed',
   'answers_json',
+  'messages_json',
   'history_only',
   'delivered_revision',
   'attachment_digests',
@@ -176,6 +184,7 @@ function toRow(q: QuestionRow): Row {
     content_json: q.legacy_content_json ?? null,
     content_sealed: q.content_sealed,
     answers_json: q.answers_json,
+    messages_json: q.messages_json ?? '[]',
     history_only: q.history_only ? 1 : 0,
     delivered_revision: q.delivered_revision,
     attachment_digests: JSON.stringify(q.attachment_digests),
@@ -214,6 +223,7 @@ function fromRow(r: Row): QuestionRow {
     content_sealed: (r.content_sealed as string | null) ?? null,
     ...(r.content_json != null ? { legacy_content_json: r.content_json as string } : {}),
     answers_json: r.answers_json as string,
+    messages_json: (r.messages_json as string | null) ?? '[]',
     history_only: Number(r.history_only) === 1,
     delivered_revision: Number(r.delivered_revision),
     attachment_digests: JSON.parse(r.attachment_digests as string) as string[],
@@ -441,12 +451,13 @@ export class SqliteLocalStore implements LocalStore {
 
   private putIntentSql(i: InjectionIntent): void {
     this.st(
-      `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,host_id,pane_id,terminal_generation,ownership_principal,agent_incarnation,state,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT OR REPLACE INTO injection_intents(injection_id,question_id,answer_revision,message_id,host_id,pane_id,terminal_generation,ownership_principal,agent_incarnation,state,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       i.injection_id,
       i.question_id,
       i.answer_revision,
+      i.message_id ?? null,
       i.host_id,
       i.pane_id,
       i.terminal_generation,
@@ -465,6 +476,7 @@ export class SqliteLocalStore implements LocalStore {
       injection_id: r.injection_id as string,
       question_id: r.question_id as string,
       answer_revision: Number(r.answer_revision),
+      message_id: (r.message_id as string | null) ?? null,
       host_id: r.host_id as string,
       pane_id: r.pane_id as string,
       terminal_generation: Number(r.terminal_generation),
@@ -496,7 +508,7 @@ export class SqliteLocalStore implements LocalStore {
 
   async hasUncertainIntent(questionId: string) {
     const r = this.st(
-      `SELECT 1 AS x FROM injection_intents WHERE question_id = ? AND state = 'uncertain' LIMIT 1`,
+      `SELECT 1 AS x FROM injection_intents WHERE question_id = ? AND message_id IS NULL AND state = 'uncertain' LIMIT 1`,
     ).get(questionId);
     return r !== undefined;
   }

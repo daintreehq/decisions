@@ -63,6 +63,43 @@ function decisionResult(v: DecisionView) {
       delivered: a.delivered,
       created_at: a.createdAt,
     })),
+    thread: v.thread.map((t) =>
+      t.kind === 'answer'
+        ? {
+            kind: t.kind,
+            revision: t.revision,
+            source: t.source,
+            choices: t.choices,
+            text: t.text,
+            correction: t.correction,
+            delivered: t.delivered,
+            created_at: t.createdAt,
+          }
+        : {
+            kind: t.kind,
+            message_id: t.messageId,
+            message_seq: t.messageSeq,
+            side: t.side,
+            expects_reply: t.expectsReply,
+            text: t.text,
+            images: t.images.map((i) => ({
+              attachment_id: i.attachmentId,
+              ...(i.alt ? { alt: i.alt } : {}),
+              ...(i.path ? { path: i.path } : {}),
+            })),
+            created_at: t.createdAt,
+            ...(t.unreadable ? { unreadable: true } : {}),
+            delivery: t.delivery
+              ? {
+                  status: t.delivery.status,
+                  received_at: t.delivery.receivedAt,
+                  terminal_delivered_at: t.delivery.terminalDeliveredAt,
+                  injection_id: t.delivery.injectionId,
+                  error_code: t.delivery.errorCode,
+                }
+              : null,
+          },
+    ),
   };
 }
 
@@ -189,7 +226,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text and reviewed_digests_match (true only if the human reviewed exactly the attached images). Only status human-answered with provenance human is a human decision; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images) and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -219,6 +256,55 @@ export const TOOLS = [
         text: { type: 'string' },
         reviewed_digests_match: { type: 'boolean' },
         expires_at: { type: ['string', 'null'] },
+        thread: {
+          type: 'array',
+          description:
+            'Answers and follow-up messages in order. side agent: yours; side human: the person, with delivery. A message never changes the answer.',
+          items: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['answer', 'message'] },
+              revision: { type: 'integer' },
+              source: { type: 'string', enum: ['human', 'proxy', 'system'] },
+              choices: { type: 'array', items: { type: 'string' } },
+              message_id: { type: 'string' },
+              message_seq: { type: 'integer' },
+              side: { type: 'string', enum: ['agent', 'human'] },
+              expects_reply: { type: 'boolean' },
+              text: { type: 'string' },
+              images: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    attachment_id: { type: 'string' },
+                    alt: { type: 'string' },
+                    path: { type: 'string' },
+                  },
+                },
+              },
+              created_at: { type: 'string' },
+              delivery: {
+                type: ['object', 'null'],
+                properties: {
+                  status: {
+                    type: 'string',
+                    enum: [
+                      'received',
+                      'terminal-delivered',
+                      'needs-attention',
+                      'delivery-uncertain',
+                    ],
+                  },
+                  received_at: { type: 'string' },
+                  terminal_delivered_at: { type: ['string', 'null'] },
+                  injection_id: { type: ['string', 'null'] },
+                  error_code: { type: ['string', 'null'] },
+                },
+              },
+            },
+          },
+        },
         error: { type: 'string' },
       },
     },
@@ -410,7 +496,13 @@ export function createDecisionsMcpHandler(
           : v.status === 'expired'
             ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : `q-${v.alias} is ${v.status}; no answer in force.`;
-        return text(summary, decisionResult(v));
+        const messages = v.thread.filter((t) => t.kind === 'message').length;
+        return text(
+          messages > 0
+            ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
+            : summary,
+          decisionResult(v),
+        );
       }
       if (name === 'cancel_question') {
         if (typeof args.question_id !== 'string')

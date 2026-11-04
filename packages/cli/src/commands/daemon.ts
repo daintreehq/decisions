@@ -189,6 +189,8 @@ export function buildBridge(
     spool: new FileSpool(join(rt.ctx.home, 'spool')),
     // Default: no attachments. Callers choose between the human's unrestricted --attach and a pane folder.
     resolver: extra.resolver ?? noAttachmentsResolver,
+    // The CLI's sinks type the library's text as given, follow-up blocks included.
+    followUps: true,
     auditPath: rt.auditPath,
     policy: extra.policy ?? new PolicyRegistry(),
     ...(rt.ctx.webSocket ? { webSocket: rt.ctx.webSocket } : {}),

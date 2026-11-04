@@ -392,6 +392,7 @@ describe('sink outcomes', () => {
       injection_id: 'orphan',
       question_id: qid,
       answer_revision: 1,
+      message_id: null,
       host_id: 'host-local',
       pane_id: 'pane-1',
       terminal_generation: 1,

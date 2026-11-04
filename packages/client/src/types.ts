@@ -77,6 +77,11 @@ export interface QuestionRow {
   legacy_content_json?: string | null;
   /** Answer history (human and proxy), newest last: `AnswerEntry[]` whose content is sealed per entry. */
   answers_json: string;
+  /**
+   * The question's thread messages, both sides, in ledger order: `StoredMessage[]` (`messages.ts`) whose content
+   * is sealed per message. Each human message carries its own delivery state; nothing here changes the answer.
+   */
+  messages_json: string;
   /** Imported records are never delivered. */
   history_only: boolean;
   /** Highest answer revision already typed into the terminal (dedupe). */
@@ -115,7 +120,13 @@ export type IntentState = 'intent' | 'typed' | 'acked' | 'uncertain' | 'abandone
 export interface InjectionIntent {
   injection_id: string;
   question_id: string;
+  /** The answer revision typed, or 0 for a follow-up message. */
   answer_revision: number;
+  /**
+   * The follow-up message typed, or null for an answer. Its delivery is keyed by `(question_id, message_id)`
+   * (protocol `messageDeliveryKey`), never by an answer revision, and never blocks the question's answers.
+   */
+  message_id: string | null;
   host_id: string;
   pane_id: string;
   terminal_generation: number;

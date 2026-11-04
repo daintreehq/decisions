@@ -389,6 +389,14 @@ not yet sent, and when it is due the relay sends it only if the thread still wai
 The publishing desktop types each human message into the asking pane the way it types an answer, but as a follow-up,
 never as an answer or an approval. Agent messages are not delivered anywhere; phones read them.
 
+It follows the answer's rules: the exact pane identity, only at an idle prompt, held while the pane is busy, resumed
+when the agent's session must be, and `needs-attention` when the pane is gone. An answer and messages waiting for the
+same pane are typed in thread order (ledger order), batched when they fit, and a message never holds back or changes
+an answer's delivery. The typed text is its own block, distinct from an answer block, saying that it is a message the
+reviewer sent from their phone about the question and that it does not change the answer. The client library's
+format (`[DAINTREE DECISION FOLLOW-UP]`) is specified line by line in the
+[integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes.
+
 ### 16.4 Message receipts
 
 Each human message has its own delivery: `relay-queued → received → terminal-delivered`, or `needs-attention` /

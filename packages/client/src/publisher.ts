@@ -321,6 +321,7 @@ export class Publisher {
       // The ciphertext the relay will hold, never the plaintext: see at-rest.ts.
       content_sealed: JSON.stringify(envelope),
       answers_json: '[]',
+      messages_json: '[]',
       history_only: false,
       delivered_revision: 0,
       attachment_digests: digests,

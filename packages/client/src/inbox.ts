@@ -2,6 +2,7 @@ import {
   ApiError,
   EventData,
   applyAction,
+  isThreadClosedStatus,
   type DecisionContentV1,
   type LedgerEvent,
   type QuestionStatus,
@@ -10,7 +11,14 @@ import {
 import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import { hostRef, type BridgeContext } from './context.js';
-import { EVENT_ACTION, revokedKey, type EventVerifier, type VerifiedAnswer } from './inbound.js';
+import {
+  EVENT_ACTION,
+  revokedKey,
+  type EventVerifier,
+  type VerifiedAnswer,
+  type VerifiedMessage,
+} from './inbound.js';
+import { parseMessages, serializeMessages, type StoredMessage } from './messages.js';
 import { Mutex, TransientError } from './mutex.js';
 import { gateAllowsText } from './policy.js';
 import type { QuestionRow } from './types.js';
@@ -22,6 +30,26 @@ export interface InboxCallbacks {
   onSnapshotRefresh?(row: QuestionRow, refresh: SnapshotRefresh): void;
   /** One of this device's questions expired, was cancelled or was deleted. Must return without waiting. */
   onQuestionClosed?(questionId: string): void;
+}
+
+export interface InboxOptions {
+  /**
+   * Take thread messages (`decision.message.posted`) for the questions this device asked: store each verified one
+   * and hand the person's to delivery. Off, they are ignored, as a client that never declared
+   * `thread-messages-v1` is never sent them.
+   */
+  messages?: boolean;
+}
+
+/** Withdraw every human message not yet typed: kept for the thread, never typed. */
+function withdrawMessages(json: string): string {
+  return serializeMessages(
+    parseMessages(json).map((m) =>
+      m.delivery && m.delivery.status !== 'terminal-delivered'
+        ? { ...m, delivery: { ...m.delivery, deliver: false } }
+        : m,
+    ),
+  );
 }
 
 /**
@@ -61,6 +89,7 @@ export class Inbox {
     private readonly ctx: BridgeContext,
     private readonly verifier: EventVerifier,
     private readonly cb: InboxCallbacks,
+    private readonly opts: InboxOptions = {},
   ) {}
 
   /** Durable write. Returns the new contiguous cursor (what may be acked). */
@@ -206,6 +235,12 @@ export class Inbox {
       if (!v.ok) return this.reject(peek, v.reason);
       return ctx.lock.run(() => this.applyVerified(ev, v));
     }
+    if (ev.event_type === 'decision.message.posted') {
+      if (!this.opts.messages) return false;
+      const v = await this.verifier.verifyMessage(ev); // may throw TransientError, like an action
+      if (!v.ok) return this.reject(peek, v.reason);
+      return ctx.lock.run(() => this.applyMessage(ev, v));
+    }
     return ctx.lock.run(async () => {
       const row = await ctx.store.getQuestion(ev.question_id!);
       if (!row) return false;
@@ -233,6 +268,7 @@ export class Inbox {
             local_status: 'cancelled',
             remote_event_seq: ev.seq,
             answers_json: serializeAnswers(entries),
+            messages_json: withdrawMessages(row.messages_json),
           });
           this.cb.onQuestionClosed?.(row.question_id);
           return false;
@@ -267,6 +303,7 @@ export class Inbox {
       source: 'system',
       correction: false,
       created_at: new Date(this.ctx.now()).toISOString(),
+      event_seq: ev.seq,
       deliver: true,
       delivered: false,
       sealed: null,
@@ -340,6 +377,7 @@ export class Inbox {
         await ctx.store.updateQuestion(row.question_id, {
           ...patch,
           answers_json: serializeAnswers(dropped),
+          messages_json: withdrawMessages(row.messages_json),
         });
         await ctx.audit.log({
           event: 'question.cancelled',
@@ -436,6 +474,7 @@ export class Inbox {
       source: v.provenance,
       correction: v.action === 'override',
       created_at: v.record.created_at,
+      event_seq: ev.seq,
       deliver: t.deliverable,
       delivered: false,
       sealed: await sealAnswerContent(
@@ -464,6 +503,67 @@ export class Inbox {
       await this.learn(row, question, content, entry);
     }
     return entry.deliver;
+  }
+
+  /**
+   * Store one verified thread message with its question. Runs under ctx.lock with a fresh read of the row. A
+   * message never answers: it leaves the status, the revision, the answers and their delivery state, the gate
+   * and the decision model's history exactly as they were. Only the person's messages are delivered; the agent's
+   * own are kept for `get_decision`. True when a human message now waits for the pane.
+   */
+  private async applyMessage(ev: LedgerEvent, v: VerifiedMessage): Promise<boolean> {
+    const { ctx } = this;
+    const { record, envelope } = v.entry;
+    const row = await ctx.store.getQuestion(record.question_id);
+    if (!row || row.history_only) return false;
+    const messages = parseMessages(row.messages_json);
+    const prior = messages.find((m) => m.message_id === record.message_id);
+    if (prior) {
+      // A replay of the same message is harmless; the same id with other content is not the same message.
+      return prior.envelope_digest === record.envelope_digest
+        ? false
+        : this.reject(row, 'message-id-reused');
+    }
+    // Events apply in ledger order, so this is the state the relay committed the message against.
+    const status = protocolStatus(row.local_status);
+    if (status === null || isThreadClosedStatus(status)) return this.reject(row, 'thread-closed');
+    const human = record.side === 'human';
+    const message: StoredMessage = {
+      message_id: record.message_id,
+      message_seq: v.entry.message_seq,
+      event_seq: ev.seq,
+      side: record.side,
+      expects_reply: record.expects_reply,
+      signer_device_id: record.signer_device_id,
+      attachment_ids: [...record.attachment_ids],
+      created_at: record.created_at,
+      committed_at: v.entry.committed_at,
+      envelope_digest: record.envelope_digest,
+      // Stored as the relay holds it: ciphertext under the installation's epoch key, opened only to type or show.
+      sealed: JSON.stringify(envelope),
+      target_host_id: v.targetHostId,
+      delivery: human
+        ? {
+            status: 'received',
+            deliver: true,
+            received_at: new Date(ctx.now()).toISOString(),
+            terminal_delivered_at: null,
+            injection_id: null,
+            error_code: null,
+            reported: null,
+          }
+        : null,
+    };
+    messages.push(message);
+    messages.sort((a, b) => a.event_seq - b.event_seq);
+    await ctx.store.updateQuestion(row.question_id, { messages_json: serializeMessages(messages) });
+    await ctx.audit.log({
+      event: 'message.received',
+      question_id: row.question_id,
+      requirement: row.requirement,
+      result: record.side,
+    });
+    return human;
   }
 
   /**

@@ -1,6 +1,9 @@
 import {
   Id,
+  MESSAGE_RECORD_TYPE,
+  MessageContentV1,
   PhoneImageReferences,
+  imagesMatchRecord,
   type CryptoEnvelope,
   type DecisionContentV1,
   type EnvelopePurpose,
@@ -19,6 +22,7 @@ import {
   type OpenAnswerEntry,
 } from './answers.js';
 import { currentEpochKey, type Identity } from './identity.js';
+import type { MessageContent, StoredMessage } from './messages.js';
 import { TransientError, type Mutex } from './mutex.js';
 import type { LocalStore } from './store.js';
 import type { OutboxItem, QuestionRow } from './types.js';
@@ -282,6 +286,34 @@ export async function openAnswers(
     out.push({ ...rest, ...content });
   }
   return out;
+}
+
+/* ---------------- thread messages ---------------- */
+
+/**
+ * One thread message's content, decrypted in memory from the relay envelope it is stored as. It must still be
+ * what was verified when it arrived: the content of the same side, referencing exactly the images its signed
+ * record lists. Anything else throws `SealedContentError` and is never shown or typed as an empty message; a
+ * missing epoch key throws `TransientError`.
+ */
+export async function openMessageContent(
+  ctx: SealContext,
+  questionId: string,
+  m: Pick<StoredMessage, 'message_id' | 'side' | 'attachment_ids' | 'sealed'>,
+): Promise<MessageContent> {
+  const raw = await open<unknown>(ctx, m.sealed, {
+    questionId,
+    recordId: m.message_id,
+    recordTypes: [MESSAGE_RECORD_TYPE],
+    purpose: 'message-content',
+  });
+  const p = MessageContentV1.safeParse(raw);
+  if (!p.success || p.data.side !== m.side)
+    throw new SealedContentError('sealed message content is malformed');
+  const images = p.data.side === 'human' ? p.data.images : [];
+  if (!imagesMatchRecord(m.attachment_ids, images))
+    throw new SealedContentError('sealed message images do not match its record');
+  return { text: p.data.text, images };
 }
 
 /* ---------------- proxy drafts in the outbox ---------------- */

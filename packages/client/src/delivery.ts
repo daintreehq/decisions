@@ -1,10 +1,30 @@
-import { batchNotices, formatAnswerNotice } from './notice.js';
+import {
+  MAX_NOTICE_BYTES,
+  formatAnswerNotice,
+  formatFollowupNotice,
+  noticeChunk,
+} from './notice.js';
 import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
-import { openAnswerContent, openQuestionContent } from './at-rest.js';
+import { openAnswerContent, openMessageContent, openQuestionContent } from './at-rest.js';
+import { RelayError } from './errors.js';
 import { TransientError } from './mutex.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
-import { newId } from '@daintreehq/decisions-crypto';
+import { newId, sha256Hex } from '@daintreehq/decisions-crypto';
+import { messageDeliveryKey } from '@daintreehq/decisions-protocol';
+import {
+  isPendingMessage,
+  isUndeliveredMessage,
+  parseMessages,
+  receiptId,
+  serializeMessages,
+  unreportedStatuses,
+  type LocalMessageStatus,
+  type MessageContent,
+  type MessageDelivery,
+  type StoredMessage,
+} from './messages.js';
+import type { MessageReceiptInput } from './relay.js';
 import { pickResumeAdapter, unsupportedResumeAdapter } from './resume.js';
 import {
   resolvePhoneImages,
@@ -100,16 +120,52 @@ export function normalizeInjectResult(raw: unknown): InjectResult & { code?: str
   }
 }
 
-interface Item {
+const enc = new TextEncoder();
+const byteLen = (s: string): number => enc.encode(s).length;
+
+/** An answer entry's place in its question's thread: its ledger seq, or 0 for one stored before threads. */
+const seqOf = (e: AnswerEntry): number => e.event_seq ?? 0;
+
+/** The wire form of a local error code (`MessageReceiptBody` and `deliveries/failed` take `[a-z0-9_.-]{1,48}`). */
+const wireCode = (code: string): string =>
+  code.replace(/[^a-z0-9_.-]/g, '_').slice(0, 48) || 'unknown';
+
+interface ItemBase {
   q: QuestionRow;
-  entry: AnswerEntry;
-  /** The answer's content, opened in memory for this attempt only. */
-  content: AnswerContent;
   /** The question as asked, quoted in the block; absent when its sealed content can't be opened now. */
   question?: string;
   intentId: string;
-  /** The answer's phone images, resolved for this attempt once the pane is idle. */
+  /** The carrier's phone images, resolved for this attempt once the pane is idle. */
   images?: ResolvedPhoneImage[];
+  /** The item's place in its question's thread (ledger seq). */
+  seq: number;
+}
+
+interface AnswerItem extends ItemBase {
+  kind: 'answer';
+  entry: AnswerEntry;
+  /** The answer's content, opened in memory for this attempt only. */
+  content: AnswerContent;
+}
+
+interface MessageItem extends ItemBase {
+  kind: 'message';
+  message: StoredMessage;
+  /** The message's content, opened in memory for this attempt only. */
+  content: MessageContent;
+  /** The question had an answer before this message, in thread order. */
+  answered: boolean;
+}
+
+type Item = AnswerItem | MessageItem;
+
+/** What one question has to type on this pass. */
+interface Thread {
+  q: QuestionRow;
+  /** Pending answers, or none while the question's answers are held for a human. */
+  answers: AnswerEntry[];
+  /** Pending human messages in thread order, none after anything earlier in the thread that is held. */
+  messages: StoredMessage[];
 }
 
 export class DeliveryEngine {
@@ -158,40 +214,88 @@ export class DeliveryEngine {
     const { ctx } = this;
     const out = EMPTY();
     await this.flushAcks();
-    const candidates = (await ctx.store.listQuestions()).filter(
-      (q) =>
-        !q.history_only &&
-        this.pending(q).length > 0 &&
-        q.delivery_status !== 'needs-attention' &&
-        q.delivery_status !== 'delivery-uncertain',
-    );
-    // An unresolved uncertain injection blocks the question even if its status flag was lost in a crash. So
-    // does an intent still in state `intent`: passes are serialised, so one found here belongs to an attempt
-    // that failed before it was settled. The text may be on screen; recover() reconciles it at start.
+    const rows = (await ctx.store.listQuestions()).filter((q) => !q.history_only);
+    await this.flushMessageReceipts(rows);
+    // An unresolved uncertain injection blocks a question's answers even if its status flag was lost in a crash.
+    // So does an intent still in state `intent`: passes are serialised, so one found here belongs to an attempt
+    // that failed before it was settled. The text may be on screen; recover() reconciles it at start. A
+    // follow-up's unsettled intent holds that message (and what follows it in its thread), never the answers.
+    const open = (await ctx.store.openIntents()).filter((i) => i.state === 'intent');
+    // A follow-up's attempt is known by its message id or, should a store have lost that, by the attempt id the
+    // follow-up itself records.
+    const attempts = new Map<string, string>();
+    for (const q of rows)
+      for (const m of parseMessages(q.messages_json))
+        if (m.delivery?.attempt_id)
+          attempts.set(m.delivery.attempt_id, messageDeliveryKey(q.question_id, m.message_id));
     const unsettled = new Set(
-      (await ctx.store.openIntents()).filter((i) => i.state === 'intent').map((i) => i.question_id),
+      open
+        .filter((i) => i.message_id == null && !attempts.has(i.injection_id))
+        .map((i) => i.question_id),
     );
-    const all: QuestionRow[] = [];
-    for (const q of candidates)
-      if (!unsettled.has(q.question_id) && !(await ctx.store.hasUncertainIntent(q.question_id)))
-        all.push(q);
-    // One lane per pane: answers go in question-creation order (alias is monotonic).
-    const lanes = new Map<string, QuestionRow[]>();
-    for (const q of all) {
-      const k = `${q.origin.host_id}\u0000${q.origin.pane_id}`;
-      (lanes.get(k) ?? lanes.set(k, []).get(k)!).push(q);
+    const unsettledMessages = new Set(
+      open.flatMap((i) =>
+        i.message_id != null
+          ? [messageDeliveryKey(i.question_id, i.message_id)]
+          : attempts.has(i.injection_id)
+            ? [attempts.get(i.injection_id)!]
+            : [],
+      ),
+    );
+    const threads: Thread[] = [];
+    for (const q of rows) {
+      const t = await this.thread(q, unsettled, unsettledMessages);
+      if (t.answers.length > 0 || t.messages.length > 0) threads.push(t);
     }
-    for (const qs of lanes.values()) {
+    // One lane per pane: questions go in creation order (alias is monotonic), each in its thread's order.
+    const lanes = new Map<string, Thread[]>();
+    for (const t of threads) {
+      const k = `${t.q.origin.host_id}\u0000${t.q.origin.pane_id}`;
+      (lanes.get(k) ?? lanes.set(k, []).get(k)!).push(t);
+    }
+    for (const ts of lanes.values()) {
       if (this.stopped) break;
-      qs.sort((a, b) => a.alias - b.alias);
-      add(out, await this.laneDeliver(qs));
+      ts.sort((a, b) => a.q.alias - b.q.alias);
+      add(out, await this.laneDeliver(ts));
     }
     return out;
   }
 
-  private async resolveTarget(
+  /**
+   * What `q` may type now. Its answers follow the rules they always had. A follow-up never overtakes anything
+   * before it in the thread: it waits behind a held answer and behind an earlier follow-up that is held. An
+   * answer never waits for a follow-up, so a message can never hold back or change an answer's delivery.
+   */
+  private async thread(
     q: QuestionRow,
+    unsettled: ReadonlySet<string>,
+    unsettledMessages: ReadonlySet<string>,
+  ): Promise<Thread> {
+    const pending = this.pending(q);
+    const held =
+      pending.length > 0 &&
+      (q.delivery_status === 'needs-attention' ||
+        q.delivery_status === 'delivery-uncertain' ||
+        unsettled.has(q.question_id) ||
+        (await this.ctx.store.hasUncertainIntent(q.question_id)));
+    const barrier = held ? Math.min(...pending.map(seqOf)) : Infinity;
+    const messages: StoredMessage[] = [];
+    const waiting = parseMessages(q.messages_json)
+      .filter(isUndeliveredMessage)
+      .sort((a, b) => a.event_seq - b.event_seq);
+    for (const m of waiting) {
+      if (m.event_seq > barrier) break;
+      if (!isPendingMessage(m)) break;
+      if (unsettledMessages.has(messageDeliveryKey(q.question_id, m.message_id))) break;
+      messages.push(m);
+    }
+    return { q, answers: held ? [] : pending, messages };
+  }
+
+  private async resolveTarget(
+    t: Thread,
   ): Promise<{ target: TerminalTarget } | { defer: true } | { attention: string }> {
+    const { q } = t;
     const loc = await this.o.sink.locate(q.origin);
     if (loc.state === 'alive') {
       if (!loc.target) return { attention: 'no_target' };
@@ -199,17 +303,21 @@ export class DeliveryEngine {
       if (!sameTarget(loc.target, targetOf(q.origin))) return { attention: 'target_mismatch' };
       return { target: loc.target };
     }
-    return this.unavailable(q, loc.state);
+    return this.unavailable(q, loc.state, t.answers.length > 0);
   }
 
-  /** Route a destination that cannot take the answer: wait, resume through a verified path, or attention. */
+  /**
+   * Route a destination that cannot take the text: wait, resume through a verified path, or attention. Only a
+   * wait for an answer shows on the question (`pending-host`); a follow-up waits in its own `received` state.
+   */
   private async unavailable(
     q: QuestionRow,
     reason: string,
+    answers: boolean,
   ): Promise<{ target: TerminalTarget } | { defer: true } | { attention: string }> {
     const { o } = this;
     if (reason === 'host-offline') {
-      await this.setStatus(q, 'pending-host');
+      if (answers) await this.setStatus(q, 'pending-host');
       return { defer: true };
     }
     const code = Object.hasOwn(UNAVAILABLE_CODE, reason)
@@ -256,60 +364,123 @@ export class DeliveryEngine {
     return { target };
   }
 
-  private async laneDeliver(qs: QuestionRow[]): Promise<DrainResult> {
-    const { ctx, o } = this;
+  /** Every pending answer and follow-up of `t` goes to a human: answers as before, each message on its own. */
+  private async threadAttention(
+    t: Pick<Thread, 'q' | 'answers' | 'messages'>,
+    code: string,
+  ): Promise<number> {
+    let n = 0;
+    if (t.answers.length > 0) {
+      await this.attention(t.q, code, 'needs-attention');
+      n++;
+    }
+    for (const m of t.messages) {
+      await this.messageAttention(t.q, m, code, 'needs-attention');
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Open everything `t` will type before anything is typed. An answer that cannot be opened is never typed as an
+   * empty answer: the question needs a human instead, and the follow-ups after it wait with it. A message that
+   * cannot be opened needs a human too, and holds the follow-ups after it. A missing epoch key (rotated by
+   * another process, not yet reloaded) just waits for a later pass.
+   */
+  private async openThread(
+    t: Thread,
+  ): Promise<{ items: Item[]; attention: number; deferred: number } | 'transient'> {
+    const { ctx } = this;
+    const { q } = t;
+    // Only a reference for the agent: nothing is held back because its question can't be read.
+    const question = await openQuestionContent(ctx, q)
+      .then((c) => c?.question)
+      .catch(() => undefined);
+    const quoted = question ? { question } : {};
+    let items: Item[] = [];
+    let attention = 0;
+    let deferred = 0;
+    let barrier = Infinity;
+    for (const entry of t.answers) {
+      try {
+        const content = await openAnswerContent(ctx, q.question_id, entry);
+        items.push({
+          kind: 'answer',
+          q,
+          entry,
+          content,
+          intentId: newId(ctx.now()),
+          seq: seqOf(entry),
+          ...quoted,
+        });
+      } catch (e) {
+        if (e instanceof TransientError) return 'transient';
+        await this.attention(q, 'answer_unreadable', 'needs-attention');
+        attention++;
+        items = [];
+        barrier = Math.min(...t.answers.map(seqOf));
+        break;
+      }
+    }
+    const answeredBefore = (seq: number) =>
+      parseAnswers(q.answers_json).some((e) => e.kind === 'answer' && seqOf(e) < seq);
+    for (const m of t.messages) {
+      if (m.event_seq > barrier) break;
+      try {
+        const content = await openMessageContent(ctx, q.question_id, m);
+        items.push({
+          kind: 'message',
+          q,
+          message: m,
+          content,
+          answered: answeredBefore(m.event_seq),
+          intentId: newId(ctx.now()),
+          seq: m.event_seq,
+          ...quoted,
+        });
+      } catch (e) {
+        if (e instanceof TransientError) {
+          // Its key isn't loaded yet: it and the follow-ups after it wait, and what comes before still goes.
+          deferred++;
+          break;
+        }
+        await this.messageAttention(q, m, 'message_unreadable', 'needs-attention');
+        attention++;
+        break;
+      }
+    }
+    items.sort((a, b) => a.seq - b.seq);
+    return { items, attention, deferred };
+  }
+
+  private async laneDeliver(threads: Thread[]): Promise<DrainResult> {
+    const { o } = this;
     const res = EMPTY();
     let target: TerminalTarget | null = null;
     const items: Item[] = [];
-    for (const q of qs) {
-      const r = await this.resolveTarget(q);
+    for (const t of threads) {
+      const r = await this.resolveTarget(t);
       if ('defer' in r) {
         res.deferred++;
         break; // preserve ordering: nothing later in the lane may overtake
       }
       if ('attention' in r) {
-        await this.attention(q, r.attention, 'needs-attention');
-        res.needsAttention++;
+        res.needsAttention += await this.threadAttention(t, r.attention);
         continue;
       }
       if (target && !sameTarget(target, r.target)) {
         break; // a different destination (pane, generation, session or worktree): handle on the next pass
       }
-      // Open every pending answer before anything is typed. One that cannot be opened is never typed as an
-      // empty answer: the question needs a human instead.
-      // A missing epoch key (rotated by another process, not yet reloaded) just waits for a later pass.
-      const opened: Item[] = [];
-      let unreadable: 'transient' | 'broken' | null = null;
-      // Only a reference for the agent: an answer is never held back because its question can't be read.
-      const question = await openQuestionContent(ctx, q)
-        .then((c) => c?.question)
-        .catch(() => undefined);
-      for (const entry of this.pending(q)) {
-        try {
-          const content = await openAnswerContent(ctx, q.question_id, entry);
-          opened.push({
-            q,
-            entry,
-            content,
-            intentId: newId(ctx.now()),
-            ...(question ? { question } : {}),
-          });
-        } catch (e) {
-          unreadable = e instanceof TransientError ? 'transient' : 'broken';
-          break;
-        }
-      }
-      if (unreadable === 'transient') {
+      const opened = await this.openThread(t);
+      if (opened === 'transient') {
         res.deferred++;
         break;
       }
-      if (unreadable) {
-        await this.attention(q, 'answer_unreadable', 'needs-attention');
-        res.needsAttention++;
-        continue;
-      }
+      res.needsAttention += opened.attention;
+      res.deferred += opened.deferred;
+      if (opened.items.length === 0) continue;
       target = r.target;
-      items.push(...opened);
+      items.push(...opened.items);
     }
     if (!target || items.length === 0) return res;
     if (!(await o.sink.isIdle(target))) {
@@ -329,21 +500,42 @@ export class DeliveryEngine {
     return res;
   }
 
+  /** Consecutive items, in order, grouped so no typed chunk exceeds the byte cap (a lone item always fits). */
   private chunk(items: Item[]): Item[][] {
-    const blocks = items.map((i) => this.block(i));
-    const texts = batchNotices(blocks, this.o.maxBatchBytes);
-    // Map chunk texts back to item groups by counting blocks per text.
+    const max = this.o.maxBatchBytes ?? MAX_NOTICE_BYTES;
     const groups: Item[][] = [];
-    let idx = 0;
-    for (const t of texts) {
-      const n = t.split('[DAINTREE DECISION ANSWER]').length - 1;
-      groups.push(items.slice(idx, idx + n));
-      idx += n;
+    let cur: Item[] = [];
+    for (const i of items) {
+      const next = [...cur, i];
+      if (cur.length > 0 && byteLen(this.text(next)) > max) {
+        groups.push(cur);
+        cur = [i];
+      } else {
+        cur = next;
+      }
     }
+    if (cur.length > 0) groups.push(cur);
     return groups;
   }
 
+  /** The text typed for one chunk. */
+  private text(chunk: Item[]): string {
+    return noticeChunk(chunk.map((i) => this.block(i)));
+  }
+
   private block(i: Item): string {
+    if (i.kind === 'message') {
+      return formatFollowupNotice({
+        questionId: i.q.question_id,
+        alias: i.q.alias,
+        messageId: i.message.message_id,
+        ...(i.question ? { question: i.question } : {}),
+        text: i.content.text,
+        answered: i.answered,
+        ...(i.images?.length ? { images: i.images } : {}),
+        injectionId: i.intentId,
+      });
+    }
     const e = { ...i.entry, ...i.content };
     return formatAnswerNotice({
       kind: e.kind,
@@ -364,8 +556,8 @@ export class DeliveryEngine {
   }
 
   /**
-   * Fetch, check and store each pending answer's phone images, and keep the host's paths on the entry so a
-   * retried delivery (a busy pane, a held write, a restart) reuses the files instead of fetching and storing
+   * Fetch, check and store each pending answer's or message's phone images, and keep the host's paths with it so
+   * a retried delivery (a busy pane, a held write, a restart) reuses the files instead of fetching and storing
    * them again. Failures are not kept: the next attempt tries again, and the block typed lists them as
    * unavailable, never holding back the words.
    */
@@ -373,12 +565,17 @@ export class DeliveryEngine {
     for (const i of items) {
       if (this.stopped) return;
       const images = i.content.images ?? [];
-      const signedIds = i.content.image_ids ?? [];
+      const signedIds =
+        i.kind === 'answer' ? (i.content.image_ids ?? []) : i.message.attachment_ids;
       if (images.length === 0 && signedIds.length === 0) continue;
-      const stored = new Map((i.entry.stored_images ?? []).map((s) => [s.attachment_id, s.path]));
+      const prior = i.kind === 'answer' ? i.entry.stored_images : i.message.delivery?.stored_images;
+      const stored = new Map((prior ?? []).map((s) => [s.attachment_id, s.path]));
       i.images = await resolvePhoneImages(this.ctx, this.o.phoneImages, {
         questionId: i.q.question_id,
-        carrier: { kind: 'answer', actionId: i.entry.entry_id },
+        carrier:
+          i.kind === 'answer'
+            ? { kind: 'answer', actionId: i.entry.entry_id }
+            : { kind: 'message', messageId: i.message.message_id },
         origin: i.q.origin,
         signedIds,
         images,
@@ -402,7 +599,7 @@ export class DeliveryEngine {
     }
   }
 
-  /** Record the host's paths on the answer entry, re-read inside the shared lock like `markDelivered`. */
+  /** Record the host's paths on the answer entry or message, re-read inside the shared lock like `markDelivered`. */
   private async rememberImages(
     i: Item,
     fresh: { attachment_id: string; path: string }[],
@@ -414,14 +611,26 @@ export class DeliveryEngine {
     await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(i.q.question_id);
       if (!row) return;
-      const entries = parseAnswers(row.answers_json).map((e) =>
-        e.entry_id === i.entry.entry_id ? { ...e, stored_images: merge(e.stored_images) } : e,
-      );
-      await this.ctx.store.updateQuestion(i.q.question_id, {
-        answers_json: serializeAnswers(entries),
-      });
+      if (i.kind === 'answer') {
+        const entries = parseAnswers(row.answers_json).map((e) =>
+          e.entry_id === i.entry.entry_id ? { ...e, stored_images: merge(e.stored_images) } : e,
+        );
+        await this.ctx.store.updateQuestion(i.q.question_id, {
+          answers_json: serializeAnswers(entries),
+        });
+      } else {
+        const messages = this.withDelivery(row, i.message.message_id, (d) => ({
+          stored_images: merge(d.stored_images),
+        }));
+        await this.ctx.store.updateQuestion(i.q.question_id, { messages_json: messages });
+      }
     });
-    i.entry = { ...i.entry, stored_images: merge(i.entry.stored_images) };
+    if (i.kind === 'answer') i.entry = { ...i.entry, stored_images: merge(i.entry.stored_images) };
+    else if (i.message.delivery)
+      i.message = {
+        ...i.message,
+        delivery: { ...i.message.delivery, stored_images: merge(i.message.delivery.stored_images) },
+      };
     for (const f of fresh) {
       await this.ctx.audit.log({
         event: 'phone-image.stored',
@@ -431,13 +640,25 @@ export class DeliveryEngine {
     }
   }
 
+  /** `row`'s messages with one message's delivery patched, serialised. */
+  private withDelivery(
+    row: QuestionRow,
+    messageId: string,
+    patch: (d: MessageDelivery) => Partial<MessageDelivery>,
+  ): string {
+    return serializeMessages(
+      parseMessages(row.messages_json).map((m) =>
+        m.message_id === messageId && m.delivery
+          ? { ...m, delivery: { ...m.delivery, ...patch(m.delivery) } }
+          : m,
+      ),
+    );
+  }
+
   private async injectChunk(target: TerminalTarget, chunk: Item[]): Promise<DrainResult> {
     const { ctx, o } = this;
     const res = EMPTY();
-    const text = batchNotices(
-      chunk.map((i) => this.block(i)),
-      Number.MAX_SAFE_INTEGER,
-    )[0]!;
+    const text = this.text(chunk);
     // 0. Revalidate every distinct question's destination IMMEDIATELY before typing. Anything that moved
     //    (resumed into another session, relaunched, closed) is deferred, never typed into the wrong place.
     const questions = [...new Map(chunk.map((i) => [i.q.question_id, i.q])).values()];
@@ -457,23 +678,60 @@ export class DeliveryEngine {
       res.deferred++;
       return res;
     }
-    // 0b. Every answer must still be one to type: fetching images takes time, and a cancellation, deletion or
-    //     another delivery may have settled one meanwhile. The check and the intents share the lock the inbox
-    //     applies cancellations and deletions under, so none lands between them.
+    // 0b. Every answer and message must still be one to type: fetching images takes time, and a cancellation,
+    //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
+    //     the inbox applies cancellations and deletions under, so none lands between them.
     const admitted = await ctx.lock.run(async () => {
+      const rows = new Map<string, QuestionRow>();
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
-        const live = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
-        if (chunk.some((i) => i.q.question_id === q.question_id && !live.has(i.entry.entry_id)))
-          return false;
+        if (row) rows.set(q.question_id, row);
+        const answers = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
+        const messages = new Set(
+          row
+            ? parseMessages(row.messages_json)
+                .filter(isPendingMessage)
+                .map((m) => m.message_id)
+            : ([] as string[]),
+        );
+        for (const i of chunk) {
+          if (i.q.question_id !== q.question_id) continue;
+          const live =
+            i.kind === 'answer'
+              ? answers.has(i.entry.entry_id)
+              : messages.has(i.message.message_id);
+          if (!live) return false;
+        }
       }
       const now = ctx.now();
-      // 1. Persist the intent BEFORE touching the terminal.
+      // 1a. Each follow-up names its attempt first, so recovery can find it from the attempt alone. Nothing is
+      //     typed yet: a crash before its intent is written only leaves it waiting, as it was.
+      for (const [questionId, row] of rows) {
+        const mine = new Map(
+          chunk.flatMap((i) =>
+            i.kind === 'message' && i.q.question_id === questionId
+              ? [[i.message.message_id, i.intentId] as const]
+              : [],
+          ),
+        );
+        if (mine.size === 0) continue;
+        await ctx.store.updateQuestion(questionId, {
+          messages_json: serializeMessages(
+            parseMessages(row.messages_json).map((m) =>
+              mine.has(m.message_id) && m.delivery
+                ? { ...m, delivery: { ...m.delivery, attempt_id: mine.get(m.message_id)! } }
+                : m,
+            ),
+          ),
+        });
+      }
+      // 1b. Persist the intent BEFORE touching the terminal.
       for (const i of chunk) {
         await ctx.store.putIntent({
           injection_id: i.intentId,
           question_id: i.q.question_id,
-          answer_revision: i.entry.revision,
+          answer_revision: i.kind === 'answer' ? i.entry.revision : 0,
+          message_id: i.kind === 'message' ? i.message.message_id : null,
           host_id: target.hostId,
           pane_id: target.paneId,
           terminal_generation: target.terminalGeneration,
@@ -483,10 +741,13 @@ export class DeliveryEngine {
           created_at: now,
           updated_at: now,
         });
-        await ctx.store.updateQuestion(i.q.question_id, {
-          last_injection_id: i.intentId,
-          last_attempt_at: new Date(now).toISOString(),
-        });
+        // The question's attempt fields describe its answers; a follow-up's attempt is its own intent.
+        if (i.kind === 'answer') {
+          await ctx.store.updateQuestion(i.q.question_id, {
+            last_injection_id: i.intentId,
+            last_attempt_at: new Date(now).toISOString(),
+          });
+        }
       }
       return true;
     });
@@ -530,14 +791,23 @@ export class DeliveryEngine {
     switch (result.outcome) {
       case 'delivered':
         for (const i of chunk) {
-          await ctx.store.updateIntent(i.intentId, { state: 'typed', updated_at: ctx.now() });
-          await this.markDelivered(
-            i.q.question_id,
-            i.entry.entry_id,
-            i.intentId,
-            i.entry.revision,
-            result.proof,
-          );
+          if (i.kind === 'answer') {
+            await ctx.store.updateIntent(i.intentId, { state: 'typed', updated_at: ctx.now() });
+            await this.markDelivered(
+              i.q.question_id,
+              i.entry.entry_id,
+              i.intentId,
+              i.entry.revision,
+              result.proof,
+            );
+          } else {
+            await this.markMessageDelivered(
+              i.q.question_id,
+              i.message.message_id,
+              i.intentId,
+              result.proof,
+            );
+          }
           await this.ack(i.intentId);
         }
         res.delivered += chunk.length;
@@ -545,7 +815,11 @@ export class DeliveryEngine {
       case 'ambiguous': {
         // The terminal may or may not have received the text: never retry blindly.
         const code = result.code ?? 'inject_ambiguous';
-        for (const i of chunk) await this.attention(i.q, code, 'delivery-uncertain', i.intentId);
+        for (const i of chunk) {
+          if (i.kind === 'answer')
+            await this.attention(i.q, code, 'delivery-uncertain', i.intentId);
+          else await this.messageAttention(i.q, i.message, code, 'delivery-uncertain', i.intentId);
+        }
         res.uncertain += chunk.length;
         return res;
       }
@@ -564,13 +838,18 @@ export class DeliveryEngine {
           ...(result.detail ? { detail: { detail: result.detail.slice(0, 80) } } : {}),
         });
         for (const q of questions) {
-          const n = chunk.filter((i) => i.q.question_id === q.question_id).length;
-          const routed = await this.unavailable(q, result.reason);
+          const mine = chunk.filter((i) => i.q.question_id === q.question_id);
+          const answers = mine.some((i) => i.kind === 'answer');
+          const routed = await this.unavailable(q, result.reason, answers);
           if ('attention' in routed) {
-            await this.attention(q, result.code ?? routed.attention, 'needs-attention');
-            res.needsAttention += n;
+            const code = result.code ?? routed.attention;
+            if (answers) await this.attention(q, code, 'needs-attention');
+            for (const i of mine)
+              if (i.kind === 'message')
+                await this.messageAttention(q, i.message, code, 'needs-attention');
+            res.needsAttention += mine.length;
           } else {
-            res.deferred += n; // waiting for the host, or resumed: a later pass delivers it
+            res.deferred += mine.length; // waiting for the host, or resumed: a later pass delivers it
           }
         }
         return res;
@@ -613,11 +892,58 @@ export class DeliveryEngine {
     });
   }
 
+  /**
+   * A follow-up was typed: the message and its intent change in ONE atomic write, so a crash can never leave it
+   * typed but still waiting (it would be typed twice). Nothing about the question's answers changes.
+   */
+  private async markMessageDelivered(
+    questionId: string,
+    messageId: string,
+    injectionId: string,
+    /** The sink's proof of the write; null when a crash-recovery marker was found instead. */
+    proof: string | null,
+  ): Promise<void> {
+    const { ctx } = this;
+    const q = await ctx.lock.run(async () => {
+      const now = ctx.now();
+      const row = await ctx.store.getQuestion(questionId);
+      if (!row) {
+        await ctx.store.updateIntent(injectionId, { state: 'typed', updated_at: now });
+        return null;
+      }
+      const messages = this.withDelivery(row, messageId, () => ({
+        status: 'terminal-delivered',
+        injection_id: injectionId,
+        terminal_delivered_at: new Date(now).toISOString(),
+        error_code: null,
+      }));
+      await ctx.store.settleIntent(injectionId, { state: 'typed', updated_at: now }, questionId, {
+        messages_json: messages,
+      });
+      return row;
+    });
+    if (!q) return;
+    await ctx.audit.log({
+      event: 'message.delivered',
+      question_id: questionId,
+      requirement: q.requirement,
+      result: proof === null ? 'marker-found' : 'typed',
+      ...(proof !== null ? { detail: { proof: proof.slice(0, 120) } } : {}),
+    });
+  }
+
   /** Tell the relay the text was really typed. Retried by flushAcks until it sticks. */
   private async ack(injectionId: string): Promise<void> {
     const { ctx } = this;
     const intent = await ctx.store.getIntent(injectionId);
     if (!intent) return;
+    if (intent.message_id != null) {
+      // A follow-up's receipts ride on its own delivery state, retried by flushMessageReceipts: once it is
+      // recorded as typed, the intent is done.
+      await ctx.store.updateIntent(injectionId, { state: 'acked', updated_at: ctx.now() });
+      await this.reportMessage(intent.question_id, intent.message_id);
+      return;
+    }
     const q = await ctx.store.getQuestion(intent.question_id);
     if (!q) return;
     if (intent.answer_revision < 1) {
@@ -641,6 +967,90 @@ export class DeliveryEngine {
   private async flushAcks(): Promise<void> {
     for (const i of await this.ctx.store.openIntents()) {
       if (i.state === 'typed') await this.ack(i.injection_id);
+    }
+  }
+
+  /** Send every follow-up receipt still owed, oldest question first; stop at the first the relay can't take now. */
+  private async flushMessageReceipts(rows: QuestionRow[]): Promise<void> {
+    for (const q of rows) {
+      for (const m of parseMessages(q.messages_json)) {
+        if (!m.delivery || unreportedStatuses(m.delivery).length === 0) continue;
+        if (!(await this.reportMessage(q.question_id, m.message_id))) return;
+      }
+    }
+  }
+
+  /**
+   * Report a follow-up's delivery to the relay (`POST /deliveries/messages`, protocol section 16.4): `received`
+   * first, then each later status once. Every receipt is idempotent: the same status of the same message always
+   * sends the same body under the same key, so a reply lost after the relay took it is harmless to resend.
+   * False while the relay is unreachable (retried on the next pass); a refusal is final and audited, so one bad
+   * receipt never blocks the others. A receipt never changes anything about the question's answers.
+   */
+  private async reportMessage(questionId: string, messageId: string): Promise<boolean> {
+    const { ctx } = this;
+    const row = await ctx.store.getQuestion(questionId);
+    const m = row ? parseMessages(row.messages_json).find((x) => x.message_id === messageId) : null;
+    if (!row || !m?.delivery) return true;
+    const d = m.delivery;
+    for (const status of unreportedStatuses(d)) {
+      const body = await this.receipt(row, m, d, status);
+      if (body) {
+        try {
+          await ctx.client.deliveriesMessages(body);
+        } catch (e) {
+          if (e instanceof RelayError && e.retryable) return false;
+          await ctx.audit.log({
+            event: 'message.receipt-refused',
+            question_id: questionId,
+            result: `${status}:${e instanceof RelayError ? e.code : 'invalid'}`.slice(0, 80),
+          });
+        }
+      }
+      await ctx.lock.run(async () => {
+        const fresh = await ctx.store.getQuestion(questionId);
+        if (fresh)
+          await ctx.store.updateQuestion(questionId, {
+            messages_json: this.withDelivery(fresh, messageId, () => ({
+              reported: receiptId(d, status),
+            })),
+          });
+      });
+    }
+    return true;
+  }
+
+  /** The receipt body for one status of a follow-up, or null when it lacks what that status must carry. */
+  private async receipt(
+    row: QuestionRow,
+    m: StoredMessage,
+    d: MessageDelivery,
+    status: LocalMessageStatus,
+  ): Promise<MessageReceiptInput | null> {
+    const detail =
+      status === 'terminal-delivered'
+        ? d.injection_id
+        : status === 'received'
+          ? ''
+          : wireCode(d.error_code ?? 'unknown');
+    if (detail === null) return null;
+    const base = {
+      idempotency_key: await sha256Hex(
+        JSON.stringify(['message-receipt', row.question_id, m.message_id, receiptId(d, status)]),
+      ),
+      question_id: row.question_id,
+      message_id: m.message_id,
+      // The relay keys the delivery by the host it was published for, even after a resume moved the question.
+      host_id: m.target_host_id || (await hostRef(row.origin.host_id)),
+    };
+    switch (status) {
+      case 'received':
+        return { ...base, status };
+      case 'terminal-delivered':
+        return { ...base, status, injection_id: detail };
+      case 'needs-attention':
+      case 'delivery-uncertain':
+        return { ...base, status, error_code: detail };
     }
   }
 
@@ -682,7 +1092,7 @@ export class DeliveryEngine {
         answer_revision: rev,
         host_id: await hostRef(q.origin.host_id),
         status,
-        error_code: code.replace(/[^a-z0-9_.-]/g, '_').slice(0, 48),
+        error_code: wireCode(code),
       });
     } catch {
       /* informational for the phone; local state is authoritative */
@@ -690,12 +1100,81 @@ export class DeliveryEngine {
   }
 
   /**
+   * One follow-up goes to a human: nothing was typed (`needs-attention`), or it may have been
+   * (`delivery-uncertain`, never typed again automatically). Only that message changes; the question's answers
+   * and their delivery state stay as they are. An uncertain intent and the message change in one atomic write.
+   */
+  private async messageAttention(
+    q: QuestionRow,
+    m: StoredMessage,
+    code: string,
+    status: 'needs-attention' | 'delivery-uncertain',
+    uncertainIntentId?: string,
+  ): Promise<void> {
+    const { ctx } = this;
+    await ctx.lock.run(async () => {
+      const now = ctx.now();
+      const row = await ctx.store.getQuestion(q.question_id);
+      if (!row) {
+        if (uncertainIntentId)
+          await ctx.store.updateIntent(uncertainIntentId, { state: 'uncertain', updated_at: now });
+        return;
+      }
+      const messages = this.withDelivery(row, m.message_id, () => ({
+        status,
+        error_code: code,
+        ...(uncertainIntentId ? { injection_id: uncertainIntentId } : {}),
+      }));
+      if (uncertainIntentId) {
+        // The intent names its follow-up again, so the answers' uncertainty guard never counts it.
+        await ctx.store.settleIntent(
+          uncertainIntentId,
+          { state: 'uncertain', message_id: m.message_id, updated_at: now },
+          q.question_id,
+          { messages_json: messages },
+        );
+      } else {
+        await ctx.store.updateQuestion(q.question_id, { messages_json: messages });
+      }
+    });
+    await ctx.audit.log({
+      event: 'message.attention',
+      question_id: q.question_id,
+      requirement: q.requirement,
+      result: code,
+    });
+    await this.reportMessage(q.question_id, m.message_id);
+  }
+
+  /** Whether the text carrying `intent`'s injection id is in the exact run it was typed into. */
+  private async markerFound(q: QuestionRow, intent: InjectionIntent): Promise<boolean> {
+    try {
+      // Look in exactly the run the text was typed into, as the intent recorded it.
+      const typedInto: QuestionOrigin = {
+        ...q.origin,
+        host_id: intent.host_id,
+        pane_id: intent.pane_id,
+        terminal_generation: intent.terminal_generation,
+        ownership_principal: intent.ownership_principal,
+        agent_incarnation: intent.agent_incarnation,
+      };
+      const loc = await this.o.sink.locate(typedInto);
+      if (loc.state === 'alive' && loc.target && sameTarget(loc.target, targetOf(typedInto)))
+        return await this.o.sink.hasMarker(loc.target, intent.injection_id);
+    } catch {
+      /* proves nothing */
+    }
+    return false;
+  }
+
+  /**
    * Startup reconciliation for injections interrupted by a crash. A marker found in the terminal means the
-   * text was typed (mark delivered, do not repeat). No marker proves nothing, so the answer is flagged
-   * `delivery-uncertain` for a human; it is NEVER re-injected automatically.
+   * text was typed (mark delivered, do not repeat). No marker proves nothing, so the answer or follow-up is
+   * flagged `delivery-uncertain` for a human; it is NEVER re-injected automatically. Each block in a batch
+   * carries its own injection id, so each is reconciled on its own.
    */
   async recover(): Promise<{ reconciled: number; uncertain: number }> {
-    const { ctx, o } = this;
+    const { ctx } = this;
     let reconciled = 0;
     let uncertain = 0;
     for (const intent of await ctx.store.openIntents()) {
@@ -707,24 +1186,17 @@ export class DeliveryEngine {
         });
         continue;
       }
-      let found = false;
-      try {
-        // Look in exactly the run the text was typed into, as the intent recorded it.
-        const typedInto: QuestionOrigin = {
-          ...q.origin,
-          host_id: intent.host_id,
-          pane_id: intent.pane_id,
-          terminal_generation: intent.terminal_generation,
-          ownership_principal: intent.ownership_principal,
-          agent_incarnation: intent.agent_incarnation,
-        };
-        const loc = await o.sink.locate(typedInto);
-        if (loc.state === 'alive' && loc.target && sameTarget(loc.target, targetOf(typedInto)))
-          found = await o.sink.hasMarker(loc.target, intent.injection_id);
-      } catch {
-        found = false;
+      const messageId =
+        intent.message_id ??
+        parseMessages(q.messages_json).find((m) => m.delivery?.attempt_id === intent.injection_id)
+          ?.message_id;
+      if (messageId != null) {
+        const r = await this.recoverMessage(q, intent, messageId);
+        if (r === 'reconciled') reconciled++;
+        else if (r === 'uncertain') uncertain++;
+        continue;
       }
-      if (found) {
+      if (await this.markerFound(q, intent)) {
         const entry = parseAnswers(q.answers_json).find(
           (e) => e.revision === intent.answer_revision && e.deliver && !e.delivered,
         );
@@ -750,15 +1222,78 @@ export class DeliveryEngine {
     return { reconciled, uncertain };
   }
 
-  /** Explicit human action: allow a stuck question to be delivered again with a fresh injection id. */
+  /** Reconcile one follow-up's interrupted injection, found by its own `(question_id, message_id)`. */
+  private async recoverMessage(
+    q: QuestionRow,
+    intent: InjectionIntent,
+    messageId: string,
+  ): Promise<'reconciled' | 'uncertain' | 'skipped'> {
+    const { ctx } = this;
+    const m = parseMessages(q.messages_json).find((x) => x.message_id === messageId);
+    if (!m?.delivery) {
+      await ctx.store.updateIntent(intent.injection_id, {
+        state: 'abandoned',
+        updated_at: ctx.now(),
+      });
+      return 'skipped';
+    }
+    // `typed` was recorded with the message in one write: it was typed, and only its receipt may be owed.
+    if (intent.state === 'typed' || (await this.markerFound(q, intent))) {
+      if (m.delivery.status !== 'terminal-delivered')
+        await this.markMessageDelivered(q.question_id, messageId, intent.injection_id, null);
+      await this.ack(intent.injection_id);
+      return 'reconciled';
+    }
+    await this.messageAttention(
+      q,
+      m,
+      'crash_unreconciled',
+      'delivery-uncertain',
+      intent.injection_id,
+    );
+    return 'uncertain';
+  }
+
+  /**
+   * Explicit human action: allow a stuck question to be delivered again with a fresh injection id. Its follow-ups
+   * held for a human (needing attention or uncertain) go back to waiting for the pane too.
+   */
   async retry(questionId: string): Promise<void> {
     const q = await this.ctx.store.getQuestion(questionId);
     if (!q) return;
-    const entries = parseAnswers(q.answers_json).map((e) => (e.deliver && !e.delivered ? e : e));
-    await this.ctx.store.updateQuestion(questionId, {
-      delivery_status: 'desktop-received',
-      error_code: null,
-      answers_json: serializeAnswers(entries),
+    // Only answers that still have somewhere to go: a retry for a follow-up leaves a delivered answer's state alone.
+    if (
+      this.pending(q).length > 0 ||
+      q.delivery_status === 'needs-attention' ||
+      q.delivery_status === 'delivery-uncertain'
+    ) {
+      const entries = parseAnswers(q.answers_json).map((e) => (e.deliver && !e.delivered ? e : e));
+      await this.ctx.store.updateQuestion(questionId, {
+        delivery_status: 'desktop-received',
+        error_code: null,
+        answers_json: serializeAnswers(entries),
+      });
+    }
+    await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(questionId);
+      if (!row) return;
+      const messages = parseMessages(row.messages_json).map((m) =>
+        m.delivery?.deliver &&
+        (m.delivery.status === 'needs-attention' || m.delivery.status === 'delivery-uncertain')
+          ? {
+              ...m,
+              delivery: {
+                ...m.delivery,
+                status: 'received' as const,
+                error_code: null,
+                retries: (m.delivery.retries ?? 0) + 1,
+              },
+            }
+          : m,
+      );
+      await this.ctx.store.updateQuestion(questionId, {
+        messages_json: serializeMessages(messages),
+      });
     });
     await this.ctx.audit.log({ event: 'delivery.retry-requested', question_id: questionId });
   }

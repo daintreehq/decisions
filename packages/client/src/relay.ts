@@ -3,6 +3,7 @@ import {
   EventsPage,
   FEATURES_QUERY_PARAM,
   KeyGrantsResponse,
+  MessageReceiptBody,
   PROTOCOL_VERSION,
   formatFeatures,
   type ActionKind,
@@ -28,6 +29,13 @@ import { RelayError } from './errors.js';
 import type { Identity } from './identity.js';
 
 type ActionBodyShape = { protocol_version: 1; idempotency_key: string; action: SignedAction };
+
+/** A message receipt as the caller gives it: any of `MessageReceiptBody`'s statuses, without the version. */
+export type MessageReceiptInput = MessageReceiptBody extends infer B
+  ? B extends MessageReceiptBody
+    ? Omit<B, 'protocol_version'>
+    : never
+  : never;
 
 /** Actions only a human device signs (human provenance). No desktop ever signs one. */
 const HUMAN_ACTIONS: ReadonlySet<ActionKind> = new Set(['answer', 'override', 'confirm-proxy']);
@@ -485,6 +493,15 @@ export class RelayClient {
   }) {
     return this.request('POST', `${API_PREFIX}/deliveries/terminal`, {
       body: { protocol_version: PROTOCOL_VERSION, ...body },
+    });
+  }
+  /**
+   * Report where one human thread message stands (protocol section 16.4): durably received, typed into the pane,
+   * or needing attention. The body is checked against the protocol schema before it is sent.
+   */
+  deliveriesMessages(body: MessageReceiptInput) {
+    return this.request('POST', `${API_PREFIX}/deliveries/messages`, {
+      body: MessageReceiptBody.parse({ protocol_version: PROTOCOL_VERSION, ...body }),
     });
   }
   deliveriesFailed(body: {

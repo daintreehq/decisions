@@ -16,6 +16,11 @@ export interface AnswerEntry {
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;
+  /**
+   * Ledger seq of the event that carried it: the entry's place in the question's thread, against its follow-up
+   * messages. Absent on entries stored before threads existed, which precede every message.
+   */
+  event_seq?: number;
   /** Needs to be typed into the terminal. */
   deliver: boolean;
   delivered: boolean;

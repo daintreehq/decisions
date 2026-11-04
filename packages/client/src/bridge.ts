@@ -18,7 +18,13 @@ import { Inbox } from './inbox.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { sameDigests, type OpenAnswerEntry } from './answers.js';
-import { openAnswers, openQuestionContent, sealStoredContent } from './at-rest.js';
+import {
+  openAnswers,
+  openMessageContent,
+  openQuestionContent,
+  sealStoredContent,
+} from './at-rest.js';
+import { parseMessages, type LocalMessageStatus } from './messages.js';
 import { RelayError } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
@@ -68,6 +74,14 @@ export interface BridgeOptions {
    * Without it, each image is listed as unavailable (`no_image_store`) and the words are delivered as usual.
    */
   phoneImages?: PhoneImageStore;
+  /**
+   * Type the person's follow-up messages into the asking pane (protocol section 16): declare `thread-messages-v1`
+   * to the relay, take the thread's messages, and deliver each human one as a FOLLOW-UP block under the same rules
+   * as an answer, with its own receipts. Off by default, so the relay neither sends this desktop messages nor
+   * lets the person send any on its questions: a host whose sink parses the library's text (Daintree) turns it on
+   * once it understands the follow-up block (docs/daintree-integration-spec.md section 6.4).
+   */
+  followUps?: boolean;
   auditPath?: string;
   debugContent?: boolean;
   client?: RelayClient;
@@ -93,6 +107,57 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
  * answer from a client that does not declare it, and its words must still arrive.
  */
 export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1'];
+
+/**
+ * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
+ * `pane-snapshots-v1` when snapshots are on.
+ */
+export function bridgeFeatures(
+  o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
+): readonly ProtocolFeature[] {
+  const extra: ProtocolFeature[] = [
+    ...(o.followUps ? (['thread-messages-v1'] as const) : []),
+    ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
+  ];
+  return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
+}
+
+/** One entry of a question's thread, in ledger order. */
+export type ThreadEntryView =
+  | {
+      kind: 'answer';
+      revision: number;
+      source: 'human' | 'proxy' | 'system';
+      choices: string[];
+      text: string;
+      correction: boolean;
+      delivered: boolean;
+      createdAt: string;
+    }
+  | {
+      kind: 'message';
+      messageId: string;
+      /** The relay's order of the question's messages, from 1. */
+      messageSeq: number;
+      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up from their phone. */
+      side: 'agent' | 'human';
+      expectsReply: boolean;
+      /** The whole text ('' for a message of images only, or one whose content can't be opened now). */
+      text: string;
+      /** The phone images attached (human only), with the host's path once stored. */
+      images: { attachmentId: string; alt?: string; path?: string }[];
+      createdAt: string;
+      /** True when the stored content could not be opened: the message is listed without its text. */
+      unreadable: boolean;
+      /** Human only: where the follow-up stands on its way into the pane. Null for the agent's own. */
+      delivery: {
+        status: LocalMessageStatus;
+        receivedAt: string;
+        terminalDeliveredAt: string | null;
+        injectionId: string | null;
+        errorCode: string | null;
+      } | null;
+    };
 
 export interface DecisionView {
   questionId: string;
@@ -132,6 +197,11 @@ export interface DecisionView {
     delivered: boolean;
     createdAt: string;
   }[];
+  /**
+   * The question's thread in ledger order: its answers and the follow-up messages from both sides, each human
+   * one with its own delivery state. A message never changes the answer in force reported above.
+   */
+  thread: ThreadEntryView[];
 }
 
 /**
@@ -196,7 +266,7 @@ export class DecisionsBridge {
   readonly delivery: DeliveryEngine;
   readonly socket: RelaySocket;
   readonly snapshots: SnapshotPublisher;
-  /** What this bridge declares to the relay: `BRIDGE_FEATURES`, and `pane-snapshots-v1` when snapshots are on. */
+  /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -236,12 +306,17 @@ export class DecisionsBridge {
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
-    this.features = o.snapshots ? [...BRIDGE_FEATURES, SNAPSHOT_FEATURE] : BRIDGE_FEATURES;
-    this.inbox = new Inbox(this.ctx, this.verifier, {
-      onRevokedSelf: () => this.markRevoked(),
-      onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
-      onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
-    });
+    this.features = bridgeFeatures(o);
+    this.inbox = new Inbox(
+      this.ctx,
+      this.verifier,
+      {
+        onRevokedSelf: () => this.markRevoked(),
+        onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
+        onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
+      },
+      { messages: !!o.followUps },
+    );
     this.delivery = new DeliveryEngine(this.ctx, {
       sink: o.sink,
       ...(o.adapters ? { adapters: o.adapters } : {}),
@@ -517,7 +592,74 @@ export class DecisionsBridge {
           delivered: e.delivered,
           createdAt: e.created_at,
         })),
+      thread: await this.thread(row, entries),
     };
+  }
+
+  /** The question's answers and messages, merged in ledger order (answers stored before threads come first). */
+  private async thread(row: QuestionRow, entries: OpenAnswerEntry[]): Promise<ThreadEntryView[]> {
+    const out: { seq: number; entry: ThreadEntryView }[] = [];
+    for (const e of entries) {
+      if (e.kind !== 'answer') continue;
+      out.push({
+        seq: e.event_seq ?? 0,
+        entry: {
+          kind: 'answer',
+          revision: e.revision,
+          source: e.source,
+          choices: e.choices.map((c) => c.id),
+          text: e.text,
+          correction: e.correction,
+          delivered: e.delivered,
+          createdAt: e.created_at,
+        },
+      });
+    }
+    for (const m of parseMessages(row.messages_json)) {
+      let text = '';
+      let images: { attachment_id: string; alt?: string }[] = [];
+      let unreadable = false;
+      try {
+        const c = await openMessageContent(this.ctx, row.question_id, m);
+        text = c.text;
+        images = c.images;
+      } catch {
+        // Listed without its words, never shown as an empty message that was read; a key not loaded yet never
+        // keeps the answers from being reported.
+        unreadable = true;
+      }
+      const paths = new Map(
+        (m.delivery?.stored_images ?? []).map((s) => [s.attachment_id, s.path]),
+      );
+      out.push({
+        seq: m.event_seq,
+        entry: {
+          kind: 'message',
+          messageId: m.message_id,
+          messageSeq: m.message_seq,
+          side: m.side,
+          expectsReply: m.expects_reply,
+          text,
+          images: images.map((i) => ({
+            attachmentId: i.attachment_id,
+            ...(i.alt ? { alt: i.alt } : {}),
+            ...(paths.has(i.attachment_id) ? { path: paths.get(i.attachment_id)! } : {}),
+          })),
+          createdAt: m.created_at,
+          unreadable,
+          delivery: m.delivery
+            ? {
+                status: m.delivery.status,
+                receivedAt: m.delivery.received_at,
+                terminalDeliveredAt: m.delivery.terminal_delivered_at,
+                injectionId: m.delivery.injection_id,
+                errorCode: m.delivery.error_code,
+              }
+            : null,
+        },
+      });
+    }
+    return out.sort((a, b) => a.seq - b.seq).map((x) => x.entry);
   }
 
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */
