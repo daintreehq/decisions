@@ -89,6 +89,9 @@ const FEATURES_TTL_MS = 60_000;
 /** Agent messages committed for one question, ever: the local share of `LIMITS.messagesPerQuestion`. */
 const messageCountKey = (questionId: string) => `thread-messages:${questionId}`;
 const messageSeq = (o: OutboxItem) => (o.payload as MessagePayload).seq;
+/** Items one flush sends at most, and how many due rows it reads to find them. */
+const OUTBOX_BATCH = 20;
+const OUTBOX_SCAN = 1_000;
 
 export interface RegisterResult {
   questionId: string;
@@ -372,8 +375,16 @@ export class Publisher {
     return sameDigests(digests, row.attachment_digests);
   }
 
-  /** Queue a cancellation; it is signed at send time against the then-current revision. */
-  async enqueueCancel(questionId: string): Promise<void> {
+  /**
+   * Queue a cancellation; it is signed at send time against the then-current revision. Runs under `ctx.lock`, so
+   * a message being committed for the same question either lands before (and is dropped with a never-sent
+   * create) or sees the cancellation.
+   */
+  enqueueCancel(questionId: string): Promise<void> {
+    return this.ctx.lock.run(() => this.enqueueCancelLocked(questionId));
+  }
+
+  private async enqueueCancelLocked(questionId: string): Promise<void> {
     const { ctx } = this;
     const row = await ctx.store.getQuestion(questionId);
     if (!row) throw new BridgeError('not_found', 'unknown question');
@@ -579,12 +590,33 @@ export class Publisher {
     let failed = 0;
     const created: string[] = [];
     let features: Promise<ReadonlySet<ProtocolFeature>> | null = null; // read at most once per flush
-    for (const item of await ctx.store.dueOutbox(ctx.now(), 20)) {
+    let attempted = 0;
+    // Each question's pending items, read once per flush and kept in step with what this flush deletes, so
+    // skipping a long thread costs one read rather than one per message.
+    const pendingByQuestion = new Map<string, OutboxItem[]>();
+    const pendingOf = async (questionId: string) => {
+      let p = pendingByQuestion.get(questionId);
+      if (!p) pendingByQuestion.set(questionId, (p = await ctx.store.outboxFor(questionId)));
+      return p;
+    };
+    const remove = async (it: OutboxItem) => {
+      await ctx.store.deleteOutbox(it.id);
+      const p = pendingByQuestion.get(it.question_id);
+      if (p)
+        pendingByQuestion.set(
+          it.question_id,
+          p.filter((o) => o.id !== it.id),
+        );
+    };
+    // Read well past the batch: items that must wait their turn are skipped without counting, so a long thread
+    // queued behind a backed-off create never crowds other questions out of the batch.
+    for (const item of await ctx.store.dueOutbox(ctx.now(), OUTBOX_SCAN)) {
+      if (attempted >= OUTBOX_BATCH) break;
       if (item.kind !== 'create') {
         // Per-question ordering: an action must never overtake its own (possibly backed-off) create, and a
         // message never overtakes an earlier message in its thread, or a later "no reply needed" could land
         // before the question it settles.
-        const pending = await ctx.store.outboxFor(item.question_id);
+        const pending = await pendingOf(item.question_id);
         if (!pending.some((o) => o.id === item.id)) continue; // dropped earlier in this flush
         if (pending.some((o) => o.kind === 'create')) continue;
         if (
@@ -593,7 +625,28 @@ export class Publisher {
         )
           continue;
       }
+      attempted++;
       if (item.kind === 'message') {
+        // Its question must still be one this desktop published and that takes messages. With no create left,
+        // a question still `queued` was never published (its create was dropped or refused).
+        const row = await ctx.store.getQuestion(item.question_id);
+        const closed = !row
+          ? 'unknown-question'
+          : row.history_only
+            ? 'history-only'
+            : ['queued', 'cancelled', 'expired', 'publish-failed'].includes(row.local_status)
+              ? row.local_status
+              : null;
+        if (closed) {
+          failed++;
+          await remove(item);
+          await ctx.audit.log({
+            event: 'outbox.message.dropped',
+            question_id: item.question_id,
+            result: closed,
+          });
+          continue;
+        }
         // A relay that does not advertise threads is never sent one (protocol section 19). Failing to read
         // `/info` backs off this message alone, so it never holds up other questions behind it.
         let set: ReadonlySet<ProtocolFeature>;
@@ -610,7 +663,7 @@ export class Publisher {
         }
         if (!set.has(THREAD_FEATURE)) {
           failed++;
-          await ctx.store.deleteOutbox(item.id);
+          await remove(item);
           await ctx.audit.log({
             event: 'outbox.message.rejected',
             question_id: item.question_id,
@@ -633,7 +686,7 @@ export class Publisher {
         } else {
           await this.sendAction(item);
         }
-        await ctx.store.deleteOutbox(item.id);
+        await remove(item);
         sent++;
       } catch (e) {
         failed++;
@@ -649,14 +702,18 @@ export class Publisher {
           break;
         }
         // Permanent rejection: surface on the question and stop retrying it.
-        await ctx.store.deleteOutbox(item.id);
+        await remove(item);
         if (item.kind === 'create') {
           await this.dropSpool(item.payload as CreatePayload);
-          await this.dropMessages(item.question_id, 'never-published');
-          await ctx.store.updateQuestion(item.question_id, {
-            local_status: 'publish-failed',
-            error_code: err.code,
+          // Under the lock, so a message being committed for this question sees `publish-failed` or is dropped.
+          await ctx.lock.run(async () => {
+            await ctx.store.updateQuestion(item.question_id, {
+              local_status: 'publish-failed',
+              error_code: err.code,
+            });
+            await this.dropMessages(item.question_id, 'never-published');
           });
+          pendingByQuestion.delete(item.question_id);
         }
         // A relay that advertised threads but has no route for them: read `/info` again next time.
         if (item.kind === 'message' && (err.status === 404 || err.status === 405)) {

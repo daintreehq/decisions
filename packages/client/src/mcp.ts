@@ -246,7 +246,7 @@ export const TOOLS = [
   {
     name: 'send_followup',
     description:
-      "Post a message in the thread of a question you asked with ask_human from this terminal: clarify it, reply to the person's follow-up, or ask a follow-up, instead of asking a new question. Returns at once. Set expects_reply when you need a reply; it arrives in this terminal as a marked follow-up. A message never changes the answer: a human answer is final.",
+      'Post in the thread of a question you asked with ask_human from this terminal, instead of a new question: clarify it, reply to a follow-up, or ask one. Returns at once; set expects_reply if you need a reply. Replies, and follow-ups the person sends even after answering, arrive here marked as follow-ups. A human answer is final: a reconsidered decision arrives as a follow-up, not a changed answer.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,

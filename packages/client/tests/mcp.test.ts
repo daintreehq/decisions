@@ -350,6 +350,25 @@ describe('HTTP MCP: send_followup', () => {
     expect(d.structuredContent).toMatchObject({ status: 'open', provenance: null, answers: [] });
   });
 
+  it('returns before the relay has seen the message', async () => {
+    const { mcp, bridge, relay } = await boot();
+    const id = await ask(mcp);
+    await settle(bridge);
+    let release!: () => void;
+    relay.holdMessages = new Promise<void>((r) => (release = r));
+    const res = await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'Quick one.',
+      expects_reply: true,
+    });
+    expect(res.structuredContent.status).toBe('queued');
+    expect(relay.messages).toHaveLength(0);
+    release();
+    relay.holdMessages = null;
+    await settle(bridge);
+    expect(relay.messages).toHaveLength(1);
+  });
+
   it("another pane's question and an unknown id are refused with the same error", async () => {
     const { mcp, bridge, relay } = await boot();
     const id = await ask(mcp);
@@ -414,11 +433,19 @@ describe('HTTP MCP: send_followup', () => {
       expect(t).toMatch(/reconsidered decision arrives as a follow-up/);
       expect(t).toMatch(/arrives? the same way/); // replies to the agent's follow-ups
     }
-    const desc = TOOLS.find((t) => t.name === 'send_followup')!.description;
-    expect(desc).toMatch(/clarify it, reply to the person's follow-up, or ask a follow-up/);
+    const desc: string = TOOLS.find((t) => t.name === 'send_followup')!.description;
+    expect(desc).toMatch(/even after answering/);
+    expect(desc).toMatch(/reconsidered decision arrives as a follow-up, not a changed answer/);
+    expect(desc).toMatch(/Replies.*arrive here marked as follow-ups/);
+    expect(desc).toMatch(/instead of a new question/);
+    for (const flag of [true, false]) {
+      const t = followupInstruction(3, flag);
+      expect(t).toMatch(/marked (as )?follow-ups?/);
+      expect(t).toMatch(/do(es)? not change the answer/);
+    }
+    expect(desc).toMatch(/clarify it, reply to a follow-up, or ask one/);
     expect(desc).toMatch(/Returns at once/);
-    expect(desc).toMatch(/marked follow-up/);
-    expect(desc).toMatch(/never changes the answer: a human answer is final/);
+    expect(desc).toMatch(/A human answer is final/);
     expect(followupInstruction(3, true)).toMatch(/^Queued in q-3's thread/);
     expect(followupInstruction(3, true)).toMatch(/end your turn/);
     expect(followupInstruction(3, false)).not.toMatch(/end your turn/);
@@ -435,7 +462,7 @@ describe('HTTP MCP: send_followup', () => {
             m,
             (...a: unknown[]) => {
               forwarded.push(m);
-              return (b[m] as (...x: unknown[]) => unknown).apply(b, a);
+              return (b[m] as unknown as (...x: unknown[]) => unknown).apply(b, a);
             },
           ]),
         ) as unknown as DecisionsMcpBridge),

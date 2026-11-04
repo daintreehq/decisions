@@ -141,6 +141,8 @@ export class FakeRelay {
   rejectMessage: { status: number; code: string } | null = null;
   /** Number of upcoming message POSTs the relay COMMITS but whose reply is lost. */
   dropMessageReply = 0;
+  /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
+  holdMessages: Promise<void> | null = null;
 
   constructor(private readonly owner: Identity) {}
 
@@ -201,6 +203,7 @@ export class FakeRelay {
       });
     }
     if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/messages$/))) {
+      if (this.holdMessages) await this.holdMessages;
       if (this.rejectMessage)
         return json(this.rejectMessage.status, { code: this.rejectMessage.code, message: 'no' });
       const b = body as { idempotency_key: string; message: SignedMessage };

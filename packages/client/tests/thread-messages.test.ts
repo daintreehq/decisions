@@ -12,6 +12,7 @@ import { decryptEnvelope, verifyRecordAndEnvelope } from '@daintreehq/decisions-
 import {
   BridgeError,
   DecisionsBridge,
+  PolicyRegistry,
   RelayClient,
   paneIdentityOf,
   type LocalStore,
@@ -110,16 +111,40 @@ describe('thread messages: what is published', () => {
   });
 
   it('a message never changes the decision: status, revision, answers and gate stay as they were', async () => {
-    const env = await setupBridge();
-    const qid = await asked(env);
-    await env.relay.answerEvent({ questionId: qid, phone: env.phone, text: 'red' });
+    const policy = new PolicyRegistry();
+    policy.register({
+      gateId: 'design/final',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+      allowText: true,
+    });
+    const env = await setupBridge({ policy });
+    const q = await env.bridge.registerQuestion({
+      origin: origin({ workflow_gate_id: 'design/final' }),
+      input: { question: 'Ship it?', options: [{ id: 'approve', label: 'Approve' }] },
+    });
+    await env.bridge.pump();
+    await env.relay.answerEvent({
+      questionId: q.questionId,
+      phone: env.phone,
+      options: ['approve'],
+      text: 'red',
+    });
     await env.bridge.catchUp();
-    const before = await env.bridge.getDecision(qid, pane);
-    expect(before.status).toBe('human-answered');
-    await post(env, qid, 'Thanks. Should the hover state be darker too?', true);
+    const before = await env.bridge.getDecision(q.questionId, pane);
+    expect(before).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      choice: 'approve',
+      workflowGateId: 'design/final',
+      requirement: 'human-required',
+    });
+    const row = await env.store.getQuestion(q.questionId);
+    await post(env, q.questionId, 'Thanks. Should the hover state be darker too?', true);
     await settle(env);
     expect(env.relay.messages).toHaveLength(1);
-    expect(await env.bridge.getDecision(qid, pane)).toEqual(before);
+    expect(await env.bridge.getDecision(q.questionId, pane)).toEqual(before);
+    expect(await env.store.getQuestion(q.questionId)).toEqual(row);
     expect(env.relay.calls.some((c) => /\/(answer|override|confirm-proxy)$/.test(c.path))).toBe(
       false,
     );
@@ -273,6 +298,77 @@ describe('thread messages: the durable outbox', () => {
       first.messageId,
       second.messageId,
     ]);
+  });
+
+  it('a message never overtakes its own question, even when the question is the one backing off', async () => {
+    const env = await setupBridge();
+    env.relay.down = 1000;
+    const q = await env.bridge.registerQuestion({ origin: origin(), input: { question: 'q' } });
+    await settle(env); // the create fails and backs off
+    env.relay.down = 0;
+    await post(env, q.questionId, 'More context.');
+    await settle(env); // the message is due, its create is not
+    expect(messagePosts(env)).toHaveLength(0);
+    expect(await env.store.outboxFor(q.questionId)).toHaveLength(2);
+    await due(env.store);
+    await env.bridge.pump();
+    expect(env.relay.questions.has(q.questionId)).toBe(true);
+    expect(env.relay.messages).toHaveLength(1);
+  });
+
+  it('messages waiting behind a backed-off question never crowd other questions out of a flush', async () => {
+    const env = await setupBridge();
+    env.relay.down = 1000;
+    const q = await env.bridge.registerQuestion({ origin: origin(), input: { question: 'q' } });
+    await settle(env);
+    for (let i = 0; i < 30; i++)
+      await env.bridge.publisher.enqueueMessage(q.questionId, {
+        question_id: q.questionId,
+        text: `note ${i}`,
+        expects_reply: false,
+      });
+    env.relay.down = 0;
+    const other = await env.bridge.publisher.register(origin({ pane_id: 'pane-9' }), {
+      question: 'another',
+    });
+    await env.bridge.pump();
+    expect((await env.store.getQuestion(other.questionId))!.local_status).toBe('open');
+    expect(messagePosts(env)).toHaveLength(0);
+  });
+
+  it('a message whose question is gone or closed by the time it is sent is dropped, not posted', async () => {
+    const env = await setupBridge();
+    const qid = await asked(env);
+    env.relay.down = 1000;
+    await post(env, qid, 'note');
+    await settle(env);
+    await env.store.updateQuestion(qid, { local_status: 'cancelled' });
+    env.relay.down = 0;
+    await due(env.store);
+    await env.bridge.pump();
+    expect(messagePosts(env)).toHaveLength(0);
+    expect(env.relay.messages).toHaveLength(0);
+    expect(await env.store.outboxFor(qid)).toHaveLength(0);
+    const audit = await env.store.listAudit(50);
+    expect(
+      audit.some((x) => x.event === 'outbox.message.dropped' && x.result === 'cancelled'),
+    ).toBe(true);
+  });
+
+  it('a cancellation racing a message commit leaves no message behind for a never-sent question', async () => {
+    const env = await setupBridge();
+    const q = await env.bridge.publisher.register(origin(), { question: 'q' });
+    const msg = env.bridge.publisher.enqueueMessage(q.questionId, {
+      question_id: q.questionId,
+      text: 'note',
+      expects_reply: false,
+    });
+    const cancel = env.bridge.cancelQuestion(q.questionId, pane);
+    await Promise.allSettled([msg, cancel]);
+    expect((await env.store.getQuestion(q.questionId))!.local_status).toBe('cancelled');
+    expect(await env.store.outboxFor(q.questionId)).toHaveLength(0);
+    await env.bridge.pump();
+    expect(messagePosts(env)).toHaveLength(0);
   });
 
   it('a lost reply is retried with the same signed body, so the relay keeps one message', async () => {
