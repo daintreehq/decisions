@@ -33,10 +33,17 @@ export interface MessageDelivery {
   injection_id: string | null;
   error_code: string | null;
   /**
-   * The latest status the relay accepted (or refused for good), so each change is reported once and `received`
-   * always first. Null until the first receipt lands.
+   * The injection id of the latest attempt, written with the follow-up BEFORE its intent: recovery finds the
+   * follow-up an intent was for from it, even through a store that loses the intent's `message_id`.
    */
-  reported: LocalMessageStatus | null;
+  attempt_id?: string | null;
+  /** Explicit retries so far (`retryDelivery`): each starts a new round of receipts. */
+  retries?: number;
+  /**
+   * The receipt the relay last accepted (or refused for good), as `receiptId`, so each transition is reported
+   * once and `received` always first. Null until the first receipt lands.
+   */
+  reported: string | null;
   /** Phone images the host already stored for this message, as for an answer (`AnswerEntry.stored_images`). */
   stored_images?: { attachment_id: string; path: string }[];
 }
@@ -99,11 +106,22 @@ export function isPendingMessage(m: StoredMessage): boolean {
 }
 
 /**
- * The receipts still owed to the relay for a message, in order. `received` goes first, once; every later status
- * is reported when it differs from the last one reported. A retry that sends a message back to `received` is
- * not reported: the relay learns what the retry led to.
+ * The identity of one receipt: its status, what it carries (the injection id or the error code) and the retry
+ * round it belongs to. `received` is a fact reported once. The same transition always has the same identity, and so
+ * the same idempotency key; a changed error code, or the same failure after an explicit retry, is a new one.
+ */
+export function receiptId(d: MessageDelivery, status: LocalMessageStatus = d.status): string {
+  if (status === 'received') return 'received';
+  const detail = status === 'terminal-delivered' ? d.injection_id : d.error_code;
+  return `${status}:${detail ?? ''}:${d.retries ?? 0}`;
+}
+
+/**
+ * The receipts still owed to the relay for a message, in order: `received` first, once, then the current status
+ * when its receipt (`receiptId`) differs from the last one reported. A retry that sends a message back to
+ * `received` is not reported: the relay learns what the retry led to.
  */
 export function unreportedStatuses(d: MessageDelivery): LocalMessageStatus[] {
   if (d.reported === null) return d.status === 'received' ? ['received'] : ['received', d.status];
-  return d.status === 'received' || d.status === d.reported ? [] : [d.status];
+  return d.status === 'received' || receiptId(d) === d.reported ? [] : [d.status];
 }

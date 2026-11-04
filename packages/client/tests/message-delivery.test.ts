@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { generateDeviceKeys } from '@daintreehq/decisions-crypto';
 import {
   BLOCK_END,
@@ -14,12 +14,14 @@ import {
   FOLLOWUP_NOTE_UNANSWERED,
   MAX_BLOCK_BYTES,
   MAX_NOTICE_BYTES,
+  MemoryLocalStore,
   PolicyRegistry,
   THREAD_PREFACE,
   fakeResumeAdapter,
   parseAnswers,
   parseMessages,
   type InjectResult,
+  type InjectionIntent,
   type LocalStore,
   type TerminalTarget,
 } from '../src/index.js';
@@ -143,7 +145,7 @@ describe('a follow-up reaches the exact pane that asked', () => {
     expect(m.delivery).toMatchObject({
       status: 'terminal-delivered',
       injection_id: typed.id,
-      reported: 'terminal-delivered',
+      reported: `terminal-delivered:${typed.id}:0`,
     });
     const r = receipts(env);
     expect(r.map((x) => x.status)).toEqual(['received', 'terminal-delivered']);
@@ -157,11 +159,59 @@ describe('a follow-up reaches the exact pane that asked', () => {
     const host = env.relay.questions.get(env.qid)!.signed.record.target_host_id;
     expect(r.map((x) => x.host_id)).toEqual([host, host]);
 
-    // Replaying the ledger types nothing twice and reports nothing twice.
+    // The same signed message delivered again under a new ledger event is stored, typed and reported once.
+    env.relay.push('decision.message.posted', env.qid, null, ev.data as Record<string, unknown>);
     await env.bridge.catchUp();
     await env.bridge.pump();
     expect(env.sink.typed).toHaveLength(2);
     expect(receipts(env)).toHaveLength(2);
+    expect(parseMessages((await env.store.getQuestion(env.qid))!.messages_json)).toHaveLength(1);
+    // Other content under the same message id is not the same message: refused, the original kept.
+    await say(env, 'Something else entirely.', { messageId: idOf(ev) });
+    await env.bridge.catchUp();
+    expect(env.sink.typed).toHaveLength(2);
+    const audit = (await env.store.listAudit(50)).filter((a) => a.event === 'event.rejected');
+    expect(audit.map((a) => a.result)).toEqual(['message-id-reused']);
+    const thread = (await env.bridge.getDecision(env.qid)).thread;
+    expect(thread.filter((t) => t.kind === 'message').map((t) => t.text)).toEqual([
+      'Also keep the index on it.',
+    ]);
+  });
+
+  it.each([
+    ['a relaunched terminal', { generation: 2 }, 'generation_mismatch'],
+    ['another run of the same pane', { principal: 'principal-2' }, 'relaunched'],
+    ['another start of the agent', { incarnation: 'inc-2' }, 'relaunched'],
+    ['another agent session', { session: 'sess-2' }, 'session_mismatch'],
+  ] as const)('is never typed into %s', async (_name, change, code) => {
+    const env = await asked();
+    await answer(env);
+    await env.bridge.catchUp();
+    Object.assign(env.sink.panes.get('pane-1')!, change);
+    const ev = await say(env, 'For the pane that asked.');
+    await env.bridge.catchUp();
+    expect(env.sink.typed).toHaveLength(1);
+    expect((await messageOf(env, idOf(ev))).delivery).toMatchObject({
+      status: 'needs-attention',
+      error_code: code,
+    });
+  });
+
+  it('is never typed into a pane that changes between the look and the write', async () => {
+    const env = await asked();
+    await answer(env);
+    await env.bridge.catchUp();
+    const target = (await env.sink.locate(origin())).target!;
+    let calls = 0;
+    // Alive and idle at first look, then another session by the time it would be typed.
+    env.sink.locateOverride = () =>
+      ++calls === 2
+        ? { state: 'alive', target: { ...target, agentSessionId: 'sess-9' } }
+        : undefined;
+    const ev = await say(env, 'Just in time?');
+    await env.bridge.catchUp();
+    expect(env.sink.typed).toHaveLength(1);
+    expect((await messageOf(env, idOf(ev))).delivery!.status).toBe('received');
   });
 
   it('is held while the pane is busy, as received, and typed once it is idle', async () => {
@@ -331,6 +381,34 @@ describe('thread order and batching', () => {
     env.sink.panes.get('pane-1')!.idle = true;
     await env.bridge.notifyPaneIdle();
     expect(env.sink.typed.map((t) => blockKinds(t.text))).toEqual([['follow-up'], ['follow-up']]);
+    expect(env.sink.typed.map((t) => t.text.match(/^text: (.*)$/m)![1])).toEqual(['One.', 'Two.']);
+    const thread = parseMessages((await env.store.getQuestion(env.qid))!.messages_json);
+    expect(thread.map((m) => [m.delivery!.status, m.delivery!.injection_id])).toEqual(
+      env.sink.typed.map((t) => ['terminal-delivered', t.id]),
+    );
+  });
+
+  it('a follow-up whose key is not loaded yet waits, and never holds back the answer', async () => {
+    const env = await asked();
+    const later = { ...env.identity.epochs.get(1)!, epoch: 2 };
+    env.identity.epochs.set(2, later);
+    env.sink.panes.get('pane-1')!.idle = false;
+    await answer(env);
+    const ev = await say(env, 'Sealed under a newer key.', { epoch: later });
+    await env.bridge.catchUp();
+    env.identity.epochs.delete(2); // a restart before the new epoch is loaded again
+    env.sink.panes.get('pane-1')!.idle = true;
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed.map((t) => blockKinds(t.text))).toEqual([['answer']]);
+    expect((await messageOf(env, idOf(ev))).delivery!.status).toBe('received');
+    // get_decision still reports the answer, listing the message without its words.
+    const v = await env.bridge.getDecision(env.qid);
+    expect(v).toMatchObject({ status: 'human-answered', provenance: 'human', choice: 'keep' });
+    expect(v.thread.at(-1)).toMatchObject({ kind: 'message', unreadable: true, text: '' });
+    env.identity.epochs.set(2, later);
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed).toHaveLength(2);
+    expect(env.sink.typed[1]!.text).toContain('text: Sealed under a newer key.');
   });
 
   it('a follow-up waits behind an answer held for a human', async () => {
@@ -474,6 +552,69 @@ describe('the follow-up block is data', () => {
   });
 });
 
+describe('per-message receipts', () => {
+  it('a changed failure, or the same one after a retry, is reported again under a new key', async () => {
+    const env = await asked();
+    await answer(env);
+    await env.bridge.catchUp();
+    env.sink.panes.delete('pane-1');
+    await say(env, 'Where did you go?');
+    await env.bridge.catchUp();
+    // Retried into a relaunched terminal: still nothing typed, for another reason.
+    env.sink.addPane('pane-1', { generation: 2 });
+    await env.bridge.retryDelivery(env.qid);
+    // Retried into the right run, where the write may or may not have landed.
+    env.sink.addPane('pane-1');
+    env.sink.injectBehaviour = 'ambiguous';
+    await env.bridge.retryDelivery(env.qid);
+    // And once more, after the pane is gone again: the first failure again.
+    env.sink.panes.delete('pane-1');
+    await env.bridge.retryDelivery(env.qid);
+    const r = receipts(env);
+    expect(r.map((x) => [x.status, x.error_code])).toEqual([
+      ['received', undefined],
+      ['needs-attention', 'pane_gone'],
+      ['needs-attention', 'generation_mismatch'],
+      ['delivery-uncertain', 'inject_ambiguous'],
+      ['needs-attention', 'pane_gone'],
+    ]);
+    expect(new Set(r.map((x) => x.idempotency_key)).size).toBe(5);
+  });
+
+  it('a receipt the relay could not be reached for is resent with the same body and key', async () => {
+    const env = await asked();
+    await answer(env);
+    await env.bridge.catchUp();
+    env.sink.panes.get('pane-1')!.idle = false;
+    env.relay.failReceipts = 1;
+    await say(env, 'Hello.');
+    await env.bridge.catchUp();
+    await env.bridge.pump();
+    const r = env.relay.calls.filter((c) => c.path === '/api/v1/deliveries/messages');
+    expect(r).toHaveLength(2);
+    expect(r[1]!.body).toEqual(r[0]!.body);
+    await env.bridge.pump();
+    expect(receipts(env)).toHaveLength(2);
+  });
+
+  it('a receipt the relay refuses is given up, audited and never retried', async () => {
+    const env = await asked();
+    await answer(env);
+    await env.bridge.catchUp();
+    env.sink.panes.get('pane-1')!.idle = false;
+    env.relay.rejectReceipts = { status: 409, code: 'invalid_state' };
+    await say(env, 'Hello.');
+    await env.bridge.catchUp();
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(receipts(env)).toHaveLength(1);
+    const audit = (await env.store.listAudit(50)).filter(
+      (a) => a.event === 'message.receipt-refused',
+    );
+    expect(audit.map((a) => a.result)).toEqual(['received:invalid_state']);
+  });
+});
+
 /** A sink write that records the text and then never reports back: the process dies mid-injection. */
 function dieWhileTyping(env: Env, o: { typed: boolean }) {
   env.sink.inject = (target, text, id) => {
@@ -483,11 +624,11 @@ function dieWhileTyping(env: Env, o: { typed: boolean }) {
   };
 }
 
-async function restart(env: Env) {
+async function restart(env: Env, store: LocalStore = env.store) {
   delete (env.sink as { inject?: unknown }).inject; // the prototype's well-behaved inject again
   const bridge = new DecisionsBridge({
     identity: env.identity,
-    store: env.store,
+    store,
     sink: env.sink,
     client: env.client,
     policy: new PolicyRegistry(),
@@ -547,6 +688,57 @@ describe('crash recovery', () => {
     await answer(env);
     await restarted.catchUp();
     expect(env.sink.typed.map((t) => blockKinds(t.text))).toEqual([['answer']]);
+    await restarted.stop();
+  });
+
+  it('a batch that crashed is reconciled block by block, each by its own marker', async () => {
+    const env = await asked();
+    env.sink.panes.get('pane-1')!.idle = false;
+    await answer(env);
+    const ev = await say(env, 'In the same batch.');
+    await env.bridge.catchUp();
+    dieWhileTyping(env, { typed: true });
+    env.sink.panes.get('pane-1')!.idle = true;
+    void env.bridge.notifyPaneIdle();
+    await untilTyped(env, 1);
+    // Only the answer's block made it to the scrollback.
+    const [answerId] = [...env.sink.typed[0]!.text.matchAll(/^injection_id: (\S+)$/gm)].map(
+      (x) => x[1],
+    );
+    env.sink.hasMarker = async (_t, id) => id === answerId;
+
+    const restarted = await restart(env);
+    expect((await env.store.getQuestion(env.qid))!.delivery_status).toBe('terminal-delivered');
+    expect((await messageOf(env, idOf(ev))).delivery).toMatchObject({
+      status: 'delivery-uncertain',
+      error_code: 'crash_unreconciled',
+    });
+    await restarted.notifyPaneIdle();
+    expect(env.sink.injectCalls).toBe(1);
+    await restarted.stop();
+  });
+
+  it('recovery finds a follow-up by its attempt even through a store that loses message_id', async () => {
+    class LossyStore extends MemoryLocalStore {
+      override async putIntent(i: InjectionIntent) {
+        await super.putIntent({ ...i, message_id: null });
+      }
+    }
+    const store = new LossyStore();
+    const env = { ...(await asked({ store })), store };
+    await answer(env);
+    await env.bridge.catchUp();
+    dieWhileTyping(env, { typed: true });
+    const ev = await say(env, 'Typed just before the crash.');
+    void env.bridge.catchUp();
+    await untilTyped(env, 2);
+
+    const restarted = await restart(env, store);
+    expect((await messageOf(env, idOf(ev))).delivery!.status).toBe('terminal-delivered');
+    await restarted.notifyPaneIdle();
+    await restarted.pump();
+    expect(env.sink.typed).toHaveLength(2);
+    expect((await env.store.getQuestion(env.qid))!.delivery_status).toBe('terminal-delivered');
     await restarted.stop();
   });
 
@@ -627,6 +819,51 @@ describe('only verified messages are taken', () => {
     expect(kept.map((m) => m.message_id)).toEqual([idOf(a)]);
   });
 
+  it('a withdrawn question takes no message, and an event must name its record’s question', async () => {
+    const env = await asked();
+    const other = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Another one?' },
+    });
+    await env.bridge.pump();
+    // Signed for one question, delivered by the relay under another.
+    const moved = await say(env, 'For the first question.');
+    moved.question_id = other.questionId;
+    await env.relay.plainActionEvent({
+      questionId: env.qid,
+      signer: { deviceId: env.identity.config.deviceId, keys: env.identity.keys },
+      action: 'cancel',
+    });
+    await say(env, 'After the withdrawal.');
+    await env.bridge.catchUp();
+    const audit = (await env.store.listAudit(50)).filter((a) => a.event === 'event.rejected');
+    expect(audit.map((a) => [a.question_id, a.result])).toEqual([
+      [other.questionId, 'question-mismatch'],
+      [env.qid, 'thread-closed'],
+    ]);
+    for (const id of [env.qid, other.questionId])
+      expect((await env.store.getQuestion(id))!.messages_json).toBe('[]');
+    expect(env.sink.typed).toHaveLength(0);
+  });
+
+  it('a message on an open question answers nothing: no status, revision, gate or learning change', async () => {
+    const learn = vi.fn();
+    const env = await asked({ learner: { learn } });
+    const before = await answerState(env);
+    await say(env, 'approved');
+    await env.bridge.catchUp();
+    expect(await answerState(env)).toEqual(before);
+    expect(await env.bridge.getDecision(env.qid)).toMatchObject({
+      status: 'open',
+      provenance: null,
+      choice: null,
+      text: '',
+    });
+    expect(learn).not.toHaveBeenCalled();
+    // The follow-up itself is still typed, saying the question is not answered yet.
+    expect(env.sink.typed[0]!.text).toContain(FOLLOWUP_NOTE_UNANSWERED);
+  });
+
   it('with follow-ups off, nothing is declared and message events are ignored', async () => {
     const env = await asked({ followUps: false });
     expect(env.bridge.features).toEqual(BRIDGE_FEATURES);
@@ -685,6 +922,8 @@ describe('get_decision', () => {
   it('returns the thread in order with each follow-up’s delivery, and the answer as before', async () => {
     const env = await asked();
     env.relay.postMessageEvents = true;
+    const early = await say(env, 'Before you answer: it is still read.');
+    await env.bridge.catchUp();
     await answer(env);
     await env.bridge.catchUp();
     const before = await env.bridge.getDecision(env.qid);
@@ -712,11 +951,19 @@ describe('get_decision', () => {
     void _t;
     expect(decision).toEqual(was);
     expect(thread).toMatchObject([
+      {
+        kind: 'message',
+        side: 'human',
+        messageId: idOf(early),
+        messageSeq: 1,
+        text: 'Before you answer: it is still read.',
+        delivery: { status: 'terminal-delivered' },
+      },
       { kind: 'answer', revision: 1, source: 'human', choices: ['keep'], delivered: true },
       {
         kind: 'message',
         side: 'agent',
-        messageSeq: 1,
+        messageSeq: 2,
         expectsReply: true,
         text: 'Should the trigger stay too?',
         delivery: null,
@@ -725,7 +972,7 @@ describe('get_decision', () => {
         kind: 'message',
         side: 'human',
         messageId: idOf(reply),
-        messageSeq: 2,
+        messageSeq: 3,
         expectsReply: false,
         text: 'Yes, keep the trigger.',
         delivery: { status: 'received', terminalDeliveredAt: null, injectionId: null },
@@ -739,5 +986,17 @@ describe('get_decision', () => {
       kind: 'message',
       delivery: { status: 'terminal-delivered', injectionId: env.sink.typed.at(-1)!.id },
     });
+  });
+
+  it('lists an answer stored before threads existed first', async () => {
+    const env = await asked();
+    await say(env, 'Sent after the upgrade.');
+    await answer(env);
+    await env.bridge.catchUp();
+    const row = (await env.store.getQuestion(env.qid))!;
+    const legacy = parseAnswers(row.answers_json).map(({ event_seq: _s, ...e }) => e);
+    await env.store.updateQuestion(env.qid, { answers_json: JSON.stringify(legacy) });
+    const kinds = (await env.bridge.getDecision(env.qid)).thread.map((t) => t.kind);
+    expect(kinds).toEqual(['answer', 'message']);
   });
 });

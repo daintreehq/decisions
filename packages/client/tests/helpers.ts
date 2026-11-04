@@ -154,6 +154,12 @@ export class FakeRelay {
   postMessageEvents = false;
   /** The next `message_seq` of each question's thread, shared by posted and built messages. */
   messageSeqs = new Map<string, number>();
+  /** Each committed message's receipt, returned unchanged for a retry, as the relay does. */
+  messageReceipts = new Map<string, unknown>();
+  /** Number of upcoming `POST /deliveries/messages` that fail with a network error after being recorded. */
+  failReceipts = 0;
+  /** While set, every `POST /deliveries/messages` is refused with this status and code. */
+  rejectReceipts: { status: number; code: string } | null = null;
   /** Every accepted `PUT /questions/{id}/snapshot` body, in order. */
   snapshots: { questionId: string; body: unknown }[] = [];
   /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
@@ -228,6 +234,8 @@ export class FakeRelay {
         return json(409, { code: 'idempotency_collision', message: 'different message' });
       const fresh = i < 0;
       if (i < 0) i = this.messages.push({ idem: b.idempotency_key, message: b.message }) - 1;
+      const prior = this.messageReceipts.get(id);
+      if (prior) return json(201, prior);
       const committedAt = new Date().toISOString();
       // Without `postMessageEvents` the seq is not a ledger seq of this fake: a burnt seq would look like a gap.
       let eventSeq = 10_000 + i;
@@ -251,6 +259,7 @@ export class FakeRelay {
         event_seq: eventSeq,
         committed_at: committedAt,
       };
+      this.messageReceipts.set(id, receipt);
       if (this.dropMessageReply > 0) {
         this.dropMessageReply--;
         throw new TypeError('connection reset after the relay committed the message');
@@ -364,6 +373,14 @@ export class FakeRelay {
     }
     if (method === 'POST' && /^\/api\/v1\/attachments\/[^/]+\/complete$/.test(p))
       return json(200, { ok: true });
+    if (method === 'POST' && p === '/api/v1/deliveries/messages') {
+      if (this.failReceipts > 0) {
+        this.failReceipts--;
+        throw new TypeError('fetch failed');
+      }
+      if (this.rejectReceipts)
+        return json(this.rejectReceipts.status, { code: this.rejectReceipts.code, message: 'no' });
+    }
     if (method === 'POST' && p.startsWith('/api/v1/deliveries/')) return json(200, { ok: true });
     if (method === 'PUT' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/snapshot$/))) {
       const reply = this.snapshotReplies.shift();

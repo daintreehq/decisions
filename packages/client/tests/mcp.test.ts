@@ -485,6 +485,8 @@ describe('HTTP MCP: send_followup', () => {
     relay.postMessageEvents = true;
     const id = await ask(mcp);
     await settle(bridge);
+    const early = await relay.messageEvent({ questionId: id, signer: phone, text: 'One sec.' });
+    await bridge.catchUp();
     await relay.answerEvent({ questionId: id, phone, options: [], text: 'Dark red.' });
     await bridge.catchUp();
     const answered = (await call(mcp, 'get_decision', { question_id: id })).structuredContent;
@@ -497,7 +499,10 @@ describe('HTTP MCP: send_followup', () => {
     await bridge.catchUp();
     const reply = await relay.messageEvent({ questionId: id, signer: phone, text: 'Maroon.' });
     await bridge.catchUp();
-    expect(sink.typed).toHaveLength(2); // the answer and the person's follow-up; never the agent's own
+    // Both of the person's follow-ups and the answer, in thread order; never the agent's own message.
+    expect(sink.typed).toHaveLength(3);
+    const idOf = (ev: { data: unknown }) =>
+      (ev.data as { record: { message_id: string } }).record.message_id;
 
     const d = await call(mcp, 'get_decision', { question_id: id });
     const { thread, ...decision } = d.structuredContent;
@@ -505,14 +510,22 @@ describe('HTTP MCP: send_followup', () => {
     void _was;
     expect(decision).toEqual(was);
     expect(d.content[0].text).toContain(
-      '2 follow-up messages in the thread; none changes the answer.',
+      '3 follow-up messages in the thread; none changes the answer.',
     );
     expect(thread).toEqual([
+      expect.objectContaining({
+        kind: 'message',
+        side: 'human',
+        message_id: idOf(early),
+        message_seq: 1,
+        text: 'One sec.',
+        delivery: expect.objectContaining({ injection_id: sink.typed[0]!.id }),
+      }),
       expect.objectContaining({ kind: 'answer', revision: 1, source: 'human', text: 'Dark red.' }),
       expect.objectContaining({
         kind: 'message',
         side: 'agent',
-        message_seq: 1,
+        message_seq: 2,
         expects_reply: true,
         text: 'The burgundy or the maroon?',
         images: [],
@@ -521,13 +534,13 @@ describe('HTTP MCP: send_followup', () => {
       expect.objectContaining({
         kind: 'message',
         side: 'human',
-        message_id: (reply.data as { record: { message_id: string } }).record.message_id,
-        message_seq: 2,
+        message_id: idOf(reply),
+        message_seq: 3,
         expects_reply: false,
         text: 'Maroon.',
         delivery: expect.objectContaining({
           status: 'terminal-delivered',
-          injection_id: sink.typed[1]!.id,
+          injection_id: sink.typed[2]!.id,
           error_code: null,
         }),
       }),

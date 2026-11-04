@@ -16,6 +16,7 @@ import {
   isPendingMessage,
   isUndeliveredMessage,
   parseMessages,
+  receiptId,
   serializeMessages,
   unreportedStatuses,
   type LocalMessageStatus,
@@ -220,11 +221,26 @@ export class DeliveryEngine {
     // that failed before it was settled. The text may be on screen; recover() reconciles it at start. A
     // follow-up's unsettled intent holds that message (and what follows it in its thread), never the answers.
     const open = (await ctx.store.openIntents()).filter((i) => i.state === 'intent');
-    const unsettled = new Set(open.filter((i) => i.message_id == null).map((i) => i.question_id));
-    const unsettledMessages = new Set(
+    // A follow-up's attempt is known by its message id or, should a store have lost that, by the attempt id the
+    // follow-up itself records.
+    const attempts = new Map<string, string>();
+    for (const q of rows)
+      for (const m of parseMessages(q.messages_json))
+        if (m.delivery?.attempt_id)
+          attempts.set(m.delivery.attempt_id, messageDeliveryKey(q.question_id, m.message_id));
+    const unsettled = new Set(
       open
-        .filter((i) => i.message_id != null)
-        .map((i) => messageDeliveryKey(i.question_id, i.message_id!)),
+        .filter((i) => i.message_id == null && !attempts.has(i.injection_id))
+        .map((i) => i.question_id),
+    );
+    const unsettledMessages = new Set(
+      open.flatMap((i) =>
+        i.message_id != null
+          ? [messageDeliveryKey(i.question_id, i.message_id)]
+          : attempts.has(i.injection_id)
+            ? [attempts.get(i.injection_id)!]
+            : [],
+      ),
     );
     const threads: Thread[] = [];
     for (const q of rows) {
@@ -371,7 +387,9 @@ export class DeliveryEngine {
    * cannot be opened needs a human too, and holds the follow-ups after it. A missing epoch key (rotated by
    * another process, not yet reloaded) just waits for a later pass.
    */
-  private async openThread(t: Thread): Promise<{ items: Item[]; attention: number } | 'transient'> {
+  private async openThread(
+    t: Thread,
+  ): Promise<{ items: Item[]; attention: number; deferred: number } | 'transient'> {
     const { ctx } = this;
     const { q } = t;
     // Only a reference for the agent: nothing is held back because its question can't be read.
@@ -381,6 +399,7 @@ export class DeliveryEngine {
     const quoted = question ? { question } : {};
     let items: Item[] = [];
     let attention = 0;
+    let deferred = 0;
     let barrier = Infinity;
     for (const entry of t.answers) {
       try {
@@ -420,14 +439,18 @@ export class DeliveryEngine {
           ...quoted,
         });
       } catch (e) {
-        if (e instanceof TransientError) return 'transient';
+        if (e instanceof TransientError) {
+          // Its key isn't loaded yet: it and the follow-ups after it wait, and what comes before still goes.
+          deferred++;
+          break;
+        }
         await this.messageAttention(q, m, 'message_unreadable', 'needs-attention');
         attention++;
         break;
       }
     }
     items.sort((a, b) => a.seq - b.seq);
-    return { items, attention };
+    return { items, attention, deferred };
   }
 
   private async laneDeliver(threads: Thread[]): Promise<DrainResult> {
@@ -454,6 +477,7 @@ export class DeliveryEngine {
         break;
       }
       res.needsAttention += opened.attention;
+      res.deferred += opened.deferred;
       if (opened.items.length === 0) continue;
       target = r.target;
       items.push(...opened.items);
@@ -658,8 +682,10 @@ export class DeliveryEngine {
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
     //     the inbox applies cancellations and deletions under, so none lands between them.
     const admitted = await ctx.lock.run(async () => {
+      const rows = new Map<string, QuestionRow>();
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
+        if (row) rows.set(q.question_id, row);
         const answers = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
         const messages = new Set(
           row
@@ -678,7 +704,28 @@ export class DeliveryEngine {
         }
       }
       const now = ctx.now();
-      // 1. Persist the intent BEFORE touching the terminal.
+      // 1a. Each follow-up names its attempt first, so recovery can find it from the attempt alone. Nothing is
+      //     typed yet: a crash before its intent is written only leaves it waiting, as it was.
+      for (const [questionId, row] of rows) {
+        const mine = new Map(
+          chunk.flatMap((i) =>
+            i.kind === 'message' && i.q.question_id === questionId
+              ? [[i.message.message_id, i.intentId] as const]
+              : [],
+          ),
+        );
+        if (mine.size === 0) continue;
+        await ctx.store.updateQuestion(questionId, {
+          messages_json: serializeMessages(
+            parseMessages(row.messages_json).map((m) =>
+              mine.has(m.message_id) && m.delivery
+                ? { ...m, delivery: { ...m.delivery, attempt_id: mine.get(m.message_id)! } }
+                : m,
+            ),
+          ),
+        });
+      }
+      // 1b. Persist the intent BEFORE touching the terminal.
       for (const i of chunk) {
         await ctx.store.putIntent({
           injection_id: i.intentId,
@@ -945,8 +992,9 @@ export class DeliveryEngine {
     const row = await ctx.store.getQuestion(questionId);
     const m = row ? parseMessages(row.messages_json).find((x) => x.message_id === messageId) : null;
     if (!row || !m?.delivery) return true;
-    for (const status of unreportedStatuses(m.delivery)) {
-      const body = await this.receipt(row, m, m.delivery, status);
+    const d = m.delivery;
+    for (const status of unreportedStatuses(d)) {
+      const body = await this.receipt(row, m, d, status);
       if (body) {
         try {
           await ctx.client.deliveriesMessages(body);
@@ -963,7 +1011,9 @@ export class DeliveryEngine {
         const fresh = await ctx.store.getQuestion(questionId);
         if (fresh)
           await ctx.store.updateQuestion(questionId, {
-            messages_json: this.withDelivery(fresh, messageId, () => ({ reported: status })),
+            messages_json: this.withDelivery(fresh, messageId, () => ({
+              reported: receiptId(d, status),
+            })),
           });
       });
     }
@@ -986,7 +1036,7 @@ export class DeliveryEngine {
     if (detail === null) return null;
     const base = {
       idempotency_key: await sha256Hex(
-        JSON.stringify(['message-receipt', row.question_id, m.message_id, status, detail]),
+        JSON.stringify(['message-receipt', row.question_id, m.message_id, receiptId(d, status)]),
       ),
       question_id: row.question_id,
       message_id: m.message_id,
@@ -1135,8 +1185,12 @@ export class DeliveryEngine {
         });
         continue;
       }
-      if (intent.message_id != null) {
-        const r = await this.recoverMessage(q, intent, intent.message_id);
+      const messageId =
+        intent.message_id ??
+        parseMessages(q.messages_json).find((m) => m.delivery?.attempt_id === intent.injection_id)
+          ?.message_id;
+      if (messageId != null) {
+        const r = await this.recoverMessage(q, intent, messageId);
         if (r === 'reconciled') reconciled++;
         else if (r === 'uncertain') uncertain++;
         continue;
@@ -1225,7 +1279,15 @@ export class DeliveryEngine {
       const messages = parseMessages(row.messages_json).map((m) =>
         m.delivery?.deliver &&
         (m.delivery.status === 'needs-attention' || m.delivery.status === 'delivery-uncertain')
-          ? { ...m, delivery: { ...m.delivery, status: 'received' as const, error_code: null } }
+          ? {
+              ...m,
+              delivery: {
+                ...m.delivery,
+                status: 'received' as const,
+                error_code: null,
+                retries: (m.delivery.retries ?? 0) + 1,
+              },
+            }
           : m,
       );
       await this.ctx.store.updateQuestion(questionId, {

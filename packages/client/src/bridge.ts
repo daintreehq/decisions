@@ -623,9 +623,10 @@ export class DecisionsBridge {
         const c = await openMessageContent(this.ctx, row.question_id, m);
         text = c.text;
         images = c.images;
-      } catch (e) {
-        if (e instanceof TransientError) throw e;
-        unreadable = true; // listed without its words; never shown as an empty message that was read
+      } catch {
+        // Listed without its words, never shown as an empty message that was read; a key not loaded yet never
+        // keeps the answers from being reported.
+        unreadable = true;
       }
       const paths = new Map(
         (m.delivery?.stored_images ?? []).map((s) => [s.attachment_id, s.path]),
