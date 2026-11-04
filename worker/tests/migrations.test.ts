@@ -17,7 +17,7 @@ import {
 
 const V1_TABLES = ['questions', 'actions', 'deliveries', 'events', 'command_receipts'] as const;
 
-/** Takes the attachments table back to before phone images (schema 3). */
+/** Takes the attachments table back to before phone images (schema 4). */
 function dropPhoneImageColumns(sql: SqlStorage): void {
   sql.exec(`DROP INDEX attachments_creator_unbound_idx`);
   for (const c of ['kind', 'binding_kind', 'binding_record_id', 'bound_at'])
@@ -98,7 +98,7 @@ describe('schema migrations', () => {
     expect(again.after).toEqual(again.before);
   });
 
-  it('upgrades a version 2 database, keeping every question image as one and taking phone images at once', async () => {
+  it('upgrades a version 3 database, keeping every question image as one and taking phone images at once', async () => {
     const w = await claimRelay();
     await declare(w.owner, ['phone-images-v1', 'thread-messages-v1']);
     const phone = await pairDevice(w);
@@ -113,7 +113,7 @@ describe('schema migrations', () => {
     const result = await inRoom((_room, state) => {
       const sql = state.storage.sql;
       dropPhoneImageColumns(sql);
-      sql.exec(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`);
+      sql.exec(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`);
       const rows = () => sql.exec(`SELECT * FROM attachments ORDER BY attachment_id`).toArray();
       const before = rows();
       migrate(sql);

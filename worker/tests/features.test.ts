@@ -244,6 +244,7 @@ describe('feature negotiation with pane snapshots (docs/protocol.md section 19)'
     const info = await raw('GET', '/api/v1/info');
     expect(InfoResponse.parse(info.json).features).toEqual([
       'pane-snapshots-v1',
+      'phone-images-v1',
       'thread-messages-v1',
     ]);
   });
