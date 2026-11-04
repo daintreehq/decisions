@@ -297,10 +297,38 @@ describe('sync engine', () => {
     await vi.waitFor(() => expect(h.errors).toHaveLength(1));
     expect(h.engine.cursor).toBe(1);
     expect(await h.db.getCursor()).toBe(1);
-    // The replay is over; the next catch-up reads the truth again.
+    // The replay is over; the next catch-up reads the truth again...
     await h.engine.catchUp();
     expect(h.engine.cursor).toBe(3);
     expect(h.ingested).toEqual([1, 2, 3]);
+    // ...and the next live event applies directly, with no marker and no HTTP request.
+    const requests = h.calls.length;
+    h.ledger.seqs.push(4);
+    ws.push({ t: 'event', event: ev(4) });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(4));
+    expect(h.calls).toHaveLength(requests);
+    expect(h.ingested).toEqual([1, 2, 3, 4]);
+    expect(h.hidden()).toEqual([]);
+  });
+
+  it('moves the cursor to the marker, past events this phone is not sent', async () => {
+    const h = await harness({ ledger: [1] });
+    await h.engine.start();
+    h.ledger.seqs.push(3); // the rest (2, 4-8) were deleted or are hidden from this phone
+    const ws = await h.connected();
+    ws.open();
+    ws.push({ t: 'event', event: ev(3) });
+    ws.push({ t: 'caught_up', high_water: 5, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(5));
+    expect(await h.db.getCursor()).toBe(5);
+    // A replay with nothing this phone may see still moves the cursor to its marker (the kick's HTTP catch-up finds
+    // nothing new, so only the marker can).
+    h.engine.kick();
+    await vi.waitFor(() => expect(ws.frames().at(-1)).toEqual({ t: 'sync', after: 5 }));
+    ws.push({ t: 'caught_up', high_water: 8, has_more: false });
+    await vi.waitFor(() => expect(h.engine.cursor).toBe(8));
+    expect(await h.db.getCursor()).toBe(8);
+    expect(h.ingested).toEqual([1, 3]);
     expect(h.hidden()).toEqual([]);
   });
 

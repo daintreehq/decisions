@@ -84,6 +84,8 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
   let bridge: DecisionsBridge;
   const ids: string[] = [];
   const seen: Seen[] = [];
+  /** What the gate in front of the phone saw: its sockets, and the first `sync` it held. */
+  const gate = { sockets: 0, held: null as { after: number; text: string } | null };
 
   /** The question rows on the page itself (the sidebar holds some of the same questions). */
   const shownIds = () =>
@@ -122,26 +124,62 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
     });
     page = await context.newPage();
 
-    // Stand between the phone and the relay on the phone's first socket: connect it to the relay only when told to,
-    // and hold the phone's first `sync` until released. That opens, every run, the gap a phone otherwise hits by
-    // chance: events committed before its socket exists reach it only in the replay, while events committed after
-    // are pushed to it live, ahead of that replay.
-    let phoneSide: WebSocketRoute | null = null;
-    let relaySide: WebSocketRoute | null = null;
-    let heldSync: string | null = null;
+    // Stand between the phone and the relay. The phone asks for its first socket ticket once its first HTTP catch-up
+    // is done; that request waits until the questions asked meanwhile are on the relay, so they can reach the phone
+    // only in its socket's replay. The socket then goes to the relay at once, but its first `sync` is held while a
+    // later question is pushed to it live, ahead of that replay: the gap a phone otherwise hits by chance. Until the
+    // `sync` goes, the phone cannot read the ledger over HTTP either, so the replay is its only way to those questions.
+    let ticketAsked = false;
+    let releaseTicket = () => {};
+    const ticketReleased = new Promise<void>((r) => (releaseTicket = r));
+    await page.route(/\/api\/v1\/socket-ticket/, async (route) => {
+      if (!ticketAsked) {
+        ticketAsked = true;
+        await ticketReleased;
+      }
+      await route.continue();
+    });
     let syncSent = false;
-    await page.routeWebSocket(/\/api\/v1\/socket/, (ws) => {
-      if (phoneSide) {
-        ws.connectToServer(); // any later socket goes straight through
+    await page.route(/\/api\/v1\/events/, (route) =>
+      ticketAsked && !syncSent ? route.abort() : route.continue(),
+    );
+    let relaySide: WebSocketRoute | null = null;
+    let hello = false;
+    let releaseSync = () => {};
+    await page.routeWebSocket(/\/api\/v1\/socket/, (phone) => {
+      gate.sockets++;
+      if (relaySide) {
+        phone.connectToServer(); // any later socket goes straight through
         return;
       }
-      phoneSide = ws;
-      ws.onMessage((m) => {
-        if (!syncSent && heldSync === null && typeof m === 'string' && m.includes('"sync"')) {
-          heldSync = m;
-          return;
+      const server = (relaySide = phone.connectToServer());
+      releaseSync = () => server.send(gate.held!.text);
+      phone.onMessage((m) => {
+        if (!syncSent && !gate.held && typeof m === 'string' && m.startsWith('{')) {
+          const f = JSON.parse(m) as { t: string; after?: number };
+          if (f.t === 'sync') {
+            gate.held = { after: f.after ?? -1, text: m };
+            return;
+          }
         }
-        relaySide?.send(m);
+        server.send(m);
+      });
+      server.onMessage((m) => {
+        if (typeof m === 'string') {
+          const f = JSON.parse(m) as {
+            t: string;
+            event?: { seq: number; event_type: string; question_id: string | null };
+          };
+          if (f.t === 'hello') hello = true;
+          if (f.t === 'event' && f.event)
+            seen.push({
+              seq: f.event.seq,
+              type: f.event.event_type,
+              questionId: f.event.question_id,
+              afterSync: syncSent,
+            });
+        }
+        phone.send(m);
       });
     });
 
@@ -204,29 +242,13 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
         `question ${id} on the relay`,
       );
 
-    // The phone opens its socket once its first HTTP catch-up is done, so it has none of these yet.
-    await until(async () => phoneSide !== null, 30_000, 'the phone to open its socket');
+    await until(async () => ticketAsked, 30_000, 'the phone to ask for a socket');
     for (let i = 0; i < BEFORE; i++) await ask(i);
     for (const id of ids) await published(id);
+    releaseTicket();
+    // The relay has registered the socket; the phone's `sync` stays held.
+    await until(async () => hello && gate.held !== null, 30_000, "the phone's socket and sync");
 
-    // Now the relay registers the socket; the phone's `sync` stays held.
-    relaySide = phoneSide!.connectToServer();
-    relaySide.onMessage((m) => {
-      if (typeof m === 'string') {
-        const f = JSON.parse(m) as {
-          t: string;
-          event?: { seq: number; event_type: string; question_id: string | null };
-        };
-        if (f.t === 'event' && f.event)
-          seen.push({
-            seq: f.event.seq,
-            type: f.event.event_type,
-            questionId: f.event.question_id,
-            afterSync: syncSent,
-          });
-      }
-      phoneSide!.send(m);
-    });
     // The last question is pushed to the phone live, before the relay has handled its `sync`. One committed in the
     // first moments after the relay accepts the socket is not always pushed (the replay still carries it), so ask
     // until one is...
@@ -245,9 +267,8 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
       );
     }
     // ...and only then is the replay of everything before it sent.
-    await until(async () => heldSync !== null, 30_000, "the phone's sync");
     syncSent = true;
-    relaySide.send(heldSync!);
+    releaseSync();
   });
 
   afterAll(async () => {
@@ -259,11 +280,13 @@ describe.skipIf(!chromiumPath)('a phone that has just paired keeps every questio
   it('shows every question, including those the relay replayed after a later one was pushed live', async () => {
     await showsEvery('every question in the burst');
     // The run really took the path the bug lived on: the last question arrived live, ahead of a replay that held
-    // earlier questions.
+    // earlier questions, which the phone did not hold when it asked for that replay, on its only socket.
     const created = seen.filter((s) => s.type === 'decision.created');
     const live = created.find((s) => s.questionId === ids.at(-1) && !s.afterSync)!;
     const replayed = created.filter((s) => s.afterSync && s.seq < live.seq);
     expect(new Set(replayed.map((s) => s.questionId))).toEqual(new Set(ids.slice(0, -1)));
+    expect(created.every((s) => s.seq > gate.held!.after)).toBe(true);
+    expect(gate.sockets).toBe(1);
     expect(new Set(await shownIds())).toEqual(new Set(ids));
   });
 
