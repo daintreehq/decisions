@@ -45,6 +45,8 @@
   --info-surface: var(--theme-status-info-surface);
   /* "Waiting on you" is Daintree's waiting signal: the amber ring. */
   --waiting: var(--theme-activity-waiting);
+  /* An agent Daintree observed working: its working green, used only on the agent-state dot. */
+  --working: var(--theme-activity-working);
   /* Model provenance: Daintree's violet, always paired with the words "Model answer". */
   --model: var(--theme-syntax-keyword);
   --model-surface: color-mix(in oklab, var(--theme-syntax-keyword) 9%, transparent);

@@ -326,6 +326,26 @@ main.bare {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/*
+ * A fresh agent state ends the row in a fixed slot, so the states line up down the list and a change of word never
+ * re-truncates the question. Quieter than the needs-you dot: a smaller dot, the word in secondary text.
+ */
+.side-q-state {
+  flex: none;
+  display: flex;
+  width: 5.4em;
+  font-size: var(--text-xs);
+}
+.side-q .agent-state {
+  gap: 5px;
+}
+.side-q .agent-dot {
+  width: 6px;
+  height: 6px;
+}
+.side-q .agent-label {
+  color: var(--text-2);
+}
 .side-q-project {
   flex: none;
   max-width: 30%;

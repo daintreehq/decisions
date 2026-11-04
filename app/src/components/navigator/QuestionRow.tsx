@@ -1,4 +1,5 @@
 import { memo, type MouseEvent, type ReactNode } from 'react';
+import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import {
   STATUS_LABEL,
@@ -10,6 +11,7 @@ import {
 import { hiddenQuestionText, proxyNeedsReview } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { ageLabel } from '../../lib/time.js';
+import { AgentStateMark } from '../AgentState.js';
 import { Origin } from '../Icons.js';
 import { StatusGlyph } from './StatusGlyph.js';
 
@@ -26,8 +28,9 @@ function since(iso: string, now: number): string {
 
 /**
  * One question in the navigator. The whole row opens it. It carries project · computer, the question (2–3 lines),
- * the answer in force ("You: …" / "Model: …"), one principal status (glyph; the word too when statuses mix), and
- * only extras someone can act on: a draft, a queued answer, a model answer to review, a delivery issue, a due time.
+ * the answer in force ("You: …" / "Model: …"), one principal status (glyph; the word too when statuses mix), the
+ * asking agent's observed state when its desktop shares one, and only extras someone can act on: a draft, a queued
+ * answer, a model answer to review, a delivery issue, a due time.
  */
 export const QuestionRow = memo(function QuestionRow({
   v,
@@ -35,6 +38,7 @@ export const QuestionRow = memo(function QuestionRow({
   selected,
   showStatusWord,
   extras,
+  agent = null,
   onOpen,
 }: {
   v: QuestionView;
@@ -42,6 +46,8 @@ export const QuestionRow = memo(function QuestionRow({
   selected: boolean;
   showStatusWord: boolean;
   extras: RowExtras;
+  /** The asking agent's observed state, or null to show nothing extra (no snapshot, sharing off, closed). */
+  agent?: AgentStateView | null;
   onOpen: (e: MouseEvent<HTMLAnchorElement>, id: string) => void;
 }) {
   const status: RowStatus = principalStatus(v, now);
@@ -49,7 +55,7 @@ export const QuestionRow = memo(function QuestionRow({
   const due = dueLabel(v, now);
   const files = v.content?.attachments.length ?? 0;
   const review = status !== 'review' && proxyNeedsReview(v, now);
-  const meta: { key: string; node: ReactNode; tone?: 'warn' }[] = [];
+  const meta: { key: string; node: ReactNode; tone?: 'warn' | 'agent' }[] = [];
   if (showStatusWord) meta.push({ key: 'status', node: STATUS_LABEL[status] });
   if (due) meta.push({ key: 'due', node: due.label, tone: due.urgent ? 'warn' : undefined });
   if (extras.pending)
@@ -65,6 +71,8 @@ export const QuestionRow = memo(function QuestionRow({
         </>
       ),
     });
+  // Last, in a slot that never changes the line count: going stale or changing word only redraws it.
+  if (agent) meta.push({ key: 'agent', node: <AgentStateMark a={agent} />, tone: 'agent' });
 
   return (
     <li className="qrow-item">

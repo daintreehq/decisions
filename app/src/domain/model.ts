@@ -47,6 +47,8 @@ export interface QuestionView {
   revision: number;
   requirement: Requirement;
   targetHostId: string;
+  /** The desktop that signed the question; only it may publish the question's pane snapshots. */
+  originatingDeviceId: string;
   createdAt: string;
   expiresAt: string | null;
   proxyAbstained: boolean;
@@ -155,6 +157,7 @@ export class QuestionStore {
       revision: 0,
       requirement: 'human-required',
       targetHostId: '',
+      originatingDeviceId: '',
       createdAt: ev.occurred_at,
       expiresAt: null,
       proxyAbstained: false,
@@ -215,6 +218,7 @@ export class QuestionStore {
           revision: 0,
           requirement: rec.requirement,
           targetHostId: rec.target_host_id,
+          originatingDeviceId: rec.originating_device_id,
           createdAt: rec.created_at,
           expiresAt: rec.expires_at,
           proxyAbstained: false,

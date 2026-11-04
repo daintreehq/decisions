@@ -22,13 +22,20 @@ import { ImageCache, type ImageContext, type ImageResult } from '../data/images.
 import { Drafts, Outbox } from '../data/outbox.js';
 import { runPairing, type PairingPhase } from '../data/pairing.js';
 import { publicJson, Relay, RelayError } from '../data/relay.js';
+import { SnapshotStore } from '../data/snapshots.js';
 import { SyncEngine, type Connection } from '../data/sync.js';
 import { buildAnswerRequest, highestEpoch, type HumanActionKind } from '../domain/answer.js';
 import { QuestionStore, type QuestionView } from '../domain/model.js';
+import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
 import { applyTheme, DEFAULT_PREFS, type LocalPrefs } from './prefs.js';
 import { checkInvite } from '../data/pairing.js';
-import type { PairingInvitePayload } from '@daintreehq/decisions-protocol';
+import type { PairingInvitePayload, ProtocolFeature } from '@daintreehq/decisions-protocol';
+
+/** The extension this app understands: pane snapshots, read for each question's observed agent state. */
+const SNAPSHOT_FEATURE: ProtocolFeature = 'pane-snapshots-v1';
+/** Set once this device has read every open question's snapshot after first declaring the feature. */
+const SNAPSHOT_BACKFILL_PREF = 'snapshot-backfill-v1';
 
 export type ServerSettings = z.infer<typeof SettingsResponse>['settings'];
 
@@ -64,6 +71,8 @@ export class AppController {
   outbox: Outbox | null = null;
   drafts: Drafts | null = null;
   sync: SyncEngine | null = null;
+  /** Each question's latest pane snapshot, while the relay serves them. */
+  snapshots: SnapshotStore | null = null;
   readonly images = new ImageCache({
     createUrl: (b) => URL.createObjectURL(b),
     revokeUrl: (u) => URL.revokeObjectURL(u),
@@ -117,10 +126,33 @@ export class AppController {
     await this.boot(config);
   }
 
+  /** Settles once `GET /info` has answered or failed; boot waits for it briefly so the first socket is right. */
+  private infoLoaded: Promise<void> = Promise.resolve();
+
   private loadInfo() {
-    publicJson<InfoResponse>(this.origin, 'GET', '/api/v1/info')
-      .then((info) => this.patch({ info }))
+    this.infoLoaded = publicJson<InfoResponse>(this.origin, 'GET', '/api/v1/info')
+      .then((info) => {
+        const before = this.snapshotsServed();
+        this.patch({ info });
+        // Info can arrive after sync has started: declare the feature now and read what was missed.
+        if (!before && this.snapshotsServed() && this.sync?.running) {
+          this.sync.redeclare();
+          void this.backfillSnapshots();
+        }
+      })
       .catch(() => undefined);
+  }
+
+  /** Whether the relay advertises pane snapshots (`GET /info`); until it does, the app never asks for them. */
+  private snapshotsServed(): boolean {
+    return this.snap.info?.features?.includes(SNAPSHOT_FEATURE) ?? false;
+  }
+
+  private async backfillSnapshots(): Promise<void> {
+    if (!this.snapshots || !this.store || !this.db || !this.snapshotsServed()) return;
+    const done = (await this.db.getPref<boolean>(SNAPSHOT_BACKFILL_PREF)) ?? false;
+    this.snapshots.backfill(this.store.list(), !done);
+    if (!done) await this.db.setPref(SNAPSHOT_BACKFILL_PREF, true);
   }
 
   private async boot(config: ConfigRecord): Promise<void> {
@@ -156,7 +188,19 @@ export class AppController {
       onKeyRotated: () => void this.refreshGrants(),
     });
     this.store.subscribe(() => this.patch({}));
-    await this.store.rebuild(await db.eventsAfter(0));
+    const cached = await db.eventsAfter(0);
+    await this.store.rebuild(cached);
+    this.snapshots = new SnapshotStore({
+      fetch: (id) => this.relay!.json('GET', `/questions/${id}/snapshot`),
+      verify: (raw, view) =>
+        verifySnapshotResponse(raw, view, {
+          installationId: config.installationId,
+          trust: this.trust!,
+          epochKeys: this.epochKeys,
+        }),
+      view: (id) => this.store?.get(id),
+    });
+    this.snapshots.noteEvents(cached, false);
 
     this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
       onChange: () => this.patch({}),
@@ -168,11 +212,16 @@ export class AppController {
     this.drafts = new Drafts(db, cacheKey);
     await this.outbox.load();
 
-    this.sync = new SyncEngine({
+    const sync = (this.sync = new SyncEngine({
       relay: this.relay,
       db,
       origin: config.relayOrigin,
-      ingest: (events) => this.store!.ingestAll(events),
+      ingest: async (events) => {
+        await this.store!.ingestAll(events);
+        if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
+      },
+      features: () => (this.snapshotsServed() ? [SNAPSHOT_FEATURE] : []),
+      onServerTime: (iso) => this.snapshots?.setServerTime(iso),
       onConnection: (connection) => {
         this.patch({ connection });
         if (connection === 'live') void this.outbox?.flush();
@@ -180,16 +229,24 @@ export class AppController {
       onSynced: (at) => this.patch({ lastSyncedAt: at, syncing: false, lastError: null }),
       onRevoked: () => this.lockRevoked(),
       onError: (e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) }),
-    });
+    }));
     this.patch({ phase: 'ready', config, syncing: true });
     this.bindPageEvents();
-    void this.sync.start().then(() => this.outbox?.flush());
+    // The socket's ticket declares the features the relay advertises, so give `GET /info` a moment first; if it
+    // answers later, the sync engine redeclares on a new socket.
+    await Promise.race([this.infoLoaded, new Promise((r) => setTimeout(r, 1500))]);
+    if (this.sync !== sync) return;
+    void sync.start().then(() => {
+      void this.outbox?.flush();
+      void this.backfillSnapshots();
+    });
     void this.refreshDevices().catch(() => undefined);
   }
 
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
   lockRevoked(): void {
     this.teardown();
+    this.snapshots?.clear();
     this.images.dispose();
     this.patch({ phase: 'revoked' });
   }
@@ -263,10 +320,12 @@ export class AppController {
     // never wait on the network. A stalled download must not be able to delay or undo an erase.
     this.teardown();
     this.sync?.stop();
+    this.snapshots?.clear();
     this.images.dispose();
     const db = this.db;
     this.db = null;
     this.relay = this.store = this.outbox = this.drafts = this.sync = this.trust = null;
+    this.snapshots = null;
     this.keys = this.cacheKey = null;
     this.epochKeys.clear();
     applyTheme(DEFAULT_PREFS.theme);
