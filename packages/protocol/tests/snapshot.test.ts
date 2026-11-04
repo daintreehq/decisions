@@ -220,6 +220,24 @@ describe('boundTerminalLines', () => {
     expect(boundTerminalLines('\u001b_apc\u001b\\x\u009d8;;http://x\u009cy')).toEqual(['xy']);
     expect(boundTerminalLines('one\u001b]0;multi\nline title\u0007\ntwo')).toEqual(['one', 'two']);
   });
+  it('never shows the payload of an unterminated control string', () => {
+    expect(boundTerminalLines('visible\u001b]0;hidden')).toEqual(['visible']);
+    expect(boundTerminalLines('visible\u009d0;hidden')).toEqual(['visible']);
+    expect(boundTerminalLines('visible\u001bPq#0;hidden')).toEqual(['visible']);
+    expect(boundTerminalLines('a\u001b]0;cut\u001b[1mb')).toEqual(['ab']);
+    expect(boundTerminalLines('a\u0090cut\u009b31mb')).toEqual(['ab']);
+  });
+  it('stays linear on hostile output full of unterminated control strings', () => {
+    // quadratic stripping would take minutes here; linear takes milliseconds
+    for (const intro of ['\u001bP', '\u001b]', '\u0090', '\u009d', '\u009b']) {
+      const started = Date.now();
+      // the final string is terminated (ST), so the line after it survives
+      const lines = boundTerminalLines(('x' + intro).repeat(100_000) + '\u001b\\\nlast');
+      expect(Date.now() - started, JSON.stringify(intro)).toBeLessThan(2_000);
+      expect(lines.at(-1)).toBe('last');
+      expect(valid(lines)).toBe(true);
+    }
+  });
   it('keeps the newest lines within the line cap', () => {
     const text = Array.from({ length: 500 }, (_, i) => `line ${i}`).join('\n');
     const lines = boundTerminalLines(text);

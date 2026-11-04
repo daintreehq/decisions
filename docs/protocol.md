@@ -462,7 +462,9 @@ Plain text means no control characters (tab excepted), escape sequences or line 
 invalid_state`), for a revision other than the question's current one (`409 revision_conflict`), with an
 `observed_at` no later than the last it accepted for the question (`409 revision_conflict`; the relay keeps that time
 after clearing, so a delayed older snapshot never returns), or with an `observed_at` more than 120 s ahead of relay
-time (`400 validation_error`).
+time (`400 validation_error`). That cap is the clock allowance every signed request already has (section 3), so it
+asks nothing more of a desktop, and it stops a desktop clock running ahead from setting an order watermark that its
+corrected clock could not pass.
 
 **Sharing off.** A record with `sharing: "off"` and no envelope replaces and clears the snapshot and says the desktop
 does not share its panes. The relay then refuses refresh requests (`409 invalid_state`) until the desktop publishes a
@@ -480,7 +482,7 @@ the snapshot and `refresh` is the outstanding request or null.
 **Stale** (`snapshotFreshness`). Freshness is measured in relay time only, so the desktop's, relay's and phone's clocks
 are never compared: `now` is the phone's clock corrected by the offset it measures from the relay (`hello.server_time`),
 age runs from `received_at`, and the refresh deadline is the relay's. `observed_at` (desktop time) is shown to the
-person but never compared with another clock.
+person and orders one desktop's snapshots, but freshness never uses it.
 
 | Result    | When                                                                                                                                                        |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
