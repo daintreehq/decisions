@@ -189,6 +189,21 @@ describe.each(impls)('atomic intent settlement: %s', (_n, make) => {
     });
     expect(await s.hasUncertainIntent('other')).toBe(false);
   });
+  it("a follow-up's intent round-trips its message id, and its uncertainty never blocks the answers", async () => {
+    const s = make();
+    await s.commitNewQuestion(row('q1', 1, { local_status: 'open' }), item('o1', 'q1'));
+    const thread = JSON.stringify([{ message_id: 'm1', delivery: { status: 'delivery-uncertain' } }]);
+    await s.putIntent({ ...base, answer_revision: 0, message_id: 'm1', state: 'intent' });
+    expect(await s.getIntent('i1')).toMatchObject({ message_id: 'm1', answer_revision: 0 });
+    await s.settleIntent('i1', { state: 'uncertain', updated_at: 9 }, 'q1', {
+      messages_json: thread,
+    });
+    expect((await s.getQuestion('q1'))!.messages_json).toBe(thread);
+    expect(await s.hasUncertainIntent('q1')).toBe(false);
+    // An answer's uncertain intent still does.
+    await s.putIntent({ ...base, injection_id: 'i2', state: 'uncertain' });
+    expect(await s.hasUncertainIntent('q1')).toBe(true);
+  });
   it('concurrent partial updates do not clobber each other', async () => {
     const s = make();
     await s.commitNewQuestion(row('q1', 1), item('o1', 'q1'));
@@ -316,6 +331,20 @@ describe('SqliteLocalStore migrations', () => {
     const again = new SqliteLocalStore(path);
     expect((await again.getQuestion('legacy-q'))!.origin.ownership_principal).toBe('');
     await again.close();
+  });
+
+  it('migrates to thread messages: earlier rows have an empty thread and earlier intents are answers', async () => {
+    const path = join(dir, 'v1-threads.db');
+    writeVersion1Database(path);
+    const s = new SqliteLocalStore(path);
+    expect((await s.getQuestion('legacy-q'))!.messages_json).toBe('[]');
+    expect(await s.getIntent('legacy-i')).toMatchObject({ message_id: null, answer_revision: 1 });
+    // A row written by a host that does not know the field yet still reads back with an empty thread.
+    const { messages_json: _m, ...old } = row('q-old', 2);
+    void _m;
+    await s.commitNewQuestion(old as QuestionRow, item('o-old', 'q-old'));
+    expect((await s.getQuestion('q-old'))!.messages_json).toBe('[]');
+    await s.close();
   });
 
   it('a migrated question is invisible to every pane identity, including an empty one', async () => {

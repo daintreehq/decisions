@@ -12,6 +12,7 @@ import {
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  buildSignedMessage,
   createEpochGrant,
   decryptEnvelope,
   encryptEnvelope,
@@ -149,6 +150,10 @@ export class FakeRelay {
   dropMessageReply = 0;
   /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
   holdMessages: Promise<void> | null = null;
+  /** Commit each new posted message to the ledger as `decision.message.posted`, as the relay does. */
+  postMessageEvents = false;
+  /** The next `message_seq` of each question's thread, shared by posted and built messages. */
+  messageSeqs = new Map<string, number>();
   /** Every accepted `PUT /questions/{id}/snapshot` body, in order. */
   snapshots: { questionId: string; body: unknown }[] = [];
   /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
@@ -221,15 +226,30 @@ export class FakeRelay {
       let i = this.messages.findIndex((x) => x.message.record.message_id === id);
       if (i >= 0 && JSON.stringify(this.messages[i]!.message) !== JSON.stringify(b.message))
         return json(409, { code: 'idempotency_collision', message: 'different message' });
+      const fresh = i < 0;
       if (i < 0) i = this.messages.push({ idem: b.idempotency_key, message: b.message }) - 1;
+      const committedAt = new Date().toISOString();
+      // Without `postMessageEvents` the seq is not a ledger seq of this fake: a burnt seq would look like a gap.
+      let eventSeq = 10_000 + i;
+      let messageSeq = i + 1;
+      if (this.postMessageEvents && fresh) {
+        const qid = b.message.record.question_id;
+        messageSeq = (this.messageSeqs.get(qid) ?? 0) + 1;
+        this.messageSeqs.set(qid, messageSeq);
+        eventSeq = this.push('decision.message.posted', qid, null, {
+          message_seq: messageSeq,
+          committed_at: committedAt,
+          record: b.message.record,
+          envelope: b.message.envelope,
+          target_host_id: this.questions.get(qid)!.signed.record.target_host_id,
+        }).seq;
+      }
       const receipt = {
         question_id: m[1],
         message_id: id,
-        message_seq: i + 1,
-        // Not a ledger seq of this fake: the bridge does not read message events yet (#35), and a burnt seq
-        // would look like a ledger gap.
-        event_seq: 10_000 + i,
-        committed_at: new Date().toISOString(),
+        message_seq: messageSeq,
+        event_seq: eventSeq,
+        committed_at: committedAt,
       };
       if (this.dropMessageReply > 0) {
         this.dropMessageReply--;
@@ -488,6 +508,71 @@ export class FakeRelay {
         target_host_id: q.signed.record.target_host_id,
         deliverable: action !== 'confirm-proxy',
       }),
+      ...(opts.dataOverride ?? {}),
+    });
+  }
+
+  /**
+   * Build a validly signed thread message from `signer` (a phone by default) for a question the bridge published,
+   * committed as the relay does: a `decision.message.posted` event with the next `message_seq`.
+   */
+  async messageEvent(opts: {
+    questionId: string;
+    signer: { deviceId: string; keys: DeviceKeys };
+    side?: 'human' | 'agent';
+    text?: string;
+    expectsReply?: boolean;
+    messageId?: string;
+    /** Phone images the content references; their ids are signed into the record unless `attachmentIds` is set. */
+    images?: Record<string, unknown>[];
+    attachmentIds?: string[];
+    /** Replace the encrypted content (to model a phone that lies about its side or images). */
+    content?: Record<string, unknown>;
+    signWith?: DeviceKeys;
+    epoch?: EpochKey;
+    /** Override what the event's `data` claims (to model a lying relay). */
+    dataOverride?: Record<string, unknown>;
+  }): Promise<LedgerEvent> {
+    const o = this.owner;
+    const side = opts.side ?? 'human';
+    const messageId = opts.messageId ?? newId();
+    const images = opts.images ?? [];
+    const envelope = await encryptEnvelope({
+      epochKey: opts.epoch ?? o.epochs.get(1)!,
+      installationId: o.config.installationId,
+      questionId: opts.questionId,
+      recordId: messageId,
+      recordType: 'thread.message',
+      revision: 0,
+      senderDeviceId: opts.signer.deviceId,
+      purpose: 'message-content',
+      plaintext: opts.content ?? {
+        content_version: 1,
+        side,
+        text: opts.text ?? '',
+        ...(side === 'human' ? { images } : {}),
+      },
+    });
+    const signed = await buildSignedMessage({
+      installationId: o.config.installationId,
+      questionId: opts.questionId,
+      messageId,
+      side,
+      signerDeviceId: opts.signer.deviceId,
+      signingKey: (opts.signWith ?? opts.signer.keys).signing.privateKey,
+      expectsReply: opts.expectsReply ?? false,
+      attachmentIds: opts.attachmentIds ?? images.map((i) => i.attachment_id as string),
+      envelope,
+    });
+    const seq = (this.messageSeqs.get(opts.questionId) ?? 0) + 1;
+    this.messageSeqs.set(opts.questionId, seq);
+    const q = this.questions.get(opts.questionId)!;
+    return this.push('decision.message.posted', opts.questionId, null, {
+      message_seq: seq,
+      committed_at: new Date().toISOString(),
+      record: signed.record,
+      envelope: signed.envelope,
+      target_host_id: q.signed.record.target_host_id,
       ...(opts.dataOverride ?? {}),
     });
   }

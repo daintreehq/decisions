@@ -479,6 +479,60 @@ describe('HTTP MCP: send_followup', () => {
     await settle(bridge);
     expect(relay.messages).toHaveLength(1);
   });
+
+  it('get_decision returns the thread: the agent’s follow-ups and the person’s, with delivery, the answer unchanged', async () => {
+    const { mcp, bridge, relay, phone, sink } = await boot({ bridge: { followUps: true } });
+    relay.postMessageEvents = true;
+    const id = await ask(mcp);
+    await settle(bridge);
+    await relay.answerEvent({ questionId: id, phone, options: [], text: 'Dark red.' });
+    await bridge.catchUp();
+    const answered = (await call(mcp, 'get_decision', { question_id: id })).structuredContent;
+    await call(mcp, 'send_followup', {
+      question_id: id,
+      text: 'The burgundy or the maroon?',
+      expects_reply: true,
+    });
+    await settle(bridge);
+    await bridge.catchUp();
+    const reply = await relay.messageEvent({ questionId: id, signer: phone, text: 'Maroon.' });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(2); // the answer and the person's follow-up; never the agent's own
+
+    const d = await call(mcp, 'get_decision', { question_id: id });
+    const { thread, ...decision } = d.structuredContent;
+    const { thread: _was, ...was } = answered;
+    void _was;
+    expect(decision).toEqual(was);
+    expect(d.content[0].text).toContain('2 follow-up messages in the thread; none changes the answer.');
+    expect(thread).toEqual([
+      expect.objectContaining({ kind: 'answer', revision: 1, source: 'human', text: 'Dark red.' }),
+      expect.objectContaining({
+        kind: 'message',
+        side: 'agent',
+        message_seq: 1,
+        expects_reply: true,
+        text: 'The burgundy or the maroon?',
+        images: [],
+        delivery: null,
+      }),
+      expect.objectContaining({
+        kind: 'message',
+        side: 'human',
+        message_id: (reply.data as { record: { message_id: string } }).record.message_id,
+        message_seq: 2,
+        expects_reply: false,
+        text: 'Maroon.',
+        delivery: expect.objectContaining({
+          status: 'terminal-delivered',
+          injection_id: sink.typed[1]!.id,
+          error_code: null,
+        }),
+      }),
+    ]);
+    // Another pane still sees nothing of it.
+    expect((await call(mcp, 'get_decision', { question_id: id }, OTHER)).isError).toBe(true);
+  });
 });
 
 describe('HTTP MCP: workflow gates', () => {
