@@ -322,7 +322,11 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     const answered = await act(w, phone, 'answer', questionId, 0, {
       actionId,
       attachmentIds: [forAnswer.attachmentId],
-      content: { selected_option_ids: ['approve'], text: 'see the screenshot', images: [forAnswer.ref] },
+      content: {
+        selected_option_ids: ['approve'],
+        text: 'see the screenshot',
+        images: [forAnswer.ref],
+      },
     });
     expect(answered.res.status).toBe(201);
     const messageId = newId();
@@ -366,7 +370,12 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     }
     // Threads alone do not unlock them: an image-bearing answer also needs the image feature.
     const threadsOnly = (
-      await host.call('GET', '/api/v1/events', undefined, 'after=0&limit=100&features=thread-messages-v1')
+      await host.call(
+        'GET',
+        '/api/v1/events',
+        undefined,
+        'after=0&limit=100&features=thread-messages-v1',
+      )
     ).json.events as { seq: number }[];
     expect(threadsOnly.map((e) => e.seq)).not.toContain(answered.res.json.event_seq);
     expect(threadsOnly.map((e) => e.seq)).not.toContain(said.res.json.event_seq);

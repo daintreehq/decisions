@@ -104,7 +104,9 @@ describe('schema migrations', () => {
     const phone = await pairDevice(w);
     const questionId = newId();
     const asked = await uploadImage(w, questionId, PNG);
-    expect((await ask(w, { questionId, attachmentIds: [asked.attachmentId] })).res.status).toBe(201);
+    expect((await ask(w, { questionId, attachmentIds: [asked.attachmentId] })).res.status).toBe(
+      201,
+    );
     const later = newId();
     const pending = await uploadImage(w, later, PNG);
 
@@ -135,7 +137,10 @@ describe('schema migrations', () => {
       (await ask(w, { questionId: later, attachmentIds: [pending.attachmentId] })).res.status,
     ).toBe(201);
     const actionId = newId();
-    const img = await uploadPhoneImage(w, phone, questionId, { kind: 'answer', record_id: actionId });
+    const img = await uploadPhoneImage(w, phone, questionId, {
+      kind: 'answer',
+      record_id: actionId,
+    });
     expect(img.complete!.status).toBe(200);
     const answered = await act(w, phone, 'answer', questionId, 0, {
       actionId,

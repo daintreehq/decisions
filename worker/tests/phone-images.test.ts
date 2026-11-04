@@ -271,7 +271,11 @@ describe('reserving', () => {
     expect([refused.status, refused.json.code]).toEqual([409, 'invalid_state']);
     const overdue = (await ask(w)).questionId;
     await inRoom((room) =>
-      room.run(`UPDATE questions SET expires_at = ? WHERE question_id = ?`, Date.now() - 1, overdue),
+      room.run(
+        `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
+        Date.now() - 1,
+        overdue,
+      ),
     );
     const late = await reserve(overdue);
     expect([late.status, late.json.code]).toEqual([410, 'expired']);
@@ -329,8 +333,7 @@ describe('reserving', () => {
     ).toBe('idempotency_collision');
     // A fresh key cannot take an id already in use.
     expect(
-      (await phone.call('POST', path(questionId), { ...body, idempotency_key: newId() })).json
-        .code,
+      (await phone.call('POST', path(questionId), { ...body, idempotency_key: newId() })).json.code,
     ).toBe('invalid_state');
     const count = await inRoom(
       (room) => room.q1<{ n: number }>(`SELECT COUNT(*) AS n FROM attachments`)!.n,
@@ -662,7 +665,9 @@ describe('cleanup and retention', () => {
     );
     for (const img of [reserved, uploaded, completed, kept]) {
       const job = jobs.find((j) => j.attachment_id === img.attachmentId)!;
-      expect(job.run_at).toBe((await row(img.attachmentId))!.created_at + LIMITS.phoneImageOrphanMs);
+      expect(job.run_at).toBe(
+        (await row(img.attachmentId))!.created_at + LIMITS.phoneImageOrphanMs,
+      );
       expect(job.question_id).toBeNull();
     }
     expect(await stored(uploaded.attachmentId)).not.toBeNull();

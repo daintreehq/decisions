@@ -419,10 +419,11 @@ nonce for every upload.
 1. `POST /questions/{id}/images/reservations` (phone, tablet) `PhoneImageReserveBody {protocol_version,
 idempotency_key, attachment_id, binding: {kind: "answer" | "message", record_id}, ciphertext_bytes,
 sha256_ciphertext, mime_category: "image"}` → `AttachmentReservation`. `record_id` is the `action_id` or
-   `message_id` the image will be signed into. The question must exist and take messages (section 16): `404
-   not_found`, `410 expired` or `409 invalid_state` otherwise, and `409 invalid_state` when its publishing desktop
-   does not declare `phone-images-v1`. A retry with the same `idempotency_key` and body on the same question returns
-   the original reservation; the same key on another question is `409 idempotency_collision`.
+   `message_id` the image will be signed into. The question must exist and take messages (section 16), or the
+   relay answers `404 not_found`, `410 expired` or `409 invalid_state`; it is also `409 invalid_state` when the
+   publishing desktop does not declare `phone-images-v1`. A retry with the same `idempotency_key` and body on the
+   same question returns the original reservation; the same key on another question is
+   `409 idempotency_collision`.
 2. `PUT /attachments/{id}/content` and `POST /attachments/{id}/complete`, as for question attachments, by the same
    device. The reservation's kind decides the role: a desktop is refused a phone image's upload or completion
    (`403 forbidden`), as a phone or tablet is a question attachment's. Completion also checks the stored object's
@@ -432,8 +433,8 @@ sha256_ciphertext, mime_category: "image"}` → `AttachmentReservation`. `record
    `MessageRecord.attachment_ids`) and the same images in the encrypted content. At commit the relay requires every
    listed id to be completed, reserved by the signer for this question and exactly this `binding`, and not yet bound;
    it binds them all or commits nothing (`400 validation_error`). An image binds once, and one past its orphan
-   deadline (below) no longer binds. The publishing desktop must still declare `phone-images-v1` at commit (`409
-   invalid_state`), or it would be sent nothing it could deliver.
+   deadline (below) no longer binds. At commit the publishing desktop must still declare `phone-images-v1`, or it
+   would be sent nothing it could deliver (`409 invalid_state`).
 4. Readers check `imagesMatchRecord`, then the downloaded image's size, MIME and `sha256`. A reader that cannot fetch
    or verify an image still shows the answer or message, and shows that image as unavailable. A desktop types the
    words with each image's local path, or its reason for being unavailable, into the asking pane (integration spec

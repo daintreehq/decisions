@@ -270,7 +270,11 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
       // A bound phone image's retention ended. Claim it synchronously before touching R2, so nothing can read
       // it while the object goes; a retry after a failed delete finds the claim and finishes the job.
       const id = job.attachment_id ?? '';
-      const a = room.q1<{ object_key: string; delete_after: number | null; object_deleted: number }>(
+      const a = room.q1<{
+        object_key: string;
+        delete_after: number | null;
+        object_deleted: number;
+      }>(
         `SELECT object_key, delete_after, object_deleted FROM attachments WHERE attachment_id = ? AND kind = 'phone'`,
         id,
       );
