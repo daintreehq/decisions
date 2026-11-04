@@ -504,7 +504,9 @@ describe('HTTP MCP: send_followup', () => {
     const { thread: _was, ...was } = answered;
     void _was;
     expect(decision).toEqual(was);
-    expect(d.content[0].text).toContain('2 follow-up messages in the thread; none changes the answer.');
+    expect(d.content[0].text).toContain(
+      '2 follow-up messages in the thread; none changes the answer.',
+    );
     expect(thread).toEqual([
       expect.objectContaining({ kind: 'answer', revision: 1, source: 'human', text: 'Dark red.' }),
       expect.objectContaining({

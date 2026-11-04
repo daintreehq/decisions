@@ -58,6 +58,8 @@ export interface StoredMessage {
   envelope_digest: string;
   /** The message's relay envelope, as JSON. */
   sealed: string;
+  /** The host reference the relay keyed its delivery by (the question's at publication): receipts name it. */
+  target_host_id: string;
   /** Human messages only; null for the agent's own. */
   delivery: MessageDelivery | null;
 }
@@ -102,7 +104,6 @@ export function isPendingMessage(m: StoredMessage): boolean {
  * not reported: the relay learns what the retry led to.
  */
 export function unreportedStatuses(d: MessageDelivery): LocalMessageStatus[] {
-  if (d.reported === null)
-    return d.status === 'received' ? ['received'] : ['received', d.status];
+  if (d.reported === null) return d.status === 'received' ? ['received'] : ['received', d.status];
   return d.status === 'received' || d.status === d.reported ? [] : [d.status];
 }

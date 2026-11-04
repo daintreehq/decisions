@@ -289,7 +289,12 @@ export const TOOLS = [
                 properties: {
                   status: {
                     type: 'string',
-                    enum: ['received', 'terminal-delivered', 'needs-attention', 'delivery-uncertain'],
+                    enum: [
+                      'received',
+                      'terminal-delivered',
+                      'needs-attention',
+                      'delivery-uncertain',
+                    ],
                   },
                   received_at: { type: 'string' },
                   terminal_delivered_at: { type: ['string', 'null'] },

@@ -627,7 +627,9 @@ export class DecisionsBridge {
         if (e instanceof TransientError) throw e;
         unreadable = true; // listed without its words; never shown as an empty message that was read
       }
-      const paths = new Map((m.delivery?.stored_images ?? []).map((s) => [s.attachment_id, s.path]));
+      const paths = new Map(
+        (m.delivery?.stored_images ?? []).map((s) => [s.attachment_id, s.path]),
+      );
       out.push({
         seq: m.event_seq,
         entry: {

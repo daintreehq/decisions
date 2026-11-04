@@ -1,8 +1,9 @@
 # @daintreehq/decisions-client
 
 The desktop side of [Daintree Decisions](https://github.com/daintreehq/decisions): the relay client, the
-hibernatable socket, durable local stores, the delivery bridge that types answers back into the right agent pane,
-and the HTTP MCP server that gives agents the `ask_human` and `send_followup` tools.
+hibernatable socket, durable local stores, the delivery bridge that types answers and the person's follow-up
+messages back into the right agent pane, and the HTTP MCP server that gives agents the `ask_human` and
+`send_followup` tools.
 
 ```bash
 npm install @daintreehq/decisions-client

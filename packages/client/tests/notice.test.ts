@@ -335,7 +335,13 @@ describe('formatFollowupNotice', () => {
     expect(question.length).toBeLessThan(MAX_FOLLOWUP_QUESTION_CHARS + 40);
     expect(lines.some((l) => l.startsWith('text:'))).toBe(false);
     expect(lines.some((l) => l.startsWith('image_'))).toBe(false);
-    const unreadable = formatFollowupNotice({ ...base, question: '', messageId: 'm', injectionId: 'i', text: 'hi' });
+    const unreadable = formatFollowupNotice({
+      ...base,
+      question: '',
+      messageId: 'm',
+      injectionId: 'i',
+      text: 'hi',
+    });
     expect(unreadable.split('\n').some((l) => l.startsWith('question:'))).toBe(false);
   });
 

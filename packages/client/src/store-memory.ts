@@ -30,7 +30,10 @@ export class MemoryLocalStore implements LocalStore {
   }
   async commitNewQuestion(row: QuestionRow, outbox: OutboxItem) {
     if (this.questions.has(row.question_id)) throw new Error('duplicate question');
-    this.questions.set(row.question_id, clone({ ...row, messages_json: row.messages_json ?? '[]' }));
+    this.questions.set(
+      row.question_id,
+      clone({ ...row, messages_json: row.messages_json ?? '[]' }),
+    );
     this.outbox.set(outbox.id, clone(outbox));
   }
   async getQuestion(id: string) {

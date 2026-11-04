@@ -192,7 +192,9 @@ describe.each(impls)('atomic intent settlement: %s', (_n, make) => {
   it("a follow-up's intent round-trips its message id, and its uncertainty never blocks the answers", async () => {
     const s = make();
     await s.commitNewQuestion(row('q1', 1, { local_status: 'open' }), item('o1', 'q1'));
-    const thread = JSON.stringify([{ message_id: 'm1', delivery: { status: 'delivery-uncertain' } }]);
+    const thread = JSON.stringify([
+      { message_id: 'm1', delivery: { status: 'delivery-uncertain' } },
+    ]);
     await s.putIntent({ ...base, answer_revision: 0, message_id: 'm1', state: 'intent' });
     expect(await s.getIntent('i1')).toMatchObject({ message_id: 'm1', answer_revision: 0 });
     await s.settleIntent('i1', { state: 'uncertain', updated_at: 9 }, 'q1', {

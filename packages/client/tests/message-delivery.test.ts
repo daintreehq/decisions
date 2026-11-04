@@ -153,6 +153,9 @@ describe('a follow-up reaches the exact pane that asked', () => {
       injection_id: typed.id,
     });
     expect(new Set(r.map((x) => x.idempotency_key)).size).toBe(2);
+    // Named by the host the relay keyed the delivery by: the question's at publication.
+    const host = env.relay.questions.get(env.qid)!.signed.record.target_host_id;
+    expect(r.map((x) => x.host_id)).toEqual([host, host]);
 
     // Replaying the ledger types nothing twice and reports nothing twice.
     await env.bridge.catchUp();

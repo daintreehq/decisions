@@ -1,4 +1,9 @@
-import { MAX_NOTICE_BYTES, formatAnswerNotice, formatFollowupNotice, noticeChunk } from './notice.js';
+import {
+  MAX_NOTICE_BYTES,
+  formatAnswerNotice,
+  formatFollowupNotice,
+  noticeChunk,
+} from './notice.js';
 import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
 import { openAnswerContent, openMessageContent, openQuestionContent } from './at-rest.js';
 import { RelayError } from './errors.js';
@@ -539,8 +544,7 @@ export class DeliveryEngine {
       const signedIds =
         i.kind === 'answer' ? (i.content.image_ids ?? []) : i.message.attachment_ids;
       if (images.length === 0 && signedIds.length === 0) continue;
-      const prior =
-        i.kind === 'answer' ? i.entry.stored_images : i.message.delivery?.stored_images;
+      const prior = i.kind === 'answer' ? i.entry.stored_images : i.message.delivery?.stored_images;
       const stored = new Map((prior ?? []).map((s) => [s.attachment_id, s.path]));
       i.images = await resolvePhoneImages(this.ctx, this.o.phoneImages, {
         questionId: i.q.question_id,
@@ -667,7 +671,9 @@ export class DeliveryEngine {
         for (const i of chunk) {
           if (i.q.question_id !== q.question_id) continue;
           const live =
-            i.kind === 'answer' ? answers.has(i.entry.entry_id) : messages.has(i.message.message_id);
+            i.kind === 'answer'
+              ? answers.has(i.entry.entry_id)
+              : messages.has(i.message.message_id);
           if (!live) return false;
         }
       }
@@ -763,7 +769,8 @@ export class DeliveryEngine {
         // The terminal may or may not have received the text: never retry blindly.
         const code = result.code ?? 'inject_ambiguous';
         for (const i of chunk) {
-          if (i.kind === 'answer') await this.attention(i.q, code, 'delivery-uncertain', i.intentId);
+          if (i.kind === 'answer')
+            await this.attention(i.q, code, 'delivery-uncertain', i.intentId);
           else await this.messageAttention(i.q, i.message, code, 'delivery-uncertain', i.intentId);
         }
         res.uncertain += chunk.length;
@@ -983,7 +990,8 @@ export class DeliveryEngine {
       ),
       question_id: row.question_id,
       message_id: m.message_id,
-      host_id: await hostRef(row.origin.host_id),
+      // The relay keys the delivery by the host it was published for, even after a resume moved the question.
+      host_id: m.target_host_id || (await hostRef(row.origin.host_id)),
     };
     switch (status) {
       case 'received':

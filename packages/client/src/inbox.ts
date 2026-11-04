@@ -541,6 +541,7 @@ export class Inbox {
       envelope_digest: record.envelope_digest,
       // Stored as the relay holds it: ciphertext under the installation's epoch key, opened only to type or show.
       sealed: JSON.stringify(envelope),
+      target_host_id: v.targetHostId,
       delivery: human
         ? {
             status: 'received',

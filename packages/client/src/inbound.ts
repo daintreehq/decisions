@@ -70,6 +70,8 @@ export interface VerifiedMessage {
   entry: MessageEntry;
   content: MessageContentV1;
   signerRole: Role;
+  /** The host reference the relay keyed the message's delivery by: what its receipts name. Never used to route. */
+  targetHostId: string;
 }
 
 export const revokedKey = (deviceId: string): string => `revoked:${deviceId}`;
@@ -269,7 +271,7 @@ export class EventVerifier {
       return { ok: false, reason: 'not-a-message-event' };
     const parsed = EventData.messagePosted.safeParse(ev.data);
     if (!parsed.success) return { ok: false, reason: 'malformed-event' };
-    const { record, envelope, message_seq, committed_at } = parsed.data;
+    const { record, envelope, message_seq, committed_at, target_host_id } = parsed.data;
     if (messageEnvelopeIssues(record, envelope).length > 0)
       return { ok: false, reason: 'envelope-binding-mismatch' };
     if (record.installation_id !== ctx.identity.config.installationId)
@@ -305,6 +307,7 @@ export class EventVerifier {
       entry: { message_seq, committed_at, record, envelope },
       content: p.data,
       signerRole: role,
+      targetHostId: target_host_id,
     };
   }
 }
