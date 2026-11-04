@@ -728,6 +728,13 @@ export const deleteQuestion: Handler = async (room, c) => {
     deleteSnapshotState(room, id);
     room.run(`DELETE FROM events WHERE question_id = ?`, id);
     room.run(`DELETE FROM questions WHERE question_id = ?`, id);
+    // Phone images stop being readable with the question; the job below then removes their objects.
+    room.run(
+      `UPDATE attachments SET state = 'deleted', deleted_at = COALESCE(deleted_at, ?)
+       WHERE question_id = ? AND kind = 'phone' AND object_deleted = 0`,
+      nowMs(),
+      id,
+    );
     room.schedule({
       kind: 'delete_attachments',
       runAt: nowMs(),

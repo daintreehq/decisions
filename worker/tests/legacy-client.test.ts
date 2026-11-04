@@ -312,7 +312,23 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     const phone = await pairDevice(w);
     const oldPhone = await pairDevice(w, 'phone', 'Old iPhone');
     const { host } = await enrollHost(w);
+    const tablet = await pairDevice(w, 'tablet', 'Threads-only tablet');
     const { questionId } = await ask(w);
+    // Sockets held open while the images commit: the two 0.3.0 clients, one that knows threads only, and one that
+    // knows both.
+    const legacyTicket = async (a: Actor) =>
+      (await a.call('POST', '/api/v1/socket-ticket', { protocol_version: PROTOCOL_VERSION })).json
+        .ticket as string;
+    const live = {
+      host: await hold(await legacyTicket(host)),
+      oldPhone: await hold(await legacyTicket(oldPhone)),
+      threads: await hold(await declare(tablet, ['thread-messages-v1'])),
+      modern: await hold(await declare(phone, ['phone-images-v1', 'thread-messages-v1'])),
+    };
+    for (const sock of Object.values(live)) {
+      await sock.until((f) => f.t === 'hello');
+      await sock.sync(0);
+    }
     const actionId = newId();
     const forAnswer = await uploadPhoneImage(w, phone, questionId, {
       kind: 'answer',
@@ -341,7 +357,8 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     });
     expect(said.res.status).toBe(201);
     // Another question after them, so the hidden events sit mid-stream.
-    expect((await ask(w)).res.status).toBe(201);
+    const sentinel = await ask(w);
+    expect(sentinel.res.status).toBe(201);
 
     const all = (
       await w.owner.call(
@@ -353,6 +370,16 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     ).json.events as { seq: number; event_type: string }[];
     const imageSeqs = [answered.res.json.event_seq, said.res.json.event_seq];
     expect(all.map((e) => e.seq)).toEqual(expect.arrayContaining(imageSeqs));
+    // Live frames: only the socket that declared images got them, and the 0.3.0 sockets parse every frame.
+    for (const [name, sock] of Object.entries(live)) {
+      await sock.until((f) => f.t === 'event' && f.event.seq === sentinel.res.json.event_seq);
+      const seen = sock.parsed().flatMap((f) => (f.t === 'event' ? [f.event.seq as number] : []));
+      for (const seq of imageSeqs)
+        expect([name, seq, seen.includes(seq)]).toEqual([name, seq, name === 'modern']);
+    }
+    for (const sock of [live.host, live.oldPhone])
+      expect(legacySocketReceive(sock.frames).dropped).toEqual([]);
+    for (const sock of Object.values(live)) sock.close();
     const visible = all.filter(
       (e) => !imageSeqs.includes(e.seq) && e.event_type !== 'decision.message.posted',
     );

@@ -3,12 +3,22 @@ import { runDurableObjectAlarm } from 'cloudflare:test';
 import {
   ActionRecord,
   HumanAnswerContentV1,
+  HumanMessageContentV1,
   LIMITS,
+  MESSAGE_RECORD_TYPE,
   PROTOCOL_VERSION,
   imagesMatchRecord,
   type PhoneImageBinding,
 } from '@daintreehq/decisions-protocol';
-import { decryptAttachment, decryptEnvelope, newId } from '@daintreehq/decisions-crypto';
+import {
+  decryptAttachment,
+  decryptEnvelope,
+  envelopeDigest,
+  importSigningPublicKey,
+  newId,
+  verifyObject,
+} from '@daintreehq/decisions-crypto';
+import { deleteQuestion } from '../src/routes/questions.js';
 import { testEnv as env } from './env.js';
 import {
   PNG,
@@ -89,24 +99,34 @@ const row = (id: string) =>
 
 const stored = async (id: string) => env.ATTACHMENTS.head((await row(id))!.object_key);
 
-/** Makes the matching pending jobs due now and runs the alarm until nothing due is left. */
-async function runDue(kind: string, attachmentId?: string) {
-  await inRoom((room) =>
-    attachmentId
-      ? room.run(
-          `UPDATE scheduled_jobs SET run_at = ? WHERE kind = ? AND attachment_id = ? AND status = 'pending'`,
-          Date.now() - 1,
-          kind,
-          attachmentId,
-        )
-      : room.run(
-          `UPDATE scheduled_jobs SET run_at = ? WHERE kind = ? AND status = 'pending'`,
-          Date.now() - 1,
-          kind,
-        ),
-  );
+/**
+ * Makes the matching pending jobs due now, runs the alarm until nothing due is left, and requires every one of
+ * them to have ended as `want` (`pending` for a job that deferred itself), so "it survived" never means "the job
+ * failed".
+ */
+async function runDue(kind: string, attachmentId?: string, want: 'done' | 'pending' = 'done') {
+  const ids = await inRoom((room) => {
+    const jobs = room
+      .q<{ job_id: string; attachment_id: string | null }>(
+        `SELECT job_id, attachment_id FROM scheduled_jobs WHERE kind = ? AND status = 'pending'`,
+        kind,
+      )
+      .filter((j) => !attachmentId || j.attachment_id === attachmentId);
+    for (const j of jobs)
+      room.run(`UPDATE scheduled_jobs SET run_at = ? WHERE job_id = ?`, Date.now() - 1, j.job_id);
+    return jobs.map((j) => j.job_id);
+  });
+  expect(ids.length).toBeGreaterThan(0);
   await runDurableObjectAlarm(stub());
   await settle();
+  const statuses = await inRoom((room) =>
+    ids.map(
+      (id) =>
+        room.q1<{ status: string }>(`SELECT status FROM scheduled_jobs WHERE job_id = ?`, id)!
+          .status,
+    ),
+  );
+  expect(statuses).toEqual(ids.map(() => want));
 }
 
 const question = async (a: Actor, id: string) =>
@@ -244,10 +264,44 @@ describe('uploading phone images (end to end)', () => {
     );
     expect(imagesMatchRecord(record.attachment_ids ?? [], content.images ?? [])).toBe(true);
     expect(content.images).toEqual([img.ref]);
+    const signer = await importSigningPublicKey(phone.signingPub);
+    expect(await verifyObject(signer, entry.record)).toBe(true);
+    expect(await envelopeDigest(entry.envelope)).toBe(record.envelope_digest);
+
     const [m] = await thread(phone, questionId);
     expect(m.record.attachment_ids).toEqual([late.attachmentId]);
-    // Every listed image downloads, under its reference's size once decrypted.
-    for (const i of [img, late]) expect((await download(w.owner, i.attachmentId)).status).toBe(200);
+    expect(await verifyObject(signer, m.record)).toBe(true);
+    expect(await envelopeDigest(m.envelope)).toBe(m.record.envelope_digest);
+    const said = HumanMessageContentV1.parse(
+      await decryptEnvelope(m.envelope, new Map([[w.epoch.epoch, w.epoch]]), {
+        installationId: w.installationId,
+        questionId,
+        recordType: MESSAGE_RECORD_TYPE,
+        revision: 0,
+        senderDeviceId: phone.id,
+        purpose: 'message-content',
+      }),
+    );
+    expect(said.images).toEqual([late.ref]);
+    expect(imagesMatchRecord(m.record.attachment_ids, said.images)).toBe(true);
+    // Every listed image downloads and decrypts to what its reference says.
+    for (const i of [img, late]) {
+      const dl = await download(w.owner, i.attachmentId);
+      expect(dl.status).toBe(200);
+      const plain = await decryptAttachment(
+        w.epoch,
+        {
+          installationId: w.installationId,
+          questionId,
+          attachmentId: i.attachmentId,
+          keyEpoch: i.ref.key_epoch,
+        },
+        i.ref.nonce,
+        dl.bytes,
+        i.ref.sha256,
+      );
+      expect(plain.length).toBe(i.ref.size);
+    }
   });
 });
 
@@ -424,18 +478,30 @@ describe('limits', () => {
     expect(gone).toBe(LIMITS.phoneImagesPerQuestion);
     const seventeenth = await reserveBytes(phones[2]!, many, 1000);
     expect([seventeenth.status, seventeenth.json.code]).toEqual([413, 'payload_too_large']);
+    // The byte budget is for the lifetime too: `big` has only seven reservations, all collected now.
+    const refill = await reserveBytes(phones[0]!, big, 1000);
+    expect([refill.status, refill.json.code]).toEqual([413, 'payload_too_large']);
   });
 
-  it('keeps phone image budgets apart from the desktop question-image budgets', async () => {
-    const { w, phone, questionId } = await setup();
-    for (let i = 0; i < LIMITS.phoneImageUnboundPerDevice; i++)
-      expect((await reserveBytes(phone, questionId, 1000, forMessage())).status).toBe(201);
-    // The desktop still reserves its full question-image budget for another question.
+  it("keeps phone image budgets apart from the question's own images", async () => {
+    const w = await claimRelay();
+    await declare(w.owner, IMAGES);
+    const phones = [await pairDevice(w), await pairDevice(w, 'phone', 'Second phone')];
+    // A question asked with the desktop's own images, at that budget's limit.
+    const questionId = newId();
+    const own = [];
+    for (let i = 0; i < LIMITS.attachmentsPerQuestion; i++)
+      own.push(await uploadImage(w, questionId, PNG));
+    const asked = await ask(w, { questionId, attachmentIds: own.map((u) => u.attachmentId) });
+    expect(asked.res.status).toBe(201);
+    // They do not use up the phones' budget on it: all 16 phone images still fit, and no more.
+    for (let i = 0; i < LIMITS.phoneImagesPerQuestion; i++)
+      expect((await reserveBytes(phones[i % 2]!, questionId, 1000, forMessage())).status).toBe(201);
+    expect((await reserveBytes(phones[0]!, questionId, 1000)).status).toBe(413);
+    // Nor do phone images use up the desktop's budget for a question it has yet to ask.
     const next = newId();
-    for (let i = 0; i < LIMITS.attachmentsPerQuestion; i++) {
-      const up = await uploadImage(w, next, PNG, { skipComplete: true });
-      expect(up.put.status).toBe(200);
-    }
+    for (let i = 0; i < LIMITS.attachmentsPerQuestion; i++)
+      expect((await uploadImage(w, next, PNG, { skipComplete: true })).put.status).toBe(200);
   });
 });
 
@@ -520,6 +586,25 @@ describe('binding at commit', () => {
     expect(reuse.res.status).toBe(400);
   });
 
+  it('refuses an otherwise valid image that is not a phone image, or is already bound', async () => {
+    const { w, phone, questionId } = await setup();
+    for (const edit of [`kind = 'question'`, `bound = 1`]) {
+      const messageId = newId();
+      const img = await uploadPhoneImage(w, phone, questionId, forMessage(messageId));
+      expect(img.complete!.status).toBe(200);
+      await inRoom((room) =>
+        room.run(`UPDATE attachments SET ${edit} WHERE attachment_id = ?`, img.attachmentId),
+      );
+      const r = await say(w, phone, questionId, {
+        messageId,
+        attachmentIds: [img.attachmentId],
+        images: [img.ref],
+      });
+      expect([edit, r.res.status, r.res.json.code]).toEqual([edit, 400, 'validation_error']);
+    }
+    expect(await thread(phone, questionId)).toEqual([]);
+  });
+
   it('refuses images once the publishing desktop stops declaring them', async () => {
     const { w, phone, questionId } = await setup();
     const actionId = newId();
@@ -576,19 +661,30 @@ describe('digest mismatch', () => {
     expect((await answerWith(w, phone, questionId, actionId, [img])).res.status).toBe(201);
   });
 
-  it('refuses to complete an upload whose stored object no longer matches the reservation', async () => {
-    const { w, phone, questionId } = await setup();
-    const img = await uploadPhoneImage(w, phone, questionId, forAnswer(), { until: 'put' });
-    expect(img.put!.status).toBe(200);
-    // Same length, different bytes, written behind the relay's back.
-    const key = (await row(img.attachmentId))!.object_key;
-    await env.ATTACHMENTS.put(key, new Uint8Array(img.enc.ciphertext.length).fill(1));
-    const done = await phone.call('POST', `/api/v1/attachments/${img.attachmentId}/complete`, {
-      protocol_version: PROTOCOL_VERSION,
-    });
-    expect([done.status, done.json.code]).toEqual([400, 'validation_error']);
-    expect(await row(img.attachmentId)).toMatchObject({ state: 'uploaded' });
-  });
+  it.each(['a different checksum', 'no checksum'] as const)(
+    'refuses to complete an upload whose stored object no longer matches the reservation (%s)',
+    async (how) => {
+      const { w, phone, questionId } = await setup();
+      const img = await uploadPhoneImage(w, phone, questionId, forAnswer(), { until: 'put' });
+      expect(img.put!.status).toBe(200);
+      // Same length, different bytes, written behind the relay's back.
+      const key = (await row(img.attachmentId))!.object_key;
+      const corrupt = new Uint8Array(img.enc.ciphertext.length).fill(1);
+      await env.ATTACHMENTS.put(
+        key,
+        corrupt,
+        how === 'no checksum' ? {} : { sha256: await sha256Hex(corrupt) },
+      );
+      const head = await env.ATTACHMENTS.head(key);
+      expect(head!.size).toBe(img.enc.ciphertext.length);
+      expect(Boolean(head!.checksums.sha256)).toBe(how === 'a different checksum');
+      const done = await phone.call('POST', `/api/v1/attachments/${img.attachmentId}/complete`, {
+        protocol_version: PROTOCOL_VERSION,
+      });
+      expect([done.status, done.json.code]).toEqual([400, 'validation_error']);
+      expect(await row(img.attachmentId)).toMatchObject({ state: 'uploaded' });
+    },
+  );
 });
 
 describe('who may upload, complete and download', () => {
@@ -614,15 +710,13 @@ describe('who may upload, complete and download', () => {
     expect((await complete(w.owner)).status).toBe(403);
     expect((await complete(other)).status).toBe(404);
     expect((await complete(phone)).status).toBe(200);
-    // Phones still cannot touch a desktop's question image.
+    // Phones still cannot touch a desktop's question image, whatever the body.
     const desktop = await uploadImage(w, newId(), PNG, { skipComplete: true });
-    expect(
-      (
-        await phone.call('POST', `/api/v1/attachments/${desktop.attachmentId}/complete`, {
-          protocol_version: PROTOCOL_VERSION,
-        })
-      ).status,
-    ).toBe(403);
+    for (const body of [{ protocol_version: PROTOCOL_VERSION }, {}])
+      expect(
+        (await phone.call('POST', `/api/v1/attachments/${desktop.attachmentId}/complete`, body))
+          .status,
+      ).toBe(403);
   });
 
   it('downloads by role: nobody before the commit, every active paired device after, nobody unsigned or revoked', async () => {
@@ -692,13 +786,22 @@ describe('cleanup and retention', () => {
 
   it('keeps a bound image for the retention period from its own commit, whatever the question does', async () => {
     const { w, phone, questionId } = await setup();
+    const DAYS = 7;
+    expect(
+      (
+        await w.owner.call('PUT', '/api/v1/settings', {
+          protocol_version: PROTOCOL_VERSION,
+          attachment_retention_days: DAYS,
+        })
+      ).status,
+    ).toBe(200);
     const actionId = newId();
     const answerImage = await uploadPhoneImage(w, phone, questionId, forAnswer(actionId));
     const t0 = Date.now();
     await answerWith(w, phone, questionId, actionId, [answerImage]);
     const bound = (await row(answerImage.attachmentId))!;
     expect(bound.bound_at).toBeGreaterThanOrEqual(t0);
-    expect(bound.delete_after).toBe(bound.bound_at! + 30 * 86_400_000);
+    expect(bound.delete_after).toBe(bound.bound_at! + DAYS * 86_400_000);
     const job = await inRoom((room) =>
       room.q1<{ run_at: number; question_id: string | null; status: string }>(
         `SELECT run_at, question_id, status FROM scheduled_jobs WHERE kind = 'delete_phone_image' AND attachment_id = ?`,
@@ -710,11 +813,27 @@ describe('cleanup and retention', () => {
     // A follow-up's image binds later and keeps its own clock.
     const messageId = newId();
     const followUp = await uploadPhoneImage(w, phone, questionId, forMessage(messageId));
+    await new Promise((r) => setTimeout(r, 5));
+    const t1 = Date.now();
     await say(w, phone, questionId, {
       messageId,
       attachmentIds: [followUp.attachmentId],
       images: [followUp.ref],
     });
+    const later = (await row(followUp.attachmentId))!;
+    expect(later.bound_at).toBeGreaterThanOrEqual(t1);
+    expect(later.bound_at).toBeGreaterThan(bound.bound_at!);
+    expect(later.delete_after).toBe(later.bound_at! + DAYS * 86_400_000);
+    // Its deletion job, run early, defers to the deadline and deletes nothing.
+    await runDue('delete_phone_image', followUp.attachmentId, 'pending');
+    const deferred = await inRoom((room) =>
+      room.q1<{ run_at: number }>(
+        `SELECT run_at FROM scheduled_jobs WHERE kind = 'delete_phone_image' AND attachment_id = ?`,
+        followUp.attachmentId,
+      ),
+    );
+    expect(deferred!.run_at).toBe(later.delete_after);
+    expect(await stored(followUp.attachmentId)).not.toBeNull();
     // The question's own retention (scheduled by the answer) leaves both phone images alone.
     await runDue('delete_attachments');
     for (const img of [answerImage, followUp]) {
@@ -742,6 +861,24 @@ describe('cleanup and retention', () => {
     expect(detail.actions.find((a: any) => a.action === 'answer').record.attachment_ids).toEqual([
       answerImage.attachmentId,
     ]);
+  });
+
+  it("lists and retains the question's own images apart from its phone images", async () => {
+    const { w, phone } = await setup();
+    const questionId = newId();
+    const own = await uploadImage(w, questionId, PNG);
+    expect((await ask(w, { questionId, attachmentIds: [own.attachmentId] })).res.status).toBe(201);
+    const actionId = newId();
+    const img = await uploadPhoneImage(w, phone, questionId, forAnswer(actionId));
+    expect((await answerWith(w, phone, questionId, actionId, [img])).res.status).toBe(201);
+    const detail = await question(w.owner, questionId);
+    expect(detail.attachments.map((a: any) => a.attachment_id)).toEqual([own.attachmentId]);
+    // The question's retention removes its own image and leaves the phone image to its own clock.
+    await runDue('delete_attachments');
+    expect(await stored(own.attachmentId)).toBeNull();
+    expect((await download(w.owner, own.attachmentId)).status).toBe(404);
+    expect(await stored(img.attachmentId)).not.toBeNull();
+    expect((await download(w.owner, img.attachmentId)).status).toBe(200);
   });
 
   it('keeps retention running when the question is cancelled after an image binds', async () => {
@@ -781,6 +918,8 @@ describe('delete', () => {
     await answerWith(w, phone, keep, otherActionId, [elsewhere]);
 
     expect((await w.owner.call('DELETE', `/api/v1/questions/${questionId}`)).status).toBe(200);
+    // Unreadable as soon as the delete returns, before the job removes the objects.
+    expect((await download(w.owner, bound.attachmentId)).status).toBe(404);
     await runDurableObjectAlarm(stub());
     await settle();
     for (const img of [bound, unbound, reserved]) {
@@ -791,6 +930,25 @@ describe('delete', () => {
     expect((await download(w.owner, elsewhere.attachmentId)).status).toBe(200);
   });
 
+  it('makes phone images unreadable in the same transaction that deletes their question', async () => {
+    const { w, phone, questionId } = await setup();
+    const actionId = newId();
+    const img = await uploadPhoneImage(w, phone, questionId, forAnswer(actionId));
+    await answerWith(w, phone, questionId, actionId, [img]);
+    // Read inside the object right after the handler returns, before the cleanup job can run.
+    const state = await inRoom(async (room) => {
+      await deleteQuestion(room, {
+        params: [questionId],
+        auth: { deviceId: w.owner.id, role: 'owner-desktop', installationId: w.installationId },
+      } as never);
+      return room.q1<{ state: string }>(
+        `SELECT state FROM attachments WHERE attachment_id = ?`,
+        img.attachmentId,
+      )!.state;
+    });
+    expect(state).toBe('deleted');
+  });
+
   it.each(['questions', 'everything'] as const)(
     'deleting relay data removes every phone image and reservation (%s)',
     async (scope) => {
@@ -799,10 +957,14 @@ describe('delete', () => {
       const bound = await uploadPhoneImage(w, phone, questionId, forAnswer(actionId));
       await answerWith(w, phone, questionId, actionId, [bound]);
       const unbound = await uploadPhoneImage(w, phone, questionId, forMessage());
-      const keys = [
-        (await row(bound.attachmentId))!.object_key,
-        (await row(unbound.attachmentId))!.object_key,
-      ];
+      const uploaded = await uploadPhoneImage(w, phone, questionId, forMessage(), { until: 'put' });
+      const reserved = await uploadPhoneImage(w, phone, questionId, forMessage(), {
+        until: 'reserve',
+      });
+      expect([uploaded.put!.status, reserved.reserve.status]).toEqual([200, 201]);
+      const keys = [];
+      for (const i of [bound, unbound, uploaded, reserved])
+        keys.push((await row(i.attachmentId))!.object_key);
       const res = await w.owner.call('POST', '/api/v1/admin/delete-data', {
         protocol_version: PROTOCOL_VERSION,
         confirm: 'DELETE',

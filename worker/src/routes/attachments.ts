@@ -92,7 +92,6 @@ export const reserve: Handler = async (room, c) => {
 };
 
 export const complete: Handler = async (room, c) => {
-  c.body(AttachmentCompleteBody);
   const id = c.params[0]!;
   const auth = c.auth!;
   const a = room.q1<{
@@ -108,7 +107,10 @@ export const complete: Handler = async (room, c) => {
      FROM attachments WHERE attachment_id = ?`,
     id,
   );
+  // The role comes first, as when the route admitted desktops only: a device of the other family is refused
+  // whatever its body says.
   if (a) assertUploaderRole(a.kind, auth.role);
+  c.body(AttachmentCompleteBody);
   if (!a || a.creator_device_id !== auth.deviceId)
     throw new ApiError('not_found', 'no such attachment');
   if (a.state === 'available') return json(200, { attachment_id: id, state: 'available' });
