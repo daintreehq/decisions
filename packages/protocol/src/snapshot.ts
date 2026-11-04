@@ -38,7 +38,6 @@ export const SnapshotWaitingReason = z.enum(['prompt', 'question', 'approval', '
 export type SnapshotWaitingReason = z.infer<typeof SnapshotWaitingReason>;
 
 /** C0 controls except tab, DEL and C1 controls: whatever could steer a terminal or a renderer. */
-// eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
 const PlainLine = (max?: number) => {
   const s = max === undefined ? z.string() : z.string().max(max);
@@ -183,9 +182,7 @@ export function snapshotFreshness(i: {
   return i.now - Date.parse(i.snapshot.observed_at) <= LIMITS.snapshotFreshMs ? 'fresh' : 'stale';
 }
 
-// eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
-// eslint-disable-next-line no-control-regex
 const CONTROL_ALL = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
 
 /**

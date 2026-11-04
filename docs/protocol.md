@@ -28,6 +28,10 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 | `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                           |
 | `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, settings, push, voice                                                                  |
 
+With the extensions in sections 16 to 18, a phone or tablet also sends human messages, attaches phone images and asks
+for pane snapshots, and the desktop that published a question (its `originating_device_id`, whatever its role)
+publishes that question's agent messages and pane snapshots and reports delivery of its human messages.
+
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
 role: only `phone`/`tablet` can sign `answer`, `override` and `confirm-proxy` (**human** provenance); only
 desktops sign `proxy-answer` (**proxy** provenance). A `human-required` question can never be satisfied by a proxy
@@ -90,12 +94,17 @@ exchange_pub, pop}`; `pop` signs `pairingPopString`. The relay checks `sha256(se
 - Per-record AES-256-GCM key = `HKDF-SHA256(epoch key, salt="decisions/v1", info=envelopeKeyInfo)`; fresh random
   96-bit nonce per encryption; AAD = `envelopeAadString` binds crypto version, suite, epoch, record id, purpose,
   installation, question, record type, revision and sender device.
-- Content is JSON inside a `CryptoEnvelope`. **Signed records** (`QuestionRecord`, `ActionRecord`) commit to
-  `sha256(canonicalize(envelope))`, so a relay cannot swap ciphertext, and carry the metadata the relay needs
+- Content is JSON inside a `CryptoEnvelope`. **Signed records** (`QuestionRecord`, `ActionRecord`, and the
+  extensions' `MessageRecord` and `PaneSnapshotRecord`) commit to `sha256(canonicalize(envelope))`, so a relay
+  cannot swap ciphertext, and carry the metadata the relay needs
   for routing (requirement, expiry, target host). Everything else — question, context, options, answers,
   attachment captions — is inside the envelope.
+- Envelope purposes: `question-content`, `answer-content`, `history-export`, and for the extensions
+  `message-content` (section 16) and `snapshot-content` (section 18). Message and snapshot envelopes set
+  `aad.revision` to 0: neither belongs to an answer revision.
 - Attachments are encrypted separately (`encryptAttachment`): one AES-GCM blob per image; the nonce, plaintext
-  SHA-256 and MIME live in the encrypted `DecisionContentV1.attachments[]` descriptor.
+  SHA-256 and MIME live in the encrypted `DecisionContentV1.attachments[]` descriptor (phone images: the
+  `PhoneImageReference` in answer or message content, section 17).
 - Clients MUST verify record signatures against the device certificate chain (owner key pinned at pairing) before
   decrypting or acting.
 
@@ -107,19 +116,19 @@ Lifecycle: `open → human-answered | proxy-answered | cancelled | expired`; `pr
 Every state-changing command carries `expected_revision` and the relay compare-and-swaps: **first human answer
 wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 
-| Route                                   | Role          | Notes                                                                                     |
-| --------------------------------------- | ------------- | ----------------------------------------------------------------------------------------- |
-| `POST /questions`                       | desktops      | `{protocol_version, idempotency_key, question:{record, envelope}}` → `201 CommandReceipt` |
-| `GET /questions?status=&cursor=&limit=` | any           | `QuestionList` (summaries only)                                                           |
-| `GET /questions/{id}`                   | any           | `QuestionDetail` incl. action log, attachments, deliveries                                |
-| `POST /questions/{id}/answer`           | phone, tablet | `ActionBody`; `record.action = "answer"`, `expected_revision` = revision seen             |
-| `POST /questions/{id}/override`         | phone, tablet | replace a human/proxy answer; returns to the terminal as a correction                     |
-| `POST /questions/{id}/confirm-proxy`    | phone, tablet | human affirms the proxy answer; not re-delivered                                          |
-| `POST /questions/{id}/proxy-answer`     | desktops      | rejected for `human-required`                                                             |
-| `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                    |
-| `POST /questions/{id}/cancel`           | desktops      | idempotent; cannot remove a committed human answer                                        |
-| `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                   |
-| `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, attachments; emits `decision.deleted`                      |
+| Route                                   | Role          | Notes                                                                                           |
+| --------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| `POST /questions`                       | desktops      | `{protocol_version, idempotency_key, question:{record, envelope}}` → `201 CommandReceipt`       |
+| `GET /questions?status=&cursor=&limit=` | any           | `QuestionList` (summaries only)                                                                 |
+| `GET /questions/{id}`                   | any           | `QuestionDetail` incl. action log, attachments, deliveries                                      |
+| `POST /questions/{id}/answer`           | phone, tablet | `ActionBody`; `record.action = "answer"`, `expected_revision` = revision seen                   |
+| `POST /questions/{id}/override`         | phone, tablet | replace a proxy answer, or (deprecated, section 16.1) a human answer; delivered as a correction |
+| `POST /questions/{id}/confirm-proxy`    | phone, tablet | human affirms the proxy answer; not re-delivered                                                |
+| `POST /questions/{id}/proxy-answer`     | desktops      | rejected for `human-required`                                                                   |
+| `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                          |
+| `POST /questions/{id}/cancel`           | desktops      | idempotent; cannot remove a committed human answer                                              |
+| `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                         |
+| `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, attachments; emits `decision.deleted`                            |
 
 Idempotency: a repeated `idempotency_key` with identical body returns the original receipt; a different body is
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent.
@@ -132,7 +141,8 @@ on every read/write as well as by the alarm).
 ## 7. Event ledger and sync
 
 Every committed transition appends an immutable `LedgerEvent` with a monotonically increasing `seq` assigned by
-the Durable Object. Delivery is **at-least-once**; consumers dedupe by `event_id`. Event types and `data` shapes are
+the Durable Object. Delivery is **at-least-once**; consumers dedupe by `event_id`. Event types added after 0.3.0 are
+sent only to clients that declared the feature they belong to (section 19). Event types and `data` shapes are
 in `api.ts` (`EventData`). Notable: `decision.created` and `decision.*.committed` carry the signed record plus
 ciphertext; `decision.expired` is relay-asserted and unsigned (it never authorises anything).
 
@@ -153,8 +163,8 @@ injection); connect; `sync`; process; `ack`; later `POST /deliveries/terminal` o
 Both the desktop and the PWA hold one socket to the single Durable Object using the WebSocket Hibernation API, so an
 idle connection costs nothing and survives deploys with a reconnect + `sync`.
 
-1. `POST /socket-ticket` (signed) → `{ticket, expires_at, ws_path}`; the ticket is single-use, bound to the
-   device, valid 30 s.
+1. `POST /socket-ticket {protocol_version, features?}` (signed) → `{ticket, expires_at, ws_path}`; the ticket is
+   single-use, bound to the device, valid 30 s. `features` (section 19) sets what the socket is sent.
 2. `GET /api/v1/socket?ticket=…` (WebSocket upgrade). The relay attaches `{device_id, role}` to the socket.
    A second socket from the same device closes the older one with code `4409`.
 3. Server frames (`ServerFrame`): `hello`, `event`, `caught_up {high_water, has_more}`, `pairing`, `res`, `revoked`, `error`.
@@ -189,7 +199,8 @@ attached image has been downloaded, decrypted and checked against its descriptor
 `reviewed_attachment_digests` lists the plaintext SHA-256 of each image the phone displayed. The desktop reports
 the answer as bound to the images only when that list equals the question's attachment digests. Attachments are
 fixed when a question is created, so different images are always a different question, and an answer to one
-never applies to another.
+never applies to another. Images a phone attaches later (section 17) are a separate set with their own budget; they
+never join the question's attachments or `reviewed_attachment_digests`.
 
 ## 10. Devices, keys and revocation
 
@@ -236,7 +247,9 @@ decoding (terminal line wraps). Both objects are strict: unknown top-level field
 ## 11. Push, reminders and expiry
 
 `GET /push/config`, `POST /push/subscriptions {endpoint, p256dh, auth}`, `DELETE /push/subscriptions/{id}`,
-`POST /push/test`. Payloads are generic JSON (`{"type":"decision-new","question_id":"…"}`) encrypted per RFC 8291 and
+`POST /push/test`. Payloads are generic JSON (`{"type":"decision-new","question_id":"…"}`; every allowed shape is `PushPayload`, which
+admits a type and a question id and nothing else, and `decision-reply` marks an agent message that expects a reply)
+encrypted per RFC 8291 and
 signed with VAPID (RFC 8292); the lock-screen text is fixed client-side by the service worker. Endpoints must be HTTPS
 on a known push-service host. One Durable Object alarm drives a SQL `scheduled_jobs` table: initial notification
 (deferred for `proxy-*` questions until the proxy abstains or a grace period passes), reminders (first after 4 h, then
@@ -249,7 +262,7 @@ hours and reminder preferences (notification preferences only; they never delay 
 `POST /deliveries/terminal {question_id, answer_revision, injection_id, host_id}`: text was actually typed into the
 agent terminal (**not** inferred from receipt). `POST /deliveries/failed {…, status: needs-attention |
 delivery-uncertain, error_code}`. Each emits a ledger event so the phone shows `queued → delivered to desktop →
-terminal delivered`.
+terminal delivered`. Human thread messages have their own per-message receipts (section 16.4).
 
 ## 13. Voice (optional, separately disclosed)
 
@@ -267,10 +280,261 @@ logged.
 ## 14. Admin
 
 `GET /admin/diagnostics` (owner) → `Diagnostics` (counters only, no content). `POST /admin/delete-data {confirm:
-"DELETE", scope: "questions" | "everything"}` (owner).
+"DELETE", scope: "questions" | "everything"}` (owner). Both scopes also remove every thread message, message receipt,
+phone image and reservation, pane snapshot and outstanding snapshot refresh.
 
 ## 15. Conformance
 
 A compatible relay MUST pass `worker/tests/*.test.ts` semantics: signature/replay rejection, CAS and first-answer-wins,
 proxy never satisfying `human-required`, idempotency, ordered event paging, revocation, reminder cancellation,
-attachment integrity, and no plaintext in storage.
+attachment integrity, no plaintext in storage, and feature filtering that keeps a 0.3.0 client parsing every page and
+frame (section 19).
+
+## Extensions: threads, phone images and pane snapshots
+
+Sections 16 to 19 define three opt-in extensions, each named by a feature (section 19). Their shapes are in
+`thread.ts`, `snapshot.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
+and `openapi.json` when the relay serves them; until a relay advertises a feature in `GET /info`, clients MUST NOT
+use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
+with messages in both directions (`THREAD_FIXTURE`), phone image references, a fresh snapshot, stale snapshots and a
+sharing-off record. Content there is plaintext and records are unsigned templates that each test encrypts and signs
+with its own keys.
+
+## 16. Thread messages (`thread-messages-v1`)
+
+A message is a follow-up on one existing question, from one of two sides:
+
+- **human**: signed by a paired `phone` or `tablet`;
+- **agent**: signed by the desktop that published the question on behalf of the asking pane, the device whose id is
+  the question's `originating_device_id`. `target_host_id` is a host reference, not a device id. No other desktop,
+  not even the owner, speaks for another desktop's agent.
+
+`MessageRecord` (signed): `{v, type: "thread.message", installation_id, question_id, message_id, side,
+expects_reply, attachment_ids, created_at, envelope_digest, signer_device_id, signature}`. The signer chooses
+`message_id`, which never changes and is never reused. `expects_reply` is true only on an agent message that waits on
+the person. `attachment_ids` lists phone images (section 17) and is empty on an agent message.
+
+The envelope has purpose `message-content`, `record_id = message_id`, `aad.record_type = "thread.message"` and
+`aad.revision = 0`. Content is `HumanMessageContentV1 {content_version: 1, side: "human", text, images[]}` (text,
+images or both) or `AgentMessageContentV1 {content_version: 1, side: "agent", text}` (non-blank text). Message
+content has no options, approval or reason: unknown fields are dropped. Before showing a message, a client checks
+that `content.side` equals `record.side` and that the content's image ids equal the record's (`imagesMatchRecord`).
+
+**Order.** The relay assigns `message_seq` (1, 2, … per question) when it commits a message. It is independent of
+the question's `revision`: nothing is compare-and-swapped, so concurrent senders never conflict. A retry with the same
+`idempotency_key` and body, or the same record under the same `message_id`, returns the original receipt; the same
+`message_id` with a different record is `409 idempotency_collision`. Retries are recognised before the state and
+quota checks.
+
+**Which states take messages** (`applyMessage`, `isThreadClosedStatus`):
+
+| `status`                  | App shows    | Human message       | Agent message       |
+| ------------------------- | ------------ | ------------------- | ------------------- |
+| `open`                    | Needs you    | accepted            | accepted            |
+| `human-answered`          | Answered     | accepted            | accepted            |
+| `proxy-answered`          | Model answer | accepted            | accepted            |
+| `expired`                 | Expired      | `410 expired`       | `410 expired`       |
+| `cancelled` ("withdrawn") | Withdrawn    | `409 invalid_state` | `409 invalid_state` |
+
+"Withdrawn" is how the app shows `cancelled`; there is no separate status. An answer is final for the answer, not for
+the thread, so answered questions keep taking messages. Expired and cancelled questions are closed, and a `reopen`
+opens the thread again with its earlier messages and order intact. The relay checks the status inside the committing
+transaction.
+
+**A message never changes the decision.** It leaves `status`, `revision`, the proxy state, the answer in force,
+`deliverable` and every gate outcome as they were, and it never counts as approval: "approved" in a message is text,
+and a human message on a `proxy-answered` question does not confirm the model's answer. `applyMessage` returns the
+question state unchanged with `deliverable: false` and `approval: false`.
+
+**Limits** (`LIMITS`): text 16 KiB UTF-8 (`messageTextBytes`, the same budget as an answer's text); 4 images per
+message; 200 messages per question over its lifetime, both sides together, not reset by a reopen
+(`messagesPerQuestion`, `409 invalid_state` beyond it); 50 messages per page. The envelope is bounded by
+`envelopeCiphertextChars`, like every envelope.
+
+| Route                                        | Role                                  | Notes                                                                               |
+| -------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------- |
+| `POST /questions/{id}/messages`              | phone, tablet; the publishing desktop | `MessageBody {protocol_version, idempotency_key, message}` → `201 MessageReceipt`   |
+| `GET /questions/{id}/messages?after=&limit=` | any                                   | `MessagesPage`: `MessageView` (entry, `event_seq`, delivery) in `message_seq` order |
+| `POST /deliveries/messages`                  | the publishing desktop                | `MessageReceiptBody` (section 16.4)                                                 |
+
+Events: `decision.message.posted` (`EventData.messagePosted`: the `MessageEntry` and `target_host_id`; the event's
+`question_revision` is null) and `delivery.message` (`EventData.messageDelivery`).
+
+### 16.1 Answers are final
+
+A human answer is final in the product: saying more after answering is a message, not an `override`, and an app built
+for threads never offers to change a human answer. For compatibility, the relay still accepts a phone's `override`
+of a human answer, unchanged (a new revision, delivered as a correction). Today's phone app corrects answers that way
+until its thread UI ships, phones keep running cached copies of it, 0.3.0 Daintree delivers corrections, and the relay
+cannot tell an older app from a newer one. It is deprecated, and a later protocol version may refuse it. Confirming or
+overruling a proxy (model) answer with `confirm-proxy` or `override` is unchanged and not deprecated.
+
+### 16.2 Waiting on the person
+
+An agent message with `expects_reply: true` asks the person something. The thread waits on the person
+(`threadAwaitsHuman`) while the latest agent message expects a reply and nothing human came after it in ledger order:
+a human message, or a human answer, override or confirmation. A later agent message that asks nothing withdraws the
+request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
+"Needs you" again. The relay sends a `decision-reply` push for an agent message that expects a reply.
+
+### 16.3 Delivering human messages
+
+The publishing desktop types each human message into the asking pane the way it types an answer, but as a follow-up,
+never as an answer or an approval. Agent messages are not delivered anywhere; phones read them.
+
+### 16.4 Message receipts
+
+Each human message has its own delivery: `relay-queued → received → terminal-delivered`, or `needs-attention` /
+`delivery-uncertain` with an `error_code`. Only the publishing desktop reports it, with `POST /deliveries/messages`
+`{protocol_version, idempotency_key, question_id, message_id, host_id, status, injection_id (terminal-delivered),
+error_code (needs-attention, delivery-uncertain)}`. `received` is an explicit receipt: a ledger `ack` never marks a
+message received. The crash-recovery key is `messageDeliveryKey(question_id, message_id)`, in place of an answer's
+`(question_id, answer_revision)`: the desktop records its injection intent under that key before touching the
+terminal, reuses its `injection_id` after a restart, and reconciles an uncertain attempt rather than typing again.
+
+## 17. Phone images (`phone-images-v1`)
+
+A phone can attach images to a human answer or a human message after the question exists. Each is a
+`PhoneImageReference {attachment_id, mime: image/png | image/jpeg | image/webp, size, sha256, nonce, key_epoch, alt?}`
+in `HumanAnswerContentV1.images` or `HumanMessageContentV1.images`. `sha256` is the plaintext digest that identifies
+the image. Proxy answer content never carries images.
+
+**Encryption.** Exactly as a question attachment (`encryptAttachment`, `attachmentAadString`, `attachmentKeyInfo`):
+the epoch content key, bound to the installation, question, attachment id and epoch, with a fresh attachment id and
+nonce for every upload.
+
+**Binding an upload to one answer or message.**
+
+1. `POST /questions/{id}/images/reservations` (phone, tablet) `PhoneImageReserveBody {protocol_version,
+idempotency_key, attachment_id, binding: {kind: "answer" | "message", record_id}, ciphertext_bytes,
+sha256_ciphertext, mime_category: "image"}` → `AttachmentReservation`. `record_id` is the `action_id` or
+   `message_id` the image will be signed into. The question must exist and take messages (section 16).
+2. `PUT /attachments/{id}/content` and `POST /attachments/{id}/complete`, as for question attachments, by the same
+   device.
+3. The signer lists the ids in the signed record (`ActionRecord.attachment_ids` on an `answer` or `override`, or
+   `MessageRecord.attachment_ids`) and the same images in the encrypted content. At commit the relay requires every
+   listed id to be completed, reserved by the signer for this question and exactly this `binding`, and not yet bound;
+   it binds them all or commits nothing. An image binds once.
+4. Readers check `imagesMatchRecord`, then the downloaded image's size, MIME and `sha256`.
+
+`ActionRecord.attachment_ids` is optional with no default, so records signed without it verify exactly as before.
+Phone images never join the question's attachments or `reviewed_attachment_digests`, and never count as approval
+evidence. Until a relay advertises `phone-images-v1` it refuses an action that lists images (`400
+validation_error`).
+
+**Limits.** 10 MiB per image; 4 per answer or message; 16 per question over its lifetime, reserved or bound; 64 MiB of
+ciphertext per question; 8 unbound reservations per device. These are separate from the desktop's question-image
+budgets (section 9).
+
+**Retention.** An image no committed record references (reserved, uploaded or completed) is deleted 2 hours after its
+reservation (`phoneImageOrphanMs`). A bound image is kept for the attachment retention period
+(`attachment_retention_days`, default 30) from the commit of the answer or message that references it, whatever the
+question's status later; its reference stays in the encrypted content, and the image then reads as unavailable.
+
+**Delete and export.** `DELETE /questions/{id}` and both `POST /admin/delete-data` scopes remove phone images and
+their reservations along with the question's messages, receipts and snapshot. Copies other devices already downloaded
+cannot be recalled. The desktop's history export carries verified message text and image references (digest, MIME,
+size), not image bytes, as it already treats question attachments; pane snapshots are never exported.
+
+## 18. Pane snapshots (`pane-snapshots-v1`)
+
+A snapshot is what the asking pane looked like, published by the question's publishing desktop. The relay keeps one
+per question: a new one replaces the last.
+
+`PaneSnapshotRecord` (signed): `{v, type: "pane.snapshot", installation_id, question_id, snapshot_id,
+question_revision, observed_at, sharing: "on" | "off", envelope_digest, signer_device_id, signature}`. The envelope
+has purpose `snapshot-content`, `record_id = snapshot_id`, `aad.record_type = "pane.snapshot"` and `aad.revision = 0`.
+Content is `PaneSnapshotContentV1`:
+
+| Field            | Meaning                                                                                          | Limit                            |
+| ---------------- | ------------------------------------------------------------------------------------------------ | -------------------------------- |
+| `observed_at`    | when the desktop read the pane; equals the record's                                              |                                  |
+| `agent_state`    | `idle`, `working`, `waiting`, `directing`, `completed`, `exited`; anything newer reads `unknown` |                                  |
+| `waiting_reason` | `prompt`, `question`, `approval`, `error` or `null`; anything newer reads `null`                 |                                  |
+| `pane_title`     | plain text                                                                                       | 240 characters                   |
+| `terminal_lines` | the newest terminal lines, oldest first, plain text                                              | 200 lines, 32 KiB joined by `\n` |
+
+Plain text means no control characters (tab excepted), escape sequences or line breaks inside a line.
+`boundTerminalLines` turns raw terminal text into lines within these limits.
+
+**Publishing.** `PUT /questions/{id}/snapshot` `PaneSnapshotBody {protocol_version, idempotency_key, snapshot}`
+(the publishing desktop only). The relay refuses a snapshot for a closed question (`410 expired`, `409
+invalid_state`), for a revision other than the question's current one (`409 revision_conflict`), with an
+`observed_at` no later than the last it accepted for the question (`409 revision_conflict`; the relay keeps that time
+after clearing, so a delayed older snapshot never returns), or with an `observed_at` more than 120 s ahead of relay
+time (`400 validation_error`).
+
+**Sharing off.** A record with `sharing: "off"` and no envelope replaces and clears the snapshot and says the desktop
+does not share its panes. The relay then refuses refresh requests (`409 invalid_state`) until the desktop publishes a
+shared snapshot again.
+
+**Refresh.** `POST /questions/{id}/snapshot/refresh` (phone, tablet) `SnapshotRefreshBody {protocol_version,
+idempotency_key}` → `SnapshotRefresh {refresh_id, requested_by_device_id, requested_at, deadline_at}`, where
+`deadline_at` is `requested_at` + 15 s (`snapshotRefreshTimeoutMs`), in relay time. While a refresh is outstanding,
+another returns the same one; a device may ask 6 times a minute. The publishing desktop gets
+`decision.snapshot.refresh_requested`, reads the pane after receiving it and publishes; the first snapshot the relay
+accepts after the request fulfils it. `GET /questions/{id}/snapshot` (any paired device) →
+`PaneSnapshotResponse {question_id, snapshot, refresh}`, where `refresh` is the outstanding request or null.
+
+**Stale** (`snapshotFreshness`, at the phone's `now`):
+
+| Result    | When                                                                                                                                                  |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `none`    | the question is expired or cancelled, or there is no snapshot and no outstanding request                                                              |
+| `off`     | the desktop said sharing is off                                                                                                                       |
+| `pending` | a refresh is outstanding and its deadline has not passed                                                                                              |
+| `stale`   | a refresh passed its deadline with no new snapshot (however recent the last one), or the snapshot was observed more than 60 s ago (`snapshotFreshMs`) |
+| `fresh`   | otherwise                                                                                                                                             |
+
+**Cleared** when the question expires, is cancelled or is deleted, when the desktop turns sharing off, and 24 hours
+after `observed_at` (`snapshotRetentionMs`). A reopened question starts with no snapshot and no outstanding request.
+An answer does not clear it: the thread is still live.
+
+**Events and push.** `decision.snapshot.updated {snapshot_id, observed_at, sharing, target_host_id}` and
+`decision.snapshot.refresh_requested {SnapshotRefresh, target_host_id}` are hints: they carry no title, state or
+terminal text, and readers fetch the current snapshot, so replaying an old hint shows the latest one. Snapshots never
+trigger a push, and no snapshot field fits a `PushPayload`.
+
+## 19. Feature negotiation and 0.3.0 clients
+
+A 0.3.0 client validates every events page and socket frame against a closed `EventType` enum: a page with an unknown
+type fails its whole catch-up, and an unknown frame is dropped. So a relay sends each client only what it declared it
+understands.
+
+**Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`. Lists a client
+receives use `FeatureToken`, so a newer peer's unknown features parse and are ignored (`knownFeatures`).
+
+**Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
+and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No
+declaration, which is every 0.3.0 client, means the 0.3.0 baseline, whatever the device declared before.
+
+**Advertising.** The relay lists the features it implements in `GET /info` (`features`; absent means none). It
+records each device's latest socket-ticket declaration and shows it in `GET /devices` (`DeviceInfo.features`). A
+phone offers messages, images or a snapshot refresh on a question only when the relay and the question's publishing
+desktop both advertise the feature, and the relay refuses a human message, a phone image reservation or a refresh for
+a question whose publishing desktop does not (`409 invalid_state`).
+
+**Filtering** (`requiredFeaturesForEvent`, `isEventVisible`). An event is sent only to a client that declared every
+feature it needs: the new event types need their feature, and an answer or message that lists phone images also needs
+`phone-images-v1`, because a 0.3.0 client would type the answer's text and silently drop its images. This applies to
+`GET /events` (also when tunnelled in a `req` frame), to socket `sync` replays and to live `event` frames.
+
+**Cursors** (`buildEventsPage`), so a client never stalls on events it is not sent:
+
+- `has_more` is true only when another event the client may see is left, so a page that says "more" is never empty;
+- a page that ends the stream sets `next_after` to the high-water mark, past any hidden events;
+- a page cut by its size stops at its last event and never skips a visible one;
+- a socket `caught_up` frame carries the same `next_after` as `high_water`, and the same `has_more`.
+
+A client that turns a feature on later (after an upgrade) backfills from that feature's own routes
+(`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`): its cursor may already be past events it was not
+sent.
+
+**Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive and opt-in, and a client that declares nothing
+sees exactly the 0.3.0 protocol. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
+`HumanAnswerContentV1.images`, `InfoResponse.features`, `DeviceInfo.features`, `SocketTicketBody.features`) parse
+under 0.3.0 schemas, and `attachment_ids` appears only on events a 0.3.0 client is never sent.
+
+**Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
+desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and
+`worker/tests/legacy-client.test.ts` against the relay.
