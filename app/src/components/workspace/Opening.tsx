@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { app } from '../../app/controller.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
+import { cameFromApp } from '../../app/listState.js';
 import { openNavigator } from '../../app/navigator.js';
 import { needsAction } from '../../domain/selectors.js';
 import { RefreshIcon } from '../Icons.js';
@@ -66,7 +67,7 @@ export function WorkspaceOpening() {
   }
   return (
     <div className="ws" data-state="opening">
-      <WorkspaceHeader project="" machine="" />
+      <WorkspaceHeader project="" machine="" back={cameFromApp()} />
       <div className="ws-body">
         <div className="ws-column">{body}</div>
       </div>
