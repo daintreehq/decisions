@@ -91,14 +91,20 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
       30_000,
       `“${text}” in the terminal`,
     );
-  /** Presses at the centre of `selector` and lets go after `ms`, as a finger would. */
+  /** Holds an actionable target while `during` runs, then releases as a finger would. */
   const hold = async (selector: string, during: () => Promise<void>) => {
-    const box = await page.locator(selector).first().boundingBox();
+    const target = page.locator(selector).first();
+    // Raw mouse events do not wait for layout stability or check that the target receives the press.
+    await target.hover();
+    const box = await target.boundingBox();
     if (!box) throw new Error(`${selector} is not on screen`);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
-    await during();
-    await page.mouse.up();
+    try {
+      await during();
+    } finally {
+      await page.mouse.up();
+    }
   };
 
   beforeAll(async () => {
@@ -262,6 +268,10 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
 
   it('dictates while the mic, or the empty field, is held, and letting go stops', async () => {
     await openId('voice');
+    // Restoring the preceding dictation adds Send and moves the mic; wait before measuring its position.
+    await fieldHas('Tell the client to slow down.');
+    // The relay's voice configuration loads separately from the cached question and draft.
+    await page.locator('.dock textarea[placeholder="Type or hold to talk"]').waitFor();
     voice = { words: [{ afterMs: 150, text: 'Include a retry after header.', final: true }] };
     await hold('.dock .dictate-btn', async () => {
       await stop().waitFor({ timeout: 20_000 });
@@ -273,7 +283,7 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await field().fill('');
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     voice = { words: [{ afterMs: 150, text: 'Say when to try again.', final: true }] };
-    await hold('.dock .composer-field', async () => {
+    await hold('.dock .composer-hold', async () => {
       await stop().waitFor({ timeout: 20_000 });
       await fieldHas('Say when to try again.');
     });
