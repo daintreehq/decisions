@@ -39,7 +39,8 @@ export function StatusGlyph({ status, label = true }: { status: RowStatus; label
         {status === 'withdrawn' && (
           <>
             <circle cx="8" cy="8" r="5.5" />
-            <path d="m4.2 11.8 7.6-7.6" />
+            {/* Lucide's ban: the slash falls left to right, so it never reads as the rising stroke of a check. */}
+            <path d="m4.2 4.2 7.6 7.6" />
           </>
         )}
         {status === 'delivery' && (

@@ -116,7 +116,8 @@
   margin-top: 20px;
 }
 .choose-hint {
-  margin-top: 14px !important;
+  /* Close under the heading it explains: the icon-to-heading gap stays the larger. */
+  margin-top: 8px !important;
   font-size: var(--text-xs);
 }
 .choose-hint kbd + kbd {
