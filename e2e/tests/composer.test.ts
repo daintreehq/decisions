@@ -212,7 +212,15 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await expect(
       page.locator('.dock').getByRole('button', { name: 'Send answer' }).count(),
     ).resolves.toBe(0);
+    // Opening the keyboard establishes the action row before typing, so the first character doesn't move it.
+    await page.locator('.dock .composer-field').click();
+    await page.locator('.composer[data-rows="two"]').waitFor();
+    const micBefore = await mic().boundingBox();
     await field().fill('Use 5173, the Vite default.');
+    const micAfter = await mic().boundingBox();
+    expect(micBefore).not.toBeNull();
+    expect(micAfter).not.toBeNull();
+    expect(Math.abs(micAfter!.y - micBefore!.y)).toBeLessThanOrEqual(1);
     await page.locator('.dock').getByRole('button', { name: 'Send answer' }).click();
     await typedHas('Use 5173, the Vite default.');
     await page.locator('.ws').getByText('Use 5173, the Vite default.').first().waitFor();

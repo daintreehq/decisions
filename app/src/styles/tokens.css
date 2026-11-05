@@ -101,10 +101,10 @@
   --safe-r: env(safe-area-inset-right, 0px);
 
   /* Motion: Daintree's tiers. */
-  --dur-fast: 100ms;
-  --dur: 150ms;
-  --dur-enter: 200ms;
-  --dur-exit: 120ms;
+  --dur-fast: 70ms;
+  --dur: 120ms;
+  --dur-enter: 160ms;
+  --dur-exit: 100ms;
   --ease-out: ease-out;
   --ease-enter: cubic-bezier(0.2, 0, 0, 1);
   --ease-exit: cubic-bezier(0.2, 0, 0.7, 0);
@@ -145,5 +145,12 @@
   :root {
     --gutter: 12px;
     --text-question: 1.25rem;
+  }
+}
+
+/* Phone reading and typing use the familiar iOS body size; utility labels retain their hierarchy. */
+@media (max-width: 719px) {
+  :root {
+    --text-md: 1.0625rem;
   }
 }

@@ -155,8 +155,9 @@ export function Composer(p: ComposerProps) {
   const textless = shape.fields.length === 0;
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  // The pill opens as capture starts, not when the first word lands, so nothing moves while the person talks.
-  const two = textless || sendSlot || hasText || hasPhotos || capturing;
+  // Open with the keyboard, before the first keystroke. Typing and clearing text then keep the same control row;
+  // capture also opens before the first word lands, so Stop stays under the finger.
+  const two = focused || textless || sendSlot || hasText || hasPhotos || capturing;
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {
