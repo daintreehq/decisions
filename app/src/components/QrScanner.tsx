@@ -11,7 +11,11 @@ declare global {
   }
 }
 
-type CameraProblem = { title: string; body: string };
+/** A camera failure. `retry` is false when trying again cannot help (no camera, no camera API). */
+type CameraProblem = { title: string; body: string; retry: boolean };
+
+/** What the camera is doing, for the page's one live region. */
+export type ScanStatus = 'starting' | 'live';
 
 /** Camera QR scanner: native BarcodeDetector when present, jsQR on canvas frames otherwise. */
 export function QrScanner({
@@ -19,6 +23,7 @@ export function QrScanner({
   onCancel,
   onPaste,
   onRetry,
+  onStatus,
 }: {
   onResult: (text: string) => void;
   onCancel: () => void;
@@ -26,6 +31,8 @@ export function QrScanner({
   onPaste: () => void;
   /** Start the camera again (for example after allowing it in settings). */
   onRetry: () => void;
+  /** Told when the camera starts and when it is live, so the page can announce it. */
+  onStatus?: (status: ScanStatus | null) => void;
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<CameraProblem | null>(null);
@@ -35,6 +42,7 @@ export function QrScanner({
     let stopped = false;
     let stream: MediaStream | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    onStatus?.('starting');
     (async () => {
       try {
         if (!navigator.mediaDevices?.getUserMedia)
@@ -52,6 +60,7 @@ export function QrScanner({
         v.srcObject = stream;
         await v.play();
         setLive(true);
+        onStatus?.('live');
         const detector = window.BarcodeDetector
           ? new window.BarcodeDetector({ formats: ['qr_code'] })
           : null;
@@ -87,26 +96,31 @@ export function QrScanner({
       } catch (e) {
         stream?.getTracks().forEach((t) => t.stop());
         if (stopped) return;
+        onStatus?.(null);
         const name = e instanceof Error ? e.name : '';
         setError(
           name === 'NotAllowedError' || name === 'SecurityError'
             ? {
                 title: 'Camera access is blocked',
                 body: 'Allow the camera for this site in your browser’s settings, then try again. Or paste the pairing link instead.',
+                retry: true,
               }
             : name === 'NotFoundError' || name === 'OverconstrainedError'
               ? {
                   title: 'No camera found',
                   body: 'This device has no camera Decisions can use. Paste the pairing link instead.',
+                  retry: false,
                 }
               : name === 'NotSupportedError'
                 ? {
                     title: 'This browser can’t use the camera',
                     body: 'Paste the pairing link instead.',
+                    retry: false,
                   }
                 : {
                     title: 'The camera couldn’t start',
                     body: 'Another app may be using it. Try again, or paste the pairing link instead.',
+                    retry: true,
                   },
         );
       }
@@ -115,6 +129,7 @@ export function QrScanner({
       stopped = true;
       if (timer) clearTimeout(timer);
       stream?.getTracks().forEach((t) => t.stop());
+      onStatus?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -127,13 +142,15 @@ export function QrScanner({
         </Callout>
         <div className="onb-actions">
           <button type="button" className="btn primary big" onClick={onPaste}>
-            <LinkIcon size={18} />
+            <LinkIcon size={20} />
             Paste pairing link
           </button>
-          <button type="button" className="btn big" onClick={onRetry}>
-            <RefreshIcon size={18} />
-            Try the camera again
-          </button>
+          {error.retry && (
+            <button type="button" className="btn big" onClick={onRetry}>
+              <RefreshIcon size={20} />
+              Try the camera again
+            </button>
+          )}
           <button type="button" className="btn ghost big" onClick={onCancel}>
             Cancel
           </button>
@@ -147,12 +164,17 @@ export function QrScanner({
       <div className={`scanner-frame${live ? ' live' : ''}`}>
         <video ref={video} playsInline muted aria-label="Camera preview" />
         <span className="scanner-target" aria-hidden="true" />
-        {!live && <span className="scanner-starting">Starting camera…</span>}
+        {!live && (
+          <span className="scanner-starting">
+            <span className="spinner" aria-hidden="true" />
+            Starting camera…
+          </span>
+        )}
       </div>
       <p className="scanner-caption">Point the camera at the code on your computer’s screen.</p>
       <div className="onb-actions">
         <button type="button" className="btn big" onClick={onPaste}>
-          <LinkIcon size={18} />
+          <LinkIcon size={20} />
           Paste pairing link
         </button>
         <button type="button" className="btn ghost big" onClick={onCancel}>
