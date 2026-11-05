@@ -78,13 +78,6 @@ function useSplit(): boolean {
   return on;
 }
 
-function deviceNoun(): string {
-  const ua = globalThis.navigator?.userAgent ?? '';
-  if (/iPad|Tablet/.test(ua) || (/Mac/.test(ua) && navigator.maxTouchPoints > 1)) return 'tablet';
-  if (/iPhone|Android.*Mobile|Mobile/.test(ua)) return 'phone';
-  return 'device';
-}
-
 function useSummaries(): Record<SectionId, string> {
   const snap = useApp();
   const notif = useNotificationStatus(false);
@@ -98,7 +91,7 @@ function useSummaries(): Record<SectionId, string> {
     dictation: dictationSummary(snap.prefs.voice, snap.info),
     notifications: NOTIFICATION_SUMMARY[notif.state],
     'quiet-hours': quietHoursSummary(server),
-    devices: devicesSummary(snap.devices?.devices, snap.config?.deviceId, deviceNoun()),
+    devices: devicesSummary(snap.devices?.devices, snap.config?.deviceId),
     privacy: 'Paired',
     about: aboutSummary(snap.updateAvailable),
   };
@@ -145,7 +138,14 @@ function SettingsIndex({ active, split }: { active?: SectionId; split: boolean }
                   <span className="s-index-icon">
                     <Icon size={18} />
                   </span>
-                  <span className="s-index-label">{sectionTitle(id)}</span>
+                  {/* On a phone the value trails the label; in the wide rail it sits beneath it. */}
+                  <span className="s-index-text">
+                    {/* "&" stays with the word after it, so a wrapped title never ends on it. */}
+                    <span className="s-index-label">
+                      {sectionTitle(id).replace(' & ', ' &\u00a0')}
+                    </span>
+                    {split && values[id] && <span className="s-index-sub">{values[id]}</span>}
+                  </span>
                   {!split && <span className="value">{values[id]}</span>}
                 </Link>
               </li>

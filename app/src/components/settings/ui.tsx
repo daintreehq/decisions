@@ -10,10 +10,13 @@ export function SettingsGroup({
   label,
   children,
   id,
+  footer,
 }: {
   label?: string;
   children: ReactNode;
   id?: string;
+  /** A short note under the group, for what applies to the whole group rather than one row. */
+  footer?: ReactNode;
 }) {
   const hid = useId();
   return (
@@ -24,6 +27,7 @@ export function SettingsGroup({
         </h2>
       )}
       <div className="s-group">{children}</div>
+      {footer && <p className="s-group-foot">{footer}</p>}
     </section>
   );
 }

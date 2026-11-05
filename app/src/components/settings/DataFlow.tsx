@@ -1,42 +1,49 @@
 import type { ReactNode } from 'react';
-import { BellIcon, LaptopIcon, LockIcon, MicIcon, PhoneIcon, ShieldIcon } from '../Icons.js';
+import { BellIcon, LaptopIcon, LockIcon, MicIcon, PhoneIcon } from '../Icons.js';
 
-const FLOW: { icon: ReactNode; who: string; sees: ReactNode }[] = [
+/** Each party, what it can see in a few words (the verdict), then the detail behind it. */
+const FLOW: { icon: ReactNode; who: string; verdict: string; sees: ReactNode }[] = [
   {
     icon: <PhoneIcon size={20} />,
     who: 'Your devices and your computer',
-    sees: 'Everything: questions, context, screenshots and answers. Only they hold the keys.',
+    verdict: 'Everything',
+    sees: 'Questions, context, screenshots and answers. Only they hold the keys.',
   },
   {
     icon: <LockIcon size={20} />,
     who: 'Your relay, in your Cloudflare account',
+    verdict: 'Can’t read your questions or answers',
     sees: (
       <>
-        Questions, answers and images <strong>end-to-end encrypted</strong>, so it can’t read them.
-        It does see routing details: when things happen, their size, expiry times and your device
-        names.
+        They reach it <strong>end-to-end encrypted</strong>, images too. It does see routing
+        details: when things happen, their size, expiry times and your device names. Dictation is
+        the one exception, below.
       </>
     ),
   },
   {
     icon: <BellIcon size={20} />,
     who: 'Push services (Apple, Google, Mozilla)',
-    sees: 'That a notification went to this device. Never the question, project or any agent text.',
+    verdict: 'Only that a notification went out',
+    sees: 'Never the question, project or any agent text.',
   },
   {
     icon: <MicIcon size={20} />,
-    who: 'Dictation providers, only if you turn dictation on',
+    who: 'Dictation providers',
+    verdict: 'Your audio, its transcript and the question, if you turn dictation on',
     sees: (
       <>
-        The audio you dictate, its transcript, and the question (for tidying wording), through your
-        relay. This is <strong>not</strong> end-to-end encrypted.
+        Your audio goes through your relay to the speech provider. If wording is tidied, the
+        transcript and the question also go to the tidying provider. This is <strong>not</strong>{' '}
+        end-to-end encrypted.
       </>
     ),
   },
   {
     icon: <LaptopIcon size={20} />,
     who: 'Daintree, the project',
-    sees: 'Nothing. There is no Daintree server in this system.',
+    verdict: 'Nothing',
+    sees: 'There is no Daintree server in this system.',
   },
 ];
 
@@ -49,6 +56,7 @@ export function DataFlow() {
           <span className="s-row-icon">{f.icon}</span>
           <span className="s-row-text">
             <span className="s-row-label">{f.who}</span>
+            <span className="s-flow-verdict">{f.verdict}</span>
             <span className="s-row-desc">{f.sees}</span>
           </span>
         </li>
@@ -57,13 +65,11 @@ export function DataFlow() {
   );
 }
 
+/** What the design can't protect against. Plain rows: the actor list above is the only one with glyphs. */
 export function PrivacyLimits() {
   return (
     <ul className="s-flow">
       <li className="s-row">
-        <span className="s-row-icon">
-          <ShieldIcon size={20} />
-        </span>
         <span className="s-row-text">
           <span className="s-row-label">The app comes from your relay</span>
           <span className="s-row-desc">
@@ -73,9 +79,6 @@ export function PrivacyLimits() {
         </span>
       </li>
       <li className="s-row">
-        <span className="s-row-icon">
-          <PhoneIcon size={20} />
-        </span>
         <span className="s-row-text">
           <span className="s-row-label">Revoking can’t reach back</span>
           <span className="s-row-desc">
@@ -84,9 +87,6 @@ export function PrivacyLimits() {
         </span>
       </li>
       <li className="s-row">
-        <span className="s-row-icon">
-          <LockIcon size={20} />
-        </span>
         <span className="s-row-text">
           <span className="s-row-label">Lose every key, lose the history</span>
           <span className="s-row-desc">

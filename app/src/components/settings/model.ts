@@ -110,11 +110,17 @@ export function reminderSummary(rm: Reminders): string {
   return `${first}, then ${everyLabel(rm.interval_ms)}, up to ${rm.max} reminders`;
 }
 
-/** The index row's summary for quiet hours. */
+/**
+ * The index row's summary for the section as a whole: the quiet range when it is on, otherwise whether reminders
+ * still run, so an active reminder schedule never reads as "Off".
+ */
 export function quietHoursSummary(s: ServerSettings | null): string {
   const qh = s?.quiet_hours;
   if (!qh) return '';
-  return qh.enabled ? `${qh.start}–${qh.end}` : 'Off';
+  if (qh.enabled) return `${qh.start}–${qh.end}`;
+  const rm = s?.reminders;
+  const reminding = (rm?.enabled && rm.max > 0) || s?.proxy_review_reminder !== false;
+  return reminding ? 'Reminders on' : 'Off';
 }
 
 /** Hours offered for the reminder delays, plus whatever the relay already holds if it is not one of them. */
@@ -156,12 +162,12 @@ export function notificationState(input: {
 export const NOTIFICATION_SUMMARY: Record<NotificationState, string> = {
   checking: '',
   unsupported: 'Not available',
-  'install-needed': 'Needs Home Screen',
+  'install-needed': 'Install first',
   'check-failed': 'Couldn’t check',
   blocked: 'Blocked',
   'not-requested': 'Off',
   'granted-no-subscription': 'Not set up',
-  on: 'On for this device',
+  on: 'On',
 };
 
 /* ---------------- unpairing ---------------- */
@@ -174,14 +180,21 @@ export interface LocalData {
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** Exactly what unpairing erases from this device, in the order it matters to the person. */
+/**
+ * Exactly what unpairing erases from this device, in the order it matters to the person. Only what is really there:
+ * nothing waiting is said once, beside the list, not as an erasure.
+ */
 export function unpairErasures(d: LocalData): string[] {
   return [
-    d.unsent === 0
-      ? 'No unsent answers'
-      : `${count(d.unsent, 'unsent answer', 'unsent answers')}, which will never be sent`,
-    d.drafts === 0 ? 'No drafts' : count(d.drafts, 'draft', 'drafts'),
-    `${count(d.questions, 'saved question', 'saved questions')} and their answers`,
+    ...(d.unsent > 0 ? [count(d.unsent, 'unsent answer', 'unsent answers')] : []),
+    ...(d.drafts > 0 ? [count(d.drafts, 'draft', 'drafts')] : []),
+    ...(d.questions > 0
+      ? [
+          d.questions === 1
+            ? '1 saved question and its answers'
+            : `${d.questions} saved questions and their answers`,
+        ]
+      : []),
     'The keys that let this device read and answer your questions',
     'Your settings on this device: theme, dictation and notifications',
   ];
@@ -201,19 +214,14 @@ export function deviceGroup(
   return 'others';
 }
 
-/** The Devices index summary: "This phone + 2 computers". */
+/** The Devices index summary: how many devices are paired now, this one included ("3 devices"). Always fits a row. */
 export function devicesSummary(
   devices: { device_id: string; role: string; revoked_at: string | null }[] | undefined,
   myId: string | undefined,
-  myNoun: string,
 ): string {
   if (!devices) return '';
-  const computers = devices.filter((d) => deviceGroup(d, myId) === 'computers').length;
-  const others = devices.filter((d) => deviceGroup(d, myId) === 'others').length;
-  const parts = [`This ${myNoun}`];
-  if (computers) parts.push(count(computers, 'computer', 'computers'));
-  if (others) parts.push(count(others, 'other', 'others'));
-  return parts.join(' + ');
+  const paired = devices.filter((d) => deviceGroup(d, myId) !== 'revoked').length;
+  return count(Math.max(paired, 1), 'device', 'devices');
 }
 
 /* ---------------- keyboard ---------------- */

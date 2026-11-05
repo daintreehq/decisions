@@ -36,10 +36,13 @@ export function UnpairDialog({ open, onClose }: { open: boolean; onClose: () => 
     <Dialog
       open={open}
       title="Unpair this device?"
-      onClose={onClose}
+      // Once erasing has started there is nothing to cancel.
+      onClose={() => {
+        if (!busy) onClose();
+      }}
       actions={
         <>
-          <button type="button" className="btn" onClick={onClose}>
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>
             Cancel
           </button>
           <button
@@ -49,11 +52,15 @@ export function UnpairDialog({ open, onClose }: { open: boolean; onClose: () => 
             onClick={() => {
               setBusy(true);
               forgetServerSettings();
-              void app.wipe().then(() => {
-                setBusy(false);
-                onClose();
-                navigate('/', true);
-              });
+              void app
+                .wipe()
+                .then(() => {
+                  setBusy(false);
+                  onClose();
+                  navigate('/', true);
+                })
+                // If erasing fails the dialog stays usable, so the person isn't stuck behind it.
+                .catch(() => setBusy(false));
             }}
           >
             {busy ? 'Erasing…' : 'Unpair and erase'}
@@ -70,6 +77,11 @@ export function UnpairDialog({ open, onClose }: { open: boolean; onClose: () => 
         </ul>
       ) : (
         <p className="s-row-desc">Counting what’s saved here…</p>
+      )}
+      {data && data.unsent === 0 && data.drafts === 0 && (
+        <p className="s-row-desc s-erase-note">
+          Nothing is waiting to be sent, and there are no drafts.
+        </p>
       )}
       {data && data.unsent > 0 && (
         <Callout tone="warn">
@@ -91,6 +103,10 @@ export function PrivacySection() {
   const me = devices?.devices.find((d) => d.device_id === config?.deviceId);
   return (
     <>
+      <p className="s-lead">
+        Who can see your questions and answers, what recovery depends on, and how to unpair this
+        device.
+      </p>
       <SettingsGroup>
         <Row
           label="Paired to your relay"
