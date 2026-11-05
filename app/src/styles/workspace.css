@@ -232,6 +232,16 @@
 .ws-title:not([data-excerpt]) .ws-excerpt .ws-line {
   transform: translateY(100%);
 }
+/* The incoming title is added to the page as the roll starts, so it starts from its side of the cell. Only while
+   rolling: a question that opens does not animate its title in. */
+@starting-style {
+  .ws-title[data-rolling][data-excerpt] .ws-excerpt .ws-line {
+    transform: translateY(100%);
+  }
+  .ws-title[data-rolling]:not([data-excerpt]) .ws-origin .ws-line {
+    transform: translateY(-100%);
+  }
+}
 /* Reduced motion: the title is simply replaced, the outgoing one hidden at once rather than after the roll. */
 @media (prefers-reduced-motion: reduce) {
   .ws-origin,

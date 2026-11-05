@@ -55,6 +55,19 @@ export function WorkspaceHeader({
   const label = backLabel();
   const excerptOn = !!(showExcerpt && excerpt);
   const origin = machine ? `${project} · ${machine}` : project;
+  // At rest only the title on screen is in the page. When it changes, the outgoing one stays for the roll and leaves
+  // when the incoming one has arrived (a state update during render, so the outgoing title is never dropped for a
+  // frame). Reduced motion replaces the title outright, so nothing stays.
+  const [shown, setShown] = useState(excerptOn);
+  const [rolling, setRolling] = useState(false);
+  if (shown !== excerptOn) {
+    setShown(excerptOn);
+    setRolling(
+      typeof matchMedia === 'undefined' || !matchMedia('(prefers-reduced-motion: reduce)').matches,
+    );
+  }
+  const withOrigin = !excerptOn || rolling;
+  const withExcerpt = !!excerpt && (excerptOn || rolling);
   return (
     <header className="ws-head">
       <div className="ws-lead">
@@ -75,28 +88,39 @@ export function WorkspaceHeader({
           </a>
         )}
       </div>
-      <div className="ws-title" data-excerpt={excerptOn || undefined}>
-        {/* Only the title on screen can be reached: the other is inert. The caller moves focus to the question when
-            the excerpt had it and the question scrolls back into view. */}
-        <p
-          className="ws-origin"
-          title={origin}
-          aria-hidden={excerptOn || undefined}
-          inert={excerptOn}
-        >
-          <span className="ws-title-main">
-            <span className="ws-line">{project}</span>
-          </span>
-          {machine && (
-            <span className="ws-title-sub">
-              <span className="ws-line">
-                <span className="sr-only"> on </span>
-                {machine}
-              </span>
+      <div
+        className="ws-title"
+        data-excerpt={excerptOn || undefined}
+        data-rolling={rolling || undefined}
+        onTransitionEnd={(e) => {
+          if (e.propertyName !== 'transform') return;
+          const host = (e.target as HTMLElement).closest('.ws-origin, .ws-excerpt');
+          if (host && !host.hasAttribute('inert')) setRolling(false);
+        }}
+      >
+        {/* Only the title on screen can be reached: the other is inert while it rolls away. The caller moves focus
+            to the question when the excerpt had it and the question scrolls back into view. */}
+        {withOrigin && (
+          <p
+            className="ws-origin"
+            title={origin}
+            aria-hidden={excerptOn || undefined}
+            inert={excerptOn}
+          >
+            <span className="ws-title-main">
+              <span className="ws-line">{project}</span>
             </span>
-          )}
-        </p>
-        {excerpt && (
+            {machine && (
+              <span className="ws-title-sub">
+                <span className="ws-line">
+                  <span className="sr-only"> on </span>
+                  {machine}
+                </span>
+              </span>
+            )}
+          </p>
+        )}
+        {withExcerpt && (
           <button
             type="button"
             className="ws-excerpt"
