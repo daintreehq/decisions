@@ -1239,3 +1239,105 @@
     bottom: calc(64px + var(--safe-b));
   }
 }
+
+/* ---------- viewer with its chrome hidden ----------
+ * A single tap on the image hides the bar, the tools and the dock; another brings them back. The bars slide off
+ * their edges over the stage, which grows to the whole viewport. The image area itself stays where it was
+ * (--fx-bare-*, captured as the chrome hid), so the image keeps its size and position and a zoomed image gets the
+ * whole screen to run into. Without a captured frame (the viewport changed meanwhile) it takes the whole stage.
+ */
+.fx-viewer .fx-bar,
+.fx-viewer .fx-tools {
+  transition:
+    transform var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease-out);
+}
+.fx-viewer.is-bare .fx-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+.fx-viewer.is-bare .fx-tools {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+.fx-overlay .fx-viewer.is-bare .fx-viewer-stage {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--fx-bare-l, 0px);
+  width: var(--fx-bare-w, 100%);
+}
+.fx-overlay .fx-viewer.is-bare .fx-viewer-stage .fs-track {
+  top: var(--fx-bare-t, 0px);
+  height: var(--fx-bare-h, 100%);
+  left: 0;
+  right: 0;
+  bottom: auto;
+}
+@media (pointer: coarse) and (max-width: 44.999em) {
+  /* The floating pill drops past the bottom edge, safe area included. */
+  .fx-viewer.is-bare .fx-tools {
+    bottom: 10px;
+    left: auto;
+    right: auto;
+    transform: translateY(calc(100% + 12px + var(--safe-b)));
+  }
+}
+/* Stop stays reachable while recording, with everything else hidden. */
+.fx-stop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(12px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 2px 2px 2px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface-chrome) 92%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  animation: fx-fade-in var(--dur) var(--ease-out);
+}
+.fx-stop-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fx-stop-btn {
+  width: var(--tap-min);
+  height: var(--tap-min);
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface-page);
+}
+.fx-stop-btn[aria-disabled='true'] {
+  opacity: 0.6;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx-viewer .fx-bar,
+  .fx-viewer .fx-tools {
+    transition: none;
+  }
+  .fx-stop {
+    animation: none;
+  }
+}

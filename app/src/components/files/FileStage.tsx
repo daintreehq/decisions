@@ -9,7 +9,7 @@ import {
   type PointerEvent as RPointerEvent,
   type ReactNode,
 } from 'react';
-import { GestureRecognizer, type GestureEvent, type Point } from './gesture.js';
+import { DEFAULT_GESTURE, GestureRecognizer, type GestureEvent, type Point } from './gesture.js';
 import {
   FIT,
   displayedSize,
@@ -45,6 +45,11 @@ export interface FileStageProps extends Omit<HTMLAttributes<HTMLDivElement>, 'on
   canStep?: (dir: -1 | 1) => boolean;
   /** Click or tap on the stage (not after a drag). */
   onActivate?: () => void;
+  /**
+   * A single tap that is not the first half of a double-tap: it fires once the double-tap window has passed with no
+   * further contact, so a double-tap (zoom) never also counts as a tap. Drags, swipes and pinches never fire it.
+   */
+  onTap?: () => void;
   onNatural: (id: string, size: Size) => void;
   onSize?: (size: Size) => void;
   /** `inline` lets the page scroll vertically and pinch-zoom; `zoom` owns every touch. */
@@ -54,6 +59,8 @@ export interface FileStageProps extends Omit<HTMLAttributes<HTMLDivElement>, 'on
 
 export interface FileStageHandle {
   el: HTMLDivElement | null;
+  /** The image area the zoom maths measure. */
+  track: HTMLDivElement | null;
 }
 
 /**
@@ -70,6 +77,7 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
     onStep,
     canStep,
     onActivate,
+    onTap,
     onNatural,
     onSize,
     touch,
@@ -81,8 +89,18 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
 ) {
   const el = useRef<HTMLDivElement>(null);
   const track = useRef<HTMLDivElement>(null);
-  useImperativeHandle(ref, () => ({ el: el.current }), []);
+  useImperativeHandle(ref, () => ({ el: el.current, track: track.current }), []);
   const rec = useRef(new GestureRecognizer());
+  // A tap waits out the double-tap window before it counts: any new contact (the second tap, a drag, a pinch) or a
+  // file change cancels it.
+  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onTapRef = useRef(onTap);
+  onTapRef.current = onTap;
+  const cancelTap = () => {
+    if (tapTimer.current) clearTimeout(tapTimer.current);
+    tapTimer.current = null;
+  };
+  useEffect(() => cancelTap, []);
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   const [dragDx, setDragDx] = useState(0);
   const [gesturing, setGesturing] = useState(false);
@@ -111,6 +129,7 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
   // A file change abandons any drag in progress on the old one.
   useEffect(() => {
     rec.current.reset();
+    cancelTap();
     pinchStart.current = null;
     setDragDx(0);
     setGesturing(false);
@@ -151,9 +170,16 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
           pinchStart.current = null;
           break;
         case 'double-tap':
+          cancelTap();
           if (v && set && n) set(doubleTapView(v, rel(ev), n, s));
           break;
         case 'tap':
+          cancelTap();
+          if (!onTapRef.current) break;
+          tapTimer.current = setTimeout(() => {
+            tapTimer.current = null;
+            onTapRef.current?.();
+          }, DEFAULT_GESTURE.doubleTapMs);
           break;
       }
     }
@@ -172,6 +198,7 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
   const down = (e: RPointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (onControl(e)) return;
+    cancelTap();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -200,6 +227,7 @@ export const FileStage = forwardRef<FileStageHandle, FileStageProps>(function Fi
     const wheel = (e: WheelEvent) => {
       const { view: v, onView: set, size: s, natural: n } = live.current;
       if (!v || !set || !n) return;
+      cancelTap();
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const factor = Math.exp(Math.max(-0.5, Math.min(0.5, -e.deltaY / 120)));
