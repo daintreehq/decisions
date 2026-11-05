@@ -42,6 +42,8 @@ const capture = (e: ReactPointerEvent<HTMLElement>) => {
     /* no such pointer */
   }
 };
+/** Measures a line of the field's text without laying it out. */
+let measureCanvas: HTMLCanvasElement | null = null;
 const isCapture = (p: DictPhase) => p === 'starting' || p === 'recording' || p === 'finishing';
 
 export interface ComposerProps {
@@ -146,7 +148,8 @@ export function Composer(p: ComposerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
   // Failures and interruptions are spoken once, when they happen; the clock and interim words never are.
-  const message = dict?.message?.text ?? null;
+  // An error's lane is an alert, which speaks for itself.
+  const message = dict?.message && dict.message.tone !== 'error' ? dict.message.text : null;
   useEffect(() => {
     if (message) announce(message);
   }, [message]);
@@ -154,9 +157,28 @@ export function Composer(p: ComposerProps) {
   const textless = shape.fields.length === 0;
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  // Focus alone never enlarges the input. Once text wraps, keep the wider writing surface until it is cleared.
+  // Send's one reason it can't send yet owns the action row's slot; otherwise "Use original wording" sits there,
+  // from the moment the tidy-up starts until the passage is edited, so it never needs a row of its own.
+  const hintShown = verdict.hasContent && !!verdict.hint && !p.stale && !p.error;
+  const originalInSlot = p.canUseOriginal && !hintShown && !capturing;
+  // The microphone starting into an empty answer keeps the compact bar: the field's placeholder says so, and Stop is
+  // where the mic was. The pill opens when there is something to show (the clock and the words).
+  const startingEmpty =
+    !!dict &&
+    (phase === 'starting' || (phase === 'recording' && !dict.micLive)) &&
+    !dict.permission &&
+    !dict.micSilent &&
+    !dict.escArmed &&
+    !value;
+  // Focus alone never enlarges the input. Once typed text wraps, keep the wider writing surface until it is cleared
+  // (a replacement that isn't typing, such as a tidy-up, measures again).
   const two =
-    textless || multiline || hasPhotos || capturing || (verdict.hasContent && !!verdict.hint);
+    textless ||
+    multiline ||
+    hasPhotos ||
+    (capturing && !startingEmpty) ||
+    originalInSlot ||
+    (verdict.hasContent && !!verdict.hint);
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {
@@ -177,18 +199,58 @@ export function Composer(p: ComposerProps) {
     if (!unsure) setReviewing(false);
   }, [unsure]);
 
+  // The tidy-up's changed words, underlined on the answer itself for a few seconds; a caret placed in one says what
+  // was heard there.
+  const review = dict?.review && reviewApplies(dict.review, draft) ? dict.review : null;
+  const marks = review && review.field === field ? review.marks : null;
+  const caret = draft.caret;
+  const heard =
+    review && caret && caret.field === review.field && caret.start === caret.end
+      ? (review.marks.find((m) => caret.start >= m.from && caret.start < m.to) ?? null)
+      : null;
+
+  // The microphone's own states and the heard word are spoken once, when they change (the lane rows that show them
+  // mount with their words already in, which screen readers often skip).
+  const micNotice = dict?.permission
+    ? 'Allow microphone access to continue'
+    : dict?.micSilent
+      ? 'No sound from your microphone'
+      : phase === 'starting'
+        ? 'Starting microphone…'
+        : null;
+  useEffect(() => {
+    if (micNotice) announce(micNotice);
+  }, [micNotice]);
+  const heardText = heard
+    ? heard.heard
+      ? `Heard “${heard.heard}”`
+      : 'Added by the tidy-up'
+    : null;
+  useEffect(() => {
+    if (heardText) announce(heardText);
+  }, [heardText]);
+
   const lane = Lane({
     ...p,
-    unsure,
+    // While the word check is open above the pill, its own chip would only repeat it.
+    unsure: reviewing ? null : unsure,
+    originalInSlot,
+    heard: heardText,
+    // The word check takes focus itself (its choices come first), and the word is marked on the answer, so the
+    // keyboard stays down.
     onReviewWords: () => {
       if (!unsure) return;
       p.onField(unsure.field);
       setReviewing(true);
-      setTimeout(() => p.fieldRef.current?.focus({ preventScroll: true }), 0);
     },
   });
+  // While checking, the word in question is marked on the answer itself.
+  const checking =
+    reviewing && unsure && unsure.field === field && unsure.spans[0]
+      ? [{ from: unsure.spans[0].start, to: unsure.spans[0].end, kind: 'check' as const }]
+      : null;
 
-  const note = !capturing && phase !== 'cleaning' ? sendNote(p) : null;
+  const note = capturing ? null : sendNote(p, originalInSlot);
 
   return (
     <div className="composer" data-rows={two ? 'two' : 'one'}>
@@ -212,6 +274,21 @@ export function Composer(p: ComposerProps) {
               type="button"
               role="tab"
               aria-selected={t.id === field}
+              tabIndex={t.id === field ? 0 : -1}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+                e.preventDefault();
+                const tabs = p.fieldTabs!;
+                const at = tabs.findIndex((x) => x.id === t.id);
+                const next =
+                  tabs[(at + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]!;
+                const buttons =
+                  e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                    '[role="tab"]',
+                  );
+                buttons?.[tabs.indexOf(next)]?.focus();
+                buttons?.[tabs.indexOf(next)]?.click();
+              }}
               onClick={() => {
                 if (t.id === field) return;
                 // Switching fields while dictating stops first, so words never land in the other field.
@@ -271,7 +348,9 @@ export function Composer(p: ComposerProps) {
             onContact={quiet}
             onPastePhotos={takesDrop ? dropped : undefined}
             open={two}
+            multiline={multiline}
             onMultiline={setMultiline}
+            marks={checking ?? marks}
           />
         )}
         {photos && (
@@ -280,9 +359,11 @@ export function Composer(p: ComposerProps) {
           </div>
         )}
         <div className="composer-actions">
-          <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
-            {note}
-          </span>
+          {(two || !!verdict.hint) && (
+            <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
+              {note}
+            </span>
+          )}
           <span className="composer-buttons">
             {!textless && (
               <DictateButton
@@ -343,7 +424,11 @@ function Field(
     onPastePhotos?: (files: FileList) => boolean;
     /** The pill is open into two rows; the field measures itself again when it changes. */
     open: boolean;
+    /** The words have wrapped at the compact width (what keeps the pill open while typing). */
+    multiline: boolean;
     onMultiline: (value: boolean) => void;
+    /** The tidy-up's changed words, in this field's offsets, while they are underlined. */
+    marks: readonly { from: number; to: number; kind?: 'check' }[] | null;
   },
 ) {
   const { draft, field, dict, fieldRef: ref, value } = p;
@@ -367,11 +452,26 @@ function Field(
     !p.focused &&
     (phase === 'idle' || phase === 'cleaning');
 
+  // What the person typed last: any other change of value (dictated words, a tidy-up, Use original wording, Undo) is
+  // a replacement, after which the pill measures the words at the compact width again instead of staying open.
+  const typed = useRef<string | null>(null);
+  const seen = useRef(value);
+  // The text width the compact bar gives the words, from its last measure: deleting back to a short answer that fits
+  // it closes the pill again, measured at that width so the open pill's wider field can't keep it open.
+  const compactWidth = useRef(0);
+
   // Grow with the text; the cap (about five lines, less with the keyboard up) is in CSS, and beyond it the field
   // scrolls. While words are arriving, keep the newest of them in view.
   useLayoutEffect(() => {
     const t = ref.current;
     if (!t) return;
+    if (value !== seen.current) {
+      const shorter = value.length < seen.current.length;
+      seen.current = value;
+      // Before paint: the closed pill measures on the next pass and opens again at once if the words still wrap.
+      if (p.open && p.multiline && (value !== typed.current || (shorter && fitsCompact(t, value))))
+        p.onMultiline(false);
+    }
     const measure = () => {
       t.style.height = 'auto';
       const style = getComputedStyle(t);
@@ -379,7 +479,11 @@ function Field(
         parseFloat(style.lineHeight) +
         parseFloat(style.paddingTop) +
         parseFloat(style.paddingBottom);
-      if (!p.open && value && t.scrollHeight > line + 2) p.onMultiline(true);
+      if (!p.open) {
+        compactWidth.current =
+          t.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        if (value && t.scrollHeight > line + 2) p.onMultiline(true);
+      }
       t.style.height = `${t.scrollHeight}px`;
       if (p.capturing) t.scrollTop = t.scrollHeight;
     };
@@ -393,7 +497,55 @@ function Field(
     });
     observer.observe(t);
     return () => observer.disconnect();
-  }, [value, p.capturing, interim, ref, p.open, p.onMultiline]);
+  }, [value, p.capturing, interim, ref, p.open, p.multiline, p.onMultiline]);
+
+  // The changed words' underline is drawn by a copy of the text laid exactly under the field's own (transparent, and
+  // never in the way of the caret, selection or scrolling).
+  const mirror = useRef<HTMLDivElement>(null);
+  const marks = p.marks?.length ? p.marks : null;
+  useLayoutEffect(() => {
+    const t = ref.current;
+    const m = mirror.current;
+    if (!t || !m) return;
+    const sync = () => {
+      const cs = getComputedStyle(t);
+      // Only a scrolled field clips: unscrolled, the wave may hang into the field's bottom margin like any underline.
+      const scrolled = t.scrollHeight > t.clientHeight + 1;
+      Object.assign(m.style, {
+        top: `${t.offsetTop}px`,
+        left: `${t.offsetLeft}px`,
+        width: `${t.clientWidth}px`,
+        height: `${t.clientHeight}px`,
+        padding: cs.padding,
+        overflow: scrolled ? 'hidden' : 'visible',
+      });
+      m.scrollTop = t.scrollTop;
+    };
+    // A word being checked is brought into view in a long, scrolled answer (the field scrolls; focus stays put).
+    const checked = m.querySelector<HTMLElement>('.composer-mark.is-check');
+    if (checked) {
+      const top = checked.offsetTop - parseFloat(getComputedStyle(t).paddingTop);
+      if (top < t.scrollTop || top + checked.offsetHeight > t.scrollTop + t.clientHeight)
+        t.scrollTop = Math.max(0, top - (t.clientHeight - checked.offsetHeight) / 2);
+    }
+    sync();
+    t.addEventListener('scroll', sync);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync);
+    observer?.observe(t);
+    return () => {
+      t.removeEventListener('scroll', sync);
+      observer?.disconnect();
+    };
+  }, [marks, value, p.open, ref]);
+
+  function fitsCompact(t: HTMLTextAreaElement, text: string): boolean {
+    if (!compactWidth.current || text.includes('\n')) return false;
+    const ctx = (measureCanvas ??= document.createElement('canvas')).getContext('2d');
+    if (!ctx) return false;
+    ctx.font = getComputedStyle(t).font;
+    // A few px of slack, so an answer right at the edge doesn't flip between the two forms as it is edited.
+    return ctx.measureText(text).width <= compactWidth.current - 6;
+  }
 
   const caret = () => {
     const t = ref.current;
@@ -402,6 +554,11 @@ function Field(
 
   return (
     <div className={`composer-field${hold.holding ? ' holding' : ''}`}>
+      {marks && (
+        <div className="composer-marks" ref={mirror} aria-hidden="true">
+          {withMarks(value, marks)}
+        </div>
+      )}
       <textarea
         id="ws-field"
         ref={ref}
@@ -410,22 +567,26 @@ function Field(
         value={value}
         aria-label={p.fieldLabel}
         aria-describedby={p.verdict.hint ? 'ws-send-hint' : undefined}
-        // While capture runs the lane says what is happening; an empty field only promises the words.
+        // While the microphone starts, the empty field says so (a row of its own would only hold those words);
+        // once it is live it promises the words.
         placeholder={
           p.capturing
             ? liveMic
               ? 'Listening…'
-              : ''
+              : (phase === 'starting' || phase === 'recording') &&
+                  !dict?.permission &&
+                  !dict?.micSilent
+                ? 'Starting microphone…'
+                : ''
             : p.focused
               ? p.focusedPlaceholder
-              : p.canHold || !p.voice
-                ? p.placeholder
-                : 'Type or tap the microphone'
+              : p.placeholder
         }
         readOnly={p.disabled}
         enterKeyHint="enter"
         onFocus={() => p.setFocused(true)}
         onChange={(e) => {
+          typed.current = e.target.value;
           drafts.edit(
             draft.key,
             field === 'reason' ? { reason: e.target.value } : { text: e.target.value },
@@ -469,6 +630,26 @@ function Field(
       )}
     </div>
   );
+}
+
+/** The text with its marked runs wrapped, ending in a zero-width space so a trailing newline keeps its line. */
+function withMarks(
+  text: string,
+  marks: readonly { from: number; to: number; kind?: 'check' }[],
+): ReactNode[] {
+  const out: ReactNode[] = [];
+  let at = 0;
+  marks.forEach((m, k) => {
+    if (m.from > at) out.push(text.slice(at, m.from));
+    out.push(
+      <span key={k} className={`composer-mark${m.kind === 'check' ? ' is-check' : ''}`}>
+        {text.slice(m.from, m.to)}
+      </span>,
+    );
+    at = Math.max(at, m.to);
+  });
+  out.push(text.slice(at) + '\u200b');
+  return out;
 }
 
 /**
@@ -613,7 +794,6 @@ export function DictateButton({
         type="button"
         className="dictate-btn"
         aria-label={label}
-        aria-pressed={open}
         aria-disabled={p === 'finishing' || undefined}
         title={tip}
         onPointerDown={(e) => {
@@ -637,7 +817,7 @@ export function DictateButton({
         onContextMenu={(e) => e.preventDefault()}
         // Pointer presses are handled above; a keyboard activation (detail 0) toggles.
         onClick={(e) => {
-          if (e.detail === 0) onToggle();
+          if (e.detail === 0 && p !== 'finishing') onToggle();
         }}
       >
         {open || p === 'finishing' ? <StopIcon size={18} /> : <MicIcon size={22} />}
@@ -679,7 +859,8 @@ function SendButton({
       aria-describedby={describedBy}
       aria-label={sending ? 'Sending…' : full}
       title={`${full} (${MOD}+Enter)`}
-      onPointerDown={() => (armed.current = now() >= (quietUntil.current ?? 0))}
+      // Armed only if it was ready when the press began: a press that starts on a not-ready Send never becomes a send.
+      onPointerDown={() => (armed.current = ready && now() >= (quietUntil.current ?? 0))}
       onClick={(e) => {
         const pointer = e.detail > 0;
         const ok = !pointer || armed.current;
@@ -692,8 +873,25 @@ function SendButton({
   );
 }
 
-/** The quiet line beside Send: the one reason it can't send yet, else where the draft is saved. */
-function sendNote(p: ComposerProps): ReactNode {
+/**
+ * Use original wording leaves with its own press, so a keyboard activation hands focus back to the field it acted on
+ * (a tap doesn't, which would raise the phone's keyboard).
+ */
+function revertTidy(
+  e: React.MouseEvent<HTMLButtonElement>,
+  key: string,
+  field: RefObject<HTMLTextAreaElement | null>,
+) {
+  const keyboard = e.detail === 0;
+  dictation.useOriginal(key);
+  if (keyboard) setTimeout(() => field.current?.focus({ preventScroll: true }), 0);
+}
+
+/**
+ * The slot beside Send, one thing at a time: the one reason it can't send yet, else Use original wording (from the
+ * tidy-up starting until the passage is edited), else the quiet word on the draft (restored, saving, saved).
+ */
+function sendNote(p: ComposerProps, original: boolean): ReactNode {
   const { verdict, draft } = p;
   if (p.stale || p.error) return null;
   if (verdict.hasContent && verdict.hint) {
@@ -705,7 +903,19 @@ function sendNote(p: ComposerProps): ReactNode {
       );
     return verdict.hint;
   }
-  if (!verdict.hasContent || draft.save === 'error') return null;
+  if (original)
+    return (
+      <button
+        type="button"
+        className="composer-action"
+        onClick={(e) => revertTidy(e, draft.key, p.fieldRef)}
+      >
+        <UndoIcon size={14} />
+        Use original wording
+      </button>
+    );
+  if (!verdict.hasContent || draft.save === 'error' || p.dict?.phase === 'cleaning') return null;
+  if (draft.notice === 'restored') return 'Draft restored';
   if (draft.save === 'saving') return 'Saving…';
   if (draft.save === 'saved') return 'Saved on this device';
   return null;
@@ -713,11 +923,24 @@ function sendNote(p: ComposerProps): ReactNode {
 
 /* ---------- the lane: dictation, errors and notices ---------- */
 
-function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => void }): ReactNode {
+function Lane(
+  i: ComposerProps & {
+    unsure: Unsure | null;
+    /** Use original wording is in the action row's slot, not here. */
+    originalInSlot: boolean;
+    /** What was heard at the changed word the caret is in, during the few seconds the changes are underlined. */
+    heard: string | null;
+    onReviewWords: () => void;
+  },
+): ReactNode {
   const { dict, draft } = i;
   const p = dict?.phase ?? 'idle';
-  const action = (label: string, onClick: () => void, icon?: ReactNode) => (
-    <button type="button" className="lane-action" onClick={onClick}>
+  const action = (
+    label: string,
+    onClick: (e: React.MouseEvent<HTMLButtonElement>) => void,
+    icon?: ReactNode,
+  ) => (
+    <button type="button" className="composer-action" onClick={onClick}>
       {icon}
       {label}
     </button>
@@ -742,6 +965,16 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
         {action('Discard', () => dictation.discard())}
       </span>
     );
+  // Starting into an empty field: the field itself says so, so the pill doesn't open a row for it.
+  if (
+    dict &&
+    (p === 'starting' || p === 'recording') &&
+    !dict.permission &&
+    !dict.micSilent &&
+    !dict.escArmed &&
+    !fieldValue(draft, i.field)
+  )
+    return null;
   if (dict && (p === 'starting' || p === 'recording'))
     return (
       <span className={`lane${dict.micSilent ? ' warn' : ''}`}>
@@ -769,7 +1002,8 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
         <span className="lane-text">
           <span className="spinner small" aria-hidden="true" /> Tidying wording…
         </span>
-        {action('Use original wording', () => dictation.useOriginal(draft.key))}
+        {!i.originalInSlot &&
+          action('Use original wording', (e) => revertTidy(e, draft.key, i.fieldRef))}
       </span>
     );
   // A failed save outranks everything below it: the words are only on screen until it is fixed.
@@ -817,19 +1051,24 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
     return (
       <span
         className={`lane${dict.message.tone === 'error' ? ' error' : ''}`}
-        role={dict.message.tone === 'error' ? 'alert' : 'status'}
+        role={dict.message.tone === 'error' ? 'alert' : undefined}
       >
         <span className="lane-text">{dict.message.text}</span>
         {dict.message.retry && action('Try again', i.onDictate)}
         {dismiss(() => dictation.dismissMessage())}
       </span>
     );
-  if (dict?.review && reviewApplies(dict.review, draft))
-    return <ReviewMarks review={dict.review} draft={draft} />;
-  if (i.canUseOriginal || i.unsure)
+  if (i.heard)
     return (
       <span className="lane">
-        {i.canUseOriginal && action('Use original wording', () => dictation.useOriginal(draft.key))}
+        <span className="lane-text">{i.heard}</span>
+      </span>
+    );
+  const original = i.canUseOriginal && !i.originalInSlot;
+  if (original || i.unsure)
+    return (
+      <span className="lane only-actions">
+        {original && action('Use original wording', (e) => revertTidy(e, draft.key, i.fieldRef))}
         {i.unsure &&
           action(
             `Review ${i.unsure.spans.length} ${i.unsure.spans.length === 1 ? 'word' : 'words'}`,
@@ -843,12 +1082,6 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
         <span className="lane-text">Draft from an earlier version of this question</span>
       </span>
     );
-  if (draft.notice === 'restored')
-    return (
-      <span className="lane">
-        <span className="lane-text">Draft restored</span>
-      </span>
-    );
   return null;
 }
 
@@ -856,47 +1089,6 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
 function reviewApplies(review: Review, draft: DraftModel): boolean {
   const text = fieldValue(draft, review.field);
   return text.slice(review.start, review.start + review.cleaned.length) === review.cleaned;
-}
-
-/** After a cleanup lands: its changed words underlined for a few seconds; tapping one says what was heard. */
-function ReviewMarks({ review, draft }: { review: Review; draft: DraftModel }) {
-  const [heard, setHeard] = useState<string | null>(null);
-  const text = fieldValue(draft, review.field);
-  const parts: ReactNode[] = [];
-  // Start a few words before the first change, so the underline is on screen within one line.
-  const first = review.marks[0]?.from ?? review.start;
-  const lead = text.slice(review.start, first);
-  const keep = lead.length > 28 ? lead.slice(-28).replace(/^\S*\s/, '') : lead;
-  let at = first - keep.length;
-  if (at > review.start) parts.push('…');
-  review.marks.forEach((m, k) => {
-    if (m.from > at) parts.push(text.slice(at, m.from));
-    parts.push(
-      <button
-        key={k}
-        type="button"
-        className="mark"
-        aria-label={`${text.slice(m.from, m.to)}, changed${m.heard ? `, heard ${m.heard}` : ''}`}
-        onClick={() => setHeard(m.heard ? `Heard “${m.heard}”` : 'Added by the tidy-up')}
-      >
-        {text.slice(m.from, m.to)}
-      </button>,
-    );
-    at = m.to;
-  });
-  parts.push(text.slice(at, review.start + review.cleaned.length));
-  return (
-    <span className="lane review">
-      <span className="lane-text review-text">{heard ?? parts}</span>
-      <button
-        type="button"
-        className="lane-action"
-        onClick={() => dictation.useOriginal(draft.key)}
-      >
-        Use original wording
-      </button>
-    </span>
-  );
 }
 
 /** "Recording · 00:24", ticking from the moment capture began. Not a live region: the start and stop are announced. */
@@ -1013,47 +1205,58 @@ function UnsureReview({
   const s = unsure.spans[0]!;
   const text = unsure.text;
   const word = text.slice(s.start, s.end);
+  const group = useRef<HTMLDivElement>(null);
+  // Focus starts on the choices, which come before the field; the word itself is marked on the answer.
   useEffect(() => {
-    const t = textarea.current;
-    if (t && document.activeElement === t) t.setSelectionRange(s.start, s.end);
-  }, [s.start, s.end, textarea]);
-  const choose = (c: SpanChoice) => {
+    group.current
+      ?.querySelector<HTMLButtonElement>('.unsure-choices button')
+      ?.focus({ preventScroll: true });
+  }, [s.start, s.end]);
+  // Leaving the check from the keyboard goes back to the answer; a tap leaves focus alone, so the phone's keyboard
+  // stays down for someone who only came to check a word.
+  const backToField = (e: React.MouseEvent) => {
+    if (e.detail === 0) textarea.current?.focus({ preventScroll: true });
+  };
+  const choose = (c: SpanChoice, e: React.MouseEvent) => {
     const r = resolveSpan(text, unsure.spans, 0, c);
     drafts.edit(draft.key, unsure.field === 'reason' ? { reason: r.text } : { text: r.text });
     dictation.setUnsure(r.spans.length ? { ...unsure, text: r.text, spans: r.spans } : null);
+    if (!r.spans.length) backToField(e);
   };
   return (
-    <div className="unsure" role="group" aria-label="Check a word">
-      <p className="unsure-line">
+    <div className="unsure" role="group" aria-labelledby="ws-unsure-line" ref={group}>
+      <p className="unsure-line" id="ws-unsure-line">
         Not sure about <mark>{word}</mark>
         {unsure.spans.length > 1 && (
           <span className="muted"> · {unsure.spans.length - 1} more</span>
         )}
       </p>
-      <div className="unsure-choices">
-        <button type="button" className="btn small" onClick={() => choose('corrected')}>
+      {/* A new set of choices for each word, so moving on to the next one is a new focus that is spoken. */}
+      <div className="unsure-choices" key={`${s.start}-${s.end}`}>
+        <button type="button" className="composer-action" onClick={(e) => choose('corrected', e)}>
           Keep “{word}”
         </button>
         {s.candidate && s.candidate !== word && (
-          <button type="button" className="btn small" onClick={() => choose('candidate')}>
+          <button type="button" className="composer-action" onClick={(e) => choose('candidate', e)}>
             Use “{s.candidate}”
           </button>
         )}
         {s.raw && s.raw !== word && (
-          <button type="button" className="btn small" onClick={() => choose('raw')}>
+          <button type="button" className="composer-action" onClick={(e) => choose('raw', e)}>
             Heard “{s.raw}”
           </button>
         )}
         <button
           type="button"
-          className="btn ghost icon"
+          className="lane-x"
           aria-label="Stop checking words"
-          onClick={() => {
+          onClick={(e) => {
             dictation.setUnsure(null);
             onClose();
+            backToField(e);
           }}
         >
-          <CloseIcon size={16} />
+          <CloseIcon size={14} />
         </button>
       </div>
     </div>

@@ -153,9 +153,9 @@
   inset: -5px;
   border-radius: 50%;
 }
-/* The pill's padding is 6 px, so the orbit (and the halo on its dot) stays inside it instead of crossing its edge. */
+/* The pill's padding is 4 px, so the orbit (and the halo on its dot) stays inside it instead of crossing its edge. */
 .composer .orbit {
-  inset: -3px;
+  inset: -2px;
 }
 .composer .orbit-band {
   padding: 2.5px;

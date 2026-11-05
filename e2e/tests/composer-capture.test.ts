@@ -18,7 +18,7 @@ import {
   type TerminalTarget,
 } from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
-import { FAKE_MIC_ARGS, mockVoice, type VoiceScript } from './voice-mock.js';
+import { FAKE_MIC_ARGS, mockVoice, type CleanupScript, type VoiceScript } from './voice-mock.js';
 
 /**
  * Captures the answer composer in every state that carries design weight, for design review:
@@ -107,6 +107,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
   const written: string[] = [];
   const ids: Record<string, string> = {};
   let voice: VoiceScript = { words: [] };
+  let tidy: CleanupScript | null = null;
 
   const settle = async (ms = 500) => {
     await page.evaluate(() => document.fonts.ready);
@@ -236,7 +237,12 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
       });
     });
     page = await context.newPage();
-    await mockVoice(context, page, () => voice);
+    await mockVoice(
+      context,
+      page,
+      () => voice,
+      () => tidy,
+    );
   });
 
   afterAll(async () => {
@@ -332,6 +338,17 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
     });
     await ask('dictate', origin('p10', 'edge-api'), {
       question: 'What should the 429 response body say when a client is rate limited?',
+      kind: 'text',
+      options: [],
+    });
+    await ask('tidy', origin('p11', 'nightly-export'), {
+      question:
+        'The nightly export failed twice this week with a timeout from the warehouse. Should I keep retrying it, or pause it until you’ve had a look?',
+      kind: 'text',
+      options: [],
+    });
+    await ask('tidy-short', origin('p12', 'billing-api', 'codex'), {
+      question: 'Who should get paged when the webhook retries run out?',
       kind: 'text',
       options: [],
     });
@@ -458,7 +475,11 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
     const consent = page.getByRole('button', { name: 'Enable and start dictation' });
     await consent.waitFor({ timeout: 10_000 });
     await consent.click();
-    await sees(/Starting microphone/);
+    // Starting into an empty answer, the field itself says so.
+    await page
+      .locator('.dock .composer-field textarea[placeholder="Starting microphone…"]')
+      .first()
+      .waitFor({ timeout: 10_000 });
     await shot('p-dictate-starting-light', 300);
     // Locked words are in the field itself; the words still being recognised trail them.
     await until(
@@ -473,6 +494,90 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
     await theme('light');
     await stopDictation().click();
     await dictate().waitFor({ timeout: 15_000 });
+  });
+
+  it('captures the tidy-up: tidying, the changed words, and Use original wording after it', async () => {
+    /** Dictates one passage into the open question and stops, leaving the tidy-up to run. */
+    const speak = async (text: string) => {
+      voice = { words: [{ afterMs: 200, text, final: true }] };
+      await dictate().click();
+      const consent = page.getByRole('button', { name: 'Enable and start dictation' });
+      if (await consent.isVisible().catch(() => false)) await consent.click();
+      await until(
+        async () => (await field().inputValue()).includes(text.slice(0, 12)),
+        30_000,
+        'the dictated words in the field',
+      );
+      await stopDictation().click();
+    };
+    const lane = () => page.locator('.dock .composer-lane');
+
+    // A rambling passage that wraps, tidied to one short line: the pill stays open, as it does on a phone.
+    await openId('tidy');
+    await sees('The nightly export failed twice');
+    tidy = { afterMs: 4_000, corrected: 'What’s actually going on here?' };
+    await speak(
+      'Um, so, okay, like, what is actually going on here with the export thing, I mean, like, today?',
+    );
+    await sees('Tidying wording…', '.dock');
+    await shot('p-tidy-cleaning-light', 300);
+    await until(
+      async () => (await field().inputValue()) === 'What’s actually going on here?',
+      15_000,
+      'the tidied words in the field',
+    );
+    await page.locator('.dock .composer-mark').first().waitFor({ timeout: 5_000 });
+    await shot('p-tidy-review-light', 200);
+    // The changed words' underline lasts five seconds; after it, Use original wording stays on its own.
+    await until(
+      async () => (await page.locator('.dock .composer-mark').count()) === 0,
+      10_000,
+      'the review marks to clear',
+    );
+    await page.locator('.dock').getByRole('button', { name: 'Use original wording' }).waitFor();
+    await shot('p-tidy-original-light');
+    await theme('dark');
+    await shot('p-tidy-original-dark');
+    await theme('light');
+    await focusField();
+    await keyboard(true);
+    await shot('p-tidy-keyboard-light', 700);
+    await keyboard(false);
+    await blur();
+
+    // A short passage that never wraps, with one word the tidy-up was unsure of.
+    await openId('tidy-short');
+    await sees('Who should get paged');
+    const corrected = 'Page Sam, then the on-call channel.';
+    const at = corrected.indexOf('Sam');
+    tidy = {
+      afterMs: 300,
+      corrected,
+      spans: [{ start: at, end: at + 3, raw: 'sam', candidate: 'Sam', reason: 'name' }],
+    };
+    await speak('page sam then the on call channel');
+    await until(
+      async () => (await field().inputValue()) === corrected,
+      15_000,
+      'the tidied short answer',
+    );
+    await until(
+      async () => (await page.locator('.dock .composer-mark').count()) === 0,
+      10_000,
+      'the review marks to clear',
+    );
+    await lane()
+      .getByRole('button', { name: /Review 1 word/ })
+      .waitFor();
+    await shot('p-tidy-unsure-light');
+    // The word check: its choices above the pill, the word marked on the answer, the keyboard down.
+    await lane()
+      .getByRole('button', { name: /Review 1 word/ })
+      .click();
+    await page.locator('.dock .unsure').waitFor();
+    await page.locator('.dock .composer-mark.is-check').waitFor();
+    await shot('p-tidy-check-light');
+    tidy = null;
   });
 
   it('captures a follow-up and a sent answer', async () => {
@@ -511,6 +616,13 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the answer composer', () => 
       'p-dictate-starting-light',
       'p-dictate-recording-light',
       'p-dictate-recording-dark',
+      'p-tidy-cleaning-light',
+      'p-tidy-review-light',
+      'p-tidy-original-light',
+      'p-tidy-original-dark',
+      'p-tidy-keyboard-light',
+      'p-tidy-unsure-light',
+      'p-tidy-check-light',
       'p-follow-up-light',
       'p-sent-light',
       'w-choice-selected-light',
