@@ -218,6 +218,31 @@ describe('file gesture recogniser', () => {
     expect(h.events.map((e) => e.type)).toEqual(['tap', 'double-tap']);
   });
 
+  it('a drag between two taps makes the second a fresh tap, not a double-tap', () => {
+    const h = harness();
+    h.down(1, 100, 100);
+    h.up(1, 100, 100);
+    h.down(1, 100, 100);
+    h.move(1, 100, 160);
+    h.up(1, 100, 160);
+    h.down(1, 104, 102);
+    h.up(1, 104, 102);
+    expect(h.events.filter((e) => e.type === 'tap' || e.type === 'double-tap')).toEqual([
+      { type: 'tap', x: 100, y: 100 },
+      { type: 'tap', x: 104, y: 102 },
+    ]);
+  });
+
+  it('a reset (another file) forgets the last tap', () => {
+    const h = harness();
+    h.down(1, 100, 100);
+    h.up(1, 100, 100);
+    h.rec.reset();
+    h.down(1, 104, 102);
+    h.up(1, 104, 102);
+    expect(h.events.map((e) => e.type)).toEqual(['tap', 'tap']);
+  });
+
   it('zoom is a multiple of Fit capped at 8×', () => {
     expect(zoomAt(FIT, 50, { x: 0, y: 0 }, natural, stage).scale).toBe(MAX_ZOOM);
     expect(zoomAt(FIT, 0.2, { x: 0, y: 0 }, natural, stage).scale).toBe(1);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { dictation, useDictation } from '../../features/voice/dictation.js';
 import { clockLabel } from '../../lib/time.js';
 import { StopIcon } from '../Icons.js';
@@ -7,9 +7,19 @@ import { StopIcon } from '../Icons.js';
  * Stop while the viewer's chrome (and the dock with it) is hidden: recording is never stranded behind a tap (guide
  * 9.2, "Stop stays reachable everywhere"). It only ever stops; it never starts dictation or sends.
  */
-export function ViewerStop() {
+export function ViewerStop({ fallback }: { fallback: () => HTMLElement | null | undefined }) {
   const dict = useDictation();
   const p = dict.phase;
+  const active = p === 'starting' || p === 'recording' || p === 'finishing';
+  // Stop leaves once dictation ends; if it held focus, focus goes to the stage rather than the page body (not every
+  // browser reports the blur of a removed element).
+  const held = useRef(false);
+  useLayoutEffect(() => {
+    if (active || !held.current) return;
+    held.current = false;
+    fallback()?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
   const since = dict.startedAt;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -17,7 +27,7 @@ export function ViewerStop() {
     const id = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(id);
   }, [p, since]);
-  if (p !== 'starting' && p !== 'recording' && p !== 'finishing') return null;
+  if (!active) return null;
   const finishing = p === 'finishing';
   const label =
     p === 'starting' ? 'Cancel dictation' : finishing ? 'Finishing your words' : 'Stop dictation';
@@ -42,6 +52,8 @@ export function ViewerStop() {
         aria-label={label}
         title={label}
         aria-disabled={finishing || undefined}
+        onFocus={() => (held.current = true)}
+        onBlur={() => (held.current = false)}
         onClick={() => {
           if (!finishing) void dictation.stop();
         }}

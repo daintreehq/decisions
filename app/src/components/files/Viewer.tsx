@@ -98,6 +98,43 @@ export function QuestionIdentity({
   );
 }
 
+const px = (n: number) => `${n}px`;
+
+interface Bare {
+  frame: Record<string, string> | null;
+  /** The image area does not span the viewport's width (a sidebar was beside it). */
+  inset: boolean;
+}
+
+/**
+ * Where the image area and the bars sit with the chrome shown, as the custom properties the hidden layout pins them
+ * with: the image keeps its size and position, and the bars leave from where they were.
+ */
+function frameOf(
+  track: HTMLElement | null | undefined,
+  bar: HTMLElement | null,
+  tools: HTMLElement | null,
+): Bare {
+  if (!track || !bar || !tools) return { frame: null, inset: false };
+  const t = track.getBoundingClientRect();
+  const b = bar.getBoundingClientRect();
+  const o = tools.getBoundingClientRect();
+  const inset = t.left > 0.5 || t.right < window.innerWidth - 0.5;
+  const frame = {
+    '--fx-bare-t': px(t.top),
+    '--fx-bare-l': px(t.left),
+    '--fx-bare-w': px(t.width),
+    '--fx-bare-h': px(t.height),
+    '--fx-bare-bar-l': px(b.left),
+    '--fx-bare-bar-w': px(b.width),
+    '--fx-bare-tools-t': px(o.top),
+    '--fx-bare-tools-b': 'auto',
+    '--fx-bare-tools-l': px(o.left),
+    '--fx-bare-tools-w': px(o.width),
+  };
+  return { frame, inset };
+}
+
 /**
  * The file viewer: a mode of the workspace, not a modal. Close, the question's identity (with the full text one
  * tap away), the file's label and position, the file menu; the darkest stage at the largest practical size; then
@@ -139,9 +176,9 @@ export function Viewer({
   const [moving, setMoving] = useState(false);
   const tools = useRef<HTMLDivElement>(null);
   const bar = useRef<HTMLElement>(null);
-  // Chrome hidden: where the image area sat with it shown (viewport px), so it stays put. Null while shown, and
-  // after a resize while hidden, when the image area takes the whole viewport.
-  const [bare, setBare] = useState<{ frame: DOMRect | null } | null>(null);
+  // Chrome hidden: where the image area and the bars sat with it shown (viewport px), so nothing jumps. Null while
+  // shown; its frame is dropped after a resize while hidden, when the image area takes the whole viewport.
+  const [bare, setBare] = useState<Bare | null>(null);
   useMoveFocus(moving, tools, () => stage.current?.el);
   useFocusInOut(() => stage.current?.el, focusFallback);
   useFocusKeeper(root, (from) => toolFallback(from, () => stage.current?.el));
@@ -172,31 +209,22 @@ export function Viewer({
       announce('Controls shown.');
       return;
     }
-    // Focus never stays on a control that is about to be hidden.
-    const at = document.activeElement;
-    if (at && (bar.current?.contains(at) || tools.current?.contains(at)))
-      stage.current?.el?.focus({ preventScroll: true });
+    // Focus never stays on a control that is about to be hidden (the bars, the dock, anything else on screen).
+    const el = stage.current?.el;
+    if (el && document.activeElement !== el) el.focus({ preventScroll: true });
     setMoving(false);
-    setBare({ frame: stage.current?.track?.getBoundingClientRect() ?? null });
+    setBare(frameOf(stage.current?.track, bar.current, tools.current));
     announce('Controls hidden. Tap the image or press Space to show them.');
   };
 
   // A new viewport (rotation, a resized window) has no "where it was": the image area takes the whole screen.
   useEffect(() => {
     if (!hidden) return;
-    const drop = () => setBare((b) => (b?.frame ? { frame: null } : b));
+    const drop = () => setBare((b) => (b?.frame ? { frame: null, inset: false } : b));
     window.addEventListener('resize', drop);
     return () => window.removeEventListener('resize', drop);
   }, [hidden]);
-  const frame = bare?.frame;
-  const bareStyle = frame
-    ? ({
-        '--fx-bare-t': `${frame.top}px`,
-        '--fx-bare-l': `${frame.left}px`,
-        '--fx-bare-w': `${frame.width}px`,
-        '--fx-bare-h': `${frame.height}px`,
-      } as CSSProperties)
-    : undefined;
+  const bareStyle = (bare?.frame ?? undefined) as CSSProperties | undefined;
 
   const step = (dir: -1 | 1) => {
     const next = active + dir;
@@ -266,7 +294,7 @@ export function Viewer({
     <Overlay className="fx-viewer-layer">
       <div
         ref={root}
-        className={`fx-viewer${hidden ? ' is-bare' : ''}`}
+        className={`fx-viewer${hidden ? ' is-bare' : ''}${bare?.inset ? ' is-inset' : ''}`}
         style={bareStyle}
         role="dialog"
         aria-labelledby={`${id}-t`}
@@ -357,7 +385,7 @@ export function Viewer({
             </>
           )}
         </div>
-        {hidden && <ViewerStop />}
+        {hidden && <ViewerStop fallback={() => stage.current?.el} />}
       </div>
     </Overlay>
   );
