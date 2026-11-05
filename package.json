@@ -1,6 +1,6 @@
 {
   "name": "daintree-decisions",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Daintree Decisions: a non-blocking, end-to-end encrypted human-in-the-loop relay for AI coding agents. Self-hosted on Cloudflare.",
   "license": "Apache-2.0",
