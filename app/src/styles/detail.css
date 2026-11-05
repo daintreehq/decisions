@@ -24,8 +24,8 @@
   /* The person's own bubbles: a neutral step off the page, never the accent. */
   --out-bg: color-mix(in oklab, var(--surface-page), var(--text) 12%);
   /* Cards' radius (guide 2.4), with a tighter corner on the speaker's side. */
-  --bubble-r: var(--radius-lg);
-  --bubble-tail: var(--radius-sm);
+  --bubble-r: 20px;
+  --bubble-tail: 8px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -51,7 +51,7 @@
   align-items: baseline;
   gap: 0;
   max-width: 100%;
-  margin: 0 0 6px 4px;
+  margin: 0 0 10px;
   font-size: var(--text-xs);
   line-height: 18px;
   color: var(--text-2);
@@ -101,10 +101,11 @@
 }
 .msg.in .bubble {
   width: 100%;
-  border-top-left-radius: var(--bubble-tail);
-  background: var(--surface-card);
-  border: 1px solid var(--line-default);
-  box-shadow: var(--shadow-1);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 .msg.out .bubble {
   max-width: min(85%, 560px);
@@ -144,7 +145,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 6px 0 0 4px;
+  margin: 10px 0 0;
   font-size: var(--text-xs);
   line-height: 18px;
   color: var(--text-2);
@@ -316,7 +317,7 @@
   align-items: center;
   min-height: 56px;
   padding: 12px 14px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   /* A control's edge owes 3:1, so options take the input edge rather than a decorative hairline. */
   border: 1px solid var(--line-input);
   background: var(--surface-card);
@@ -353,7 +354,7 @@
      hairline as the synced chip above the composer. */
   background: var(--raised-select);
   border-color: var(--text-2);
-  box-shadow: var(--shadow-1);
+  box-shadow: none;
 }
 .option:has(input:focus-visible) {
   outline: 2px solid var(--focus);
@@ -543,6 +544,9 @@
 
 /* The decision model's message: violet only on the mark and a faint edge; the words always say "Model answer". */
 .msg.model .bubble {
+  padding: 12px 14px;
+  border-radius: var(--radius-xl);
+  border-left: 2px solid var(--model);
   border-color: color-mix(in oklab, var(--model) 32%, var(--line-default));
   background: color-mix(in oklab, var(--surface-card) 100%, var(--model) 4%);
 }

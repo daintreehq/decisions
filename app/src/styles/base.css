@@ -203,3 +203,17 @@ main:focus,
     display: none;
   }
 }
+
+/* Fast taps on controls keep native scrolling, text selection and pinch zoom available elsewhere. */
+:where(button, a, summary, [role='button'], [role='radio'], [role='checkbox']) {
+  touch-action: manipulation;
+}
+@media (hover: none) and (pointer: coarse) {
+  :where(button, a, summary) {
+    -webkit-touch-callout: none;
+  }
+}
+/* Press feedback begins under the finger, rather than after the tap has completed. */
+:is(.btn, .chip, .qrow, .side-row, .side-q, .s-row, .menu-fab, .float-btn):active {
+  transition-duration: 0ms;
+}

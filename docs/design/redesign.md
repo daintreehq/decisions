@@ -541,3 +541,19 @@ The full scenario lists in both source specs remain the test plan; these are the
 - Reduced motion removes all movement without losing any state signal.
 - On desktop (1280 × 820) the sidebar column and workspace coexist, the dock belongs to the workspace column, and the shortcuts in 3.4 work.
 - The installed app is no longer locked to portrait.
+
+## Mobile refinement (November 2026)
+
+The ChatGPT and Claude phone references inform the conversation surface: incoming messages are unboxed, the header
+shares the page colour, and the composer is the only enclosing input surface. The dock remains a real grid row so
+safe areas, file overlays and the keyboard retain their geometry. It now shares the page background, with a 24 px
+fade into the reading area instead of a bar, divider, blur and floating shadow. Outgoing bubbles keep their neutral
+fill with 20 px corners; model messages retain an explicit provenance label and violet leading rule.
+
+Phone body and input type is 17 px. The composer opens its action row on focus, before the first keystroke, and holds
+that layout while the keyboard is open, including when the draft is cleared. A resize observer keeps the thread's
+end visible across keyboard and draft height changes only while the person is already following the end.
+
+Interaction timing is 70 ms for small feedback, 120 ms for state changes, 160 ms to enter and 100 ms to exit. Touch
+controls opt into manipulation and show pressed feedback immediately. Pinch zoom and native text selection remain
+available. The 750 ms dictation-to-send protection is unchanged: animation timing must not weaken the send gate.

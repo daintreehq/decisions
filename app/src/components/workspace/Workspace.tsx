@@ -1351,11 +1351,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const shownSteps = useRef<Map<string, string> | null>(null);
   const stuckTarget = useRef<string | null>(null);
   const followingEnd = useRef(true);
+  const bodyHeight = useRef(0);
   const [newBelow, setNewBelow] = useState(false);
   const atEnd = (b: HTMLElement) => b.scrollHeight - b.scrollTop - b.clientHeight < 96;
   const onBodyScroll = () => {
     const b = bodyRef.current;
     if (!b) return;
+    // A viewport resize can dispatch scroll before ResizeObserver. Preserve the pre-resize reading intent until
+    // the observer has anchored the new geometry.
+    if (bodyHeight.current && b.clientHeight !== bodyHeight.current) return;
     followingEnd.current = atEnd(b);
     if (followingEnd.current && newBelow) setNewBelow(false);
   };
@@ -1394,6 +1398,23 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     followingEnd.current = max - to < 96;
     return true;
   };
+  // The keyboard and a growing draft resize the reading area without adding a message. Keep the latest reply
+  // visible if the person was following it; someone reading earlier messages keeps their scroll position.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || typeof ResizeObserver === 'undefined') return;
+    bodyHeight.current = body.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = body.clientHeight;
+      if (nextHeight === bodyHeight.current) return;
+      bodyHeight.current = nextHeight;
+      if (followingEnd.current) {
+        body.scrollTop = body.scrollHeight - body.clientHeight;
+      }
+    });
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, []);
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!body || !threadRef.current) return;

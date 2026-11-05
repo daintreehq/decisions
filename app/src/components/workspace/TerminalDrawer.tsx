@@ -290,7 +290,7 @@ function ModalTerminal({
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 130);
+      const t = setTimeout(finish, 110);
       return () => clearTimeout(t);
     }
   }, [open, titleId]);

@@ -259,6 +259,50 @@ describe.skipIf(!chromiumPath)('follow-ups after an answer', () => {
     ).toBe(0);
   });
 
+  it('keeps the latest reply above a resizing composer and preserves an earlier reading position', async () => {
+    await openId('thread');
+    await bridge.postMessage(
+      {
+        question_id: ids.thread,
+        expects_reply: false,
+        text: `${'The redirect preserves existing links while the new route takes over.\n\n'.repeat(24)}End of the route update.`,
+      },
+      paneIdentityOf(origins.thread!),
+    );
+    await bridge.pump();
+    await page
+      .locator('.ws .msg.note')
+      .getByText('End of the route update.', { exact: true })
+      .waitFor();
+    await page.locator('.ws-body').evaluate((body) => {
+      body.scrollTop = body.scrollHeight;
+      body.dispatchEvent(new Event('scroll'));
+    });
+    const bottomGap = () =>
+      page
+        .locator('.ws-body')
+        .evaluate((body) => body.scrollHeight - body.clientHeight - body.scrollTop);
+    await page.setViewportSize({ width: 390, height: 508 });
+    await until(async () => (await bottomGap()) < 2, 5000, 'the latest reply above the keyboard');
+    await field().fill('Keep the redirect.\nAlso update the navigation.\nAnd the tests.');
+    await until(
+      async () => (await bottomGap()) < 2,
+      5000,
+      'the latest reply above the growing draft',
+    );
+    await page.locator('.ws-body').evaluate((body) => {
+      body.scrollTop = 120;
+      body.dispatchEvent(new Event('scroll'));
+    });
+    await page.setViewportSize({ width: 390, height: 450 });
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+    );
+    expect(await page.locator('.ws-body').evaluate((body) => body.scrollTop)).toBeCloseTo(120, 0);
+    await field().fill('');
+    await page.setViewportSize({ width: 390, height: 844 });
+  });
+
   it('shows an agent message that expects a reply, puts the question back in Needs you, and sends the reply', async () => {
     await answer('asking', /^Yes/, 'Send decision');
     await bridge.postMessage(

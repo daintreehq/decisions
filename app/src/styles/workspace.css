@@ -91,10 +91,8 @@
   column-gap: 4px;
   min-height: calc(52px + var(--safe-t));
   padding: var(--safe-t) var(--ws-pad-r) 0 var(--ws-pad-l);
-  background: var(--material-bg);
-  backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  border-bottom: 1px solid var(--line);
+  background: var(--surface-page);
+  border-bottom: 1px solid transparent;
   position: relative;
   z-index: 7;
 }
@@ -305,7 +303,7 @@
 }
 
 /* ---------- the dock ----------
- * The workspace's last row: material on Daintree, opaque on Bondi, a top hairline and the floating shadow. It holds
+ * The workspace's last row shares the reading surface, with a soft fade into the thread. It holds
  * the composer while a question can be answered, and "Next question" once an answer is on its way.
  */
 .dock {
@@ -313,12 +311,19 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: var(--material-bg);
-  backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(115%);
-  border-top: 1px solid var(--line);
-  box-shadow: var(--shadow-2);
-  padding: 8px calc(12px + var(--safe-r)) calc(8px + var(--safe-b)) calc(12px + var(--safe-l));
+  background: var(--surface-page);
+  isolation: isolate;
+  padding: 6px calc(12px + var(--safe-r)) calc(8px + var(--safe-b)) calc(12px + var(--safe-l));
+}
+.dock::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 24px;
+  background: linear-gradient(to bottom, transparent, var(--surface-page));
+  pointer-events: none;
 }
 .shell[data-layout='column'] .dock {
   padding-bottom: 12px;
@@ -414,8 +419,9 @@
   padding: 6px;
   /* Concentric with the 46 px mic and Send it holds (23 + 6), so they sit in its corners rather than against them. */
   border-radius: 30px;
-  border: 1px solid var(--line-input);
-  background: var(--surface-input);
+  border: 1px solid var(--line-strong);
+  background: color-mix(in oklab, var(--surface-page), var(--surface-input) 65%);
+  box-shadow: none;
 }
 .composer-pill.two {
   grid-template-areas:
@@ -427,6 +433,12 @@
 .composer-pill:has(.composer-input:focus-visible) {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
+}
+@media (hover: none) and (pointer: coarse) {
+  .composer-pill:has(.composer-input:focus-visible) {
+    outline: none;
+    border-color: var(--text-2);
+  }
 }
 .composer-pill.placeholder {
   min-height: 60px;
@@ -565,6 +577,9 @@
   height: 46px;
   padding: 0;
   border-radius: 50%;
+}
+.composer .composer-send {
+  box-shadow: none;
 }
 .composer-send::after {
   content: '';
