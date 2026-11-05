@@ -51,7 +51,15 @@ export function FileMenu({
     downloadBlobUrl(url, name);
     setAsk(null);
   };
-  const run = (action: Action) => (action === 'open' ? doOpen() : doDownload());
+  const run = (action: Action) => {
+    // Recording may have started while the explanation was open: stop and save it first, then ask for a fresh tap.
+    if (action === 'open' && handoffBusy()) {
+      void settleHandoff().then(() => setAsk({ action, reason: 'settled' }));
+      return;
+    }
+    if (action === 'open') doOpen();
+    else doDownload();
+  };
 
   const choose = (action: Action) => {
     setMenu(false);
@@ -80,6 +88,7 @@ export function FileMenu({
       key: 'open',
       label: 'Open in new tab',
       icon: <ExternalIcon size={18} />,
+      group: items.length > 0,
       disabled: !url,
       onSelect: () => choose('open'),
     },
@@ -93,22 +102,27 @@ export function FileMenu({
   );
   const note = url
     ? undefined
-    : result && !result.ok && result.reason === 'unverified'
-      ? 'This file failed verification, so it cannot leave Decisions.'
-      : 'Open and Download are available once this file is verified.';
+    : !result
+      ? 'Open and Download are available once this file is verified.'
+      : !result.ok && result.reason === 'unverified'
+        ? 'This file failed verification, so it cannot leave Decisions.'
+        : !result.ok && result.reason === 'expired'
+          ? 'This file is no longer available, so it cannot be opened or downloaded.'
+          : 'Open and Download are available once this file loads.';
 
   return (
     <>
       <button
         ref={trigger}
         type="button"
-        className="btn ghost icon"
+        className="btn ghost icon fx-menu-trigger"
         aria-label="File menu"
+        title="File menu"
         aria-haspopup="menu"
         aria-expanded={menu}
         onClick={() => setMenu((m) => !m)}
       >
-        <MoreIcon />
+        <MoreIcon size={20} />
       </button>
       {menu && (
         <Menu
@@ -139,7 +153,7 @@ export function FileMenu({
                     <DownloadIcon size={18} />
                     Download instead
                   </button>
-                  <button type="button" className="btn primary" onClick={doOpen}>
+                  <button type="button" className="btn primary" onClick={() => run('open')}>
                     Try again
                   </button>
                 </>

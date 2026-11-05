@@ -2,10 +2,19 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { originParts } from '../../domain/selectors.js';
 import { CheckIcon, CloseIcon } from '../Icons.js';
 import { FileStage, type FileStageHandle } from './FileStage.js';
-import { Overlay, useFocusInOut } from './Layer.js';
+import { Overlay, useFocusInOut, useFocusKeeper } from './Layer.js';
 import { zoomMemory, type FilesModel } from './model.js';
-import { useMoveFocus, PanPad, ZoomButtons, zoomCommands, type ZoomTarget } from './Tools.js';
-import { questionExcerpt, slidesFor } from './Viewer.js';
+import {
+  formatScale,
+  isModified,
+  toolFallback,
+  useMoveFocus,
+  PanPad,
+  ZoomButtons,
+  zoomCommands,
+  type ZoomTarget,
+} from './Tools.js';
+import { QuestionIdentity, questionExcerpt, slidesFor } from './Viewer.js';
 import {
   FIT,
   FIT_NORMAL,
@@ -19,8 +28,16 @@ import {
 export type Side = 'before' | 'after';
 const SIDES: Side[] = ['before', 'after'];
 const LABEL: Record<Side, string> = { before: 'Before', after: 'After' };
-/** Below this width comparison is one stage with a Before | After switch; above, side-by-side panes. */
-export const COMPARE_SIDE_BY_SIDE = 720;
+/**
+ * Below this width comparison is one stage with a Before | After switch; from it, side-by-side panes. Two panes of
+ * at least 320 px each (the inline stage's own cap), so a laptop's workspace beside the sidebar and list qualifies.
+ */
+export const COMPARE_SIDE_BY_SIDE = 640;
+
+/** The width comparison will have: the workspace region it covers, or the window without one. */
+function hostWidth(): number {
+  return document.getElementById('workspace-overlay')?.clientWidth || window.innerWidth;
+}
 
 /**
  * Before and after (guide 5.5). On a phone: one large stage and a full-width Before | After switch that keeps the
@@ -51,7 +68,8 @@ export function Compare({
   const root = useRef<HTMLDivElement>(null);
   const stageA = useRef<FileStageHandle>(null);
   const stageB = useRef<FileStageHandle>(null);
-  const [wide, setWide] = useState(() => window.innerWidth >= COMPARE_SIDE_BY_SIDE);
+  // Measured from the host before the first render, so the panes never mount and unmount again (taking focus).
+  const [wide, setWide] = useState(() => hostWidth() >= COMPARE_SIDE_BY_SIDE);
   const [sizes, setSizes] = useState<Record<Side, Size>>({
     before: { w: 0, h: 0 },
     after: { w: 0, h: 0 },
@@ -69,9 +87,13 @@ export function Compare({
     zoomMemory.set(`${memKey}:after`, own.after);
   }, [memKey, shared, own]);
   const [linkChoice, setLinkChoice] = useState<boolean | null>(null);
+  /** With Link zoom off, the pane the toolbar and keys work on: the one last touched or focused. */
+  const [current, setCurrent] = useState<Side>('after');
   const [moving, setMoving] = useState(false);
   const tools = useRef<HTMLDivElement>(null);
-  useMoveFocus(moving, tools, () => (stageA.current ?? stageB.current)?.el);
+  const currentStage = () =>
+    (wide ? (current === 'before' ? stageA : stageB) : stageB).current?.el ?? root.current;
+  useMoveFocus(moving, tools, currentStage);
 
   useEffect(() => {
     const node = root.current;
@@ -93,6 +115,7 @@ export function Compare({
     () => (wide ? stageA.current?.el : stageB.current?.el) ?? root.current,
     focusFallback,
   );
+  useFocusKeeper(root, (from) => toolFallback(from, currentStage));
 
   const target = (s: Side): ZoomTarget => {
     const natural = nat(s);
@@ -122,16 +145,13 @@ export function Compare({
     }
   });
 
-  const targets = wide
-    ? linked
-      ? [target('before'), target('after')]
-      : SIDES.map(target)
-    : [target(side)];
-  // Linked panes share one view, so commands go through whichever pane is ready.
+  const targets = wide ? SIDES.map(target) : [target(side)];
+  // Linked panes share one view, so commands go through whichever pane is ready; unlinked, through the current one.
   const cmd = zoomCommands(
-    linked && wide ? [targets.find((t) => t.natural) ?? targets[0]!] : targets,
+    !wide ? targets : linked ? [targets.find((t) => t.natural) ?? targets[0]!] : [target(current)],
   );
-  const zoomed = targets.some((t) => isZoomed(t.view));
+  // Unlinked, Move and the keys work on the current pane, so its zoom is the one that counts.
+  const zoomed = wide && !linked ? cmd.zoomed : targets.some((t) => isZoomed(t.view));
   useEffect(() => {
     if (!zoomed) setMoving(false);
   }, [zoomed]);
@@ -140,10 +160,16 @@ export function Compare({
     if (!root.current?.contains(e.target as Node)) return;
     const t = e.target as HTMLElement;
     if (t.closest('input, textarea, select')) return;
-    const onStage = !!t.closest('.fs-stage') || t === root.current;
+    if (isModified(e)) return;
+    const onStage =
+      !!t.closest('.fs-stage') ||
+      t === root.current ||
+      !!t.closest('.fx-compare-switch') ||
+      (!!tools.current?.contains(t) && !t.closest('.fx-zoom-popover'));
     switch (e.key) {
       case 'Escape':
-        onClose();
+        if (moving) setMoving(false);
+        else onClose();
         break;
       case 'ArrowLeft':
       case 'ArrowRight':
@@ -199,32 +225,18 @@ export function Compare({
             type="button"
             className="btn ghost icon"
             aria-label="Close comparison"
+            title="Close (Esc)"
             onClick={onClose}
           >
             <CloseIcon size={20} />
           </button>
-          <div className="fx-id">
-            <div className="fx-id-file" id={`${id}-t`}>
-              <span className={wide ? 'fx-id-label' : 'sr-only'}>Before and after</span>
-            </div>
-            {!wide && (
-              <div className="seg fx-compare-seg" role="group" aria-label="Show">
-                {SIDES.map((s) => (
-                  <button key={s} type="button" aria-pressed={side === s} onClick={() => onSide(s)}>
-                    {LABEL[s]}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className={wide ? 'fx-id-q' : 'sr-only'} id={`${id}-q`}>
-              <span className="fx-id-project">{project}</span>
-              <span aria-hidden="true"> · </span>
-              {excerpt}
-            </div>
-          </div>
-          <button type="button" className="btn small fx-question-btn" onClick={onQuestion}>
-            Question
-          </button>
+          <QuestionIdentity
+            id={id}
+            project={project}
+            excerpt={excerpt}
+            onQuestion={onQuestion}
+            title={<span className="fx-id-label">Before and after</span>}
+          />
         </header>
 
         {wide ? (
@@ -232,10 +244,19 @@ export function Compare({
             {SIDES.map((s) => {
               const t = target(s);
               return (
-                <section key={s} className="fx-pane" aria-label={LABEL[s]}>
+                <section
+                  key={s}
+                  className={`fx-pane${!linked && current === s ? ' is-current' : ''}`}
+                  aria-label={LABEL[s]}
+                  onPointerDown={() => setCurrent(s)}
+                  onFocus={() => setCurrent(s)}
+                >
                   <div className="fx-pane-head">
                     <span className="fx-pane-label">{LABEL[s]}</span>
-                    <span className="fx-pane-dims tabular">{dims(s)}</span>
+                    <span className="fx-pane-dims tabular">
+                      {isZoomed(t.view) && `${formatScale(t.view.scale)} · `}
+                      {dims(s)}
+                    </span>
                   </div>
                   <FileStage
                     ref={s === 'before' ? stageA : stageB}
@@ -263,7 +284,7 @@ export function Compare({
         ) : (
           <FileStage
             ref={stageB}
-            className="fx-viewer-stage"
+            className="fx-viewer-stage fx-flip-stage"
             touch="zoom"
             slides={[slideOf('before'), slideOf('after')]}
             active={side === 'before' ? 0 : 1}
@@ -284,6 +305,19 @@ export function Compare({
           />
         )}
 
+        {/* One stage: the full-width Before | After switch (guide 5.5), above the tools and kept while moving, so
+            flipping never means leaving Move. */}
+        {!wide && (
+          <div className="fx-compare-switch">
+            <div className="seg fx-compare-seg" role="group" aria-label="Show">
+              {SIDES.map((s) => (
+                <button key={s} type="button" aria-pressed={side === s} onClick={() => onSide(s)}>
+                  {LABEL[s]}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div ref={tools} className="fx-tools" role="group" aria-label="Comparison controls">
           {moving && zoomed ? (
             <PanPad cmd={cmd} onDone={() => setMoving(false)} />
@@ -297,7 +331,8 @@ export function Compare({
                   aria-pressed={linked}
                   onClick={() => {
                     const next = !linked;
-                    if (next) setShared(own.before);
+                    // Linking keeps what the current pane shows, so the inspection in progress is not lost.
+                    if (next) setShared(own[current]);
                     else setOwn({ before: shared, after: shared });
                     setLinkChoice(next);
                   }}
