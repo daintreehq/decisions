@@ -203,8 +203,9 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question header', () => 
   /** Opens the context disclosure, so the question is long enough to scroll its heading away. */
   const expandContext = async () => {
     await page.evaluate(() => {
-      for (const d of document.querySelectorAll<HTMLDetailsElement>('.ws-body details.msg-context'))
-        d.open = true;
+      document
+        .querySelectorAll<HTMLDetailsElement>('.ws-body details.msg-context')
+        .forEach((d) => (d.open = true));
     });
     await settle(200);
   };
