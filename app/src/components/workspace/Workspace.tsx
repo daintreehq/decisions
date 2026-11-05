@@ -90,7 +90,7 @@ import {
   terminalModalOpen,
   useTerminalServed,
 } from './TerminalDrawer.js';
-import { WorkspaceHeader, type MenuItem } from './WorkspaceHeader.js';
+import { WorkspaceHeader, type HeaderAnswer, type MenuItem } from './WorkspaceHeader.js';
 
 /** The gallery's review report: `digests` are the files both verified and actually presented. */
 type Review = ReviewState;
@@ -347,19 +347,27 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const next = nextQuestion(all, id, now);
   const { project, machine } = originParts(view);
   const excerpt = content ? previewText(content.question, 90) : '';
-  // The decision in force, in one line: the header keeps it in view while the follow-ups after it scroll by. The
-  // header is narrow, so the choice leads and a note only stands in when there is no choice.
-  const answerLine = (() => {
+  // The decision in force, in one line: the header keeps it in view while the follow-ups after it scroll by. It is
+  // said as Home's rows say it ("You: Keep Canopy · 2 photos", "Model: Changed"). The header is narrow, so the
+  // choice and photos lead and a note only stands in when there is neither.
+  const headerAnswer = ((): HeaderAnswer | null => {
     const short = (selected: string[], text: string, photos = 0) =>
-      selected.length
-        ? choiceLine(view, selected, '')
-        : choiceLine(view, [], text) || (photos ? photoCount(photos) : 'No note');
+      [choiceLine(view, selected, ''), photos ? photoCount(photos) : '']
+        .filter(Boolean)
+        .join(' · ') ||
+      choiceLine(view, [], text) ||
+      'No note';
     if (pendingEntry && pendingEntry.kind !== 'confirm-proxy')
-      return `Answer: ${short(pendingEntry.selected, pendingEntry.text, pendingEntry.images?.length)}`;
+      return {
+        author: 'You',
+        text: short(pendingEntry.selected, pendingEntry.text, pendingEntry.images?.length),
+      };
     if (!answer) return null;
     const c = answer.content as HumanAnswerContentV1 | null;
-    const line = short(c?.selected_option_ids ?? [], c?.text ?? '', c?.images?.length);
-    return `${answer.provenance === 'proxy' ? 'Model answer' : 'Answer'}: ${line}`;
+    return {
+      author: answer.provenance === 'proxy' ? 'Model' : 'You',
+      text: short(c?.selected_option_ids ?? [], c?.text ?? '', c?.images?.length),
+    };
   })();
   const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
   // Short, self-contained choices live in the dock; described choices are read once in the thread.
@@ -413,13 +421,22 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const h = headingRef.current;
     const root = bodyRef.current;
     if (!h || !root || typeof IntersectionObserver === 'undefined') return;
-    const io = new IntersectionObserver(([e]) => setHeadingAway(!e!.isIntersecting), {
-      root,
-      rootMargin: wide
-        ? '0px'
-        : `-${rootRef.current?.querySelector('.ws-head')?.clientHeight ?? 60}px 0px 0px`,
-      threshold: 0,
-    });
+    const io = new IntersectionObserver(
+      ([e]) => {
+        const away = !e!.isIntersecting;
+        // The excerpt is going away under a keyboard user: their place is the question it pointed at.
+        if (!away && document.activeElement?.closest('.ws-excerpt'))
+          headingRef.current?.focus({ preventScroll: true });
+        setHeadingAway(away);
+      },
+      {
+        root,
+        rootMargin: wide
+          ? '0px'
+          : `-${rootRef.current?.querySelector('.ws-head')?.clientHeight ?? 60}px 0px 0px`,
+        threshold: 0,
+      },
+    );
     io.observe(h);
     return () => io.disconnect();
   }, [content, wide]);
@@ -1534,7 +1551,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         project={project}
         machine={machine}
         excerpt={excerpt}
-        answerLine={answerLine}
+        answer={headerAnswer}
         showExcerpt={headingAway}
         onExcerpt={() => {
           bodyRef.current?.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });

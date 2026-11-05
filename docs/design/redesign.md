@@ -314,7 +314,7 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 
 - The placeholder says what it is: "Add a follow-up", or "Reply to Claude Code" while the agent's latest message waits on a reply. Send reads **Send** (named "Send follow-up" or "Send reply" for assistive tech and in its tooltip), so the save state beside it keeps one line.
 - **Next question** sits just above the pill at its trailing edge, quiet, one tap away; moving on is never automatic.
-- A follow-up becomes an outgoing bubble labelled **Follow-up**, with its own receipt (§10). The person's answer is labelled **Your answer**, and once the question scrolls away the header's second line keeps the answer in force in view ("Your answer: Yes, rename").
+- A follow-up becomes an outgoing bubble labelled **Follow-up**, with its own receipt (§10). The person's answer is labelled **Your answer**, and once the question scrolls away the header's second line keeps the answer in force in view as Home's rows say it ("You: Yes, rename", or "Model: Changed" beside the model's diamond).
 - The agent's messages are incoming bubbles under its name. One that expects a reply carries "Waiting for your reply" beside the amber Needs-you ring.
 - A model answer awaiting review is decided first (Confirm answer or Overrule on its message); the follow-up composer appears after, or at once when the agent is asking something.
 - When the computer that asked doesn't take follow-ups yet, the dock says so above **Next question**.
@@ -330,7 +330,7 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 - **Sending**: at Send each photo is encrypted on the phone under a fresh attachment id, exactly as a question attachment is, and queued with its answer or follow-up. Before the signed record can commit, each photo is reserved for that record, uploaded and completed; the record is then committed with their ids. A photo whose reservation the relay lost is encrypted again once under a fresh id, and the record signed again.
 - **On the way**: the outgoing bubble shows the photos at once (from this device's own copy, checked as a download would be), each dimmed with a ring that fills as it uploads; the receipt reads "Uploading photo 2 of 3" before the usual steps. An upload that stops keeps the words and photos on screen with a warning badge, "The upload stopped. It will try again." and **Try again**; it retries by itself after 3, 10 and 30 s. Offline they wait with their message ("Queued · Sends when you’re back online").
 - **In the thread**: photos sit above the words in the person's bubble in fixed frames, so nothing moves as they load: one at 4:3, two side by side, three as one large and two small, four as a 2 × 2 grid with 3 px gutters. A tap opens the file viewer (§5.4) on that photo; photos are never evidence for an approval. A photo that can't be fetched or verified shows its state in its frame; photos that disagree with their signed record are not shown at all and the bubble says so.
-- Lists and the header count photos as part of what was said: "You: Keep Canopy · 2 photos", or "Answer: 2 photos".
+- Lists and the header count photos as part of what was said: "You: Keep Canopy · 2 photos", or "You: 2 photos".
 
 Dictation availability changes only the mic: an unconfigured relay says "Dictation isn't set up for this relay"; offline says "Dictation needs a connection". Never a silently disabled icon. The placeholder only promises holding when dictation can start.
 
