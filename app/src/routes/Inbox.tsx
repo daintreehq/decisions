@@ -13,11 +13,11 @@ function ChooseQuestion() {
   const all = useQuestions();
   if (all.length === 0) return <div className="choose" aria-hidden="true" />;
   return (
-    <div className="choose" aria-labelledby="choose-h">
+    <div className="choose">
       <div className="choose-icon">
         <NavGlyph name="questions" size={22} />
       </div>
-      <h2 id="choose-h">Choose a question</h2>
+      <h2>Choose a question</h2>
       <p className="choose-hint">
         <kbd>{isMac() ? '⌘K' : 'Ctrl K'}</kbd> searches questions
       </p>

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef } from 'react';
 import { useLayer } from '../../app/layers.js';
+import { setQuestions } from '../../app/listState.js';
 import { closeNavigator, openNavigator, useNavigatorOpen } from '../../app/navigator.js';
 import { Link } from '../../app/router.js';
 import { CloseIcon } from '../Icons.js';
@@ -57,6 +58,14 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
       aria-labelledby={titleId}
       onCancel={(e) => {
         e.preventDefault();
+        // Escape clears a query before it closes anything, wherever focus is in the sheet (the search, or a result
+        // reached from it with the arrow keys), and puts focus back in the search. The next Escape closes.
+        const field = ref.current?.querySelector<HTMLInputElement>('input[type="search"]');
+        if (field && field.value) {
+          setQuestions({ query: '' });
+          field.focus();
+          return;
+        }
         dismiss();
       }}
       onClick={(e) => {

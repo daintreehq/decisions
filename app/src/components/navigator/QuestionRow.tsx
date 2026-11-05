@@ -111,6 +111,8 @@ export const QuestionRow = memo(function QuestionRow({
             <span className="sr-only">, {ageLabel(at, now)}</span>
           </time>
         </span>
+        {/* Spoken separators: the row's parts are separate boxes, so its name would otherwise run together. */}
+        <span className="sr-only">. </span>
         {answer ? (
           <span className={'ask' in answer && answer.ask ? 'qrow-a ask' : 'qrow-a'}>
             <span className="who">{answer.author}:</span> {answer.text || 'No note'}
@@ -119,6 +121,7 @@ export const QuestionRow = memo(function QuestionRow({
           closed && <span className="qrow-a closed">{closed}</span>
         )}
         <span className="qrow-meta">
+          <span className="sr-only">. </span>
           <span className="qrow-origin">
             <span className="project">{project}</span>
             {machine && (

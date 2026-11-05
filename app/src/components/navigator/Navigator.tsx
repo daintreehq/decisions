@@ -6,6 +6,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from 'react';
@@ -40,6 +41,7 @@ import type { AgentStateView } from '../../domain/agentState.js';
 import type { QuestionView } from '../../domain/model.js';
 import { currentSubscription, isIos, isStandalone, pushSupport } from '../../features/push.js';
 import { ArrowDown, CloseIcon, FilterIcon, OfflineIcon, SearchIcon } from '../Icons.js';
+import { NavGlyph } from '../NavGlyphs.js';
 import { FilterChips, FilterSheet, type FacetValue } from './Filters.js';
 import { QuestionRow, type PendingAnswer } from './QuestionRow.js';
 import { StatusGlyph } from './StatusGlyph.js';
@@ -330,6 +332,30 @@ export function NavigatorPanel({
     row?.scrollIntoView?.({ block: 'nearest' });
   }, [currentId, loading]);
 
+  /* ---- keyboard: Arrow Down leaves the search for the first row; Up and Down step through rows; Up from the first
+     row returns to the search. Rows stay ordinary links (Tab and Enter work as before). ---- */
+  const rowLinks = () =>
+    Array.from(listRef.current?.querySelectorAll<HTMLAnchorElement>('a.qrow') ?? []);
+  const focusFirstRow = useCallback(() => {
+    const first = listRef.current?.querySelector<HTMLAnchorElement>('a.qrow');
+    if (!first) return false;
+    first.focus();
+    return true;
+  }, []);
+  const onListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const here = (e.target as HTMLElement).closest?.('a.qrow');
+    if (!here) return;
+    const rows = rowLinks();
+    const i = rows.indexOf(here as HTMLAnchorElement);
+    if (i < 0) return;
+    e.preventDefault();
+    if (e.key === 'ArrowDown') rows[i + 1]?.focus();
+    else if (i > 0) rows[i - 1]!.focus();
+    else searchInput.current?.focus();
+  };
+
   const onOpen = useCallback(
     (e: MouseEvent<HTMLAnchorElement>, id: string) =>
       rowClick(e, id, 'questions', { refocus: page }),
@@ -352,13 +378,16 @@ export function NavigatorPanel({
             key: 'sending',
             glyph: 'sending' as const,
             n: countOf('sending'),
-            label: (n: number) => `${n} ${n === 1 ? 'answer' : 'answers'} waiting to send`,
+            // Short enough that both links share one phone line; the rest is said, not shown.
+            label: (n: number) => `${n} waiting to send`,
+            more: '',
           },
           {
             key: 'review',
             glyph: 'review' as const,
             n: countOf('review'),
-            label: (n: number) => `${n} model ${n === 1 ? 'answer' : 'answers'} to review`,
+            label: (n: number) => `${n} model ${n === 1 ? 'answer' : 'answers'}`,
+            more: ' to review',
           },
         ].filter((j) => j.n > 0)
       : [];
@@ -389,7 +418,7 @@ export function NavigatorPanel({
     ) : checking ? (
       <Empty busy title="Checking for questions…" />
     ) : (
-      <Empty title="No questions yet.">
+      <Empty icon={<NavGlyph name="questions" size={20} />} title="No questions yet.">
         <p>Questions your agents ask will appear here.</p>
         {page && <NotifyNudge />}
       </Empty>
@@ -437,17 +466,27 @@ export function NavigatorPanel({
             </Heading>
             {needs && ids.length > 1 && <SortSelect sort={nav.sort} />}
           </div>
-          {needs &&
-            jumps.map((j) => (
-              <button key={j.key} type="button" className="jump-link" onClick={() => jumpTo(j.key)}>
-                <StatusGlyph status={j.glyph} label={false} />
-                {j.label(j.n)}
-                {/* It moves down the list, so an arrow: the chevron beside it opens the sort picker. */}
-                <ArrowDown size={14} />
-              </button>
-            ))}
+          {needs && jumps.length > 0 && (
+            // One quiet line under the heading, not rows: links that point past the fold, side by side.
+            <div className="jump-links">
+              {jumps.map((j) => (
+                <button
+                  key={j.key}
+                  type="button"
+                  className="jump-link"
+                  onClick={() => jumpTo(j.key)}
+                >
+                  <StatusGlyph status={j.glyph} label={false} />
+                  {j.label(j.n)}
+                  {j.more && <span className="sr-only">{j.more}</span>}
+                  {/* It moves down the list, so an arrow: the chevron beside it opens the sort picker. */}
+                  <ArrowDown size={13} />
+                </button>
+              ))}
+            </div>
+          )}
           {ids.length > 0 ? (
-            <ul className="qlist" aria-labelledby={headId}>
+            <ul className="qlist">
               {ids.map((id) => {
                 const v = byId.get(id)!.v;
                 return (
@@ -494,8 +533,9 @@ export function NavigatorPanel({
     if (sc) sc.scrollTo?.({ top: 0 });
     else window.scrollTo?.({ top: 0 });
     setSaid(
+      // Naming the query means refining it is heard even when the count stays the same.
       searching
-        ? `${count} ${count === 1 ? 'match' : 'matches'}`
+        ? `${count} ${count === 1 ? 'match' : 'matches'} for ${query.trim()}`
         : `${count} ${count === 1 ? 'question' : 'questions'}`,
     );
     // Announce on a change of query or filters only, with the count as it stands then.
@@ -514,6 +554,7 @@ export function NavigatorPanel({
             placeholder="Search questions"
             clearable={false}
             onEscapeEmpty={closeSearch}
+            onArrowDown={focusFirstRow}
           />
         </div>
       )}
@@ -560,6 +601,7 @@ export function NavigatorPanel({
           label="Search questions"
           placeholder="Search questions"
           shortcut={page && wide ? (isMac() ? 'Meta+K' : 'Control+K') : undefined}
+          onArrowDown={focusFirstRow}
         />
         {showFilter && (
           <button
@@ -601,7 +643,7 @@ export function NavigatorPanel({
       )}
       {/* With nothing saved yet there is nothing to search or filter, so no tools that would do nothing. */}
       {(all.length > 0 || searching || filtered) && tools}
-      <div className="nav-scroll" ref={listRef}>
+      <div className="nav-scroll" ref={listRef} onKeyDown={onListKeyDown}>
         {floating && <FilterChips project={nav.project} computer={nav.computer} />}
         {offline && all.length > 0 && !loading && (
           <p className="list-note home-offline" role="status">

@@ -25,14 +25,18 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
  *   pnpm build && DESIGN_CAPTURE_DIR=/some/dir pnpm --filter @daintreehq/decisions-e2e test home-capture
  * Skipped unless DESIGN_CAPTURE_DIR is set. Everything goes through the real seams: a real relay, the real desktop
  * client publishing encrypted questions from two computers and two projects, and the PWA paired through its own UI.
- * It captures 0, 3 and 20 questions at 390×844 in both themes, plus search, filters, offline, tablet and wide. Each
- * capture checks what it claims to show before it writes, and the run fails if any expected file is missing. The
+ * It captures 0, 3 and 20 questions at 390×844 in both themes, plus search, filters, offline, tablet, wide and the
+ * Ctrl/⌘+K navigator sheet over a question (phone and tablet). Each capture checks what it claims to show before it
+ * writes, and the run fails if any expected file is missing, if the sheet's keyboard route (Arrow Down into the results,
+ * Escape clears before it closes) breaks, or if the hit boxes around Needs you's heading overlap. HOME_CAPTURE_PORT and
+ * HOME_CAPTURE_INSPECTOR_PORT pick the relay's ports. The
  * same spec runs against the earlier list (scope segments, an always-visible search field, select filters) so the
  * before and after pair by name.
  */
 const OUT = process.env.DESIGN_CAPTURE_DIR;
 const chromiumPath = findChromium();
 const PORT = Number(process.env.HOME_CAPTURE_PORT ?? 8827);
+const INSPECTOR_PORT = Number(process.env.HOME_CAPTURE_INSPECTOR_PORT ?? PORT + 1000);
 const PHONE = { width: 390, height: 844 };
 const TABLET = { width: 834, height: 1194 };
 const WIDE = { width: 1280, height: 820 };
@@ -184,6 +188,36 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     await page.locator('.ws .receipt').filter({ hasText: settled }).waitFor({ timeout: 30_000 });
   };
 
+  /** Hit boxes in Needs you's head that overlap each other or the first row (none should). */
+  const targetOverlaps = (root: string) =>
+    page.evaluate((sel) => {
+      const scope = document.querySelector(sel)?.querySelector('[data-section="needs"]');
+      if (!scope) return ['no Needs you section'];
+      const boxes = [
+        ...Array.from(scope.querySelectorAll('.qgroup-sort, .jump-link')),
+        scope.querySelector('a.qrow'),
+      ]
+        .filter((el): el is Element => !!el)
+        .map((el) => ({ name: el.className || el.tagName, r: el.getBoundingClientRect() }));
+      const hits: string[] = [];
+      for (let i = 0; i < boxes.length; i++)
+        for (let j = i + 1; j < boxes.length; j++) {
+          const a = boxes[i]!.r;
+          const b = boxes[j]!.r;
+          const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          if (w > 0.5 && h > 0.5)
+            hits.push(`${boxes[i]!.name} × ${boxes[j]!.name}: ${Math.round(h)}px`);
+        }
+      return hits;
+    }, root);
+  const expectNoOverlaps = async (name: string, root: string) => {
+    const hits = await targetOverlaps(root);
+    checks.targets ??= {} as Record<string, string[]>;
+    (checks.targets as Record<string, string[]>)[name] = hits;
+    if (hits.length) throw new Error(`${name}: overlapping targets ${hits.join('; ')}`);
+  };
+
   /* ---- the list's tools, in whichever form this build has ---- */
 
   const search = async (q: string) => {
@@ -271,7 +305,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
 
   beforeAll(async () => {
     mkdirSync(OUT!, { recursive: true });
-    relay = await startRelay(PORT);
+    relay = await startRelay(PORT, INSPECTOR_PORT);
     browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
     context = await browser.newContext({
       viewport: PHONE,
@@ -580,6 +614,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     await onHome('Raise the webhook rate limit');
     await expectRows(8, 'twenty questions');
     await shot('p20-light');
+    await expectNoOverlaps('p20-light', 'main');
     await theme('dark');
     await shot('p20-dark');
     await theme('light');
@@ -659,6 +694,63 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     await page.waitForURL((u) => u.pathname === `/q/${ids.ratelimit}`, { timeout: 15_000 });
     await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
     await shot('w20-question-light');
+
+    // Ctrl/⌘+K over a question below 1100px: the Questions & answers sheet, from the bottom on phones and from the
+    // left on tablets, with its search focused and the current question highlighted.
+    const openSheet = async () => {
+      await page.keyboard.press('ControlOrMeta+k');
+      await page.locator('dialog.nav-sheet[open] a.qrow').first().waitFor({ timeout: 10_000 });
+      await settle(400);
+    };
+    const closeSheet = async () => {
+      await page.keyboard.press('Escape');
+      await until(
+        async () => (await page.locator('dialog.nav-sheet[open]').count()) === 0,
+        10_000,
+        'the navigator sheet to close',
+      );
+    };
+    await size(PHONE);
+    await go(`/q/${ids.ratelimit}`);
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+    await openSheet();
+    if ((await page.locator('dialog.nav-sheet[open] .qrow[aria-current="page"]').count()) !== 1)
+      throw new Error('the sheet does not mark the current question');
+    await shot('p20-sheet-light');
+    await expectNoOverlaps('p20-sheet-light', 'dialog.nav-sheet[open]');
+    await theme('dark');
+    await shot('p20-sheet-dark');
+    await theme('light');
+    await page.locator('dialog.nav-sheet[open] input[type="search"]').fill('webhook');
+    await page
+      .locator('dialog.nav-sheet[open] a.qrow', { hasText: 'Log webhook payloads' })
+      .waitFor({ timeout: 10_000 });
+    await shot('p20-sheet-search-light');
+    // The keyboard route: Arrow Down leaves the search for the first result, and Escape there clears the query
+    // (back in the search) before a second Escape closes the sheet.
+    const sheetSearch = page.locator('dialog.nav-sheet[open] input[type="search"]');
+    await sheetSearch.press('ArrowDown');
+    const onRow = await page.evaluate(
+      () => !!document.activeElement?.matches('dialog.nav-sheet a.qrow'),
+    );
+    await page.keyboard.press('Escape');
+    await settle(300);
+    checks.sheetKeys = {
+      arrowDownReachesRow: onRow,
+      escapeKeepsSheet: (await page.locator('dialog.nav-sheet[open]').count()) === 1,
+      escapeClearsQuery: (await sheetSearch.inputValue().catch(() => 'closed')) === '',
+    };
+    if (!Object.values(checks.sheetKeys as Record<string, boolean>).every(Boolean))
+      throw new Error(`sheet keyboard route: ${JSON.stringify(checks.sheetKeys)}`);
+    await closeSheet();
+    await size(TABLET);
+    await settle();
+    await openSheet();
+    await shot('t20-sheet-light');
+    await theme('dark');
+    await shot('t20-sheet-dark');
+    await theme('light');
+    await closeSheet();
     await size(PHONE);
 
     // Offline, with an answer queued on this device.
@@ -691,6 +783,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
       .first()
       .waitFor({ timeout: 15_000 });
     await shot('p20-offline-light');
+    await expectNoOverlaps('p20-offline-light', 'main');
     await theme('dark');
     await shot('p20-offline-dark');
     await theme('light');
@@ -703,7 +796,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of Home, the list of every ques
     }
     await context.setOffline(false);
 
-    const expected = compact ? 23 : 20;
+    const expected = compact ? 28 : 25;
     expect(written.length).toBe(expected);
   });
 });

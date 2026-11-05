@@ -29,6 +29,7 @@ export function SearchField({
   className,
   clearable = true,
   onEscapeEmpty,
+  onArrowDown,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -41,9 +42,16 @@ export function SearchField({
   className?: string;
   clearable?: boolean;
   onEscapeEmpty?: () => void;
+  /** Arrow Down leaves the field for the results (returns false when there are none). */
+  onArrowDown?: () => boolean;
 }) {
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Escape' || e.nativeEvent.isComposing) return;
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === 'ArrowDown' && onArrowDown && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (onArrowDown()) e.preventDefault();
+      return;
+    }
+    if (e.key !== 'Escape') return;
     if (value) {
       e.preventDefault();
       e.stopPropagation();
@@ -78,7 +86,12 @@ export function SearchField({
           type="button"
           className="search-clear"
           aria-label="Clear search"
-          onClick={() => onChange('')}
+          // The button goes once the field is empty: focus stays in the field (and a phone keeps its keyboard).
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            onChange('');
+            e.currentTarget.parentElement?.querySelector('input')?.focus();
+          }}
         >
           <CloseIcon size={14} />
         </button>
