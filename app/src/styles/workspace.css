@@ -372,8 +372,12 @@
   margin-left: auto;
   margin-right: auto;
 }
-/* From 720px the dock lines up with the thread's column (760px less its 32px padding). */
+/* From 720px the dock lines up with the thread's column (760px less its 32px padding), in a narrow pane too. */
 @media (min-width: 720px) {
+  .dock {
+    padding-left: calc(32px + var(--safe-l));
+    padding-right: calc(32px + var(--safe-r));
+  }
   .dock > * {
     max-width: 696px;
   }
@@ -391,7 +395,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 60px;
+  min-height: 56px;
   font-size: var(--text-sm);
   color: var(--text-2);
 }
@@ -482,7 +486,7 @@
   }
 }
 .composer-pill.placeholder {
-  min-height: 60px;
+  min-height: 56px;
 }
 .composer-lane {
   grid-area: lane;
@@ -499,11 +503,13 @@
   justify-content: center;
 }
 .composer-input {
+  position: relative;
   display: block;
   width: 100%;
   min-height: 46px;
-  max-height: calc(5 * 1.5em + 22px);
-  padding: 11px 8px 11px 12px;
+  max-height: calc(5 * 1.5em + 46px - 1.5em);
+  /* One line is exactly the buttons' 46 px at any text size, so the resting pill stays concentric with them. */
+  padding: calc((46px - 1.5em) / 2) 8px calc((46px - 1.5em) / 2) 12px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -530,6 +536,30 @@
 }
 .ws[data-kb] .composer-input {
   max-height: max(3 * 1.5em, min(5 * 1.5em, calc(var(--vv-h, 100dvh) * 0.22)));
+}
+/* The changed words after a tidy-up: the field's own text, transparent, with only the underline showing through. */
+.composer-marks {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  color: transparent;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.composer-mark {
+  text-decoration: underline wavy var(--accent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: none;
+}
+/* The word being checked: a quiet tint behind it rather than a selection, so the keyboard can stay down. */
+.composer-mark.is-check {
+  text-decoration: none;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent);
 }
 .composer-interim {
   display: flex;
@@ -571,8 +601,11 @@
 .composer-pill.two .composer-actions {
   padding-left: 6px;
 }
-/* The mic and Send travel together; the note beside them takes two short lines rather than a row of its own. */
+/* The mic and Send travel together; the note beside them takes two short lines rather than a row of its own. Their
+   targets sit above the field's hold surface, which would otherwise take the edge of the mic's. */
 .composer-buttons {
+  position: relative;
+  z-index: 2;
   flex: none;
   display: flex;
   flex-wrap: wrap;
@@ -584,6 +617,8 @@
 }
 /* Beside Send: the one reason it can't send yet, or the quiet save state, in two short lines at most. */
 .composer-note {
+  display: flex;
+  align-items: center;
   flex: 1 1 0;
   min-width: 0;
   padding-left: 5px;
@@ -656,12 +691,19 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0 12px;
+  gap: 4px 8px;
   min-height: 36px;
   /* A step below the field's 16 px, so a lane line never reads as a second placeholder. */
   font-size: var(--text-xs);
   line-height: 18px;
   color: var(--text-2);
+}
+/* A row of chips and nothing else is only as tall as the chips; a row of words, only as tall as its line. */
+.lane.only-actions {
+  min-height: 32px;
+}
+.lane:not(:has(.composer-action, .lane-x)) {
+  min-height: 26px;
 }
 .lane-text {
   display: inline-flex;
@@ -676,7 +718,7 @@
   font-variant-numeric: tabular-nums;
 }
 /* Discard sits at the far end, away from the running clock. */
-.lane.rec .lane-action {
+.lane.rec .composer-action {
   margin-left: auto;
 }
 .lane-quiet {
@@ -699,33 +741,79 @@
 .lane.error .lane-text {
   color: var(--text);
 }
-.lane-action {
+/* The composer's own small actions (Use original wording, Review 2 words, Discard, Retry, Undo…): a bounded neutral
+   chip, so a control never reads as words in the answer. 32 px to look at, its target taken out to 44. */
+.composer-action {
+  position: relative;
+  flex: none;
   font: inherit;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 44px;
-  padding: 0 2px;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 0;
-  background: transparent;
+  border-radius: 16px;
+  background: var(--surface-card);
+  /* The control-boundary token (3:1 on both themes), so the chip reads as bounded on Bondi's near-white pill too. */
+  box-shadow: inset 0 0 0 1px var(--line-input);
   color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 18px;
   font-weight: 500;
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
-  text-decoration-color: var(--text-2);
+  white-space: nowrap;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+/* In the slot beside Send the label wraps to a second line rather than run under the mic on a narrow screen. */
+.composer-note .composer-action {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  white-space: normal;
+  text-align: left;
+  line-height: 15px;
+}
+.composer-action svg {
+  flex: none;
+  color: var(--text-2);
+}
+.composer-action::after {
+  content: '';
+  position: absolute;
+  inset: -6px -2px;
+}
+@media (hover: hover) {
+  .composer-action:hover {
+    background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 5%);
+  }
+}
+.composer-action:active {
+  background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 8%);
+}
+.composer-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 .lane-x {
+  position: relative;
   display: inline-grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  margin: 0 -6px 0 auto;
+  width: 32px;
+  height: 32px;
+  margin: 0 -2px 0 auto;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: 50%;
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
+}
+.lane-x::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
 }
 .rec-dot {
   width: 8px;
@@ -733,25 +821,6 @@
   border-radius: 50%;
   background: var(--accent);
 }
-.review-text {
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.review-text .mark {
-  font: inherit;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  text-decoration: underline wavy;
-  text-decoration-color: var(--accent);
-  text-underline-offset: 0.22em;
-}
-
 /* Choices: one row of chips above the pill. Selection is a raised neutral fill, an edge and a check. */
 .chips {
   position: relative;
@@ -877,7 +946,8 @@
   font-size: var(--text-sm);
 }
 .unsure mark {
-  background: var(--warning-surface);
+  /* The same tint the word wears on the answer below. */
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
   color: var(--text);
   padding: 0 3px;
   border-radius: 4px;

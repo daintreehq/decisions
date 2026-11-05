@@ -588,6 +588,8 @@ export class DictationController {
     const d0 = drafts.get(b.key)!;
     const at = fieldValue(d0, b.field);
     this.set({ ...IDLE, phase: 'cleaning', binding: b, message });
+    // Why Send isn't ready yet, said once (the words "Recording stopped" leave it open).
+    announce('Tidying wording…');
     const outcome = await (this.deps.correct ?? runCorrection)({
       provider,
       raw: passage.raw,
@@ -662,18 +664,25 @@ export class DictationController {
       start: s.start + passage.start,
       end: s.end + passage.start,
     }));
+    // With words to review, "Review N words" is the call to action, so the guess warning is spoken rather than shown
+    // above it.
+    const guessed = outcome.lowConfidence
+      ? 'Tidied, but some words were guesses. Check it before sending.'
+      : null;
     this.set({
       ...IDLE,
       binding: b,
-      message: outcome.lowConfidence
-        ? { text: 'Tidied, but some words were guesses. Check it before sending.', tone: 'info' }
-        : message,
+      message: guessed && !spans.length ? { text: guessed, tone: 'info' } : message,
       review: marks.length
         ? { key: b.key, field: b.field, start: passage.start, cleaned, marks }
         : null,
       unsure: spans.length ? { key: b.key, field: b.field, text: now, spans } : null,
     });
-    announce('Wording tidied. Use original wording is available.');
+    announce(
+      guessed && spans.length
+        ? `${guessed} Use original wording is available.`
+        : 'Wording tidied. Use original wording is available.',
+    );
     clearTimeout(this.reviewTimer);
     this.reviewTimer = setTimeout(() => this.set({ review: null }), REVIEW_MS);
   }
@@ -699,11 +708,9 @@ export class DictationController {
   useOriginal(key: string): void {
     if (this.state.phase === 'cleaning' && this.state.binding?.key === key) {
       this.cleanGen++;
-      this.set({
-        ...IDLE,
-        binding: this.state.binding,
-        message: { text: 'Kept your original wording.', tone: 'info' },
-      });
+      // The words in the field and the chip leaving are what shows it; a row saying so would stay until dismissed.
+      this.set({ ...IDLE, binding: this.state.binding, message: null });
+      announce('Kept your original wording.');
       return;
     }
     const d = drafts.get(key);
@@ -717,11 +724,8 @@ export class DictationController {
       passage: { ...p, cleaned: p.raw },
       caret,
     });
-    this.set({
-      review: null,
-      unsure: null,
-      message: { text: 'Back to exactly what you said.', tone: 'info' },
-    });
+    this.set({ review: null, unsure: null, message: null });
+    announce('Back to exactly what you said.');
   }
 
   /** Discard the passage being dictated: capture is cancelled and its words leave the draft, with Undo. */

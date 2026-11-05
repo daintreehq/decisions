@@ -69,7 +69,7 @@ The rules carried over from Daintree (its `.claude/rules/design-system.md` and `
 - **Green is scarce.** Status success (`#6B8D72` on Daintree, `#017249` on Bondi) is only for named outcomes and finite completed steps (delivered, confirmed), never ambient "healthy" chrome.
 - **Status colour sits on the glyph and the tint, never the words.** A status chip is a 10–15% tint of its hue with a coloured icon and neutral text.
 - **Never fade text with alpha.** Step down the hierarchy: primary → secondary → muted. `text-muted` is not for icons or load-bearing text.
-- **Shadows only from tokens**; borders are 1 px hairlines; the input edge is the solid `border-input` token (it owes 3:1).
+- **Shadows only from tokens**; borders are 1 px hairlines; the input edge is the solid `border-input` token (it owes 3:1). The composer pill is the one exception, a raised surface with a hairline edge (§6.1).
 
 ### 2.2 Tokens
 
@@ -286,9 +286,12 @@ On phones, one large image at a time with a full-width **Before | After** segmen
 One rounded pill pinned to the bottom of the chat, inside the safe area and above the on-screen keyboard. Resting and empty it is the field ("Type or hold to talk"; "Add a note" beside a choice) and the mic on one row. Once there is something to send it opens into two rows inside the same pill: the field across the top, and an action row with the one reason Send can't send yet (or the quiet save state) at the left, the mic, and **Send answer** / **Send decision** / **Send correction** (contrast button) at the right edge, in the mic's old place. `+` sits at the pill's left (§6.4). All Q&A is gone from the dock: other questions are in the sidebar (the menu button carries the waiting count) and behind Ctrl/⌘ + K.
 
 - **The field** is a real, labelled textarea at 16/24 that grows with its text to about five lines (less with the keyboard up), then scrolls. Return inserts a newline. It never focuses itself because dictation produced text.
-- **The lane** at the pill's top says one thing at a time: Starting microphone…, Recording · 00:24 with Discard, Finishing your words…, Tidying wording… with Use original wording, then (in priority order) a failed save with Retry and Copy, an error, a changed question with Review update, Undo, dictation messages, the cleanup marks, Draft restored.
+- **The lane** at the pill's top says one thing at a time, and only when it needs the width: Recording · 00:24 with Discard, Finishing your words…, Tidying wording…, then (in priority order) a failed save with Retry and Copy, an error, a changed question with Review update, Undo, dictation messages, what was heard at a changed word, Review 2 words. Starting into an empty answer is the field's placeholder, not a lane row.
+- **The slot** on the action row, between `+` and the mic, holds one quiet thing: the reason Send can't send yet, else **Use original wording** (from the moment the tidy-up starts until the passage is edited, so it never moves), else Draft restored, Saving… or Saved on this device. A tidied one-line answer is two rows: the words, then `+` · Use original wording · mic · Send.
+- **Small actions** (Use original wording, Review 2 words, Discard, Retry, Copy, Undo, Try again, Review update) are one bounded neutral chip, 32 px with a 44 px target, never a bare link that could read as part of the answer.
+- **Changed words** after a tidy-up are underlined on the answer itself for 5 s, drawn under the field's own text; placing the caret in one says what was heard there.
 - **Choices** are a row of chips just above the pill, synchronised with the radio cards in the agent's message (which keep the descriptions). One tap picks, another changes; the chosen chip shows its whole label with a check, a raised neutral fill and a text-secondary edge. A correction's chips mark the answer in force.
-- The pill keeps the input boundary token in every state, is concentric with the 46 px buttons it holds, and its focus ring is the field's.
+- The pill is a raised surface with a hairline edge (after the Claude iOS composer, November 2026), not an outlined input: it is the only enclosing input surface on the screen, and its placeholder, `+` and mic identify it. It is concentric with the 46 px buttons it holds (one line of text is exactly their height), and its focus ring is the field's.
 
 ### 6.2 States
 
@@ -297,11 +300,11 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 | Empty, text allowed           | Field and mic on one row                                                                                                             |
 | Choice, nothing chosen        | Chips; field ("Add a note") and mic                                                                                                  |
 | Choice chosen or text entered | Two rows; save state or Send reason; mic; Send                                                                                       |
-| Starting                      | Lane "Starting microphone…"; the mic is Stop with the wait arc                                                                       |
+| Starting                      | The compact bar, the field saying "Starting microphone…"; the mic is Stop with the wait arc                                          |
 | Recording                     | Lane "Recording · 00:24" and Discard; locked words in the field, interim words (two lines at most) beneath them; Stop with the orbit |
-| Finishing, cleaning           | Lane says so; Send not ready                                                                                                         |
+| Finishing, cleaning           | Lane says so; Use original wording in the slot while cleaning; Send not ready                                                        |
 | Answer sent, queued, answered | Follow-ups (§6.3): the pill with "Add a follow-up" and a quiet **Next question** above it                                            |
-| Expired, withdrawn            | The composer gives way to a 60 px **Next question** (or "No more questions need you")                                                |
+| Expired, withdrawn            | The composer gives way to a compact **Next question** at the trailing edge (or "No more questions need you")                         |
 | Conflict                      | "Your answer was not applied. Your words are kept." and **Review change**                                                            |
 | Unreadable, unverified        | The trust explanation, and Next question when there is one                                                                           |
 

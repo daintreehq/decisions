@@ -320,7 +320,7 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
       await fieldHas('Include a retry after header.');
     });
     await mic().waitFor({ timeout: 20_000 });
-    await expect(mic().getAttribute('aria-pressed')).resolves.toBe('false');
+    await expect(mic().getAttribute('aria-label')).resolves.toMatch(/^Dictate /);
 
     await field().fill('');
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
