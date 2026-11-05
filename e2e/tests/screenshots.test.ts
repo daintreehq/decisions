@@ -539,6 +539,9 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await filesReady();
     await shot('09-detail-approval');
     await shot('09-detail-approval-full', { full: true });
+    // An approval with files can only be sent once every file has been seen, so look at After first.
+    await page.getByRole('tab', { name: /^After/ }).click();
+    await page.getByRole('tab', { name: /^After/, selected: true }).waitFor();
     await page
       .getByRole('radio', { name: /^Approve/ })
       .first()
@@ -546,6 +549,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('10-detail-approval-selected');
     // The README hero: the choice made, a note for the agent, Send in the composer.
     await typeAnswer('Ship it. Keep the tooltips on every icon.');
+    await expect(page.getByText('Review the remaining file')).toHaveCount(0);
     await shot('10-detail-approval-note');
     await typeAnswer('');
     await page.getByRole('tab', { name: /^After/ }).click();
@@ -645,7 +649,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     });
     await page.goto(relay.origin + '/settings/dictation');
     await page.getByRole('switch', { name: 'Dictation' }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.getByRole('alertdialog').waitFor();
     await shot('72-dictation-consent');
     await page.getByRole('button', { name: /turn on dictation/ }).click();
     await page.getByText('Speech to text', { exact: true }).waitFor();
@@ -674,7 +678,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('74-quiet-hours-invalid', { full: true });
     await page.getByLabel('Until').fill('07:00');
     await page.locator('.s-back').click();
-    await page.getByRole('dialog', { name: 'Save your changes?' }).waitFor();
+    await page.getByRole('alertdialog', { name: 'Save your changes?' }).waitFor();
     await shot('74-quiet-hours-leave');
     await page.getByRole('button', { name: 'Keep editing' }).click();
     await page.getByRole('button', { name: 'Save', exact: true }).click();
@@ -694,11 +698,11 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('76-privacy', { full: true });
     await page.getByRole('button', { name: 'Unpair…' }).click();
     await page
-      .getByRole('dialog')
+      .getByRole('alertdialog')
       .getByText(/unsent answer/)
       .waitFor();
     await shot('24-dialog-erase');
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click();
 
     await page.goto(relay.origin + '/settings/about');
     await page.getByRole('heading', { name: 'About & help' }).waitFor();
@@ -1013,7 +1017,6 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     const box = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
     await page.mouse.dblclick(box.x + box.width * 0.3, box.y + box.height * 0.45);
     await shot('50-viewer-zoomed-phone');
-    await viewer.getByLabel('More image controls').click();
     await viewer.getByRole('button', { name: 'Move', exact: true }).click();
     await viewer.getByRole('button', { name: 'Move right' }).click();
     await shot('50-viewer-move-phone');
@@ -1023,10 +1026,10 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('menu').waitFor();
     await shot('50-viewer-menu-phone');
     await page.getByRole('menuitem', { name: 'Download' }).click();
-    await page.getByRole('dialog', { name: 'Download this file?' }).waitFor();
+    await page.getByRole('alertdialog', { name: 'Download this file?' }).waitFor();
     await shot('50-viewer-handoff-phone');
     await page
-      .getByRole('dialog', { name: 'Download this file?' })
+      .getByRole('alertdialog', { name: 'Download this file?' })
       .getByRole('button', { name: 'Cancel' })
       .click();
     await viewer.getByRole('button', { name: 'Question', exact: true }).click();
@@ -1288,7 +1291,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.waitForTimeout(800);
     await openId('text');
     await page.getByRole('button', { name: /^Dictate/ }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.getByRole('alertdialog').waitFor();
     await shot('40-ws-dictation-consent');
     await page.getByRole('button', { name: 'Enable and start dictation' }).click();
     await page.locator('.composer-lane .lane.rec').waitFor({ timeout: 15_000 });
