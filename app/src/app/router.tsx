@@ -44,14 +44,19 @@ export function navigate(to: string, replace = false, state: object | null = nul
 
 const listeners = new Set<() => void>();
 let renderedPath = typeof location === 'undefined' ? '/' : location.pathname;
-function routeChanged(): void {
+function routeChanged(event: Event): void {
   const from = renderedPath;
   const to = location.pathname;
   renderedPath = to;
-  transitionPage(from, to, () => {
-    if (from !== to) window.scrollTo(0, 0);
-    listeners.forEach((cb) => cb());
-  });
+  transitionPage(
+    from,
+    to,
+    () => {
+      if (from !== to) window.scrollTo(0, 0);
+      listeners.forEach((cb) => cb());
+    },
+    'hasUAVisualTransition' in event && event.hasUAVisualTransition === true,
+  );
 }
 
 function subscribe(cb: () => void): () => void {

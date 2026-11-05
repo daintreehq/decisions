@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -21,6 +21,7 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
 const PORT = Number(process.env.SIDEBAR_E2E_PORT ?? 8823);
 const chromiumPath = findChromium();
 const browserEngine = process.env.E2E_BROWSER === 'webkit' ? webkit : chromium;
+const motionDir = process.env.MOTION_CAPTURE_DIR;
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -83,6 +84,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     until(async () => (await sheet().count()) === 0, 10_000, 'the sidebar to close');
 
   beforeAll(async () => {
+    if (motionDir) mkdirSync(motionDir, { recursive: true });
     relay = await startRelay(PORT);
     browser = await browserEngine.launch({
       ...(browserEngine === chromium ? { executablePath: chromiumPath! } : {}),
@@ -94,6 +96,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
       // exercise navigation and gestures; Chromium's full suite also exercises the service worker.
       serviceWorkers: browserEngine === webkit ? 'block' : 'allow',
       hasTouch: true,
+      ...(motionDir ? { recordVideo: { dir: motionDir, size: { width: 390, height: 844 } } } : {}),
     });
     page = await context.newPage();
 
@@ -156,6 +159,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
 
   afterAll(async () => {
     await bridge?.stop?.();
+    for (const context of browser?.contexts() ?? []) await context.close();
     await browser?.close();
     await relay?.stop();
   });
@@ -265,12 +269,100 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
           getComputedStyle(document.querySelector('.sidebar-sheet')!, '::backdrop').backgroundColor,
       ),
     ).toBe('rgba(0, 0, 0, 0)');
+    expect(
+      await page.locator('.shell').evaluate((el) => getComputedStyle(el).backgroundColor),
+    ).toBe(
+      await page.locator('.side-sheet-body').evaluate((el) => getComputedStyle(el).backgroundColor),
+    );
+    if (motionDir) await page.screenshot({ path: join(motionDir, 'sidebar-corner.png') });
     // The exposed edge belongs to the conversation; tapping it returns to the same live draft.
     await page.mouse.click(380, 420);
     await closed();
     expect(await draft.inputValue()).toBe('Keep this draft while browsing recent questions.');
     expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(0);
     await draft.fill('');
+  });
+
+  it('slides viewport-sized snapshots without scaling when the outgoing page is taller', async () => {
+    await page.goto(relay.origin + '/');
+    await page.locator('main .qrow').first().waitFor();
+    await page.locator('.questions-page').evaluate((el) => {
+      (el as HTMLElement).style.minHeight = '1800px';
+    });
+    await page.evaluate(() => {
+      type Sample = {
+        width: number;
+        height: number;
+        a: number;
+        b: number;
+        c: number;
+        d: number;
+        x: number;
+        y: number;
+      };
+      const root = document.documentElement;
+      const output: Sample[] = [];
+      (window as unknown as { slideFrames: Sample[] }).slideFrames = output;
+      const sample = () => {
+        const group = getComputedStyle(root, '::view-transition-group(root)');
+        const incoming = getComputedStyle(root, '::view-transition-new(root)');
+        if (incoming.animationName === 'page-enter') {
+          const matrix = new DOMMatrix(
+            incoming.transform === 'none' ? undefined : incoming.transform,
+          );
+          output.push({
+            width: parseFloat(group.width),
+            height: parseFloat(group.height),
+            a: matrix.a,
+            b: matrix.b,
+            c: matrix.c,
+            d: matrix.d,
+            x: matrix.e,
+            y: matrix.f,
+          });
+        }
+        if (root.dataset.pageMotion) requestAnimationFrame(sample);
+      };
+      const observer = new MutationObserver(() => {
+        if (root.dataset.pageMotion === 'forward') {
+          observer.disconnect();
+          requestAnimationFrame(sample);
+        }
+      });
+      observer.observe(root, { attributes: true, attributeFilter: ['data-page-motion'] });
+    });
+    await page.locator('main .qrow').first().click();
+    await page.locator('.ws .dock').waitFor();
+    await until(
+      async () => page.evaluate(() => !document.documentElement.dataset.pageMotion),
+      5000,
+      'the slide to finish',
+    );
+    const frames = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            slideFrames: {
+              width: number;
+              height: number;
+              a: number;
+              b: number;
+              c: number;
+              d: number;
+              x: number;
+              y: number;
+            }[];
+          }
+        ).slideFrames,
+    );
+    expect(frames.length).toBeGreaterThan(3);
+    for (const frame of frames) {
+      expect(frame.width).toBeCloseTo(390, 0);
+      expect(frame.height).toBeCloseTo(844, 0);
+      expect([frame.a, frame.b, frame.c, frame.d, frame.y]).toEqual([1, 0, 0, 1, 0]);
+    }
+    expect(frames.some((frame) => frame.x > 40 && frame.x < 350)).toBe(true);
+    if (motionDir) await page.screenshot({ path: join(motionDir, 'compact-composer.png') });
   });
 
   it('animates question navigation in both directions and honors reduced motion', async () => {

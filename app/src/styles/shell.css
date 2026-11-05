@@ -425,13 +425,15 @@ main.bare {
 .shell[data-sidebar-dragging] {
   transition: none;
 }
+.shell:has(.sidebar-sheet[open]) {
+  /* The rounded canvas exposes this surface at its corners, beyond the sidebar's rectangular content. */
+  background: var(--surface-chrome);
+}
 .shell:has(.sidebar-sheet[open]) .frame {
   translate: var(--sidebar-offset) 0;
   background: var(--surface-page);
   border-radius: 28px 0 0 28px;
-  box-shadow:
-    -1px 0 0 var(--line-strong),
-    -12px 0 48px var(--theme-scrim-medium);
+  box-shadow: -1px 0 0 var(--line-subtle);
   overflow: clip;
 }
 .shell:has(.sidebar-sheet[open]) .menu-fab {

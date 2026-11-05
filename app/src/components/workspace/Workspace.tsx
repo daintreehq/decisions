@@ -407,11 +407,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     if (!h || !root || typeof IntersectionObserver === 'undefined') return;
     const io = new IntersectionObserver(([e]) => setHeadingAway(!e!.isIntersecting), {
       root,
+      rootMargin: wide
+        ? '0px'
+        : `-${rootRef.current?.querySelector('.ws-head')?.clientHeight ?? 60}px 0px 0px`,
       threshold: 0,
     });
     io.observe(h);
     return () => io.disconnect();
-  }, [content]);
+  }, [content, wide]);
 
   const binding = (): Binding => ({
     questionId: id,
@@ -677,9 +680,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         : mode === 'correction'
           ? 'Write the corrected answer'
           : shape.textIsAnswer
-            ? voice
-              ? 'Type or hold to talk'
-              : 'Type an answer'
+            ? 'Type an answer'
             : 'Add a note';
     const focusedPlaceholder = reason
       ? 'Why are you changing it?'

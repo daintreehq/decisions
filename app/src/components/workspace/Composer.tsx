@@ -96,8 +96,8 @@ export interface ComposerProps {
 }
 
 /**
- * A rounded writing surface with the field above a stable attachment, dictation and Send toolbar. Notices and
- * photos sit above the field. Capture freezes the Send slot and arms it only after the hand leaves Stop.
+ * A compact message bar, expanding only when the words wrap, photos arrive, or a notice needs room.
+ * Capture freezes the Send slot and arms it only after the hand leaves Stop.
  */
 export function Composer(p: ComposerProps) {
   const { shape, draft, verdict, dict, field } = p;
@@ -105,6 +105,10 @@ export function Composer(p: ComposerProps) {
   const capturing = isCapture(phase);
   const value = fieldValue(draft, field);
   const [focused, setFocused] = useState(false);
+  const [multiline, setMultiline] = useState(false);
+  useEffect(() => {
+    if (!value) setMultiline(false);
+  }, [value]);
   const [reviewing, setReviewing] = useState(false);
   const quietUntil = useRef(0);
   // The hand-off is visible: Send reads as not ready (and is) until the quiet period after the mic has passed.
@@ -148,8 +152,9 @@ export function Composer(p: ComposerProps) {
   const textless = shape.fields.length === 0;
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  // Keep the field above a stable toolbar, including at rest: focusing never rearranges controls under a thumb.
-  const two = true;
+  // Focus alone never enlarges the input. Once text wraps, keep the wider writing surface until it is cleared.
+  const two =
+    textless || multiline || hasPhotos || capturing || (verdict.hasContent && !!verdict.hint);
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {
@@ -263,6 +268,7 @@ export function Composer(p: ComposerProps) {
             onContact={quiet}
             onPastePhotos={takesDrop ? dropped : undefined}
             open={two}
+            onMultiline={setMultiline}
           />
         )}
         {photos && (
@@ -271,11 +277,9 @@ export function Composer(p: ComposerProps) {
           </div>
         )}
         <div className="composer-actions">
-          {two && (
-            <span className="composer-note" id="ws-send-hint">
-              {note}
-            </span>
-          )}
+          <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
+            {note}
+          </span>
           <span className="composer-buttons">
             {!textless && (
               <DictateButton
@@ -334,6 +338,7 @@ function Field(
     onPastePhotos?: (files: FileList) => boolean;
     /** The pill is open into two rows; the field measures itself again when it changes. */
     open: boolean;
+    onMultiline: (value: boolean) => void;
   },
 ) {
   const { draft, field, dict, fieldRef: ref, value } = p;
@@ -361,10 +366,28 @@ function Field(
   useLayoutEffect(() => {
     const t = ref.current;
     if (!t) return;
-    t.style.height = 'auto';
-    t.style.height = `${t.scrollHeight}px`;
-    if (p.capturing) t.scrollTop = t.scrollHeight;
-  }, [value, p.capturing, interim, ref, p.open]);
+    const measure = () => {
+      t.style.height = 'auto';
+      const style = getComputedStyle(t);
+      const line =
+        parseFloat(style.lineHeight) +
+        parseFloat(style.paddingTop) +
+        parseFloat(style.paddingBottom);
+      if (!p.open && value && t.scrollHeight > line + 2) p.onMultiline(true);
+      t.style.height = `${t.scrollHeight}px`;
+      if (p.capturing) t.scrollTop = t.scrollHeight;
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    let width = t.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (t.clientWidth === width) return;
+      width = t.clientWidth;
+      measure();
+    });
+    observer.observe(t);
+    return () => observer.disconnect();
+  }, [value, p.capturing, interim, ref, p.open, p.onMultiline]);
 
   const caret = () => {
     const t = ref.current;

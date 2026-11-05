@@ -218,9 +218,13 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await expect(
       page.locator('.dock').getByRole('button', { name: 'Send answer' }).count(),
     ).resolves.toBe(0);
-    // Opening the keyboard establishes the action row before typing, so the first character doesn't move it.
+    // Focusing a short message keeps the reference app's compact, single-row input.
+    const resting = await composer().boundingBox();
     await page.locator('.dock .composer-field').click();
-    await page.locator('.composer[data-rows="two"]').waitFor();
+    await page.locator('.composer[data-rows="one"]').waitFor();
+    const focused = await composer().boundingBox();
+    expect(resting!.height).toBeLessThanOrEqual(60);
+    expect(Math.abs(focused!.height - resting!.height)).toBeLessThanOrEqual(1);
     const micBefore = await mic().boundingBox();
     await field().fill('Use 5173, the Vite default.');
     const micAfter = await mic().boundingBox();
@@ -251,6 +255,25 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     expect(sink.typed.find((t) => t.includes('Default it off'))).toContain('choice: flag');
   });
 
+  it('grows for wrapped words and returns to a compact bar when cleared', async () => {
+    await openId('draft');
+    await field().fill(
+      'Keep the retry budget configurable and document how it applies to each request.\nInclude an example for the default value.',
+    );
+    await page.locator('.composer[data-rows="two"]').waitFor();
+    const writing = await composer().boundingBox();
+    expect(writing!.height).toBeGreaterThan(60);
+    expect(writing!.height).toBeLessThan(220);
+    await field().fill('');
+    await page.locator('.composer[data-rows="one"]').waitFor();
+    await page.setViewportSize({ width: 320, height: 700 });
+    expect((await composer().boundingBox())!.height).toBeLessThanOrEqual(60);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
+      false,
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+  });
+
   it('dictates with a tap to start and a tap to stop', async () => {
     voice = {
       words: [{ afterMs: 200, text: 'Tell the client to slow down.', final: true }],
@@ -271,7 +294,7 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     // Restoring the preceding dictation adds Send and moves the mic; wait before measuring its position.
     await fieldHas('Tell the client to slow down.');
     // The relay's voice configuration loads separately from the cached question and draft.
-    await page.locator('.dock textarea[placeholder="Type or hold to talk"]').waitFor();
+    await page.locator('.dock textarea[placeholder="Type an answer"]').waitFor();
     voice = { words: [{ afterMs: 150, text: 'Include a retry after header.', final: true }] };
     await hold('.dock .dictate-btn', async () => {
       await stop().waitFor({ timeout: 20_000 });
@@ -299,7 +322,10 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await openId('draft');
     await field().fill('retry_budget, in seconds');
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-    await page.locator('.dock').getByText('Saved on this device').waitFor({ timeout: 10_000 });
+    await page
+      .locator('.dock')
+      .getByText('Saved on this device')
+      .waitFor({ state: 'attached', timeout: 10_000 });
     await page.goto(`${relay.origin}/`);
     await page.locator('#main').waitFor();
     await openId('draft');

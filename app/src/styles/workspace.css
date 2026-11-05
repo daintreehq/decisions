@@ -141,6 +141,44 @@
 .ws-more svg {
   stroke-width: 3;
 }
+/* On a phone the controls float above the thread, as in the reference app. Reading content can pass beneath
+ * the status area; its initial padding and scroll padding still keep the question and focused items clear. */
+.shell[data-layout='single'] .ws > .ws-body {
+  grid-row: 1 / 3;
+  scroll-padding-top: calc(var(--safe-t) + var(--top-row) + 16px);
+}
+.shell[data-layout='single'] .ws-column {
+  padding-top: calc(var(--safe-t) + var(--top-row) + 16px);
+}
+.shell[data-layout='single'] .ws-head {
+  background: transparent;
+  isolation: isolate;
+}
+.shell[data-layout='single'] .ws-head::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 -16px;
+  z-index: -1;
+  background: linear-gradient(
+    to bottom,
+    var(--surface-page) 40%,
+    color-mix(in oklab, var(--surface-page) 88%, transparent) 75%,
+    transparent
+  );
+  pointer-events: none;
+}
+.shell[data-layout='single'] .ws-tools {
+  gap: 0;
+  padding: 2px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface-raised) 88%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.shell[data-layout='single'] .ws-tools .btn {
+  border-radius: 50%;
+}
 .ws-title {
   min-width: 0;
   text-align: center;
@@ -383,8 +421,7 @@
 }
 
 /* ---------- the composer ----------
- * One rounded writing surface: the field across the top, and a stable action row (the Send reason or save state,
- * attachments, mic, Send at the right edge) below it, including at rest.
+ * A compact message bar. Wrapped text, photos and capture gain a writing row above the controls.
  * The lane (dictation, errors, notices) sits at the pill's top; choice chips sit just above the pill.
  */
 .composer {
@@ -415,18 +452,19 @@
     'lane lane'
     'field actions';
   align-items: end;
-  min-height: 60px;
-  padding: 6px;
+  min-height: 56px;
+  padding: 4px;
   /* The toolbar's circular controls nest inside a softer, rounded writing surface. */
-  border-radius: 26px;
-  border: 1px solid var(--line-default);
-  background: var(--surface-raised);
-  box-shadow: 0 2px 12px color-mix(in oklab, var(--text) 3%, transparent);
+  border-radius: 28px;
+  border: 1px solid var(--line-subtle);
+  background: color-mix(in oklab, var(--surface-raised) 86%, var(--surface-page));
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--text) 4%, transparent);
   transition:
     border-color var(--dur) var(--ease-out),
     box-shadow var(--dur) var(--ease-out);
 }
 .composer-pill.two {
+  border-radius: 24px;
   grid-template-areas:
     'lane lane'
     'field field'
@@ -482,10 +520,10 @@
 .composer-pill.two .composer-input {
   /* Clear of the surface's rounded corner. The room is margin, not padding, so a scrolled field clips its text below
      the corner instead of sliding it up under the curve. */
-  min-height: calc(2 * 1.5em);
+  min-height: 1.5em;
   max-height: calc(5 * 1.5em);
   padding: 0 12px;
-  margin: 10px 0 8px;
+  margin: 8px 0 6px;
 }
 .composer-pill.two .composer-lane + .composer-field .composer-input {
   margin-top: 4px;
