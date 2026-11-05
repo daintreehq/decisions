@@ -431,8 +431,11 @@
   font-size: var(--text-md);
   line-height: 22px;
 }
-/* What is asking for you reads a step stronger than what is settled. */
-.navigator .qrow[data-status='needs'] .qrow-q {
+/* What is asking for you reads a step stronger than what is settled: so do an answer whose delivery needs you and a
+   model answer waiting for your review. */
+.navigator
+  .qrow:is([data-status='needs'], [data-status='delivery'], [data-status='review'])
+  .qrow-q {
   font-weight: 500;
 }
 .navigator .qrow-time {
@@ -464,13 +467,61 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The project and the computer give way separately, so a long project never pushes the computer out of the row
+   ("customer-onboard… · Greg's Mac…", never "customer-onboardin…"). */
+.navigator .qrow-origin {
+  display: flex;
+  align-items: baseline;
+}
+.navigator .qrow-origin > .project,
+.navigator .qrow-origin > .machine {
+  flex: 0 1 auto;
+  min-width: 2.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.navigator .qrow-origin > .sep {
+  flex: none;
+  white-space: pre;
+}
+/* The computer is the rarer, more identifying half (a few computers, many projects): the project gives way first. */
+.navigator .qrow-origin > .project {
+  flex-shrink: 2;
+}
+.navigator .qrow-origin > .machine {
+  /* Room for a whole "Greg's MacBook Pro" before the project gives way, never more than half the line. */
+  min-width: min(11em, 50%);
+}
+/* On a phone a stale state's age would cut the origin below recognition: the hollow ring and the secondary word
+   already say it is stale, and the exact age is a tap away (the age is decorative for assistive tech already). */
+@media (max-width: 719px) {
+  .navigator .qrow-meta .agent-age {
+    display: none;
+  }
+}
 .qrow-origin .project {
-  color: var(--text);
+  /* Set apart from the computer by weight, in the line's secondary ink, so it never outweighs the question above. */
   font-weight: 500;
 }
-/* The agent's state keeps main's reserved slot (below), set off from the chips before it as from an item. */
+/* The agent's state keeps main's reserved slot (below), set off from the chips before it as from an item. With a
+   slot on the line, the line never wraps: the origin gives way (its ellipsis), so the state sits at the line's end on
+   every row and going stale never adds a line (guide 4.2, 12). */
 .navigator .qrow-meta > .m.agent {
   margin-left: 6px;
+}
+.navigator .qrow-meta:has(> .m.agent):not(:has(> .badge)) {
+  flex-wrap: nowrap;
+}
+/* The state is sized to its words (and its age, when stale) and pinned to the line's end, so it lines up down the
+   card and is never cut to "Waiting ·…"; the origin gives way to it instead. */
+.navigator .qrow-meta > .m.agent {
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 6px;
+}
+.navigator .qrow-meta:has(> .m.agent) > .qrow-origin {
+  flex: 0 1 auto;
 }
 .navigator .qrow-meta .badge {
   flex: none;
@@ -547,7 +598,7 @@
   min-height: 0;
   padding: 11px 16px 12px 14px;
   background: var(--sidebar-card-bg, var(--theme-overlay-soft));
-  box-shadow: var(--sidebar-card-shadow, 0 0 #0000);
+  box-shadow: var(--sidebar-card-shadow, none);
 }
 .navigator[data-presentation='sheet'] .qrow-item + .qrow-item {
   border-top: 2px solid var(--nav-gutter, var(--surface-chrome));
@@ -669,10 +720,10 @@
 .home-offline {
   margin-bottom: 12px;
 }
-/* Nothing needs you: words alone, starting on the rows' title column (no glyph: a check would read as a row). */
+/* Nothing needs you: words alone, on the card's own padding (no glyph: a check would read as a row), so the card
+   doesn't look as if its icon failed to load. */
 .list-note-clear {
   display: block;
-  padding-left: 42px;
 }
 /* A long Needs you points down to the model answers waiting for review. */
 .jump-link {

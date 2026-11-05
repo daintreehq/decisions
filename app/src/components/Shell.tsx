@@ -46,6 +46,8 @@ export function Shell({ children }: { children: ReactNode }) {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'k')
         return;
       e.preventDefault();
+      // Another modal layer owns the keyboard: nothing behind it moves. The navigator's own sheet handles its search.
+      if (document.querySelector('dialog[open]:not(.nav-sheet)')) return;
       if (focusNavigatorSearch()) return;
       openNavigatorWithSearch();
     };

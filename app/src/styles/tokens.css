@@ -108,19 +108,34 @@
   --ease-out: ease-out;
   --ease-enter: cubic-bezier(0.2, 0, 0, 1);
   --ease-exit: cubic-bezier(0.2, 0, 0.7, 0);
+
+  /* Fixed in both themes. The brand tile is Daintree's app icon (guide 2.7): its dark tile and mint mark stay the
+     same on Bondi. Over a photo the app's own surfaces mean nothing, so marks on photos are white on a black scrim. */
+  --destructive: var(--theme-destructive-fill, var(--danger));
+  --destructive-fg: var(--theme-destructive-foreground, var(--on-photo));
+  --brand-tile: #151616;
+  --brand-mark: #36ce94;
+  --on-photo: #fff;
+  --photo-scrim: color-mix(in oklab, #000 38%, transparent);
+  --photo-scrim-soft: color-mix(in oklab, #000 24%, transparent);
 }
 
-/* Bondi's chrome is opaque sand (its sidebar); Daintree's is translucent charcoal with blur. */
+/* Bondi's chrome is opaque sand (its sidebar); Daintree's is translucent charcoal with blur. On Daintree the theme's
+   solid default border is darker than its own subtle and divider lines, so a card's edge vanished while the rows
+   inside it showed; the card edge steps between subtle and strong instead, keeping the ladder in order. */
 :root {
   --material-bg: color-mix(in oklab, var(--theme-surface-sidebar) 92%, transparent);
+  --line-default: color-mix(in oklab, var(--theme-border-subtle), var(--theme-border-strong));
 }
 :root[data-theme='bondi'] {
+  --line-default: var(--theme-border-default);
   --material-bg: var(--theme-surface-sidebar);
   /* Bondi's grid is sand; its stage borrows the theme's ink so screenshots still sit on dark. */
   --surface-stage: var(--theme-text-primary);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
+    --line-default: var(--theme-border-default);
     --material-bg: var(--theme-surface-sidebar);
     --surface-stage: var(--theme-text-primary);
   }

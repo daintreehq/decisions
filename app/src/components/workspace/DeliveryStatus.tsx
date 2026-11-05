@@ -149,7 +149,10 @@ export function DeliveryStepper({
             {uncertain
               ? `${subject} is saved on your relay. Your computer can’t tell whether it was typed into the terminal, so it won’t type it again.`
               : `${cause ? `${cause} ` : ''}${subject} is saved on your relay, but it wasn’t typed into the terminal.`}{' '}
-            Open Daintree on your computer to see what happened.
+            {/* The cause, when known, already says what happened; what's left is where to act on it. */}
+            {cause
+              ? 'Open Daintree on your computer to decide what to do with it.'
+              : 'Open Daintree on your computer to see what happened.'}
           </p>
           {progress.detail && !cause && (
             <p className="callout-code">

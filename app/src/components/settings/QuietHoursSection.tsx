@@ -229,7 +229,7 @@ export function QuietHoursSection() {
           <SettingsGroup>
             <Checkbox
               label="Quiet hours"
-              description="Notifications wait until quiet hours end. Questions still arrive and sync"
+              description="Notifications wait until quiet hours end. Questions still arrive and sync."
               checked={qh.enabled}
               onChange={(enabled) => setQh({ enabled })}
             />

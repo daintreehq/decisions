@@ -60,10 +60,14 @@ export function LockedPage({ phase }: { phase: Extract<Phase, 'unpaired' | 'revo
             Scan pairing code
           </button>
           <button type="button" className="btn big" onClick={() => startPairing('paste')}>
-            <LinkIcon size={18} />
+            <LinkIcon size={20} />
             Paste pairing link
           </button>
         </div>
+        <p className="onb-hint">
+          Daintree shows the code in <span className="nowrap">Settings ›</span>{' '}
+          <span className="nowrap">Decisions ›</span> <span className="nowrap">Pair a phone</span>.
+        </p>
       </div>
       <nav className="onb-links" aria-label="More">
         <Link to="/install">Install the app</Link>

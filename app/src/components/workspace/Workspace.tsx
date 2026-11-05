@@ -101,6 +101,16 @@ const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /** The question workspace for `/q/:id`. Keyed by id, so another question is always a fresh workspace. */
+
+/** Whether a native modal dialog is open anywhere (`:modal`), so the chat behind it is inert to its shortcuts. */
+const modalOpen = (): boolean => {
+  try {
+    return !!document.querySelector(':modal');
+  } catch {
+    return !!document.querySelector('dialog[open]');
+  }
+};
+
 export function Workspace({ id }: { id: string }) {
   const snap = useApp();
   const now = useNow();
@@ -556,8 +566,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      // The terminal drawer covers the chat: nothing behind it, the dock included, takes a command meanwhile.
-      if (mod && terminalModalOpen()) return;
+      // A modal layer (the sidebar, the navigator, a sheet, a confirmation, the terminal drawer) covers the chat:
+      // nothing behind it, the dock included, takes a command meanwhile. A layer that wants a shortcut handles it.
+      if (mod && (terminalModalOpen() || modalOpen())) return;
       if (mod && e.key === 'Enter') {
         e.preventDefault();
         latest.current.send();
@@ -821,13 +832,31 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       </AnswerDock>
     );
   } else if (modelReview && proxy) {
-    // Confirm and Overrule live on the model's message; moving on stays here, quieter than Confirm.
-    dock = <AnswerDock>{moveOn(false)}</AnswerDock>;
+    // Confirm and Overrule live on the model's message; moving on stays here as a quiet trailing action, so the
+    // thumb's easiest tap isn't skipping the review.
+    dock = (
+      <AnswerDock>
+        {next ? (
+          <div className="dock-quiet-row">
+            <button type="button" className="btn small ghost dock-next-quiet" onClick={goNext}>
+              Next question
+              <ArrowRight size={16} />
+            </button>
+          </div>
+        ) : (
+          moveOn(false)
+        )}
+      </AnswerDock>
+    );
   } else if (decided && followUps === 'desktop') {
     // The relay takes follow-ups, but the computer that asked can't type them into the terminal yet.
     dock = (
       <AnswerDock>
-        <p className="dock-line">Follow-ups need a newer Daintree on the computer that asked.</p>
+        <p className="dock-line">
+          {machine
+            ? `Update Daintree on ${machine} to send follow\u2011ups.`
+            : 'Update Daintree on the computer that asked to send follow\u2011ups.'}
+        </p>
         {moveOn(true)}
       </AnswerDock>
     );
@@ -849,6 +878,28 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         <ClockIcon size={13} />
         {dueLabel(view.expiresAt, now)}
       </span>
+    ) : null;
+  // The gate matters while the question is open: no model will step in, so it waits for a person. It is one more
+  // fact on the status line under the question (guide 4.1), not a block of its own.
+  const gate =
+    waitingOnPerson && view.requirement === 'human-required' ? (
+      <span className="gate">
+        <PersonIcon size={13} />
+        Human decision required
+        <span className="sr-only">. The decision model doesn’t answer this one.</span>
+      </span>
+    ) : null;
+  const statusLine =
+    due || gate ? (
+      <>
+        {due}
+        {due && gate && (
+          <span className="meta-dot" aria-hidden="true">
+            ·
+          </span>
+        )}
+        {gate}
+      </>
     ) : null;
   const inForce =
     (answer?.content as { selected_option_ids?: string[] } | null)?.selected_option_ids ?? [];
@@ -881,24 +932,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                   : inForce
               }
               caption={closed ? 'The options were' : undefined}
+              byModel={modelReview && !pendingEntry}
             />
           )
         }
-        meta={due}
+        meta={statusLine}
       />,
     );
-    // The gate matters while the question is open: no model will step in, so it waits for a person.
-    if (waitingOnPerson && view.requirement === 'human-required')
-      items.push(
-        <SystemLine
-          key="gate"
-          now={now}
-          icon={<PersonIcon size={14} />}
-          detail="The decision model doesn’t answer this one."
-        >
-          Human decision required
-        </SystemLine>,
-      );
     if (view.integrityIssues.length > 0)
       items.push(
         <SystemLine
@@ -1055,7 +1095,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           now={now}
           at={view.expiresAt}
           icon={<ClockIcon size={14} />}
-          detail="Nothing was approved. To decide now, ask your agent again from your computer."
+          detail={`${
+            content.kind === 'approval' ? 'Nothing was approved.' : 'No answer was sent.'
+          } To decide now, ask your agent again from your computer.`}
         >
           Expired without an answer
         </SystemLine>,

@@ -21,7 +21,7 @@ import {
 import { OrbitRing } from '../../features/voice/OrbitRing.js';
 import { announce } from '../../lib/announce.js';
 import { clockLabel } from '../../lib/time.js';
-import { CheckIcon, CloseIcon, MicIcon, StopIcon, UndoIcon } from '../Icons.js';
+import { ArrowUp, CheckIcon, CloseIcon, MicIcon, StopIcon, UndoIcon } from '../Icons.js';
 import { AttachButton, imageFiles, PhotoTray, type ComposerPhotosProps } from './ComposerPhotos.js';
 
 const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '');
@@ -153,10 +153,10 @@ export function Composer(p: ComposerProps) {
   }, [message]);
 
   const textless = shape.fields.length === 0;
-  const live = !!dict && (dict.final || dict.interim);
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  const two = textless || sendSlot || hasText || hasPhotos || (capturing && !!live);
+  // The pill opens as capture starts, not when the first word lands, so nothing moves while the person talks.
+  const two = textless || sendSlot || hasText || hasPhotos || capturing;
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {
@@ -269,6 +269,7 @@ export function Composer(p: ComposerProps) {
             setFocused={setFocused}
             onContact={quiet}
             onPastePhotos={takesDrop ? dropped : undefined}
+            open={two}
           />
         )}
         {photos && (
@@ -338,6 +339,8 @@ function Field(
     onContact: () => void;
     /** A paste that carries photos adds them (true when it did). */
     onPastePhotos?: (files: FileList) => boolean;
+    /** The pill is open into two rows; the field measures itself again when it changes. */
+    open: boolean;
   },
 ) {
   const { draft, field, dict, fieldRef: ref, value } = p;
@@ -368,7 +371,7 @@ function Field(
     t.style.height = 'auto';
     t.style.height = `${t.scrollHeight}px`;
     if (p.capturing) t.scrollTop = t.scrollHeight;
-  }, [value, p.capturing, interim, ref]);
+  }, [value, p.capturing, interim, ref, p.open]);
 
   const caret = () => {
     const t = ref.current;
@@ -623,14 +626,17 @@ function SendButton({
 }) {
   // A pointer activation counts only if it began on an armed Send: never the tail of a tap or hold on the mic.
   const armed = useRef(false);
+  // An up arrow on a contrast circle, in the mic's footprint: the words ("Send answer", "Send decision"…) are its
+  // name, for assistive tech and in its tooltip, so the glyph never has to carry the meaning alone.
+  const full = name ?? label;
   return (
     <button
       type="button"
       className="btn primary composer-send"
       aria-disabled={!ready || undefined}
       aria-describedby={describedBy}
-      aria-label={name && !sending ? name : undefined}
-      title={`${name ?? label} (${MOD}+Enter)`}
+      aria-label={sending ? 'Sending…' : full}
+      title={`${full} (${MOD}+Enter)`}
       onPointerDown={() => (armed.current = now() >= (quietUntil.current ?? 0))}
       onClick={(e) => {
         const pointer = e.detail > 0;
@@ -639,7 +645,7 @@ function SendButton({
         if (ok && ready) onSend();
       }}
     >
-      {sending ? 'Sending…' : label}
+      {sending ? <span className="spinner small" aria-hidden="true" /> : <ArrowUp size={22} />}
     </button>
   );
 }

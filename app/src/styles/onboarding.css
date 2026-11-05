@@ -54,6 +54,17 @@
 .onb-center .onb-lead {
   max-width: 32ch;
 }
+/* Where the code comes from, under the two ways in. */
+.onb-hint .nowrap {
+  white-space: nowrap;
+}
+.onb-hint {
+  max-width: 34ch;
+  margin: 16px auto 0;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+}
 .onb-mark {
   display: block;
   width: 72px;
@@ -146,6 +157,8 @@
 }
 .pair-digits {
   display: flex;
+  /* With enlarged text the two groups of three stack, each kept whole, rather than run off the screen. */
+  flex-wrap: wrap;
   justify-content: center;
   gap: 12px;
   margin: 28px 0;

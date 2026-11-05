@@ -79,8 +79,8 @@
   }
 }
 .btn.danger {
-  background: var(--theme-destructive-fill, var(--danger));
-  color: var(--theme-destructive-foreground, #fff);
+  background: var(--destructive);
+  color: var(--destructive-fg);
   box-shadow: var(--shadow-1);
   font-weight: 600;
 }
@@ -112,7 +112,16 @@
 .btn:disabled,
 .btn[aria-disabled='true'] {
   cursor: not-allowed;
-  opacity: 0.5;
+  /* Stepped down with tokens, never faded with alpha (guide 2.1). */
+  background: var(--subtle);
+  color: var(--text-3);
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+}
+/* A ghost button steps down by losing colour, never by gaining a plane its enabled self doesn't have. */
+.btn.ghost:disabled,
+.btn.ghost[aria-disabled='true'] {
+  background: transparent;
+  box-shadow: none;
 }
 /* A primary action that is not available yet reads as a quiet plane, never a dimmed "go". */
 .btn.primary:disabled,
@@ -342,7 +351,7 @@ label.field textarea {
   font-size: var(--text-sm);
   font-weight: 500;
   flex: 1 1 auto;
-  min-height: 38px;
+  min-height: var(--tap-min);
   min-width: 44px;
   white-space: nowrap;
   padding: 0 10px;
@@ -389,11 +398,13 @@ label.field textarea {
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
-/* Things waiting on you carry Daintree's waiting signal. */
+/* Things waiting on you carry Daintree's waiting signal as a tint, with neutral numbers (status colour sits on the
+   tint, never a solid fill beside words that already say "Needs you"). Over content, on the menu button, it is solid
+   (shell.css), since nothing else there says so. */
 .count.waiting {
-  background: var(--waiting);
-  color: var(--theme-surface-canvas);
-  box-shadow: none;
+  background: color-mix(in oklab, var(--waiting) 15%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--waiting) 45%, transparent);
 }
 .badge {
   display: inline-flex;
@@ -627,8 +638,9 @@ ul.list > li {
   margin-left: auto;
   width: 7px;
   height: 7px;
-  border-right: 1.75px solid var(--text-3);
-  border-bottom: 1.75px solid var(--text-3);
+  /* It says the row opens something, so it is not muted text (guide 2.1). */
+  border-right: 1.75px solid var(--text-2);
+  border-bottom: 1.75px solid var(--text-2);
   transform: rotate(-45deg);
 }
 .nav-list .value {

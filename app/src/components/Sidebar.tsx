@@ -105,7 +105,7 @@ function RecentRow({
   const { project } = originParts(v);
   const waiting = needsYou(v, now);
   const shown = slot && agent?.fresh === 'fresh' ? agent : null;
-  // The whole question as one plain line: the CSS ellipsis truncates what is seen, never what is read out.
+  // The whole question as plain text: the CSS clamp shortens what is seen, never what is read out.
   const text = v.content
     ? previewText(v.content.question, Number.POSITIVE_INFINITY)
     : hiddenQuestionText(v);
@@ -119,14 +119,20 @@ function RecentRow({
       >
         <span className="side-q-dot" data-on={waiting || undefined} aria-hidden="true" />
         {waiting && <span className="sr-only">Needs you: </span>}
-        <span className="side-q-text">{text}</span>
-        <span className="side-q-project">
-          <span className="sr-only">, </span>
-          {project}
+        <span className="side-q-body">
+          <span className="side-q-text">{text}</span>
+          <span className="side-q-meta">
+            <span className="side-q-project">
+              <span className="sr-only">, </span>
+              {project}
+            </span>
+            {slot && (
+              <span className="side-q-state">
+                {shown && <AgentStateMark a={shown} age={false} />}
+              </span>
+            )}
+          </span>
         </span>
-        {slot && (
-          <span className="side-q-state">{shown && <AgentStateMark a={shown} age={false} />}</span>
-        )}
       </Link>
     </li>
   );
@@ -237,8 +243,8 @@ function SidebarContent({
 /**
  * The floating menu button (below 1100px): a round 48px button over the content, top-left inside the safe area.
  * When the closed sidebar is hiding app state that needs attention (no network, a relay that has stopped answering,
- * an update to restart into) it carries a small dot; on pages that do not count waiting work themselves (a question,
- * History, Settings) it carries the waiting count. Either way its name says so.
+ * an update to restart into) it carries a small dot on its lower shoulder; on pages that do not count waiting work
+ * themselves (a question, History, Settings) it carries the waiting count on its upper one. Its name says both.
  */
 export function MenuButton() {
   const open = useSidebarOpen();
@@ -248,16 +254,18 @@ export function MenuButton() {
   // Waiting work, where the page itself does not already count it (Home's scopes do).
   const counted = useActionCount(now);
   const waiting = route.name === 'inbox' ? 0 : counted;
-  const name =
+  // Both can be true: the count is what needs the person, the dot what the app needs. Neither hides the other.
+  const state =
     attention === 'offline'
-      ? 'Menu, offline'
+      ? 'offline'
       : attention === 'reconnecting'
-        ? 'Menu, reconnecting'
+        ? 'reconnecting'
         : attention === 'update'
-          ? 'Menu, update available'
-          : waiting > 0
-            ? `Menu, ${waiting} waiting`
-            : 'Menu';
+          ? 'update available'
+          : null;
+  const name = ['Menu', waiting > 0 ? `${waiting} waiting` : null, state]
+    .filter(Boolean)
+    .join(', ');
   return (
     <button
       type="button"
@@ -272,13 +280,12 @@ export function MenuButton() {
       onClick={openSidebar}
     >
       <MenuIcon size={22} />
-      {attention ? (
-        <span className="menu-fab-dot" aria-hidden="true" />
-      ) : waiting > 0 ? (
+      {attention && <span className="menu-fab-dot" aria-hidden="true" />}
+      {waiting > 0 && (
         <span className="count waiting menu-fab-count" aria-hidden="true">
           {waiting}
         </span>
-      ) : null}
+      )}
     </button>
   );
 }

@@ -69,8 +69,10 @@ const icon = (d: string, def = 18) =>
 
 export const ChevronRight = icon('M9 5l7 7-7 7');
 export const ChevronDown = icon('M5 9l7 7 7-7');
+export const ArrowDown = icon('M12 5v14M19 12l-7 7-7-7');
 export const ArrowLeft = icon('M19 12H5M12 19l-7-7 7-7');
 export const ArrowRight = icon('M5 12h14M12 5l7 7-7 7');
+export const ArrowUp = icon('M12 19V5M5 12l7-7 7 7');
 export const CloseIcon = icon('M18 6 6 18M6 6l12 12');
 /** The sidebar's menu button: Lucide's menu. */
 export const MenuIcon = icon('M4 6h16M4 12h16M4 18h16', 22);
