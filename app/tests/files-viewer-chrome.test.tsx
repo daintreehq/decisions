@@ -209,7 +209,11 @@ describe('the viewer chrome toggle', () => {
       '400px',
       '600px',
     ]);
-    expect([v('--fx-bare-bar-l'), v('--fx-bare-bar-w')]).toEqual(['0px', '400px']);
+    expect([v('--fx-bare-bar-t'), v('--fx-bare-bar-l'), v('--fx-bare-bar-w')]).toEqual([
+      '0px',
+      '0px',
+      '400px',
+    ]);
     expect([v('--fx-bare-tools-t'), v('--fx-bare-tools-l'), v('--fx-bare-tools-w')]).toEqual([
       '600px',
       '120px',
@@ -224,12 +228,14 @@ describe('the viewer chrome toggle', () => {
   });
 
   it('beside a sidebar, the image area is marked inset so its neighbours stay out of sight', () => {
+    boxes['fx-bar'] = { top: 32, left: 320, width: 960, height: 56 };
     Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true });
     boxes['fs-track'] = { top: 56, left: 320, width: 960, height: 600 };
     tap();
     wait(350);
     expect(viewer().classList.contains('is-inset')).toBe(true);
     expect(viewer().style.getPropertyValue('--fx-bare-l')).toBe('320px');
+    expect(viewer().style.getPropertyValue('--fx-bare-bar-t')).toBe('32px');
   });
 
   it('a double-tap zooms into that point and never toggles, not even for a moment', () => {

@@ -125,6 +125,7 @@ function frameOf(
     '--fx-bare-l': px(t.left),
     '--fx-bare-w': px(t.width),
     '--fx-bare-h': px(t.height),
+    '--fx-bare-bar-t': px(b.top),
     '--fx-bare-bar-l': px(b.left),
     '--fx-bare-bar-w': px(b.width),
     '--fx-bare-tools-t': px(o.top),
@@ -179,6 +180,8 @@ export function Viewer({
   // Chrome hidden: where the image area and the bars sat with it shown (viewport px), so nothing jumps. Null while
   // shown; its frame is dropped after a resize while hidden, when the image area takes the whole viewport.
   const [bare, setBare] = useState<Bare | null>(null);
+  // The frame the hidden layout first applies in: slides move to it without animating (no neighbour sweeps past).
+  const [settling, setSettling] = useState(false);
   useMoveFocus(moving, tools, () => stage.current?.el);
   useFocusInOut(() => stage.current?.el, focusFallback);
   useFocusKeeper(root, (from) => toolFallback(from, () => stage.current?.el));
@@ -214,8 +217,18 @@ export function Viewer({
     if (el && document.activeElement !== el) el.focus({ preventScroll: true });
     setMoving(false);
     setBare(frameOf(stage.current?.track, bar.current, tools.current));
+    setSettling(true);
     announce('Controls hidden. Tap the image or press Space to show them.');
   };
+
+  useEffect(() => {
+    if (!settling) return;
+    // Two frames: the first paints the hidden layout with slide transitions off, the second turns them back on.
+    let id = requestAnimationFrame(() => {
+      id = requestAnimationFrame(() => setSettling(false));
+    });
+    return () => cancelAnimationFrame(id);
+  }, [settling]);
 
   // A new viewport (rotation, a resized window) has no "where it was": the image area takes the whole screen.
   useEffect(() => {
@@ -294,7 +307,9 @@ export function Viewer({
     <Overlay className="fx-viewer-layer">
       <div
         ref={root}
-        className={`fx-viewer${hidden ? ' is-bare' : ''}${bare?.inset ? ' is-inset' : ''}`}
+        className={`fx-viewer${hidden ? ' is-bare' : ''}${bare?.inset ? ' is-inset' : ''}${
+          settling ? ' is-settling' : ''
+        }`}
         style={bareStyle}
         role="dialog"
         aria-labelledby={`${id}-t`}

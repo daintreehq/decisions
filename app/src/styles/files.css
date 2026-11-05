@@ -1254,7 +1254,7 @@
 }
 .fx-viewer.is-bare .fx-bar {
   position: absolute;
-  top: 0;
+  top: var(--fx-bare-bar-t, 0px);
   left: var(--fx-bare-bar-l, 0px);
   width: var(--fx-bare-bar-w, 100%);
   z-index: 3;
@@ -1286,9 +1286,12 @@
   bottom: auto;
 }
 /* Where the image area no longer spans the screen (a sidebar was beside it), its neighbours would show beside it:
-   they appear only while a swipe brings one in. */
-.fx-viewer.is-bare.is-inset .fs-track:not(.is-dragging) .fs-slide:not(.is-active) {
-  visibility: hidden;
+   they wait a whole viewport further out, and still slide in and out when the file changes. */
+.fx-viewer.is-bare.is-inset .fs-stage {
+  --fs-gap: 100vw;
+}
+.fx-viewer.is-settling .fs-slide {
+  transition: none;
 }
 /* Stop stays reachable while recording, with everything else hidden. */
 .fx-stop {
