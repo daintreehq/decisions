@@ -38,6 +38,8 @@ export interface SyncDeps {
   wsFactory?: (url: string) => WebSocketLike;
   onConnection?: (c: Connection) => void;
   onSynced?: (at: number) => void;
+  /** The relay did not answer a request (a socket ticket or an events page); the next `onSynced` clears it. */
+  onUnreachable?: () => void;
   onRevoked?: () => void;
   onError?: (e: unknown) => void;
   /**
@@ -188,15 +190,18 @@ export class SyncEngine {
   private connect(): void {
     if (this.stopped) return;
     const gen = ++this.generation;
-    this.set(this.conn === 'live' ? 'live' : 'connecting');
+    // Polling carries on while the socket retries in the background, so a retry does not interrupt it.
+    this.set(this.conn === 'live' || this.conn === 'polling' ? this.conn : 'connecting');
+    // Only the ticket request itself says whether the relay answers (not parsing it, or opening the socket).
+    let answered = false;
     void (async () => {
       try {
-        const t = SocketTicketResponse.parse(
-          await this.d.relay.json('POST', '/socket-ticket', {
-            // A body without `features` is the 0.3.0 baseline, exactly what this app sent before.
-            body: this.declared().length ? { features: this.declared() } : {},
-          }),
-        );
+        const raw = await this.d.relay.json('POST', '/socket-ticket', {
+          // A body without `features` is the 0.3.0 baseline, exactly what this app sent before.
+          body: this.declared().length ? { features: this.declared() } : {},
+        });
+        answered = true;
+        const t = SocketTicketResponse.parse(raw);
         if (this.stopped || gen !== this.generation) return;
         const base = this.d.origin.replace(/^http/, 'ws');
         const path = t.ws_path.includes('ticket=')
@@ -239,6 +244,9 @@ export class SyncEngine {
           this.d.onRevoked?.();
           return;
         }
+        // While polling, the events fetches decide whether the relay answers: a failing ticket alone is the socket's
+        // problem, not the connection's.
+        if (!answered && this.conn !== 'polling') this.d.onUnreachable?.();
         this.scheduleReconnect();
       }
     })();
@@ -257,7 +265,8 @@ export class SyncEngine {
     if (this.stopped) return;
     this.attempt++;
     // After a few failures fall back to HTTP polling while we keep trying to reconnect.
-    this.set(this.attempt >= 3 ? 'polling' : 'offline');
+    // Once polling, a fresh run of socket attempts (a kick) keeps polling rather than reading as offline.
+    this.set(this.attempt >= 3 || this.conn === 'polling' ? 'polling' : 'offline');
     if (this.attempt >= 3) this.startPolling();
     const cap = Math.min(30_000, 1000 * 2 ** Math.min(this.attempt, 5));
     const delay = Math.floor((this.d.random ?? Math.random)() * cap); // full jitter
@@ -267,6 +276,8 @@ export class SyncEngine {
 
   private startPolling() {
     if (this.pollTimer) return;
+    // Fetch at once, so whether the relay still answers over HTTP is known now rather than a poll interval later.
+    void this.safeCatchUp();
     const tick = () => {
       if (this.stopped) return;
       void this.safeCatchUp();
@@ -404,15 +415,20 @@ export class SyncEngine {
 
   private async catchUpNow(): Promise<void> {
     for (;;) {
-      const page = EventsPage.parse(
-        await this.d.relay.json('GET', '/events', {
+      let raw: unknown;
+      try {
+        raw = await this.d.relay.json('GET', '/events', {
           query: {
             after: this.cursor,
             limit: 100,
             features: this.declared().length ? formatFeatures(this.declared()) : undefined,
           },
-        }),
-      );
+        });
+      } catch (e) {
+        this.d.onUnreachable?.();
+        throw e;
+      }
+      const page = EventsPage.parse(raw);
       const fresh = page.events.filter((e) => e.seq > this.cursor).sort((a, b) => a.seq - b.seq);
       if (fresh.length || page.next_after > this.cursor) {
         // Only a complete page may move the cursor to next_after; a partial one stops at what we hold.

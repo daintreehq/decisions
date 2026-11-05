@@ -5,7 +5,7 @@
  *   < 1100px    main (document scroll) · .menu-fab floating top-left inside the safe area · the sidebar as an
  *               overlay (.sidebar-sheet). A page's title shares the button's row; inside a question the button
  *               takes the workspace header's leading slot. From 720px the page is one centred surface (760px).
- *   ≥ 1100px    .shell is a two-column grid of definite height: .sidebar (272–304px) | .frame (100dvh). main is the
+ *   ≥ 1100px    .shell is a two-column grid of definite height: .sidebar (300–320px) | .frame (100dvh). main is the
  *               right column's scroll container; on question and History routes it has no padding and does not
  *               scroll, so the page inside fills it (`height: 100%`).
  */
@@ -131,7 +131,8 @@ main.bare {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--warning);
+  /* The glyph-level warning hue: the base hue is too pale on Bondi for a 9px mark (2.3:1). */
+  background: var(--warning-text);
   box-shadow: 0 0 0 2px var(--surface-page);
 }
 .menu-fab[data-attention='update'] .menu-fab-dot {
@@ -148,11 +149,11 @@ main.bare {
   right: -2px;
   min-width: 18px;
   padding: 0 5px;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   line-height: 18px;
   box-shadow:
     0 0 0 2px var(--surface-page),
-    inset 0 0 0 1px color-mix(in oklab, var(--waiting) 45%, transparent);
+    inset 0 0 0 1px color-mix(in oklab, var(--waiting) 70%, transparent);
 }
 /* The keyboard is up: the workspace is raised to the visual viewport (workspace.css), and the button stays in its
    header's leading slot, above it. */
@@ -197,11 +198,13 @@ main.bare {
   color: var(--text);
 }
 .side-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
   flex: none;
-  padding: calc(var(--safe-t) + 20px) 20px 16px calc(20px + var(--safe-l));
+  /* On the rows' left edge (10px column inset + 12px row inset), so the mark, the glyphs and the foot share a line. */
+  padding: calc(var(--safe-t) + 20px) 20px 16px calc(22px + var(--safe-l));
 }
 .side-mark.brand-mark {
   width: 36px;
@@ -224,7 +227,8 @@ main.bare {
 .side-close {
   width: var(--tap);
   height: var(--tap);
-  margin: 0 -10px 0 auto;
+  /* Taken out of the head's height, so showing it (from 720px) does not push the name down. */
+  margin: -6px -10px -6px auto;
   color: var(--text-2);
 }
 /* The destinations stay put; Recent scrolls on its own, so revealing a lower row never hides Home. */
@@ -268,10 +272,15 @@ main.bare {
 .side-row .count {
   margin-left: auto;
 }
-/* The page the sidebar is showing takes the neutral lift (Daintree's sidebar selection), never accent. */
+/* The waiting ring holds 3:1 against the selected row's white on Bondi (the shared 45% ring measures 2.5:1). */
+.side-row .count.waiting {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--waiting) 70%, transparent);
+}
+/* The page the sidebar is showing takes the neutral lift (Daintree's sidebar selection) and a text-secondary edge,
+   never accent: the fill alone is too faint against the sidebar to say "you are here". */
 .side-row.on {
   background: var(--sidebar-active-bg, var(--selected));
-  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  box-shadow: inset 0 0 0 1px var(--text-2);
   font-weight: 600;
 }
 .side-row.on svg {
@@ -286,6 +295,8 @@ main.bare {
   color: var(--text-2);
 }
 .side-qlist {
+  /* A row scrolled into view (by focus, or on opening) lands clear of the fade below. */
+  scroll-padding-bottom: 40px;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -296,6 +307,11 @@ main.bare {
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
+}
+/* More rows below: the list's foot fades out rather than cutting a row in half at the hairline. */
+.side-qlist[data-more] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 40px), transparent);
 }
 /* Two lines of the question, then its project (and a fresh agent state) on a quiet line beneath, so neither is cut
    to make room for the other. The needs-you dot sits on the question's first line. */
@@ -330,7 +346,7 @@ main.bare {
 .side-q-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
   font-size: var(--text-xs);
   line-height: 18px;
@@ -350,22 +366,25 @@ main.bare {
 .side-q-state {
   flex: none;
   display: flex;
-  width: 5.4em;
+  width: 5.8em;
   margin-left: auto;
 }
 .side-q .agent-state {
   gap: 5px;
 }
-.side-q .agent-dot {
+.side-q .agent-state:not(.side-q-needs) .agent-dot {
   width: 6px;
   height: 6px;
 }
-.side-q .agent-label {
+.side-q .agent-state:not(.side-q-needs) .agent-label {
   color: var(--text-2);
 }
 .side-q[aria-current] {
   background: var(--sidebar-active-bg, var(--selected));
-  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  box-shadow: inset 0 0 0 1px var(--text-2);
+}
+.side-q[aria-current] .side-q-text {
+  font-weight: 500;
 }
 @media (hover: hover) {
   .side-row:not(.on):hover,
@@ -377,9 +396,15 @@ main.bare {
 .side-q:focus-visible {
   outline-offset: -2px;
 }
+/* The focus ring and the selection edge share a hue, so on the current row the ring sits inside the edge. */
+.side-row.on:focus-visible,
+.side-q[aria-current]:focus-visible {
+  outline-offset: -4px;
+}
 .side-empty {
-  margin: 2px 12px 0;
+  margin: 6px 12px 0;
   font-size: var(--text-sm);
+  line-height: 20px;
   color: var(--text-2);
   text-wrap: pretty;
 }
@@ -405,7 +430,8 @@ main.bare {
 }
 html:has(.shell[data-layout='single']) {
   --drawer-width: min(84vw, 360px);
-  --sidebar-width: var(--drawer-width);
+  /* A little narrower than the drawers' width, so the displaced menu button stays inside a 390px screen. */
+  --sidebar-width: min(82vw, 360px);
   transition:
     --sidebar-offset var(--dur-canvas) var(--ease-canvas),
     --terminal-offset var(--dur-canvas) var(--ease-canvas);
@@ -588,22 +614,20 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
   gap: 9px;
   min-height: 28px;
   margin: 0;
-  /* The dot lines up with Recent's dots above it. */
-  padding: 0 10px;
+  /* The dot sits on the rows' left edge above it. */
+  padding: 0 12px;
   font-size: var(--text-xs);
   line-height: 1.45;
   color: var(--text-2);
 }
-/* Something is off: a tinted block that says what still works. */
-.conn-line[role='status'] {
+/* Something is off (offline, or the relay not answering for a while): a warning-tinted block that says what still
+   works, its colour on the glyph and the tint, never the words. */
+.conn-line[data-block] {
   align-items: flex-start;
   padding: 10px 12px;
   border-radius: var(--radius-md);
-  background: var(--subtle);
-  color: var(--text);
-}
-.conn-line[data-state='off'] {
   background: var(--warning-surface);
+  color: var(--text);
 }
 .conn-line > svg {
   flex: none;
@@ -620,17 +644,19 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
   flex: none;
   font: inherit;
   font-weight: 600;
-  /* A full 44 px target, taken out past the block's padding so the block keeps its height. */
+  /* A full 44 px target, taken out past the block's padding so the block keeps its height; its word sits on the
+     block's first line and its 12px inner edge, as Restart does above it. */
   min-height: var(--tap-min);
-  margin: -10px -6px -10px auto;
+  margin: -12px -8px -10px auto;
   padding: 0 8px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
   cursor: pointer;
+}
+.strip-action[aria-disabled] {
+  cursor: progress;
 }
 
 /* ---------- update, in the sidebar's foot ---------- */
@@ -649,8 +675,10 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
   padding: 0 12px;
   border: 0;
   border-radius: var(--radius-md);
-  background: var(--surface-raised);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  /* A quiet tinted row like the connection blocks, below the selection in the raised ladder: the app's own needs
+     never out-weigh where you are or what is waiting. */
+  background: var(--subtle);
+  box-shadow: inset 0 0 0 1px var(--line-default);
   color: var(--text);
   font-size: var(--text-sm);
   font-weight: 500;
@@ -665,8 +693,6 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
 .update-act {
   margin-left: auto;
   font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
 }
 @media (hover: hover) {
   .update-btn:not(:disabled):hover {
@@ -800,10 +826,19 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
 }
 
 @media (forced-colors: active) {
+  /* Selection is drawn by a border on a layer of its own, so a focus outline on the same row adds to it. */
   .side-row.on,
   .side-q[aria-current] {
-    outline: 2px solid Highlight;
-    outline-offset: -2px;
+    position: relative;
+  }
+  .side-row.on::after,
+  .side-q[aria-current]::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border: 2px solid Highlight;
+    border-radius: inherit;
+    pointer-events: none;
   }
   .menu-fab,
   .float-btn {
@@ -814,8 +849,30 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
     background: none;
     border: 4px solid CanvasText;
   }
-  .menu-fab-count.count {
+  .menu-fab-count.count,
+  .side-row .count,
+  .update-btn,
+  .conn-line[data-block],
+  .side .nudge {
     border: 1px solid CanvasText;
+  }
+  .side-sheet-body {
+    border-right: 1px solid CanvasText;
+  }
+  .conn-line .dot,
+  .side-q .agent-dot {
+    background: none;
+    border: 3.5px solid CanvasText;
+  }
+  /* Focus is a thicker ring inside the selection's, so a focused current row shows both. */
+  .side-row:focus-visible,
+  .side-q:focus-visible {
+    outline: 3px solid CanvasText;
+    outline-offset: -6px;
+  }
+  .side-qlist[data-more] {
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 }
 
@@ -833,6 +890,10 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
 }
 .shell:has(:is(.sidebar-sheet, .term-drawer)[open]) .menu-fab {
   opacity: 0.4;
+}
+/* The open sidebar shows the count and the app's state itself; the displaced button keeps only its glyph. */
+.shell:has(.sidebar-sheet[open]) :is(.menu-fab-count, .menu-fab-dot) {
+  visibility: hidden;
 }
 .sidebar-sheet,
 .term-drawer {

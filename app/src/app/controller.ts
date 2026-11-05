@@ -70,6 +70,8 @@ export interface AppSnapshot {
   syncing: boolean;
   lastSyncedAt: number | null;
   lastError: string | null;
+  /** The relay's last request failed and nothing has synced since: polling on is not a connection. */
+  relayUnreachable: boolean;
   updateAvailable: boolean;
   prefs: LocalPrefs;
   info: InfoResponse | null;
@@ -110,6 +112,7 @@ export class AppController {
       syncing: false,
       lastSyncedAt: null,
       lastError: null,
+      relayUnreachable: false,
       updateAvailable: false,
       prefs: DEFAULT_PREFS,
       info: null,
@@ -339,10 +342,16 @@ export class AppController {
       features: () => this.declaredFeatures(),
       onServerTime: (iso) => this.snapshots?.setServerTime(iso),
       onConnection: (connection) => {
-        this.patch({ connection });
+        this.patch(
+          connection === 'live' ? { connection, relayUnreachable: false } : { connection },
+        );
         if (connection === 'live') void this.outbox?.flush();
       },
-      onSynced: (at) => this.patch({ lastSyncedAt: at, syncing: false, lastError: null }),
+      onSynced: (at) =>
+        this.patch({ lastSyncedAt: at, syncing: false, lastError: null, relayUnreachable: false }),
+      onUnreachable: () => {
+        if (!this.snap.relayUnreachable) this.patch({ relayUnreachable: true });
+      },
       onRevoked: () => this.lockRevoked(),
       onError: (e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) }),
     }));
@@ -454,6 +463,7 @@ export class AppController {
       config: null,
       devices: null,
       connection: 'idle',
+      relayUnreachable: false,
       prefs: DEFAULT_PREFS,
     });
     await db?.wipe();
