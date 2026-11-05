@@ -227,6 +227,21 @@ describe('the viewer chrome toggle', () => {
     expect(v('--fx-bare-t')).toBe('');
   });
 
+  it('hiding mid-swipe pins the image area where it sits, not where the finger has dragged it', () => {
+    pointer('pointerdown', 300, 300);
+    for (let x = 290; x >= 200; x -= 10) {
+      clock += 40;
+      pointer('pointermove', x, 300);
+    }
+    const track = document.querySelector<HTMLElement>('.fs-track')!;
+    expect(track.style.transform).toContain('-100px');
+    // The browser reports the dragged position.
+    boxes['fs-track'] = { top: 56, left: -100, width: 400, height: 600 };
+    key(stage(), ' ');
+    expect(viewer().style.getPropertyValue('--fx-bare-l')).toBe('0px');
+    expect(viewer().classList.contains('is-inset')).toBe(false);
+  });
+
   it('beside a sidebar, the image area is marked inset so its neighbours stay out of sight', () => {
     boxes['fx-bar'] = { top: 32, left: 320, width: 960, height: 56 };
     Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true });

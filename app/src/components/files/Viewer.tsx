@@ -100,6 +100,16 @@ export function QuestionIdentity({
 
 const px = (n: number) => `${n}px`;
 
+/** The track's current horizontal translation (a swipe in progress or settling), which is not where it sits. */
+function shiftOf(el: HTMLElement): number {
+  try {
+    const t = getComputedStyle(el).transform;
+    return t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0;
+  } catch {
+    return 0;
+  }
+}
+
 interface Bare {
   frame: Record<string, string> | null;
   /** The image area does not span the viewport's width (a sidebar was beside it). */
@@ -116,10 +126,12 @@ function frameOf(
   tools: HTMLElement | null,
 ): Bare {
   if (!track || !bar || !tools) return { frame: null, inset: false };
-  const t = track.getBoundingClientRect();
+  const r = track.getBoundingClientRect();
+  const dx = shiftOf(track);
+  const t = { top: r.top, left: r.left - dx, width: r.width, height: r.height };
   const b = bar.getBoundingClientRect();
   const o = tools.getBoundingClientRect();
-  const inset = t.left > 0.5 || t.right < window.innerWidth - 0.5;
+  const inset = t.left > 0.5 || t.left + t.width < window.innerWidth - 0.5;
   const frame = {
     '--fx-bare-t': px(t.top),
     '--fx-bare-l': px(t.left),
