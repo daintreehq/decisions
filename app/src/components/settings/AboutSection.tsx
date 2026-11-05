@@ -5,15 +5,22 @@ import { Link } from '../../app/router.js';
 import { isApplePlatform } from './model.js';
 import { Callout, Row, SettingsGroup, Sheet } from './ui.js';
 
-function Keys({ keys }: { keys: string[] }) {
+/** A chord (keys pressed together), or with `either` a choice of keys, each doing its half of the row. */
+function Keys({ keys, either }: { keys: string[]; either?: boolean }) {
   return (
     <span className="s-keys">
       {keys.map((k, i) => (
-        <kbd key={i}>{k}</kbd>
+        <span key={i} className="s-key">
+          {either && i > 0 && <span className="s-keys-or">or</span>}
+          <kbd>{k}</kbd>
+        </span>
       ))}
     </span>
   );
 }
+
+/** Rows whose keys are alternatives rather than a chord. */
+const EITHER = new Set(['←→', '+−']);
 
 export function shortcutList(apple: boolean): { group: string; rows: [string[], ReactNode][] }[] {
   const mod = apple ? '⌘' : 'Ctrl';
@@ -43,7 +50,8 @@ export function ShortcutsSheet({ open, onClose }: { open: boolean; onClose: () =
   return (
     <Sheet open={open} onClose={onClose} title="Keyboard shortcuts">
       <p className="s-row-desc">
-        Shortcuts always use a modifier key, so typing never triggers one by accident.
+        Apart from Esc, shortcuts that work everywhere use a modifier key, so typing never triggers
+        one. The file keys work while a file is open.
       </p>
       {groups.map((g) => (
         <section key={g.group} className="s-keys-group">
@@ -52,7 +60,7 @@ export function ShortcutsSheet({ open, onClose }: { open: boolean; onClose: () =
             {g.rows.map(([keys, what], i) => (
               <div key={i}>
                 <dt>
-                  <Keys keys={keys} />
+                  <Keys keys={keys} either={EITHER.has(keys.join(''))} />
                 </dt>
                 <dd>{what}</dd>
               </div>
@@ -93,11 +101,13 @@ export function AboutSection() {
   return (
     <>
       <SettingsGroup>
-        <Row
-          label="Decisions"
-          description={info ? `Relay ${info.worker_version}` : undefined}
-          control={<span className="s-value mono">{__APP_VERSION__}</span>}
-        />
+        <Row label="This app" control={<span className="s-value mono">{__APP_VERSION__}</span>} />
+        {info && (
+          <Row
+            label="Your relay"
+            control={<span className="s-value mono">{info.worker_version}</span>}
+          />
+        )}
         {updateAvailable ? (
           <div className="s-row stacked">
             <div className="s-row-text">
@@ -132,13 +142,15 @@ export function AboutSection() {
           <Row
             label="Updates"
             description={
-              check === 'checking'
-                ? 'Checking your relay…'
-                : check === 'none'
-                  ? 'No newer version yet. One that arrives later shows here.'
-                  : check === 'failed'
-                    ? 'Couldn’t check. Try again when you’re online.'
-                    : 'Your relay serves new versions; they install in the background'
+              <span role="status" className={check === 'idle' ? undefined : 's-outcome'}>
+                {check === 'checking'
+                  ? 'Checking your relay…'
+                  : check === 'none'
+                    ? 'No newer version yet. One that arrives later shows here.'
+                    : check === 'failed'
+                      ? 'Couldn’t check. Try again when you’re online.'
+                      : 'Your relay serves new versions, and they install in the background.'}
+              </span>
             }
             control={
               <button

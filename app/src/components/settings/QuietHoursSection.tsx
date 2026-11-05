@@ -1,8 +1,9 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { app, type ServerSettings } from '../../app/controller.js';
 import { useApp } from '../../app/hooks.js';
 import { timeZones } from '../../lib/time.js';
 import { Dialog } from '../Dialog.js';
+import { ErrorIcon, SuccessIcon } from '../Icons.js';
 import {
   durationLabel,
   quietHoursError,
@@ -88,15 +89,18 @@ function HoursSelect({
   id,
   value,
   onChange,
+  disabled,
 }: {
   id: string;
   value: number;
   onChange: (ms: number) => void;
+  disabled?: boolean;
 }) {
   return (
     <select
       id={id}
       className="s-select"
+      disabled={disabled}
       value={value / HOUR}
       onChange={(e) => onChange(Number(e.target.value) * HOUR)}
     >
@@ -137,6 +141,34 @@ export function QuietHoursSection() {
   useEffect(load, []);
 
   const dirty = !!draft && !settingsEqual(draft, saved);
+  // A fresh save stays docked for a few seconds, then the bar settles at the form's foot still saying so.
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    setSettled(false);
+    if (!justSaved) return;
+    const t = setTimeout(() => setSettled(true), 4000);
+    return () => clearTimeout(t);
+  }, [justSaved]);
+  const docked = dirty || saving || (justSaved && !settled) || !!saveError;
+  // The docked bar's real height, so a control Tab moves to is always scrolled clear of it.
+  const dock = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = dock.current;
+    const root = document.documentElement;
+    if (!el || !docked || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      root.style.setProperty('--s-dock-h', `${el.getBoundingClientRect().height}px`);
+      // The bar lifting (or growing an error) never leaves the control being edited underneath it.
+      const f = document.activeElement;
+      if (f instanceof HTMLElement && f !== document.body && !el.contains(f))
+        f.scrollIntoView({ block: 'nearest' });
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty('--s-dock-h');
+    };
+  }, [docked]);
   const guard = useLeaveGuard(dirty);
   const qh = draft?.quiet_hours as QuietHours | undefined;
   const rm = draft?.reminders as Reminders | undefined;
@@ -151,7 +183,7 @@ export function QuietHoursSection() {
   const setRm = (p: Partial<Reminders>) => edit({ ...draft!, reminders: { ...rm!, ...p } });
 
   const save = async (): Promise<boolean> => {
-    if (!draft || invalid) return false;
+    if (!draft || invalid || saving) return false;
     setSaving(true);
     setSaveError(null);
     try {
@@ -160,11 +192,11 @@ export function QuietHoursSection() {
       remember(draft);
       setJustSaved(true);
       return true;
-    } catch (e) {
+    } catch {
       setSaveError(
         !navigator.onLine
           ? 'You’re offline. Your changes are still here; save when you reconnect.'
-          : `Your changes are still here. ${e instanceof Error ? e.message : 'Try again.'}`,
+          : 'Your relay didn’t accept the changes. They’re still here, so try again in a moment.',
       );
       return false;
     } finally {
@@ -178,8 +210,8 @@ export function QuietHoursSection() {
 
   const lead = (
     <p className="s-lead">
-      Applies to every device paired to this relay. These only change when you’re notified;
-      questions and answers always sync.
+      Saved on your relay and shared by every paired device, so changes wait for Save. These
+      settings only decide when you’re notified.
     </p>
   );
 
@@ -212,7 +244,8 @@ export function QuietHoursSection() {
   }
 
   const zoneList = [
-    ...new Set([qh.time_zone, deviceZone(), ...(zones.includes(qh.time_zone) ? zones : [])]),
+    // The relay's zone and this device's first, then every zone the browser knows (UTC is often not among them).
+    ...new Set([qh.time_zone, deviceZone(), ...zones]),
   ];
 
   return (
@@ -266,10 +299,10 @@ export function QuietHoursSection() {
                   }
                 />
                 {invalid && (
-                  <div className="s-row stacked">
-                    <p className="s-field-error" id={`${id}-err`} role="alert">
+                  <div className="s-row stacked s-field-error" id={`${id}-err`}>
+                    <Callout tone="error" role="alert">
                       {invalid}
-                    </p>
+                    </Callout>
                   </div>
                 )}
                 <Row
@@ -305,7 +338,10 @@ export function QuietHoursSection() {
               label="Remind me about unanswered questions"
               description={reminderSummary(rm)}
               checked={rm.enabled}
-              onChange={(enabled) => setRm({ enabled })}
+              // Turning reminders on from a relay that held "none" starts from the usual three.
+              onChange={(enabled) =>
+                setRm(enabled && rm.max === 0 ? { enabled, max: 3 } : { enabled })
+              }
             />
             {rm.enabled && (
               <div className="s-dependents">
@@ -327,6 +363,8 @@ export function QuietHoursSection() {
                     <HoursSelect
                       id={`${id}-every`}
                       value={rm.interval_ms}
+                      // With one reminder there is no "then".
+                      disabled={rm.max <= 1}
                       onChange={(interval_ms) => setRm({ interval_ms })}
                     />
                   }
@@ -341,11 +379,14 @@ export function QuietHoursSection() {
                       value={rm.max}
                       onChange={(e) => setRm({ max: Number(e.target.value) })}
                     >
-                      {Array.from({ length: 11 }, (_, n) => (
-                        <option key={n} value={n}>
-                          {n === 0 ? 'No reminders' : `${n} reminder${n === 1 ? '' : 's'}`}
-                        </option>
-                      ))}
+                      {/* Turning reminders off is the checkbox above; 0 is offered only if the relay already holds it. */}
+                      {Array.from({ length: 11 }, (_, n) => n)
+                        .filter((n) => n > 0 || rm.max === 0)
+                        .map((n) => (
+                          <option key={n} value={n}>
+                            {n === 0 ? 'No reminders' : `${n} reminder${n === 1 ? '' : 's'}`}
+                          </option>
+                        ))}
                     </select>
                   }
                 />
@@ -360,50 +401,51 @@ export function QuietHoursSection() {
           </SettingsGroup>
         </fieldset>
 
-        {saveError && (
-          <Callout
-            tone="error"
-            role="alert"
-            title="Couldn’t save to your relay"
-            action={
-              <button type="submit" className="btn small">
-                Retry
-              </button>
-            }
-          >
-            {saveError}
-          </Callout>
-        )}
-
-        <div className={`s-save-dock${dirty ? ' dirty' : ''}`}>
+        {/* The bar stays docked at the foot of the screen while there is anything to say about saving, so the
+            outcome of Save is always where the person pressed it. */}
+        <div className={`s-save-dock${docked ? ' docked' : ''}`} ref={dock}>
+          {saveError && (
+            <Callout tone="error" role="alert" title="Couldn’t save to your relay">
+              {saveError}
+            </Callout>
+          )}
           <div
-            className={`s-savebar${dirty ? ' dirty' : ''}`}
+            className={`s-savebar${dirty && !saving && !invalid && !saveError ? ' dirty' : ''}${dirty && (invalid || saveError) ? ' failed' : ''}${justSaved && !dirty ? ' saved' : ''}`}
             role="group"
             aria-label="Save changes"
           >
             <span className="s-savebar-status" role="status">
+              {justSaved && !dirty && !saving && <SuccessIcon size={16} />}
+              {/* A failed save already shows its glyph on the callout above. */}
+              {dirty && !saving && invalid && <ErrorIcon size={16} />}
               {saving
                 ? 'Saving to your relay…'
                 : dirty
                   ? invalid
                     ? 'Fix the times to save'
-                    : 'Unsaved changes'
+                    : saveError
+                      ? 'Not saved yet'
+                      : 'Unsaved changes'
                   : justSaved
                     ? 'Saved on your relay'
                     : ''}
             </span>
-            {dirty && (
-              <button type="button" className="btn small" disabled={saving} onClick={discard}>
-                Discard
+            <div className="s-savebar-actions">
+              {dirty && (
+                <button type="button" className="btn small" disabled={saving} onClick={discard}>
+                  Discard
+                </button>
+              )}
+              {/* Not disabled while saving, so focus stays on it; the save itself ignores a second press. */}
+              <button
+                type="submit"
+                className="btn small primary"
+                disabled={!dirty || !!invalid}
+                aria-disabled={saving || undefined}
+              >
+                {saveError && !saving ? 'Try again' : 'Save'}
               </button>
-            )}
-            <button
-              type="submit"
-              className="btn small primary"
-              disabled={!dirty || saving || !!invalid}
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </button>
+            </div>
           </div>
         </div>
       </form>
@@ -411,15 +453,19 @@ export function QuietHoursSection() {
       <Dialog
         open={guard.pending !== null}
         title="Save your changes?"
-        onClose={guard.stay}
+        // While a save is in flight its outcome decides: stay on failure, leave on success.
+        onClose={() => {
+          if (!saving) guard.stay();
+        }}
         actions={
           <div className="s-dialog-actions">
-            <button type="button" className="btn" onClick={guard.stay}>
+            <button type="button" className="btn" disabled={saving} onClick={guard.stay}>
               Keep editing
             </button>
             <button
               type="button"
               className="btn"
+              disabled={saving}
               onClick={() => {
                 discard();
                 guard.leave();

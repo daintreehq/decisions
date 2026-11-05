@@ -24,8 +24,8 @@ const DISCLOSE_SPEECH: Record<VoicePrefs['transcription'], string> = {
 const MIC_STATUS: Record<MicPermission, [string, string | undefined]> = {
   granted: ['Allowed now', 'Your browser controls how long this permission lasts'],
   prompt: [
-    'Ask when needed',
-    'Tap the microphone or test button, then allow access when your browser asks',
+    'Asks when needed',
+    'Your browser asks when you test or first dictate. To be asked less, allow the microphone for this site in your browser’s settings.',
   ],
   denied: ['Blocked', 'Allow the microphone for this site in your browser’s settings'],
   unavailable: ['Not available', 'This browser can’t use a microphone'],
@@ -44,15 +44,16 @@ export function voiceOptions(info: {
   return { speech, cleanup };
 }
 
-/** The index summary: "On · Cleanup on". */
+/** The index summary: "On · Tidying", where tidying only counts if the relay has a key for it. */
 export function dictationSummary(
   v: VoicePrefs,
-  info: { voice: { xai: boolean; openai: boolean } } | null,
+  info: { voice: { xai: boolean; openai: boolean; anthropic?: boolean } } | null,
 ): string {
   if (!info) return '';
   if (!info.voice.xai && !info.voice.openai) return 'Not set up';
   if (!v.consent) return 'Off';
-  return `On · Cleanup ${v.correction === 'off' ? 'off' : 'on'}`;
+  const cleanup = v.correction !== 'off' && !!info.voice[v.correction];
+  return cleanup ? 'On · Tidying' : 'On';
 }
 
 function Seg<T extends string>({
@@ -61,15 +62,22 @@ function Seg<T extends string>({
   labels,
   onChange,
   labelledBy,
+  describedBy,
 }: {
   value: T;
   options: readonly T[];
   labels: Record<T, string>;
   onChange: (v: T) => void;
   labelledBy: string;
+  describedBy?: string;
 }) {
   return (
-    <div className="seg s-seg" role="radiogroup" aria-labelledby={labelledBy}>
+    <div
+      className="seg s-seg"
+      role="radiogroup"
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+    >
       {options.map((o) => (
         <button
           key={o}
@@ -117,14 +125,18 @@ export function DictationSection() {
 
   return (
     <>
-      <p className="s-lead">Dictation turns speech into answer text. It never sends an answer.</p>
+      <p className="s-lead">
+        Dictation turns speech into answer text and never sends an answer. Changes apply straight
+        away, on this device only.
+      </p>
       {!info && !online && (
         <Callout tone="info">Dictation settings need a connection to your relay.</Callout>
       )}
       {info && !configured && (
-        <Callout tone="info" title="Dictation isn’t set up for this relay">
-          It needs an xAI or OpenAI key on your relay (an Anthropic key is optional, for tidying
-          wording). Typing always works.
+        <Callout tone="info" title="Dictation isn’t set up on your relay">
+          On your computer, run <span className="mono">decisions deploy</span> again and add an xAI
+          or OpenAI key when it asks (an Anthropic key is optional, for tidying wording). Typing
+          always works.
         </Callout>
       )}
       {configured && (
@@ -156,6 +168,7 @@ export function DictationSection() {
               <Row
                 label="Speech to text"
                 labelId={`${id}-s`}
+                stacked={opts!.speech.length > 1}
                 description={
                   opts!.speech.length > 1 ? undefined : 'The only provider set up on your relay'
                 }
@@ -176,26 +189,38 @@ export function DictationSection() {
               <Row
                 label="Tidy wording"
                 labelId={`${id}-t`}
+                descriptionId={`${id}-td`}
+                stacked={opts!.cleanup.length > 1}
                 description={
-                  cleanup === 'off'
-                    ? 'Off: you get exactly what was heard'
-                    : `After you stop, ${CLEANUP[cleanup]} fixes punctuation and misheard words. “Use original wording” undoes it.`
+                  opts!.cleanup.length === 1
+                    ? 'Your relay has no key for it, so you get exactly what was heard'
+                    : cleanup === 'off'
+                      ? 'You get exactly what was heard'
+                      : `After you stop, ${CLEANUP[cleanup]} fixes punctuation and misheard words. “Use original wording” undoes it.`
                 }
                 control={
-                  <Seg
-                    value={cleanup}
-                    options={opts!.cleanup}
-                    labels={CLEANUP}
-                    labelledBy={`${id}-t`}
-                    onChange={(c) => set({ correction: c })}
-                  />
+                  opts!.cleanup.length === 1 ? (
+                    <span className="s-value">Off</span>
+                  ) : (
+                    <Seg
+                      value={cleanup}
+                      options={opts!.cleanup}
+                      labels={CLEANUP}
+                      labelledBy={`${id}-t`}
+                      describedBy={`${id}-td`}
+                      onChange={(c) => set({ correction: c })}
+                    />
+                  )
                 }
               />
             </>
           )}
         </SettingsGroup>
       )}
-      <SettingsGroup label="Microphone">
+      <SettingsGroup
+        label="Microphone"
+        footer="Home Screen apps on iPhone and iPad may ask again after reopening: the browser keeps that permission, not Decisions."
+      >
         <Row
           label="Access"
           description={MIC_STATUS[mic][1]}
@@ -203,14 +228,6 @@ export function DictationSection() {
         />
         <div className="s-row stacked">
           <MicTest />
-        </div>
-        <div className="s-row stacked">
-          <p className="s-row-desc">
-            To reduce prompts, set Microphone to Allow for this site in your browser’s settings, if
-            available. iPhone and iPad Home Screen apps may ask again after reopening; Decisions
-            cannot remember that permission for the browser. Tap the microphone, allow access, then
-            speak. Hold to talk becomes available when your browser reports access is allowed.
-          </p>
         </div>
       </SettingsGroup>
       <VoiceDisclosure

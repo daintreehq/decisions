@@ -15,6 +15,12 @@ const ROLE: Record<string, string> = {
   tablet: 'Tablet',
 };
 
+/** In the list the group already says "Computers", so a computer's row names only its part. */
+const ROLE_SHORT: Record<string, string> = {
+  'owner-desktop': 'Owner',
+  'desktop-host': 'Host',
+};
+
 const GROUPS: { id: DeviceGroup; label: string }[] = [
   { id: 'this', label: 'This device' },
   { id: 'computers', label: 'Computers' },
@@ -36,13 +42,15 @@ function seenLabel(d: DeviceInfo, mine: boolean, now: number): string {
     : `Last seen ${age.replace(/(\d) /g, '$1\u00a0')}`;
 }
 
+/** Plain text in groups of four, so it reads, selects and copies exactly as Daintree shows it. */
 function Fingerprint({ value }: { value: string }) {
   const groups = value.split(/\s+/).filter(Boolean);
   return (
-    <p className="fingerprint" aria-label={`Fingerprint ${groups.join(', ')}`}>
+    <p className="fingerprint">
       {groups.map((g, i) => (
-        <span key={i} aria-hidden="true">
+        <span key={i}>
           {g}
+          {i < groups.length - 1 ? ' ' : ''}
         </span>
       ))}
     </p>
@@ -56,6 +64,7 @@ function CopyButton({ text }: { text: string }) {
       <button
         type="button"
         className="btn small"
+        disabled={!text}
         onClick={() => {
           if (!navigator.clipboard) return setState('failed');
           void navigator.clipboard
@@ -69,6 +78,7 @@ function CopyButton({ text }: { text: string }) {
       </button>
       <span className="s-row-desc" role="status">
         {state === 'failed' ? 'Couldn’t copy. Select the text to copy it.' : ''}
+        {state === 'copied' && <span className="sr-only">Fingerprint copied</span>}
       </span>
     </>
   );
@@ -111,7 +121,7 @@ function DeviceDetails({
               <dd>{d.revoked_at ? `Revoked ${absoluteLabel(d.revoked_at)}` : 'Paired'}</dd>
             </div>
             <div>
-              <dt>Paired</dt>
+              <dt>Paired on</dt>
               <dd>{absoluteLabel(d.created_at)}</dd>
             </div>
             <div>
@@ -124,7 +134,7 @@ function DeviceDetails({
                     : 'Not yet'}
               </dd>
             </div>
-            {!isComputer(d) && (
+            {!isComputer(d) && !d.revoked_at && (
               <div>
                 <dt>Notifications</dt>
                 <dd>{d.push_enabled ? 'On' : 'Off'}</dd>
@@ -134,11 +144,20 @@ function DeviceDetails({
           <h3 className="s-sheet-sub">Fingerprint</h3>
           <p className="s-row-desc">
             {owner
-              ? 'This device trusts only questions signed by this key. Check the groups match the ones Daintree shows in Settings › Decisions.'
-              : 'The key this device signs its answers with, as your computer approved it.'}
+              ? 'Decisions on this device only trusts questions signed with this computer’s key. Check that the groups below match the fingerprint Daintree shows in Settings › Decisions.'
+              : d.revoked_at
+                ? 'The key this device signed with before it was revoked. Nothing signed with it is accepted now.'
+                : isComputer(d)
+                  ? 'The key this computer signs with, as your owner computer approved it.'
+                  : mine
+                    ? 'The key this device signs your answers with, as your computer approved it.'
+                    : 'The key this device signs its answers with, as your computer approved it.'}
           </p>
           {fp ? <Fingerprint value={fp} /> : <p className="fingerprint" aria-hidden="true" />}
-          <div className="s-actions">{fp && <CopyButton text={fp} />}</div>
+          {/* Always there, so the sheet doesn't grow when the fingerprint arrives. */}
+          <div className="s-actions">
+            <CopyButton key={fp} text={fp} />
+          </div>
         </>
       )}
     </Sheet>
@@ -168,7 +187,10 @@ export function DevicesSection() {
 
   return (
     <>
-      <p className="s-lead">Devices that can read and answer your questions.</p>
+      <p className="s-lead">
+        Devices that can read and answer your questions. Open one for its details and key
+        fingerprint.
+      </p>
       {err && (
         <Callout
           tone="warn"
@@ -215,7 +237,10 @@ export function DevicesSection() {
                       <span className="s-row-text">
                         <span className="s-row-label">{d.label}</span>
                         <span className="s-row-desc">
-                          {ROLE[d.role] ?? d.role} · {seenLabel(d, mine, now)}
+                          {(g.id === 'computers' ? ROLE_SHORT[d.role] : undefined) ??
+                            ROLE[d.role] ??
+                            d.role}{' '}
+                          · {seenLabel(d, mine, now)}
                         </span>
                       </span>
                       <span className="s-chevron" aria-hidden="true" />
@@ -227,11 +252,13 @@ export function DevicesSection() {
           </section>
         );
       })}
-      <Callout tone="neutral" title="Removing a device">
-        Revoke it from your computer: in Daintree, open Settings › Decisions › Devices and choose
-        Revoke. It stops new questions reaching that device; it can’t erase what the device already
-        saved.
-      </Callout>
+      {snap.devices && (
+        <Callout tone="neutral" title="Removing a device">
+          Revoke it from your computer: in Daintree, open Settings › Decisions › Devices and choose
+          Revoke. It stops new questions reaching that device; it can’t erase what the device
+          already saved.
+        </Callout>
+      )}
       <DeviceDetails
         device={selected}
         mine={selected?.device_id === myId}
