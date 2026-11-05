@@ -950,16 +950,6 @@ input.s-switch:disabled {
   outline-offset: -2px;
 }
 
-/* A dialog taller than the screen (the dictation disclosure on a phone) keeps its answer in view. */
-.dialog .dialog-actions {
-  position: sticky;
-  bottom: -20px;
-  margin: 20px -20px -20px;
-  padding: 12px 20px 20px;
-  background: var(--surface-dialog);
-  border-top: 1px solid var(--line-subtle);
-}
-
 /* Mask the form behind the lifted save bar, with the raised card painted above the mask. */
 .s-save-dock.dirty::before {
   content: '';

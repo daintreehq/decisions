@@ -1,6 +1,11 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { Modal } from './Modal.js';
 
-/** Native <dialog> modal: focus trap and Escape handling come from the platform. */
+/**
+ * A confirmation or disclosure: the shared Modal, so it is a bottom sheet on phones and a centred panel from 720px,
+ * exactly like a workspace sheet. Focus containment and return come from the native <dialog>; Back, Escape and a
+ * tap on the dimmed page close it as one layer.
+ */
 export function Dialog({
   open,
   title,
@@ -16,30 +21,18 @@ export function Dialog({
   actions?: ReactNode;
   wide?: boolean;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  // Several dialogs can be mounted at once, so each needs its own ids for its name and description.
-  const id = useId();
-  useEffect(() => {
-    const d = ref.current;
-    if (!d) return;
-    if (open && !d.open) d.showModal();
-    if (!open && d.open) d.close();
-  }, [open]);
   return (
-    <dialog
-      ref={ref}
-      className={wide ? 'dialog wide' : 'dialog'}
-      aria-labelledby={`${id}-title`}
-      aria-describedby={`${id}-body`}
+    <Modal
+      open={open}
+      title={title}
       onClose={onClose}
-      onCancel={onClose}
+      footer={actions}
+      className={wide ? 'sheet dialog wide' : 'sheet dialog'}
+      bodyClassName="dialog-body"
+      footClassName="dialog-actions"
     >
-      <h2 id={`${id}-title`}>{title}</h2>
-      <div className="dialog-body" id={`${id}-body`}>
-        {children}
-      </div>
-      <div className="dialog-actions">{actions}</div>
-    </dialog>
+      {children}
+    </Modal>
   );
 }
 
@@ -47,6 +40,7 @@ export function ConfirmDialog({
   open,
   title,
   confirmLabel,
+  cancelLabel = 'Cancel',
   danger,
   confirmDisabled,
   onConfirm,
@@ -56,6 +50,8 @@ export function ConfirmDialog({
   open: boolean;
   title: string;
   confirmLabel: string;
+  /** The safe action, named for what it keeps where a plain "Cancel" would be ambiguous. */
+  cancelLabel?: string;
   danger?: boolean;
   confirmDisabled?: boolean;
   onConfirm: () => void;
@@ -70,7 +66,7 @@ export function ConfirmDialog({
       actions={
         <>
           <button type="button" className="btn" onClick={onCancel}>
-            Cancel
+            {cancelLabel}
           </button>
           <button
             type="button"

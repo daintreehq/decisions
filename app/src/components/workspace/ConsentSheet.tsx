@@ -1,8 +1,9 @@
 import { Sheet } from './Sheet.js';
 
 /**
- * The first press on the mic (or a hold on the empty field): say plainly where audio goes before the microphone is asked for. Consent is recorded only
- * by "Enable and start dictation".
+ * The first press on the mic (or a hold on the empty field): say plainly where audio goes before the microphone is
+ * asked for, and, when clean-up is on, that the transcript and the question it answers go to the clean-up model (the
+ * full disclosure in Settings says the same). Consent is recorded only by "Enable and start dictation".
  */
 export function ConsentSheet({
   open,
@@ -20,7 +21,11 @@ export function ConsentSheet({
   return (
     <Sheet
       open={open}
-      title="Dictation isn’t end-to-end encrypted"
+      title={
+        <>
+          Dictation isn’t <span className="nowrap">end-to-end</span> encrypted
+        </>
+      }
       onClose={onDecline}
       className="consent-sheet"
       footer={
@@ -38,14 +43,15 @@ export function ConsentSheet({
         Your audio goes through your relay to <strong>{provider}</strong> for transcription
         {cleanup ? (
           <>
-            , and the words go to <strong>{cleanup}</strong> to tidy the wording
+            , and the transcript, with the question it answers, goes to <strong>{cleanup}</strong>{' '}
+            to tidy the wording
           </>
         ) : null}
         . Answers you type stay end-to-end encrypted.
       </p>
       <p className="muted">
-        No audio is saved on this device or your relay. You review the text before anything is sent,
-        and you can turn dictation off in Settings.
+        No audio is saved on this device or your relay. You review the text before your answer is
+        sent, and you can turn dictation off in Settings.
       </p>
     </Sheet>
   );
