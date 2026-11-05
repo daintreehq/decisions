@@ -289,6 +289,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     for (const [k, v] of Object.entries(await galleryShots(browser))) images.set(k, v);
     context = await browser.newContext({
       viewport: PHONE,
+      hasTouch: true,
       deviceScaleFactor: 2,
       colorScheme: 'light',
       serviceWorkers: 'allow',
@@ -1004,10 +1005,15 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('tab', { name: /^After/ }).click();
     await page.getByRole('button', { name: 'Enlarge After' }).click();
     await viewer.locator('.fs-slide.is-active img.is-sized').waitFor({ timeout: 30_000 });
+    const stageAtFit = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
+    expect(stageAtFit.height).toBeGreaterThan(PHONE.height * 0.5);
+    expect(stageAtFit.y).toBeGreaterThanOrEqual(50);
+    expect(stageAtFit.y + stageAtFit.height).toBeLessThanOrEqual(PHONE.height);
     await shot('50-viewer-fit-phone');
     const box = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
     await page.mouse.dblclick(box.x + box.width * 0.3, box.y + box.height * 0.45);
     await shot('50-viewer-zoomed-phone');
+    await viewer.getByLabel('More image controls').click();
     await viewer.getByRole('button', { name: 'Move', exact: true }).click();
     await viewer.getByRole('button', { name: 'Move right' }).click();
     await shot('50-viewer-move-phone');

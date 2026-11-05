@@ -25,6 +25,7 @@ function useMedia(query: string): boolean {
 export const useWide = (): boolean => useMedia(WIDE_QUERY);
 /** 720px and up. */
 export const useTablet = (): boolean => useMedia(TABLET_QUERY);
+export const useCoarsePointer = (): boolean => useMedia('(pointer: coarse)');
 
 export const isWide = (): boolean =>
   typeof matchMedia === 'function' && matchMedia(WIDE_QUERY).matches;

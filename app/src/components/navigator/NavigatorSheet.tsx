@@ -6,6 +6,7 @@ import { CloseIcon } from '../Icons.js';
 import { HistoryGlyph, SettingsGlyph } from '../NavGlyphs.js';
 import { NavigatorPanel } from './Navigator.js';
 import { useDialogMotion } from '../useDialogMotion.js';
+import { useSwipeClose } from '../useSwipeClose.js';
 
 let wantSearch = false;
 
@@ -34,6 +35,7 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const present = useDialogMotion(ref, open);
+  const swipe = useSwipeClose(ref, 'down', dismiss);
 
   useEffect(() => {
     const d = ref.current;
@@ -63,7 +65,7 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
     >
       {present && (
         <div className="nav-sheet-body">
-          <header className="nav-sheet-head">
+          <header className="nav-sheet-head" {...swipe} style={{ touchAction: 'pan-x pinch-zoom' }}>
             <h2 className="sheet-title" id={titleId} tabIndex={-1}>
               Questions &amp; answers
             </h2>

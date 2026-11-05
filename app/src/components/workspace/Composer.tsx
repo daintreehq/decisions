@@ -789,7 +789,10 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
     );
   if (dict?.message)
     return (
-      <span className={`lane${dict.message.tone === 'error' ? ' error' : ''}`}>
+      <span
+        className={`lane${dict.message.tone === 'error' ? ' error' : ''}`}
+        role={dict.message.tone === 'error' ? 'alert' : 'status'}
+      >
         <span className="lane-text">{dict.message.text}</span>
         {dict.message.retry && action('Try again', i.onDictate)}
         {dismiss(() => dictation.dismissMessage())}

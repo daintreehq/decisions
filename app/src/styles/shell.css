@@ -144,8 +144,8 @@ main.bare {
   background: color-mix(in oklab, var(--waiting) 15%, var(--surface-raised));
   color: var(--text);
   position: absolute;
-  top: -2px;
-  right: -4px;
+  top: 0;
+  right: -2px;
   min-width: 18px;
   padding: 0 5px;
   font-size: 0.6875rem;
@@ -166,18 +166,17 @@ main.bare {
   display: none;
 }
 
-/* Inside a question the button takes the header's leading slot (Back, when there is one, sits beside it), and the
-   header row is the button's row. On a phone the outer columns are as wide as what they hold rather than mirrored,
-   so the project and computer get the room an absent Back would have kept empty. */
+/* Mirrored outer slots keep the project centred between the floating navigation and question tools. */
 .shell[data-layout='single'] .ws-head {
   --ws-pad-l: var(--fab-x);
   --ws-lead: calc(var(--fab-size) + 4px + var(--tap-min));
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  --ws-pad-r: var(--fab-x);
+  grid-template-columns: var(--ws-lead) minmax(0, 1fr) var(--ws-lead);
   min-height: calc(var(--safe-t) + var(--fab-size) + 12px);
 }
 /* Clear of the menu button's count badge when a long project name fills the title. */
 .shell[data-layout='single'] .ws-title {
-  padding-left: 6px;
+  padding-inline: 2px;
 }
 .shell[data-layout='single'] .ws-menu-slot {
   display: block;
@@ -305,23 +304,11 @@ main.bare {
   align-items: flex-start;
   gap: 10px;
   min-height: var(--tap-min);
-  padding: 8px 12px 8px 10px;
+  padding: 8px 12px;
   border-radius: var(--radius-md);
   color: var(--text);
   text-decoration: none;
   transition: background-color var(--dur) var(--ease-out);
-}
-.side-q-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  /* Centred on the first 20 px line. */
-  margin-top: 6px;
-  border-radius: 50%;
-}
-/* Waiting on you: Daintree's waiting signal, with the words for screen readers. */
-.side-q-dot[data-on] {
-  background: var(--waiting);
 }
 .side-q-body {
   flex: 1;
@@ -440,7 +427,7 @@ html[data-terminal-dragging] {
  * Carry the same moving sidebar/canvas split into that paint, rather than leaving a page-colored strip. */
 html:has(:is(.sidebar-sheet, .term-drawer)[open]) {
   background-color: var(--surface-chrome);
-  background-attachment: fixed;
+  overflow: hidden;
 }
 html:has(.sidebar-sheet[open]) {
   background-image: linear-gradient(
@@ -823,12 +810,76 @@ html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
     border: 1px solid ButtonText;
   }
   /* Backgrounds are overridden here, so the markers are drawn with borders. */
-  .side-q-dot[data-on],
   .menu-fab-dot {
     background: none;
     border: 4px solid CanvasText;
   }
   .menu-fab-count.count {
     border: 1px solid CanvasText;
+  }
+}
+
+/* The displaced canvas remains a navigation anchor, with its contents quiet behind the active drawer. */
+.shell:has(:is(.sidebar-sheet, .term-drawer)[open]) .frame {
+  position: relative;
+}
+.shell:has(:is(.sidebar-sheet, .term-drawer)[open]) .frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  background: color-mix(in oklab, var(--surface-page) 62%, transparent);
+  pointer-events: none;
+}
+.shell:has(:is(.sidebar-sheet, .term-drawer)[open]) .menu-fab {
+  opacity: 0.4;
+}
+.sidebar-sheet,
+.term-drawer {
+  touch-action: pan-y pinch-zoom;
+}
+/* Other modals own the screen; global controls must not peek through their rounded corners. */
+.shell:has(dialog[open]:not(.sidebar-sheet):not(.term-drawer))
+  :is(.menu-fab, .float-tools, .float-search, .ws-head) {
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (max-width: 44.999em) {
+  .side-close:not(:focus-visible) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .shell[data-drill-in] {
+    --title-clear: 0px;
+  }
+  .shell[data-drill-in] .s-back {
+    margin-left: -4px;
+  }
+}
+/* Home's floating controls get the same clear reading margin as the conversation header. */
+.shell[data-layout='single'][data-route='inbox'] .frame::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(var(--safe-t) + 80px);
+  z-index: 20;
+  background: linear-gradient(
+    to bottom,
+    var(--surface-page) calc(var(--safe-t) + 54px),
+    transparent
+  );
+  pointer-events: none;
+}
+
+@media (pointer: coarse) {
+  .shell[data-layout='single'] .frame {
+    touch-action: pan-y pinch-zoom;
   }
 }

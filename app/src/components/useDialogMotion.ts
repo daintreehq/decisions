@@ -13,6 +13,7 @@ export function useDialogMotion(
     const dialog = ref.current;
     if (!dialog) return;
     if (open) {
+      dialog.style.transform = '';
       dialog.removeAttribute('data-closing');
       if (!dialog.open) dialog.showModal();
       return;
@@ -28,6 +29,7 @@ export function useDialogMotion(
       return;
     }
     dialog.setAttribute('data-closing', '');
+    dialog.style.transform = '';
     const timer = setTimeout(finish, 220);
     return () => clearTimeout(timer);
   }, [open, ref, animateExit]);

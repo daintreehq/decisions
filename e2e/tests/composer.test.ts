@@ -201,6 +201,14 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
         { id: 'now', label: 'Ship it to everyone' },
       ],
     });
+    await ask('detailed', {
+      question: 'Which rollout strategy should we use?',
+      kind: 'choice',
+      options: [
+        { id: 'canary', label: 'Canary', description: 'Start with one region and monitor errors.' },
+        { id: 'all', label: 'Everywhere', description: 'Update every region together.' },
+      ],
+    });
     await ask('voice', { question: 'What should the 429 body say?', kind: 'text', options: [] });
     await ask('draft', { question: 'Name the new retry setting?', kind: 'text', options: [] });
     await bridge.pump();
@@ -242,17 +250,28 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     const chip = page.locator('.dock').getByRole('radio', { name: 'Behind a flag' });
     await chip.click();
     await expect(chip.getAttribute('aria-checked')).resolves.toBe('true');
-    // The same choice, in the agent's message.
-    await expect(
-      page
-        .locator('.ws-body')
-        .getByRole('radio', { name: /Behind a flag/ })
-        .isChecked(),
-    ).resolves.toBe(true);
+    // Short choices appear once, in the dock, and selection alone never submits.
+    await expect(page.locator('.ws-body').getByRole('radio').count()).resolves.toBe(0);
+    await expect(page.getByRole('radio', { name: 'Behind a flag' }).count()).resolves.toBe(1);
+    expect(sink.typed.some((t) => t.includes('choice: flag'))).toBe(false);
     await field().fill('Default it off for a week.');
     await page.locator('.dock').getByRole('button', { name: 'Send decision' }).click();
     await typedHas('Default it off for a week.');
     expect(sink.typed.find((t) => t.includes('Default it off'))).toContain('choice: flag');
+  });
+
+  it('keeps described choices in the question and sends the selected card from the compact dock', async () => {
+    await openId('detailed');
+    await expect(page.locator('.dock').getByRole('radio').count()).resolves.toBe(0);
+    await page
+      .locator('.ws-body')
+      .getByRole('radio', { name: /Canary/ })
+      .check();
+    await expect(
+      page.getByText('Start with one region and monitor errors.').isVisible(),
+    ).resolves.toBe(true);
+    await page.locator('.dock').getByRole('button', { name: 'Send answer' }).click();
+    await typedHas('choice: canary');
   });
 
   it('grows for wrapped words and returns to a compact bar when cleared', async () => {
@@ -316,6 +335,24 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await page.waitForTimeout(900);
     await page.locator('.dock').getByRole('button', { name: 'Send answer' }).click();
     await typedHas('Say when to try again.');
+  });
+
+  it('shows microphone permission failures visibly above the compact empty input', async () => {
+    await openId('draft');
+    await field().fill('');
+    await page.evaluate(() => {
+      navigator.mediaDevices.getUserMedia = async () => {
+        throw new DOMException('Denied for this check', 'NotAllowedError');
+      };
+    });
+    await mic().click();
+    const error = page.locator('.dock .lane[role="alert"]');
+    await error.getByText('Microphone access is blocked.').waitFor();
+    const errorBox = (await error.boundingBox())!;
+    expect(errorBox.height).toBeGreaterThan(20);
+    expect(errorBox.y).toBeGreaterThan(0);
+    expect(errorBox.y + errorBox.height).toBeLessThan(844);
+    await expect(page.locator('.composer[data-rows="one"]').count()).resolves.toBe(1);
   });
 
   it('keeps a draft when the person leaves the question and comes back', async () => {

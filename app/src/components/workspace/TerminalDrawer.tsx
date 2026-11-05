@@ -317,6 +317,7 @@ function ModalTerminal({
   }, [open, titleId]);
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={DRAWER_ID}
       className="term-drawer"
@@ -331,11 +332,7 @@ function ModalTerminal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      {mounted && (
-        <div className="term-panel-body" {...swipe}>
-          {children}
-        </div>
-      )}
+      {mounted && <div className="term-panel-body">{children}</div>}
     </dialog>
   );
 }
@@ -539,6 +536,7 @@ function SnapshotBody({
     const first = shown.current === null;
     shown.current = tv.snapshotId;
     if (first || atEnd.current) el.scrollTop = el.scrollHeight;
+    el.toggleAttribute('data-scrolled', el.scrollTop > 1);
   }, [tv.snapshotId]);
   const observed = new Date(tv.observedAt).toLocaleTimeString(undefined, {
     hour: '2-digit',
@@ -589,6 +587,7 @@ function SnapshotBody({
         onScroll={(e) => {
           const el = e.currentTarget;
           atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          el.toggleAttribute('data-scrolled', el.scrollTop > 1);
         }}
       >
         {tv.lines.length > 0 ? (

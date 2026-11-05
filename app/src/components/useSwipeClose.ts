@@ -11,7 +11,7 @@ import { useRef, type PointerEvent as ReactPointerEvent, type RefObject } from '
  */
 export function useSwipeClose(
   panel: RefObject<HTMLElement | null>,
-  edge: 'left' | 'right',
+  edge: 'left' | 'right' | 'down',
   close: () => void,
   presentation?: {
     width: () => number;
@@ -19,6 +19,7 @@ export function useSwipeClose(
     move: (distance: number | null) => void;
   },
 ) {
+  const vertical = edge === 'down';
   const sign = edge === 'left' ? -1 : 1;
   const drag = useRef<{
     id: number;
@@ -63,8 +64,8 @@ export function useSwipeClose(
     const d = panel.current;
     if (!s || !d || s.id !== e.pointerId) return;
     // Distance toward the panel's edge (positive) and across it.
-    const dx = (e.clientX - s.x) * sign;
-    const dy = e.clientY - s.y;
+    const dx = (vertical ? e.clientY - s.y : e.clientX - s.x) * sign;
+    const dy = vertical ? e.clientX - s.x : e.clientY - s.y;
     if (!s.on) {
       if (dx > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
         s.on = true;
@@ -81,7 +82,7 @@ export function useSwipeClose(
     }
     s.dx = Math.max(0, dx);
     if (presentation) presentation.move(s.dx);
-    else d.style.transform = `translateX(${s.dx * sign}px)`;
+    else d.style.transform = `translate${vertical ? 'Y' : 'X'}(${s.dx * sign}px)`;
   };
   const onPointerEnd = (e: ReactPointerEvent<HTMLElement>) => {
     down.current.delete(e.pointerId);
@@ -95,7 +96,11 @@ export function useSwipeClose(
     drag.current = null;
     d.removeAttribute('data-dragging');
     const velocity = s.dx / Math.max(1, e.timeStamp - s.t);
-    if (s.dx > (presentation?.width() ?? d.offsetWidth) / 3 || velocity > 0.6) close();
+    if (
+      s.dx > (presentation?.width() ?? (vertical ? d.offsetHeight : d.offsetWidth)) / 3 ||
+      velocity > 0.6
+    )
+      close();
     else d.style.transform = '';
     presentation?.move(null);
   };

@@ -205,9 +205,18 @@ export function Compare({
           </button>
           <div className="fx-id">
             <div className="fx-id-file" id={`${id}-t`}>
-              <span className="fx-id-label">Before and after</span>
+              <span className={wide ? 'fx-id-label' : 'sr-only'}>Before and after</span>
             </div>
-            <div className="fx-id-q" id={`${id}-q`}>
+            {!wide && (
+              <div className="seg fx-compare-seg" role="group" aria-label="Show">
+                {SIDES.map((s) => (
+                  <button key={s} type="button" aria-pressed={side === s} onClick={() => onSide(s)}>
+                    {LABEL[s]}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className={wide ? 'fx-id-q' : 'sr-only'} id={`${id}-q`}>
               <span className="fx-id-project">{project}</span>
               <span aria-hidden="true"> · </span>
               {excerpt}
@@ -217,18 +226,6 @@ export function Compare({
             Question
           </button>
         </header>
-
-        {!wide && (
-          <div className="fx-compare-bar">
-            <div className="seg fx-compare-seg" role="group" aria-label="Show">
-              {SIDES.map((s) => (
-                <button key={s} type="button" aria-pressed={side === s} onClick={() => onSide(s)}>
-                  {LABEL[s]}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
         {wide ? (
           <div className="fx-panes">

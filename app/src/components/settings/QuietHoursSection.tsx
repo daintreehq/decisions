@@ -375,30 +375,36 @@ export function QuietHoursSection() {
           </Callout>
         )}
 
-        <div className={`s-savebar${dirty ? ' dirty' : ''}`} role="group" aria-label="Save changes">
-          <span className="s-savebar-status" role="status">
-            {saving
-              ? 'Saving to your relay…'
-              : dirty
-                ? invalid
-                  ? 'Fix the times to save'
-                  : 'Unsaved changes'
-                : justSaved
-                  ? 'Saved on your relay'
-                  : ''}
-          </span>
-          {dirty && (
-            <button type="button" className="btn small" disabled={saving} onClick={discard}>
-              Discard
-            </button>
-          )}
-          <button
-            type="submit"
-            className="btn small primary"
-            disabled={!dirty || saving || !!invalid}
+        <div className={`s-save-dock${dirty ? ' dirty' : ''}`}>
+          <div
+            className={`s-savebar${dirty ? ' dirty' : ''}`}
+            role="group"
+            aria-label="Save changes"
           >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+            <span className="s-savebar-status" role="status">
+              {saving
+                ? 'Saving to your relay…'
+                : dirty
+                  ? invalid
+                    ? 'Fix the times to save'
+                    : 'Unsaved changes'
+                  : justSaved
+                    ? 'Saved on your relay'
+                    : ''}
+            </span>
+            {dirty && (
+              <button type="button" className="btn small" disabled={saving} onClick={discard}>
+                Discard
+              </button>
+            )}
+            <button
+              type="submit"
+              className="btn small primary"
+              disabled={!dirty || saving || !!invalid}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
         </div>
       </form>
 

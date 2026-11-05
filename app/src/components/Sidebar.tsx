@@ -117,7 +117,6 @@ function RecentRow({
         data-row-id={v.id}
         aria-current={current ? 'page' : undefined}
       >
-        <span className="side-q-dot" data-on={waiting || undefined} aria-hidden="true" />
         {waiting && <span className="sr-only">Needs you: </span>}
         <span className="side-q-body">
           <span className="side-q-text">{text}</span>
@@ -126,9 +125,16 @@ function RecentRow({
               <span className="sr-only">, </span>
               {project}
             </span>
-            {slot && (
+            {(slot || waiting) && (
               <span className="side-q-state">
-                {shown && <AgentStateMark a={shown} age={false} />}
+                {waiting ? (
+                  <span className="agent-state" data-tone="waiting" aria-hidden="true">
+                    <span className="agent-dot" />
+                    <span className="agent-label">Needs you</span>
+                  </span>
+                ) : (
+                  shown && <AgentStateMark a={shown} age={false} />
+                )}
               </span>
             )}
           </span>
@@ -369,6 +375,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
 
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={SHEET_ID}
       className="sidebar-sheet"
@@ -382,7 +389,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      <div className="side side-sheet-body" {...swipe}>
+      <div className="side side-sheet-body">
         <SidebarContent
           currentId={currentId}
           titleId={titleId}

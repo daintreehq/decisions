@@ -8,7 +8,9 @@ import {
   MoveIcon,
   ZoomInIcon,
   ZoomOutIcon,
+  MoreIcon,
 } from '../Icons.js';
+import { useTablet, useCoarsePointer } from '../../app/media.js';
 import { FIT, MAX_ZOOM, ZOOM_STEP, isZoomed, panBy, zoomBy, type Size, type View } from './zoom.js';
 
 export interface ZoomTarget {
@@ -46,6 +48,79 @@ export const formatScale = (s: number): string =>
 
 /** − Fit + and Move. The Fit button reads the current zoom ("2.5×") and returns to Fit. */
 export function ZoomButtons({ cmd, onMove }: { cmd: ZoomCommands; onMove: () => void }) {
+  const coarse = useCoarsePointer();
+  const tablet = useTablet();
+  const menu = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      const el = menu.current;
+      if (el?.open && !el.contains(event.target as Node)) el.open = false;
+    };
+    const escape = (event: KeyboardEvent) => {
+      const el = menu.current;
+      if (event.key === 'Escape' && el?.open) {
+        event.preventDefault();
+        event.stopPropagation();
+        el.open = false;
+        el.querySelector('summary')?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape, true);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape, true);
+    };
+  }, []);
+  if (coarse && !tablet)
+    return (
+      <>
+        <button
+          type="button"
+          className="btn ghost fx-tool fx-zoom-value tabular"
+          aria-label={cmd.zoomed ? `Fit to screen, now ${formatScale(cmd.scale)}` : 'Fit to screen'}
+          disabled={!cmd.zoomed}
+          onClick={cmd.fit}
+        >
+          {cmd.zoomed ? formatScale(cmd.scale) : 'Fit'}
+        </button>
+        <details className="fx-zoom-menu" ref={menu}>
+          <summary className="btn ghost icon fx-tool" aria-label="More image controls">
+            <MoreIcon size={20} />
+          </summary>
+          <div className="fx-zoom-popover" role="group" aria-label="Image controls">
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={!cmd.usable || cmd.scale >= MAX_ZOOM - 0.001}
+              onClick={cmd.zoomIn}
+            >
+              <ZoomInIcon size={18} />
+              Zoom in
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={!cmd.zoomed}
+              onClick={cmd.zoomOut}
+            >
+              <ZoomOutIcon size={18} />
+              Zoom out
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              aria-label="Move"
+              disabled={!cmd.zoomed}
+              onClick={onMove}
+            >
+              <MoveIcon size={18} />
+              Move
+            </button>
+          </div>
+        </details>
+      </>
+    );
   return (
     <>
       <div className="fx-tool-group">
@@ -181,7 +256,9 @@ export function useMoveFocus(
     const now = document.activeElement;
     if (now && now !== document.body && now.isConnected && !root.contains(now)) return;
     const next = root.querySelector<HTMLElement>(
-      moving ? '[aria-label="Move left"]' : '[aria-label="Move"]:not(:disabled)',
+      moving
+        ? '[aria-label="Move left"]'
+        : '[aria-label="More image controls"], [aria-label="Move"]:not(:disabled)',
     );
     (next ?? stage())?.focus({ preventScroll: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps

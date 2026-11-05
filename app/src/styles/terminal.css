@@ -388,3 +388,11 @@
     border: 1px solid CanvasText;
   }
 }
+
+.term-drawer .term-screen {
+  flex: 1 1 auto;
+}
+.term-screen[data-scrolled] {
+  mask-image: linear-gradient(to bottom, transparent, #000 18px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 18px);
+}

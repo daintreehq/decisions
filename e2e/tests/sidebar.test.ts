@@ -511,6 +511,108 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     expect(new URL(page.url()).pathname).toBe('/');
   });
 
+  it('opens drawers with canvas swipes while leaving controls and vertical scrolling alone', async () => {
+    await page.goto(relay.origin + `/q/${ids.newer}`);
+    await page.locator('.ws .dock').waitFor();
+    const swipe = async (x: number, y: number, dx: number, dy = 0) => {
+      if (browserEngine === chromium) {
+        // Native touch dispatch also exercises touch-action and the browser's gesture arbitration.
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+        for (let n = 1; n <= 8; n++) {
+          await cdp.send('Input.dispatchTouchEvent', {
+            type: 'touchMove',
+            touchPoints: [{ x: x + (dx * n) / 8, y: y + (dy * n) / 8 }],
+          });
+          await page.waitForTimeout(16);
+        }
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await cdp.detach();
+      } else {
+        await page.evaluate(
+          async ({ x, y, dx, dy }) => {
+            const target = document.elementFromPoint(x, y)!;
+            const fire = (type: string, n: number) => {
+              const event = new Event(type, { bubbles: true, cancelable: true });
+              Object.defineProperty(event, 'touches', {
+                value:
+                  type === 'touchend'
+                    ? []
+                    : [{ clientX: x + (dx * n) / 8, clientY: y + (dy * n) / 8 }],
+              });
+              target.dispatchEvent(event);
+            };
+            fire('touchstart', 0);
+            for (let n = 1; n <= 8; n++) {
+              fire('touchmove', n);
+              await new Promise((r) => setTimeout(r, 16));
+            }
+            fire('touchend', 8);
+          },
+          { x, y, dx, dy },
+        );
+      }
+    };
+    const field = page.locator('.dock textarea');
+    await field.fill('Preserve my answer');
+    const box = (await field.boundingBox())!;
+    await swipe(box.x + 10, box.y + 10, 100);
+    expect(await sheet().count()).toBe(0);
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    await swipe(70, 180, 12, 120);
+    expect(await sheet().count()).toBe(0);
+    await swipe(70, 180, 180);
+    await sheet().waitFor();
+    await page.keyboard.press('Escape');
+    await closed();
+    await swipe(280, 180, -180);
+    await page.locator('dialog.term-drawer[open]').waitFor();
+    await page.keyboard.press('Escape');
+    await until(
+      async () => (await page.locator('dialog.term-drawer[open]').count()) === 0,
+      5000,
+      'terminal to close',
+    );
+    expect(await field.inputValue()).toBe('Preserve my answer');
+    await page.goto(relay.origin + '/settings/appearance');
+    await page.getByRole('heading', { name: 'Appearance', exact: true }).waitFor();
+    expect(await menu().count()).toBe(0);
+    await swipe(90, 95, 180);
+    await page.waitForURL((u) => u.pathname === '/settings');
+    await menu().waitFor();
+  });
+
+  it('hides background chrome and dismisses bottom sheets from their headers', async () => {
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: 'Filter questions', exact: true }).click();
+    await page.locator('dialog.filter-sheet[open]').waitFor();
+    expect(await menu().isVisible()).toBe(false);
+    await page.locator('.filter-sheet .filter-sheet-head').evaluate(async (header) => {
+      const fire = (type: string, y: number) =>
+        header.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            pointerId: 9,
+            pointerType: 'touch',
+            clientX: 150,
+            clientY: y,
+          }),
+        );
+      fire('pointerdown', 400);
+      for (let y = 420; y <= 650; y += 30) {
+        fire('pointermove', y);
+        await new Promise((r) => setTimeout(r, 16));
+      }
+      fire('pointerup', 650);
+    });
+    await until(
+      async () => (await page.locator('dialog.filter-sheet[open]').count()) === 0,
+      5000,
+      'filters to close',
+    );
+    expect(await menu().isVisible()).toBe(true);
+  });
+
   it('is a persistent column with no menu button at 1100px and up', async () => {
     // An overlay left open when the window widens does not come back when it narrows again.
     await page.goto(relay.origin + '/');
