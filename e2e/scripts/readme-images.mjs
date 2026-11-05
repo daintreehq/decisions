@@ -104,7 +104,7 @@ const BASE_CSS = `
   }
   .canvas::before {
     content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-    background-image: ${GRAIN}; opacity: .05; mix-blend-mode: overlay;
+    background-image: ${GRAIN}; opacity: .03; mix-blend-mode: overlay;
   }
   .canvas::after {
     content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;

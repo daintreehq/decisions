@@ -552,7 +552,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('10-detail-approval-selected');
     // The README hero: the choice made, a note for the agent, Send in the composer.
     await typeAnswer('Ship it. Keep the tooltips on every icon.');
-    expect(await page.getByText('Review the remaining file').count()).toBe(0);
+    // Send is armed only once the choice is made and every file has been seen.
+    await page.locator('.composer-send:not([aria-disabled])').waitFor();
     await shot('10-detail-approval-note');
     await typeAnswer('');
     await page.getByRole('tab', { name: /^After/ }).click();

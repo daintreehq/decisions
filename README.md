@@ -29,7 +29,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 
 ## How it works
 
-<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: Home, with the questions that need you from several projects on two computers, then a model answer to review. Three: a design approval with before and after screenshots, Approve chosen and a note in the composer. Four: the answered question, marked as typed into the terminal, with Next question below it." width="100%">
+<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: Home, with the questions that need you from several projects on two computers, then a model answer to review. Three: a design approval with before and after screenshots, Approve chosen and a note in the composer. Four: another question, answered Yes, rename and marked as typed into the terminal, with Next question below it." width="100%">
 
 1. **Your agent asks.** `ask_human` returns at once with an id, and the agent ends its turn (or carries on with unrelated work). Nothing holds a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks stuck.
 2. **Your phone buzzes.** The notification says only that a question is waiting. The question itself is encrypted on your computer and decrypted on your phone.
@@ -38,7 +38,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 
 ## More than yes or no
 
-<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question with a description under each option; a free-text question with a typed answer in the composer; an answer from the decision model, labelled Model answer with the model's name, its confidence and how many earlier decisions it drew on, with Confirm answer and Overrule; and an answered question with two follow-ups from the phone and the agent's reply in the same thread." width="100%">
+<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question whose first two options carry a description of the trade-off; a free-text question with a typed answer in the composer; an answer from the decision model, labelled Model answer with the model's name, its confidence and how many earlier decisions it drew on, with Confirm answer and Overrule; and an answered question with two follow-ups from the phone and the agent's reply in the same thread." width="100%">
 
 |                                      |                                                                                                                                                                                                                                                              |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
