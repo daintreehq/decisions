@@ -283,6 +283,59 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     await draft.fill('');
   });
 
+  it('carries the sidebar paint through the top safe area while keeping controls below it', async () => {
+    await page.goto(relay.origin + '/');
+    await menu().waitFor();
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--safe-t', '59px');
+      document.documentElement.style.setProperty('--safe-b', '34px');
+    });
+    try {
+      for (const colorScheme of ['dark', 'light'] as const) {
+        await page.emulateMedia({ colorScheme });
+        await openSidebar();
+        await until(
+          async () =>
+            page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left > 327),
+          5000,
+          'the sidebar to reveal',
+        );
+        const paint = await page.evaluate(() => {
+          const root = getComputedStyle(document.documentElement);
+          const side = document.querySelector<HTMLElement>('.side-sheet-body')!;
+          return {
+            document: root.backgroundColor,
+            sidebar: getComputedStyle(side).backgroundColor,
+            split: root.backgroundImage,
+            body: getComputedStyle(document.body).backgroundColor,
+            top: side.getBoundingClientRect().top,
+            titleTop: side.querySelector('.side-name')!.getBoundingClientRect().top,
+            menuTop: document.querySelector('.menu-fab')!.getBoundingClientRect().top,
+          };
+        });
+        expect(paint.document).toBe(paint.sidebar);
+        expect(paint.split).toContain('linear-gradient');
+        expect(paint.body).toBe('rgba(0, 0, 0, 0)');
+        expect(paint.top).toBe(0);
+        expect(paint.titleTop).toBeGreaterThan(59);
+        expect(paint.menuTop).toBeGreaterThanOrEqual(59);
+        if (motionDir)
+          await page.screenshot({ path: join(motionDir, `safe-area-${colorScheme}.png`) });
+        await page.keyboard.press('Escape');
+        await closed();
+        expect(
+          await page.locator('html').evaluate((el) => getComputedStyle(el).backgroundImage),
+        ).toBe('none');
+      }
+    } finally {
+      await page.evaluate(() => {
+        document.documentElement.style.removeProperty('--safe-t');
+        document.documentElement.style.removeProperty('--safe-b');
+      });
+      await page.emulateMedia({ colorScheme: 'light' });
+    }
+  });
+
   it('slides viewport-sized snapshots without scaling when the outgoing page is taller', async () => {
     await page.goto(relay.origin + '/');
     await page.locator('main .qrow').first().waitFor();

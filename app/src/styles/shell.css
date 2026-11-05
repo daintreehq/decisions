@@ -413,17 +413,32 @@ main.bare {
   inherits: true;
   initial-value: 0px;
 }
-.shell[data-layout='single'] {
+html:has(.shell[data-layout='single']) {
   --sidebar-width: min(84vw, 360px);
-  --sidebar-offset: 0px;
-  overflow-x: clip;
   transition: --sidebar-offset var(--dur-canvas) var(--ease-canvas);
 }
-.shell[data-layout='single']:has(.sidebar-sheet[open]:not([data-closing])) {
+html:has(.shell[data-layout='single'] .sidebar-sheet[open]:not([data-closing])) {
   --sidebar-offset: var(--sidebar-width);
 }
-.shell[data-sidebar-dragging] {
+html[data-sidebar-dragging] {
   transition: none;
+}
+.shell[data-layout='single'] {
+  overflow-x: clip;
+}
+/* iOS can paint the status/overscroll area from the document background, outside a modal's top layer.
+ * Carry the same moving sidebar/canvas split into that paint, rather than leaving a page-colored strip. */
+html:has(.sidebar-sheet[open]) {
+  background-color: var(--surface-chrome);
+  background-image: linear-gradient(
+    to right,
+    var(--surface-chrome) var(--sidebar-offset),
+    var(--surface-page) var(--sidebar-offset)
+  );
+  background-attachment: fixed;
+}
+html:has(.sidebar-sheet[open]) body {
+  background: transparent;
 }
 .shell:has(.sidebar-sheet[open]) {
   /* The rounded canvas exposes this surface at its corners, beyond the sidebar's rectangular content. */

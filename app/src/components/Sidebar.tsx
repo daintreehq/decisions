@@ -306,6 +306,14 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   const titleId = useId();
   const openedAt = useRef<string>('');
 
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset.sidebarDragging;
+      document.documentElement.style.removeProperty('--sidebar-offset');
+    },
+    [],
+  );
+
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
@@ -348,14 +356,13 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   const swipe = useSwipeClose(ref, 'left', dismiss, {
     width: sidebarWidth,
     move: (distance) => {
-      const shell = ref.current?.closest<HTMLElement>('.shell');
-      if (!shell) return;
+      const root = document.documentElement;
       if (distance === null) {
-        delete shell.dataset.sidebarDragging;
-        shell.style.removeProperty('--sidebar-offset');
+        delete root.dataset.sidebarDragging;
+        root.style.removeProperty('--sidebar-offset');
       } else {
-        shell.dataset.sidebarDragging = '';
-        shell.style.setProperty('--sidebar-offset', `${Math.max(0, sidebarWidth() - distance)}px`);
+        root.dataset.sidebarDragging = '';
+        root.style.setProperty('--sidebar-offset', `${Math.max(0, sidebarWidth() - distance)}px`);
       }
     },
   });
