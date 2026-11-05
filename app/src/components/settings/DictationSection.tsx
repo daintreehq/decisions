@@ -3,7 +3,8 @@ import { app } from '../../app/controller.js';
 import { useApp } from '../../app/hooks.js';
 import type { VoicePrefs } from '../../app/prefs.js';
 import { VoiceDisclosure } from '../VoiceDisclosure.js';
-import { MicTest, useMicPermission, type MicPermission } from './MicTest.js';
+import { MicTest } from './MicTest.js';
+import { useMicPermission, type MicPermission } from '../../features/voice/permission.js';
 import { Callout, Row, SettingsGroup, Switch } from './ui.js';
 
 const SPEECH: Record<VoicePrefs['transcription'], string> = {
@@ -21,8 +22,11 @@ const DISCLOSE_SPEECH: Record<VoicePrefs['transcription'], string> = {
 };
 
 const MIC_STATUS: Record<MicPermission, [string, string | undefined]> = {
-  granted: ['Allowed', undefined],
-  prompt: ['Not asked yet', 'Your browser asks the first time you dictate or test'],
+  granted: ['Allowed now', 'Your browser controls how long this permission lasts'],
+  prompt: [
+    'Ask when needed',
+    'Tap the microphone or test button, then allow access when your browser asks',
+  ],
   denied: ['Blocked', 'Allow the microphone for this site in your browser’s settings'],
   unavailable: ['Not available', 'This browser can’t use a microphone'],
   unknown: ['Not known', 'Your browser says when you first dictate or test'],
@@ -199,6 +203,14 @@ export function DictationSection() {
         />
         <div className="s-row stacked">
           <MicTest />
+        </div>
+        <div className="s-row stacked">
+          <p className="s-row-desc">
+            To reduce prompts, set Microphone to Allow for this site in your browser’s settings, if
+            available. iPhone and iPad Home Screen apps may ask again after reopening; Decisions
+            cannot remember that permission for the browser. Tap the microphone, allow access, then
+            speak. Hold to talk becomes available when your browser reports access is allowed.
+          </p>
         </div>
       </SettingsGroup>
       <VoiceDisclosure

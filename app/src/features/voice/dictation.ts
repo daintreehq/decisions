@@ -145,6 +145,7 @@ export interface DictationDeps {
     onFrame: (pcm: ArrayBuffer) => void,
     onLevel?: (rms: number) => void,
     signal?: AbortSignal,
+    onFailure?: (error: MicUnavailableError) => void,
   ): Promise<Capture>;
   prefs(): LocalPrefs;
   /** Which providers the relay has keys for. */
@@ -343,7 +344,11 @@ export class DictationController {
           announce('Recording.');
         },
         onMicSilent: () => this.gen === gen && this.set({ micSilent: true }),
-        onFailure: () => this.onDropped(gen, MESSAGES.service),
+        onFailure: (error) =>
+          this.onDropped(
+            gen,
+            error instanceof MicUnavailableError ? error.message : MESSAGES.service,
+          ),
         segmentAfterQuietFrames: v.transcription === 'openai' ? 7 : undefined,
       },
       (p) => {

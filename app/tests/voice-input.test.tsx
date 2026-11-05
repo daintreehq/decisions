@@ -451,6 +451,7 @@ describe('the Dictate button', () => {
   afterEach(() => {
     act(() => root.unmount());
     host.remove();
+    vi.useRealTimers();
   });
   const idle = {
     phase: 'idle',
@@ -468,13 +469,14 @@ describe('the Dictate button', () => {
     escArmed: false,
   } as const;
 
-  const press = (btn: Element, type: 'pointerdown' | 'pointerup') =>
-    act(() => void btn.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0 })));
+  const press = (
+    btn: Element,
+    type: 'pointerdown' | 'pointerup' | 'pointercancel' | 'lostpointercapture',
+  ) => act(() => void btn.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0 })));
 
-  it('starts on the press; a quick tap leaves it running, and the next tap stops it', () => {
+  it('starts on tap release, so a permission prompt cannot cancel the initiating pointer', () => {
     const onToggle = vi.fn();
     const onHoldEnd = vi.fn();
-    const clock = vi.spyOn(Date, 'now');
     const show = (phase: 'idle' | 'starting' | 'recording') =>
       act(() =>
         root.render(
@@ -489,48 +491,120 @@ describe('the Dictate button', () => {
     const btn = () => host.querySelector('button')!;
     show('idle');
     expect(btn().getAttribute('aria-label')).toBe('Dictate answer');
-    clock.mockReturnValue(1_000);
     press(btn(), 'pointerdown');
+    expect(onToggle).not.toHaveBeenCalled();
+    press(btn(), 'pointerup');
     expect(onToggle).toHaveBeenCalledTimes(1);
     show('starting');
     expect(btn().disabled).toBe(false);
     expect(btn().getAttribute('aria-label')).toBe('Cancel dictation');
-    clock.mockReturnValue(1_000 + HOLD_MS - 50);
-    press(btn(), 'pointerup');
+    press(btn(), 'lostpointercapture');
+    press(btn(), 'pointercancel');
     expect(onHoldEnd).not.toHaveBeenCalled();
     show('recording');
-    clock.mockReturnValue(5_000);
     press(btn(), 'pointerdown');
     expect(onToggle).toHaveBeenCalledTimes(1);
     press(btn(), 'pointerup');
     expect(onToggle).toHaveBeenCalledTimes(2);
-    clock.mockRestore();
   });
 
   it('held past the threshold, letting go stops it', () => {
+    vi.useFakeTimers();
     const onToggle = vi.fn();
     const onHoldEnd = vi.fn();
-    const clock = vi.spyOn(Date, 'now');
     const show = (phase: 'idle' | 'recording') =>
       act(() =>
         root.render(
           createElement(DictateButton, {
             dict: { ...idle, phase, micLive: phase === 'recording' },
             fieldLabel: 'note',
+            canHold: true,
             onToggle,
             onHoldEnd,
           }),
         ),
       );
     show('idle');
-    clock.mockReturnValue(1_000);
     press(host.querySelector('button')!, 'pointerdown');
+    expect(onToggle).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(HOLD_MS));
+    expect(onToggle).toHaveBeenCalledTimes(1);
     show('recording');
-    clock.mockReturnValue(1_000 + HOLD_MS + 400);
     press(host.querySelector('button')!, 'pointerup');
     expect(onToggle).toHaveBeenCalledTimes(1);
     expect(onHoldEnd).toHaveBeenCalledTimes(1);
-    clock.mockRestore();
+  });
+
+  it('a long press without a known permission grant requests access on release and stays started', () => {
+    vi.useFakeTimers();
+    const onToggle = vi.fn();
+    const onHoldEnd = vi.fn();
+    act(() =>
+      root.render(
+        createElement(DictateButton, {
+          dict: idle,
+          fieldLabel: 'answer',
+          canHold: false,
+          onToggle,
+          onHoldEnd,
+        }),
+      ),
+    );
+    const btn = host.querySelector('button')!;
+    press(btn, 'pointerdown');
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(onToggle).not.toHaveBeenCalled();
+    press(btn, 'pointerup');
+    press(btn, 'lostpointercapture');
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onHoldEnd).not.toHaveBeenCalled();
+  });
+
+  it('cancelling a pointer before the hold threshold opens no microphone', () => {
+    vi.useFakeTimers();
+    const onToggle = vi.fn();
+    act(() =>
+      root.render(
+        createElement(DictateButton, {
+          dict: idle,
+          fieldLabel: 'answer',
+          canHold: true,
+          onToggle,
+          onHoldEnd: vi.fn(),
+        }),
+      ),
+    );
+    const btn = host.querySelector('button')!;
+    press(btn, 'pointerdown');
+    press(btn, 'pointercancel');
+    act(() => vi.advanceTimersByTime(HOLD_MS));
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it('a grant expiring during the press falls back to requesting access on release', () => {
+    vi.useFakeTimers();
+    const onToggle = vi.fn();
+    const onHoldEnd = vi.fn();
+    const show = (canHold: boolean) =>
+      act(() =>
+        root.render(
+          createElement(DictateButton, {
+            dict: idle,
+            fieldLabel: 'answer',
+            canHold,
+            onToggle,
+            onHoldEnd,
+          }),
+        ),
+      );
+    show(true);
+    press(host.querySelector('button')!, 'pointerdown');
+    show(false);
+    act(() => vi.advanceTimersByTime(HOLD_MS));
+    expect(onToggle).not.toHaveBeenCalled();
+    press(host.querySelector('button')!, 'pointerup');
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onHoldEnd).not.toHaveBeenCalled();
   });
 
   it('is Stop, not Send, while recording, and toggles from the keyboard', () => {

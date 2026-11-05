@@ -13,32 +13,6 @@ type State =
   | { s: 'done'; heard: boolean }
   | { s: 'error'; message: string };
 
-/** Microphone permission as far as the browser will say without asking. */
-export type MicPermission = 'granted' | 'denied' | 'prompt' | 'unavailable' | 'unknown';
-
-export function useMicPermission(): MicPermission {
-  const [p, setP] = useState<MicPermission>(() =>
-    typeof navigator !== 'undefined' && !navigator.mediaDevices?.getUserMedia
-      ? 'unavailable'
-      : 'unknown',
-  );
-  useEffect(() => {
-    if (p === 'unavailable') return;
-    let status: PermissionStatus | null = null;
-    const read = () => status && setP(status.state as MicPermission);
-    navigator.permissions
-      ?.query({ name: 'microphone' as PermissionName })
-      .then((s) => {
-        status = s;
-        read();
-        s.addEventListener('change', read);
-      })
-      .catch(() => undefined);
-    return () => status?.removeEventListener('change', read);
-  }, [p]);
-  return p;
-}
-
 /**
  * Opens the microphone locally and shows its level. Frames are dropped on arrival: nothing is recorded, sent to the
  * relay or written into any answer. Stops on Stop, on leaving the screen, or after 15 seconds.
@@ -48,18 +22,30 @@ export function MicTest() {
   const [level, setLevel] = useState(0);
   const [left, setLeft] = useState(LIMIT_MS / 1000);
   const cap = useRef<Capture | null>(null);
+  const abort = useRef<AbortController | null>(null);
   const heard = useRef(false);
   const run = useRef(0);
 
   const stop = (finished = true) => {
     run.current++;
+    abort.current?.abort();
+    abort.current = null;
     cap.current?.stop();
     cap.current = null;
     setLevel(0);
     if (finished) setState({ s: 'done', heard: heard.current });
   };
 
-  useEffect(() => () => stop(false), []);
+  useEffect(() => {
+    const hidden = () => {
+      if (document.visibilityState === 'hidden' && abort.current) stop();
+    };
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      document.removeEventListener('visibilitychange', hidden);
+      stop(false);
+    };
+  }, []);
 
   useEffect(() => {
     if (state.s !== 'live') return;
@@ -74,17 +60,34 @@ export function MicTest() {
 
   const start = async () => {
     const mine = ++run.current;
+    const controller = new AbortController();
+    abort.current = controller;
     heard.current = false;
     setLeft(LIMIT_MS / 1000);
     setState({ s: 'starting' });
+    const failed = (error: unknown) => {
+      if (mine !== run.current) return;
+      stop(false);
+      setState({
+        s: 'error',
+        message: !(error instanceof MicUnavailableError)
+          ? 'The microphone couldn’t start. Try again.'
+          : error.kind === 'denied'
+            ? 'Microphone access is blocked. Allow it in your browser’s site settings, then try again.'
+            : error.message,
+      });
+    };
     try {
       const c = await startMic(
         () => undefined,
         (rms) => {
+          if (mine !== run.current) return;
           if (rms > HEARD) heard.current = true;
           // A perceptual curve: speech sits around 0.02–0.2 RMS, which a linear bar would barely move.
           setLevel(Math.min(1, Math.sqrt(rms) * 2.2));
         },
+        controller.signal,
+        failed,
       );
       if (mine !== run.current) {
         c.stop();
@@ -93,15 +96,7 @@ export function MicTest() {
       cap.current = c;
       setState({ s: 'live' });
     } catch (e) {
-      if (mine !== run.current) return;
-      setState({
-        s: 'error',
-        message: !(e instanceof MicUnavailableError)
-          ? 'The microphone couldn’t start. Try again.'
-          : /denied/i.test(e.message)
-            ? 'Microphone access is blocked. Allow it in your browser’s site settings, then try again.'
-            : e.message,
-      });
+      failed(e);
     }
   };
 

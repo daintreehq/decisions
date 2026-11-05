@@ -19,6 +19,7 @@ import {
   type Unsure,
 } from '../../features/voice/dictation.js';
 import { OrbitRing } from '../../features/voice/OrbitRing.js';
+import { useMicPermission } from '../../features/voice/permission.js';
 import { announce } from '../../lib/announce.js';
 import { clockLabel } from '../../lib/time.js';
 import { ArrowUp, CheckIcon, CloseIcon, MicIcon, StopIcon, UndoIcon } from '../Icons.js';
@@ -100,6 +101,7 @@ export interface ComposerProps {
  * Capture freezes the Send slot and arms it only after the hand leaves Stop.
  */
 export function Composer(p: ComposerProps) {
+  const canHold = useMicPermission() === 'granted';
   const { shape, draft, verdict, dict, field } = p;
   const phase: DictPhase = dict?.phase ?? 'idle';
   const capturing = isCapture(phase);
@@ -261,6 +263,7 @@ export function Composer(p: ComposerProps) {
         {!textless && (
           <Field
             {...p}
+            canHold={canHold}
             value={value}
             capturing={capturing}
             focused={focused}
@@ -285,6 +288,7 @@ export function Composer(p: ComposerProps) {
               <DictateButton
                 dict={dict ?? IDLE_DICT}
                 fieldLabel={p.fieldNoun}
+                canHold={canHold}
                 onToggle={p.onDictate}
                 onHoldStart={p.onHoldStart}
                 onHoldEnd={p.onHoldEnd}
@@ -330,6 +334,7 @@ const IDLE_DICT: DictState = {
 function Field(
   p: ComposerProps & {
     value: string;
+    canHold: boolean;
     capturing: boolean;
     focused: boolean;
     setFocused: (v: boolean) => void;
@@ -355,6 +360,7 @@ function Field(
   // (caret, selection, paste, the magnifier) owns every press.
   const holdable =
     p.voice &&
+    p.canHold &&
     !p.stale &&
     !p.disabled &&
     !value &&
@@ -412,7 +418,9 @@ function Field(
               : ''
             : p.focused
               ? p.focusedPlaceholder
-              : p.placeholder
+              : p.canHold || !p.voice
+                ? p.placeholder
+                : 'Type or tap the microphone'
         }
         readOnly={p.disabled}
         enterKeyHint="enter"
@@ -549,6 +557,7 @@ export function DictateButton({
   onHoldStart,
   onHoldEnd,
   onContact,
+  canHold = false,
 }: {
   dict: DictState;
   fieldLabel: string;
@@ -556,12 +565,22 @@ export function DictateButton({
   onHoldStart?: () => void;
   onHoldEnd: () => void;
   onContact?: () => void;
+  /** A hold must never open a permission prompt underneath a finger that still needs to release. */
+  canHold?: boolean;
 }) {
   const p = dict.phase;
   const open = p === 'starting' || p === 'recording';
   const live = p === 'recording' && dict.micLive;
   const waiting = (open && !live) || p === 'finishing';
-  const press = useRef<{ at: number; started: boolean } | null>(null);
+  const press = useRef<{ held: boolean; timer: ReturnType<typeof setTimeout> | null } | null>(null);
+  const latest = useRef({ onToggle, onHoldStart, onHoldEnd, canHold, open });
+  latest.current = { onToggle, onHoldStart, onHoldEnd, canHold, open };
+  useEffect(
+    () => () => {
+      if (press.current?.timer) clearTimeout(press.current.timer);
+    },
+    [],
+  );
   const label =
     p === 'starting'
       ? 'Cancel dictation'
@@ -575,17 +594,17 @@ export function DictateButton({
       ? `Stop (${MOD}+Shift+Space)`
       : p === 'finishing'
         ? 'Finishing your words…'
-        : `Tap to dictate, or hold to talk (${MOD}+Shift+Space)`;
+        : canHold
+          ? `Tap to dictate, or hold to talk (${MOD}+Shift+Space)`
+          : `Tap to dictate (${MOD}+Shift+Space)`;
   const end = (cancelled: boolean) => {
     const pr = press.current;
     press.current = null;
     if (!pr) return;
+    if (pr.timer) clearTimeout(pr.timer);
     onContact?.();
-    if (pr.started) {
-      // Held past the threshold, letting go stops; a quick tap leaves it running. A press the platform cancelled (or
-      // whose pointer was lost) never leaves behind a recording nobody meant to lock.
-      if (cancelled || now() - pr.at >= HOLD_MS) onHoldEnd();
-    } else if (!cancelled) onToggle();
+    if (pr.held) latest.current.onHoldEnd();
+    else if (!cancelled) latest.current.onToggle();
   };
   return (
     <span className={`dictate${open || p === 'finishing' ? ' active' : ''}${live ? ' live' : ''}`}>
@@ -601,9 +620,16 @@ export function DictateButton({
           if (e.button !== 0 || p === 'finishing') return;
           capture(e);
           onContact?.();
-          // Starting begins on the press, so holding to talk loses no words; stopping waits for the release.
-          press.current = { at: now(), started: !open };
-          if (!open) (onHoldStart ?? onToggle)();
+          // A tap starts on release, after the original pointer is finished. Permission prompts cannot cancel it.
+          // Only a known grant enables push-to-talk; otherwise even a long press is a tap to request access.
+          const pr = { held: false, timer: null as ReturnType<typeof setTimeout> | null };
+          press.current = pr;
+          if (!open && canHold)
+            pr.timer = setTimeout(() => {
+              if (press.current !== pr || !latest.current.canHold || latest.current.open) return;
+              pr.held = true;
+              (latest.current.onHoldStart ?? latest.current.onToggle)();
+            }, HOLD_MS);
         }}
         onPointerUp={() => end(false)}
         onPointerCancel={() => end(true)}

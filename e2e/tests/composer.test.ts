@@ -337,6 +337,72 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await typedHas('Say when to try again.');
   });
 
+  it('waits for a pending permission grant after release, then supports repeated recordings', async () => {
+    await openId('draft');
+    await field().fill('');
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.evaluate(() => {
+      // Chromium's fake UI flag always reports granted, even after clearPermissions(). Model the prompt state
+      // explicitly while still using the real capture device once the simulated permission wait completes.
+      const query = navigator.permissions.query.bind(navigator.permissions);
+      const prompt = Object.assign(new EventTarget(), {
+        state: 'prompt',
+        onchange: null,
+      }) as PermissionStatus;
+      navigator.permissions.query = async (descriptor) =>
+        descriptor.name === ('microphone' as PermissionName) ? prompt : query(descriptor);
+      window.dispatchEvent(new Event('focus'));
+    });
+    await page.locator('.dock textarea[placeholder="Type or tap the microphone"]').waitFor();
+    voice = {
+      readyAfterMs: 1_500,
+      words: [{ afterMs: 200, text: 'Permission granted after release.', final: true }],
+    };
+    await page.evaluate(() => {
+      const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      const test = window as unknown as {
+        releaseMicrophone: () => void;
+        microphoneRequests: number;
+      };
+      const permission = new Promise<void>((resolve) => (test.releaseMicrophone = resolve));
+      test.microphoneRequests = 0;
+      navigator.mediaDevices.getUserMedia = async (constraints) => {
+        test.microphoneRequests++;
+        await permission; // Stand in for the human answering a browser-owned permission prompt.
+        return real(constraints);
+      };
+    });
+    const box = await mic().boundingBox();
+    if (!box) throw new Error('microphone is not on screen');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(400); // Longer than the hold threshold, with permission still pending.
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { microphoneRequests: number }).microphoneRequests,
+      ),
+    ).toBe(0);
+    await page.mouse.up();
+    await page.getByRole('button', { name: 'Cancel dictation' }).waitFor();
+    await page.waitForTimeout(400);
+    expect(await page.getByRole('button', { name: 'Cancel dictation' }).count()).toBe(1);
+    await page.evaluate(() =>
+      (window as unknown as { releaseMicrophone: () => void }).releaseMicrophone(),
+    );
+    await stop().waitFor({ timeout: 20_000 });
+    await fieldHas('Permission granted after release.');
+    await stop().click();
+    await mic().waitFor();
+    voice = { words: [{ afterMs: 200, text: 'The next recording works too.', final: true }] };
+    await mic().click();
+    await stop().waitFor({ timeout: 20_000 });
+    await fieldHas('The next recording works too.');
+    await stop().click();
+    await mic().waitFor();
+    await expect(field().inputValue()).resolves.toContain('Permission granted after release.');
+    await context.grantPermissions(['microphone']);
+  });
+
   it('shows microphone permission failures visibly above the compact empty input', async () => {
     await openId('draft');
     await field().fill('');
