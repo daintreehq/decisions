@@ -58,7 +58,6 @@ import {
   CheckIcon,
   ChevronDown,
   ClockIcon,
-  ModelIcon,
   PersonIcon,
   RefreshIcon,
   UndoIcon,
@@ -110,6 +109,9 @@ const modalOpen = (): boolean => {
     return !!document.querySelector('dialog[open]');
   }
 };
+
+/** Messages from the agent this close together read as one turn: its name shows once. */
+const GROUP_WITHIN_MS = 5 * 60_000;
 
 export function Workspace({ id }: { id: string }) {
   const snap = useApp();
@@ -936,6 +938,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               }
               caption={closed ? 'The options were' : undefined}
               byModel={modelReview && !pendingEntry}
+              pending={
+                !!pendingEntry &&
+                pendingEntry.kind !== 'confirm-proxy' &&
+                pendingEntry.state !== 'committed'
+              }
             />
           )
         }
@@ -971,7 +978,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     /** The answer each new one replaces, as the loop walks the ledger. */
     let replaced: (typeof view.actions)[number] | null = null;
     let lastAnswer: (typeof view.actions)[number] | null = null;
+    /** The agent's message just before this item, so a run of its messages shows its name once. */
+    let lastNote: (typeof view.messages)[number] | null = null;
     for (const t of timeline) {
+      const prevNote = lastNote;
+      lastNote = null;
       if ('a' in t && t.a.verified && ['answer', 'override', 'proxy-answer'].includes(t.a.action)) {
         replaced = lastAnswer;
         lastAnswer = t.a;
@@ -985,9 +996,20 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             </SystemLine>,
           );
         } else if (m.side === 'agent') {
+          const grouped =
+            !!prevNote &&
+            Date.parse(m.createdAt) - Date.parse(prevNote.createdAt) < GROUP_WITHIN_MS;
           items.push(
-            <AgentNote key={m.messageId} view={view} m={m} now={now} asking={ask === m} />,
+            <AgentNote
+              key={m.messageId}
+              view={view}
+              m={m}
+              now={now}
+              asking={ask === m}
+              grouped={grouped}
+            />,
           );
+          lastNote = m;
         } else {
           const p = messageProgress(m);
           items.push(
@@ -1039,7 +1061,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             view={view}
             a={a}
             now={now}
-            review={modelReview && a === proxy && !confirmed && !pendingEntry}
+            // While this device's own answer is in conflict with it, the conflict card owns what happens next
+            // (Use as correction, or Confirm model answer).
+            review={
+              modelReview && a === proxy && !confirmed && !pendingEntry && failed.length === 0
+            }
             busy={busy}
             error={confirmError}
             onConfirm={() => void confirmModel()}
@@ -1051,16 +1077,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         );
       } else if (a.action === 'proxy-abstain') {
         items.push(
-          <SystemLine
-            key={a.actionId}
-            now={now}
-            at={a.createdAt}
-            icon={
-              <span className="model-mark">
-                <ModelIcon size={12} />
-              </span>
-            }
-          >
+          // No model answer here, so no violet: the mark always travels with the words "Model answer".
+          <SystemLine key={a.actionId} now={now} at={a.createdAt}>
             The decision model left it to you
           </SystemLine>,
         );
@@ -1240,6 +1258,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                   }
                 : undefined
             }
+            dismissDiscards={status !== 'open'}
+            onKeepCurrent={
+              modelReview && answer === proxy && !confirmed && !pendingEntry
+                ? () => void confirmModel()
+                : undefined
+            }
+            keepBusy={busy}
+            keepError={confirmError}
             onDismiss={() => {
               // Back in the answer while it can still be sent; otherwise nothing could take them.
               void (status === 'open'

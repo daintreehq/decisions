@@ -323,21 +323,59 @@
   color: var(--text);
   margin: 0 0 6px;
 }
+/* The opening states' one action: a full target, a step below the words it answers. */
+.ws[data-state='opening'] .ws-state .btn {
+  min-height: var(--tap-min);
+  margin-top: 8px;
+}
+.ws[data-state='opening'] .ws-state p {
+  margin: 0;
+}
+/* "Trying again…" is the state of the wait, not an unavailable control: it stays readable. */
+.ws[data-state='opening'] .ws-state .btn[aria-disabled='true'] {
+  color: var(--text-2);
+}
+.ws-slow {
+  padding-top: 28px;
+}
+/* The skeleton is the part of the thread every question has, on the thread's own line boxes: the sender line
+   (13/18 and its 6 px), then the question's first two lines (18/26). Bars are text-shaped, not cards: an opaque step
+   off the page with no edge. Doherty gate: nothing for 400 ms, then a gentle pulse; reduced motion leaves them static (base.css). */
 .ws-loading {
-  display: grid;
-  gap: 12px;
-  padding-top: 8px;
+  display: block;
 }
-.sk-line {
-  min-height: 26px;
-  width: 92%;
+.sk {
+  display: block;
   border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--surface-page), var(--text) 9%);
+  opacity: 0;
+  animation:
+    appear 1ms 400ms forwards,
+    pulse 1.6s 400ms ease-in-out infinite;
 }
-.sk-line.short {
-  width: 60%;
+.sk-from {
+  display: flex;
+  align-items: center;
+  height: 18px;
+  margin-bottom: 6px;
 }
-.sk-stage {
-  min-height: 240px;
+.sk-name {
+  width: 32%;
+  height: 10px;
+}
+.sk-question {
+  display: flex;
+  flex-direction: column;
+}
+.sk-question > .sk {
+  height: 14px;
+  margin: 6px 0;
+}
+.sk-q1 {
+  width: 90%;
+}
+.sk-q2 {
+  width: 58%;
 }
 
 /* ---------- the dock ----------
