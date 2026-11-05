@@ -54,14 +54,17 @@ Publishing uses npm trusted publishing (OIDC), so there is no npm token in the r
 
 ### Cutting a release
 
-1. On a branch, set the new version everywhere: `pnpm release:version 0.2.0`. This rewrites the `version` of every workspace package and the version constants the CLI, the MCP server and the Worker report. Commit it (`chore: release v0.2.0`), open a pull request and merge it.
+1. Create `release/<version>` from the latest `develop` (for example, `git switch develop`, `git pull --ff-only origin develop`, then `git switch -c release/0.2.0`). Set the new version everywhere with `pnpm release:version 0.2.0`. This rewrites the `version` of every workspace package and the version constants the CLI, the MCP server and the Worker report. Commit it (`chore: release v0.2.0`), push the release branch, and open a pull request targeting `main`. Once CI passes, merge it with a merge commit.
 2. Tag the merged commit on `main` and push the tag:
    ```bash
-   git switch main && git pull
+   git switch main && git pull --ff-only origin main
    git tag v0.2.0 && git push origin v0.2.0
    ```
 3. The workflow runs `verify` (the tag must equal `v` + every package's version, then typecheck and tests), then `npm` and `github-release` in parallel. The `npm` job runs in the `npm` GitHub environment.
 4. Check the result: `npm view @daintreehq/decisions-cli@0.2.0` and the "Provenance" panel on each package's npm page.
+5. Open a pull request from `main` back into `develop` and merge it with a merge commit so the version bump and release fixes return to the integration branch. The release branch can then be deleted.
+
+For an urgent patch, start `hotfix/<name>` from the latest `main`, make the fix and patch version bump there, and follow steps 2–5 after its pull request into `main` passes CI and merges. Also merge `main` into any active release branch. Regular features and bug fixes target `develop`; [CONTRIBUTING.md](../CONTRIBUTING.md#branching-git-flow) describes the branch conventions.
 
 A version with a prerelease suffix (`pnpm release:version 0.3.0-rc.1`, tag `v0.3.0-rc.1`) is published under the `next` dist-tag, never `latest`.
 

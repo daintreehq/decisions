@@ -1,5 +1,23 @@
 # Contributing
 
+## Branching (Git flow)
+
+- `develop` is the integration branch. Start `feature/<name>` and `bugfix/<name>` branches from `develop`, and target their pull requests at `develop`.
+- `main` is the stable release branch. Merge tested `release/<version>` branches into `main` with a merge commit and tag the resulting commit `v<version>`.
+- Start a `release/<version>` branch from `develop` when preparing a release. Put the version bump and release fixes there; after releasing, merge `main` back into `develop` so both retain those changes.
+- Start urgent `hotfix/<name>` branches from `main`. Merge the fix into `main`, tag the patch release, then merge `main` back into `develop` (and any active release branch).
+- CI runs for pushes to both long-lived branches and for every pull request. Publishing is triggered by a `v*` tag; see [the release procedure](docs/operations.md#cutting-a-release).
+
+Start new work with:
+
+```bash
+git switch develop
+git pull --ff-only origin develop
+git switch -c feature/<name>
+```
+
+## Local checks
+
 ```bash
 pnpm install
 pnpm typecheck && pnpm test     # must both pass
@@ -8,7 +26,7 @@ pnpm build
 
 - The libraries in `packages/` publish built ESM from `dist`, but inside the workspace everything (TypeScript, Vitest, Vite, Wrangler) resolves them to `src` through the `@daintreehq/source` export condition, so tests and typechecks never need a build first. A new package export lists `"@daintreehq/source": "./src/…ts"` before `types` and `default`; a new Vite or Vitest config spreads `sourceConditions` from `vitest.shared.ts`; a new workspace import in the Worker gets an `alias` in `wrangler.jsonc`. `pnpm pack:check` proves the published tarballs work outside the repository.
 - Library entry points have no import-time side effects (no timers, sockets or file access; the packages declare `"sideEffects": false`), and only the `/sqlite` subpaths may load `node:sqlite`. `pnpm pack:check` imports each built entry point alone and fails if one does.
-- Releases are cut by pushing a `v*` tag after `pnpm release:version <version>` lands; the release workflow publishes every package that is not `"private": true` to npm. [docs/operations.md](docs/operations.md#releasing-to-npm) has the procedure and the one-time npm setup. A new public package also needs an entry in `tools/pack-check/pack-check.mjs` and a trusted publisher on npm. Never `npm publish` by hand: plain npm leaves `workspace:*` ranges unconverted.
+- Releases are cut by pushing a `v*` tag after `pnpm release:version <version>` lands on `main` through a release or hotfix branch; the release workflow publishes every package that is not `"private": true` to npm. [docs/operations.md](docs/operations.md#releasing-to-npm) has the procedure and the one-time npm setup. A new public package also needs an entry in `tools/pack-check/pack-check.mjs` and a trusted publisher on npm. Never `npm publish` by hand: plain npm leaves `workspace:*` ranges unconverted.
 - `packages/relay` is the Worker bundle, phone app and Wrangler config that `decisions deploy` uploads, built from `wrangler.jsonc` by `packages/relay/scripts/build.mjs`. Its build must stay reproducible (no timestamps or absolute paths in the output): the CLI embeds the SHA-256 of the relay manifest at build time and refuses to deploy anything else. Changes to `wrangler.jsonc` reach it automatically; check them with `pnpm pack:check`.
 - TypeScript is `strict`. Validate every trust boundary at runtime with the schemas in `packages/protocol`; do not invent message shapes in another package.
 - Anything that changes the wire protocol edits `packages/protocol` and `docs/protocol.md` in the same pull request, bumps nothing silently, and adds a test to `worker/tests`.
