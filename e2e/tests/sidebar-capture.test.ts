@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -18,7 +18,14 @@ import {
   type TerminalSink,
   type TerminalTarget,
 } from '@daintreehq/decisions-client';
-import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
+import {
+  CLAIM_SECRET,
+  ROOT,
+  findChromium,
+  startRelay,
+  until,
+  type RunningRelay,
+} from './harness.js';
 
 /**
  * Captures the app shell (the floating menu button, the sidebar and the wide sidebar column) in every state that
@@ -34,6 +41,13 @@ const PORT = Number(process.env.SIDEBAR_CAPTURE_PORT ?? 8821);
 const PHONE = { width: 390, height: 844 };
 const TABLET = { width: 834, height: 1194 };
 const WIDE = { width: 1280, height: 820 };
+/** The built service worker. The update captures change it on disk so the browser finds a real new version. */
+const SW = join(ROOT, 'app/dist/sw.js');
+let swOriginal: string | null = null;
+const restoreSw = () => {
+  if (swOriginal !== null) writeFileSync(SW, swOriginal);
+  swOriginal = null;
+};
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -92,6 +106,8 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
   const local = new MemoryLocalStore();
   const written: string[] = [];
   const ids: Record<string, string> = {};
+  /** Set once the relay-down captures have stopped the bridge and the relay themselves. */
+  let stopped = false;
   /** Whether this build has the floating menu button (a baseline capture of the old shell has not). */
   let hasMenu = false;
 
@@ -132,6 +148,14 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
         );
       });
   };
+  /** Recent has more rows than fit, so its foot must fade rather than cut a row. */
+  const expectMore = async (scope = 'dialog.sidebar-sheet[open]') => {
+    await until(
+      async () => (await page.locator(`${scope} .side-qlist[data-more]`).count()) > 0,
+      5_000,
+      'the Recent fade',
+    );
+  };
   const expectRecent = async (n: 'some' | 'none', scope = 'dialog.sidebar-sheet[open]') => {
     const rows = await page.locator(`${scope} .side-recent a`).count();
     if (n === 'some' && rows === 0) throw new Error('the sidebar shows no recent questions');
@@ -156,9 +180,10 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
   });
 
   afterAll(async () => {
-    await bridge?.stop?.();
+    restoreSw();
+    if (!stopped) await bridge?.stop?.();
     await browser?.close();
-    await relay?.stop();
+    if (!stopped) await relay?.stop();
   });
 
   it('pairs, then captures the shell with no questions', async () => {
@@ -321,6 +346,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     if (hasMenu) {
       await openSidebar();
       await expectRecent('some');
+      await expectMore();
       await shot('p-home-open-light');
       await closeSidebar();
     }
@@ -428,9 +454,82 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the app shell and sidebar', 
     await shot('w-question-light');
     await go('/settings');
     await shot('w-settings-light');
+
+    // Keyboard focus in the column: Tab from the current destination to the next one.
+    await go('/');
+    await page.locator('aside.sidebar .side-row').first().focus();
+    await page.keyboard.press('Tab');
+    await until(
+      async () =>
+        page.evaluate(() =>
+          Boolean(document.activeElement?.matches('aside.sidebar .side-row:focus-visible')),
+        ),
+      5_000,
+      'a focus-visible sidebar row',
+    );
+    await shot('w-focus-light');
+
+    if (hasMenu) {
+      // An update: a changed service worker on disk, found by the browser's own update check, waits to take over.
+      swOriginal = readFileSync(SW, 'utf8');
+      writeFileSync(SW, `${swOriginal}\n// design capture: a newer build\n`);
+      await until(
+        async () => {
+          await page.evaluate(async () => {
+            const reg = await navigator.serviceWorker.getRegistration();
+            await reg?.update().catch(() => undefined);
+          });
+          return (await page.locator('aside.sidebar .update-btn').count()) > 0;
+        },
+        45_000,
+        'the update row',
+      );
+      restoreSw();
+      // Changing the build on disk restarts the local relay, so let the socket come back before the capture.
+      await page
+        .locator('aside.sidebar .conn-line[data-state="live"]')
+        .waitFor({ timeout: 30_000 });
+      await shot('w-update-light');
+      await size(PHONE);
+      await go('/');
+      await page.getByText('Approve the compact sidebar').first().waitFor({ timeout: 30_000 });
+      await page.locator('.menu-fab[data-attention="update"]').waitFor({ timeout: 15_000 });
+      await shot('p-update-closed-light');
+      await openSidebar();
+      await page.locator('dialog.sidebar-sheet[open] .update-btn').waitFor({ timeout: 10_000 });
+      await expectMore();
+      await shot('p-update-open-light');
+      await closeSidebar();
+
+      // The relay stops answering. Nothing navigates after this. Once reconnecting has lasted 12 s the shell says so.
+      stopped = true;
+      await bridge.stop?.();
+      await relay.stop();
+      const down = await fetch(`${relay.origin}/health`).then(
+        () => false,
+        () => true,
+      );
+      if (!down) throw new Error('the relay is still answering');
+      await page.locator('.menu-fab[data-attention="reconnecting"]').waitFor({ timeout: 60_000 });
+      await shot('p-relay-down-closed-light');
+      await openSidebar();
+      await page
+        .locator('dialog.sidebar-sheet[open] .conn-line[data-state="wait"][data-block]')
+        .waitFor({ timeout: 10_000 });
+      await shot('p-relay-down-open-light');
+      await theme('dark');
+      await shot('p-relay-down-open-dark');
+      await theme('light');
+      await closeSidebar();
+      await size(WIDE);
+      await page
+        .locator('aside.sidebar .conn-line[data-state="wait"][data-block]')
+        .waitFor({ timeout: 10_000 });
+      await shot('w-relay-down-light');
+    }
     await size(PHONE);
 
-    const expected = hasMenu ? 25 : 17;
+    const expected = hasMenu ? 33 : 18;
     expect(written.length).toBe(expected);
   });
 });

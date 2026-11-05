@@ -195,7 +195,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     await menu().waitFor();
     expect(await menu().getAttribute('aria-expanded')).toBe('false');
     await openSidebar();
-    const dialog = page.getByRole('dialog', { name: 'Daintree' });
+    const dialog = page.getByRole('dialog', { name: 'Menu' });
     await dialog.waitFor();
     expect(
       await page.evaluate(() => !!document.activeElement?.closest('dialog.sidebar-sheet')),
@@ -296,7 +296,8 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
         await openSidebar();
         await until(
           async () =>
-            page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left > 327),
+            // The sidebar is min(82vw, 360px): 319.8px on a 390px phone.
+            page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left > 319),
           5000,
           'the sidebar to reveal',
         );
