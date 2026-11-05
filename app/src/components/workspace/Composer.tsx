@@ -96,21 +96,14 @@ export interface ComposerProps {
 }
 
 /**
- * The composer: one rounded pill at the foot of the chat. Resting and empty, it is the field ("Type or hold to talk")
- * and the mic. Once there is something to send it opens into two rows inside the same pill: the field across the
- * top, and an action row with the Send reason (or the quiet save state) at the left, the mic, and Send in the
- * mic's old place at the right edge. Dictation, errors and notices speak in a lane at the pill's top; choices sit
- * as chips just above it. The right edge never changes while capture runs, and Send arms only after the hand has
- * left the mic, so a double tap on Stop can never send. `+` sits at the pill's leading edge (on the action row once it
- * opens), and chosen photos line up above the field; on a desktop, a photo pasted into the field or dropped on the
- * pill is added the same way.
+ * A rounded writing surface with the field above a stable attachment, dictation and Send toolbar. Notices and
+ * photos sit above the field. Capture freezes the Send slot and arms it only after the hand leaves Stop.
  */
 export function Composer(p: ComposerProps) {
   const { shape, draft, verdict, dict, field } = p;
   const phase: DictPhase = dict?.phase ?? 'idle';
   const capturing = isCapture(phase);
   const value = fieldValue(draft, field);
-  const hasText = !!value.trim();
   const [focused, setFocused] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const quietUntil = useRef(0);
@@ -155,9 +148,8 @@ export function Composer(p: ComposerProps) {
   const textless = shape.fields.length === 0;
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  // Open with the keyboard, before the first keystroke. Typing and clearing text then keep the same control row;
-  // capture also opens before the first word lands, so Stop stays under the finger.
-  const two = focused || textless || sendSlot || hasText || hasPhotos || capturing;
+  // Keep the field above a stable toolbar, including at rest: focusing never rearranges controls under a thumb.
+  const two = true;
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {

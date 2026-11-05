@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type Page } from 'playwright-core';
+import { chromium, webkit, type Browser, type Page } from 'playwright-core';
 import {
   DecisionsBridge,
   FileKeyStore,
@@ -18,8 +18,9 @@ import {
 } from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
-const PORT = 8823;
+const PORT = Number(process.env.SIDEBAR_E2E_PORT ?? 8823);
 const chromiumPath = findChromium();
+const browserEngine = process.env.E2E_BROWSER === 'webkit' ? webkit : chromium;
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -83,10 +84,15 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
 
   beforeAll(async () => {
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    browser = await browserEngine.launch({
+      ...(browserEngine === chromium ? { executablePath: chromiumPath! } : {}),
+      headless: true,
+    });
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
-      serviceWorkers: 'allow',
+      // WebKit's test runner can lose its network process during worker-controlled reloads. These checks
+      // exercise navigation and gestures; Chromium's full suite also exercises the service worker.
+      serviceWorkers: browserEngine === webkit ? 'block' : 'allow',
       hasTouch: true,
     });
     page = await context.newPage();
@@ -235,6 +241,83 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     );
     await page.keyboard.press('Escape');
     await closed();
+  });
+
+  it('reveals stationary navigation beneath the displaced conversation canvas', async () => {
+    await page.goto(relay.origin + `/q/${ids.newer}`);
+    await page.locator('.ws .dock').waitFor();
+    const draft = page.locator('.composer-input');
+    await draft.fill('Keep this draft while browsing recent questions.');
+    await openSidebar();
+    await until(
+      async () =>
+        page.evaluate(() => {
+          const frame = document.querySelector('.frame')!.getBoundingClientRect();
+          const side = document.querySelector('.side-sheet-body')!.getBoundingClientRect();
+          return Math.abs(frame.left - side.width) < 1 && side.left === 0;
+        }),
+      5000,
+      'the foreground canvas to uncover the sidebar',
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          getComputedStyle(document.querySelector('.sidebar-sheet')!, '::backdrop').backgroundColor,
+      ),
+    ).toBe('rgba(0, 0, 0, 0)');
+    // The exposed edge belongs to the conversation; tapping it returns to the same live draft.
+    await page.mouse.click(380, 420);
+    await closed();
+    expect(await draft.inputValue()).toBe('Keep this draft while browsing recent questions.');
+    expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(0);
+    await draft.fill('');
+  });
+
+  it('animates question navigation in both directions and honors reduced motion', async () => {
+    await page.goto(relay.origin + '/');
+    await page.locator('main .qrow').first().waitFor();
+    await page.evaluate(() => {
+      const root = document.documentElement;
+      (window as unknown as { routeMotions: string[] }).routeMotions = [];
+      new MutationObserver(() => {
+        if (root.dataset.pageMotion)
+          (window as unknown as { routeMotions: string[] }).routeMotions.push(
+            root.dataset.pageMotion,
+          );
+      }).observe(root, { attributes: true, attributeFilter: ['data-page-motion'] });
+    });
+    await page.locator('main .qrow').first().click();
+    await page.locator('.ws .dock').waitFor();
+    await page.goBack();
+    await page.waitForURL((u) => u.pathname === '/');
+    await until(
+      async () => page.evaluate(() => !document.documentElement.dataset.pageMotion),
+      5000,
+      'route motion to finish',
+    );
+    expect(
+      await page.evaluate(() => (window as unknown as { routeMotions: string[] }).routeMotions),
+    ).toEqual(expect.arrayContaining(['forward', 'back']));
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    try {
+      await page.evaluate(() => {
+        (window as unknown as { routeMotions: string[] }).routeMotions = [];
+      });
+      await page.locator('main .qrow').first().click();
+      await page.locator('.ws .dock').waitFor();
+      await openSidebar();
+      await page.keyboard.press('Escape');
+      await closed();
+      expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(
+        0,
+      );
+      expect(
+        await page.evaluate(() => (window as unknown as { routeMotions: string[] }).routeMotions),
+      ).toEqual([]);
+    } finally {
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+    }
   });
 
   it('closes on Back before it navigates, on the dimmed edge, and on a left swipe', async () => {

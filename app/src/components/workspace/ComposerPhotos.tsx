@@ -110,6 +110,7 @@ export function AttachButton({ photos }: { photos: ComposerPhotosProps }) {
           title="Add photos"
           onClose={() => setOpen(false)}
           className="attach-sheet"
+          animateExit={false}
         >
           <div className="attach-options">
             <button type="button" className="attach-option" onClick={shoot}>

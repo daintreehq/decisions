@@ -18,7 +18,7 @@ export { ConnectionPill, Mark } from './AppStatus.js';
 /**
  * The app frame. No title bar and no tab bar at any width.
  * - Under 1100px: the page fills the screen, with a round menu button floating top-left inside the safe area. It
- *   opens the sidebar as an overlay from the left. Inside a question the workspace owns the frame and the button
+ *   reveals the sidebar beneath the foreground canvas. Inside a question the workspace owns the frame and the button
  *   sits in its header's leading slot.
  * - 1100px and up: the sidebar is a persistent column on the left and a right column of definite height (`.frame`,
  *   100dvh) holds the page or the question workspace.

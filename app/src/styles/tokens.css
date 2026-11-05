@@ -35,7 +35,7 @@
 
   --accent: var(--theme-accent-primary);
   --accent-fg: var(--theme-accent-foreground);
-  --focus: var(--theme-focus-ring);
+  --focus: var(--text-2);
 
   --success: var(--theme-status-success);
   --success-text: var(--theme-status-success-text, var(--theme-status-success));
@@ -108,6 +108,8 @@
   --ease-out: ease-out;
   --ease-enter: cubic-bezier(0.2, 0, 0, 1);
   --ease-exit: cubic-bezier(0.2, 0, 0.7, 0);
+  --dur-canvas: 360ms;
+  --ease-canvas: cubic-bezier(0.22, 0.8, 0.24, 1);
 
   /* Fixed in both themes. The brand tile is Daintree's app icon (guide 2.7): its dark tile and mint mark stay the
      same on Bondi. Over a photo the app's own surfaces mean nothing, so marks on photos are white on a black scrim. */

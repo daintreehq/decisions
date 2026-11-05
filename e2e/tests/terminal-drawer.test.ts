@@ -251,7 +251,26 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
     await drawer()
       .getByText(/Terminal sharing is off on E2E Mac/)
       .waitFor();
-    await page.keyboard.press('Escape');
+    expect(
+      await drawer()
+        .locator('.term-title')
+        .evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('none');
+    await drawer().getByRole('button', { name: /Close/ }).click();
+    await until(
+      async () => (await drawer().count()) === 0,
+      10_000,
+      'the drawer to close after a tap',
+    );
+    expect(
+      await page.locator('#terminal-button').evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('none');
+    // Keyboard users still have a visible, neutral focus indicator after dismissal.
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    expect(
+      await page.locator('#terminal-button').evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('solid');
   });
 
   it('closes on Back before leaving the chat', async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { useLayer } from '../../app/layers.js';
 import { CloseIcon } from '../Icons.js';
+import { useDialogMotion } from '../useDialogMotion.js';
 
 /**
  * A bottom sheet on phones and a centred panel on wide screens, built on the native modal <dialog> (focus is
@@ -14,6 +15,7 @@ export function Sheet({
   footer,
   className,
   describedBy,
+  animateExit = true,
 }: {
   open: boolean;
   title: ReactNode;
@@ -22,22 +24,13 @@ export function Sheet({
   footer?: ReactNode;
   className?: string;
   describedBy?: string;
+  /** Native camera/library handoffs release the modal immediately. */
+  animateExit?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const id = useId();
   const dismiss = useLayer(open, onClose);
-  useEffect(() => {
-    const d = ref.current;
-    if (!d) return;
-    if (open && !d.open) {
-      try {
-        d.showModal();
-      } catch {
-        d.setAttribute('open', '');
-      }
-    }
-    if (!open && d.open) d.close();
-  }, [open]);
+  const present = useDialogMotion(ref, open, animateExit);
   return (
     <dialog
       ref={ref}
@@ -53,7 +46,7 @@ export function Sheet({
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      {open && (
+      {present && (
         <div className="sheet-body">
           <header className="sheet-head">
             <h2 id={`${id}-t`}>{title}</h2>

@@ -13,6 +13,11 @@ export function useSwipeClose(
   panel: RefObject<HTMLElement | null>,
   edge: 'left' | 'right',
   close: () => void,
+  presentation?: {
+    width: () => number;
+    /** Override the moving panel, e.g. a foreground canvas that reveals a stationary sidebar. */
+    move: (distance: number | null) => void;
+  },
 ) {
   const sign = edge === 'left' ? -1 : 1;
   const drag = useRef<{
@@ -31,6 +36,7 @@ export function useSwipeClose(
     if (drag.current?.on && d) {
       d.removeAttribute('data-dragging');
       d.style.transform = '';
+      presentation?.move(null);
     }
     drag.current = null;
   };
@@ -74,7 +80,8 @@ export function useSwipeClose(
       } else return;
     }
     s.dx = Math.max(0, dx);
-    d.style.transform = `translateX(${s.dx * sign}px)`;
+    if (presentation) presentation.move(s.dx);
+    else d.style.transform = `translateX(${s.dx * sign}px)`;
   };
   const onPointerEnd = (e: ReactPointerEvent<HTMLElement>) => {
     down.current.delete(e.pointerId);
@@ -88,8 +95,9 @@ export function useSwipeClose(
     drag.current = null;
     d.removeAttribute('data-dragging');
     const velocity = s.dx / Math.max(1, e.timeStamp - s.t);
-    if (s.dx > d.offsetWidth / 3 || velocity > 0.6) close();
+    if (s.dx > (presentation?.width() ?? d.offsetWidth) / 3 || velocity > 0.6) close();
     else d.style.transform = '';
+    presentation?.move(null);
   };
 
   return {

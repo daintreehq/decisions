@@ -294,8 +294,8 @@ const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * The sidebar as an overlay (below 1100px): a modal dialog from the left, covering about 84% of a phone, with the
- * current screen dimmed beside it. It is a layer (Back closes it before anything navigates) and a modal dialog
+ * The sidebar under the foreground canvas (below 1100px), revealed as the page moves right. A transparent
+ * modal dialog keeps the revealed navigation accessible and the displaced page inert. It is a layer
  * (focus stays inside, Escape closes it). Tapping the dimmed edge or swiping it left closes it too. Focus returns
  * to the menu button, or to the new page when a row navigated.
  */
@@ -338,13 +338,27 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 110);
+      const t = setTimeout(finish, 380);
       return () => clearTimeout(t);
     }
   }, [open]);
 
   // A left swipe on the panel follows the finger and closes it past a third of its width (or on a flick).
-  const swipe = useSwipeClose(ref, 'left', dismiss);
+  const sidebarWidth = () => ref.current?.querySelector<HTMLElement>('.side')?.offsetWidth ?? 0;
+  const swipe = useSwipeClose(ref, 'left', dismiss, {
+    width: sidebarWidth,
+    move: (distance) => {
+      const shell = ref.current?.closest<HTMLElement>('.shell');
+      if (!shell) return;
+      if (distance === null) {
+        delete shell.dataset.sidebarDragging;
+        shell.style.removeProperty('--sidebar-offset');
+      } else {
+        shell.dataset.sidebarDragging = '';
+        shell.style.setProperty('--sidebar-offset', `${Math.max(0, sidebarWidth() - distance)}px`);
+      }
+    },
+  });
 
   return (
     <dialog

@@ -383,8 +383,8 @@
 }
 
 /* ---------- the composer ----------
- * One rounded pill. Resting and empty: the field and the mic on one row. With something to send: the field across
- * the top, and an action row (the Send reason or save state, the mic, Send at the right edge) inside the same pill.
+ * One rounded writing surface: the field across the top, and a stable action row (the Send reason or save state,
+ * attachments, mic, Send at the right edge) below it, including at rest.
  * The lane (dictation, errors, notices) sits at the pill's top; choice chips sit just above the pill.
  */
 .composer {
@@ -417,11 +417,14 @@
   align-items: end;
   min-height: 60px;
   padding: 6px;
-  /* Concentric with the 46 px mic and Send it holds (23 + 6), so they sit in its corners rather than against them. */
-  border-radius: 30px;
-  border: 1px solid var(--line-strong);
-  background: color-mix(in oklab, var(--surface-page), var(--surface-input) 65%);
-  box-shadow: none;
+  /* The toolbar's circular controls nest inside a softer, rounded writing surface. */
+  border-radius: 26px;
+  border: 1px solid var(--line-default);
+  background: var(--surface-raised);
+  box-shadow: 0 2px 12px color-mix(in oklab, var(--text) 3%, transparent);
+  transition:
+    border-color var(--dur) var(--ease-out),
+    box-shadow var(--dur) var(--ease-out);
 }
 .composer-pill.two {
   grid-template-areas:
@@ -477,12 +480,12 @@
   outline: none;
 }
 .composer-pill.two .composer-input {
-  /* Clear of the pill's 30 px corner. The room is margin, not padding, so a scrolled field clips its text below
+  /* Clear of the surface's rounded corner. The room is margin, not padding, so a scrolled field clips its text below
      the corner instead of sliding it up under the curve. */
-  min-height: 1.5em;
+  min-height: calc(2 * 1.5em);
   max-height: calc(5 * 1.5em);
   padding: 0 12px;
-  margin: 12px 0 4px;
+  margin: 10px 0 8px;
 }
 .composer-pill.two .composer-lane + .composer-field .composer-input {
   margin-top: 4px;

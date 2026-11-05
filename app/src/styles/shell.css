@@ -86,20 +86,7 @@ main.bare {
   }
 }
 
-/* Content scrolls under the opaque button. The status bar (the top safe area of an installed app) keeps the page's
-   surface, so nothing scrolls under the clock. */
-.shell[data-layout='single']::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 19;
-  height: var(--safe-t);
-  pointer-events: none;
-  background: var(--surface-page);
-}
-
+/* Content may pass beneath the status bar; controls retain their safe-area padding. */
 /* ---------- the menu button and Home's round buttons (below 1100px) ---------- */
 .menu-fab,
 .float-btn {
@@ -420,70 +407,62 @@ main.bare {
   border-top: 1px solid var(--line);
 }
 
-/* ---------- the overlay (below 1100px) ---------- */
+/* ---------- mobile navigation: sidebar beneath the conversation canvas ---------- */
+@property --sidebar-offset {
+  syntax: '<length-percentage>';
+  inherits: true;
+  initial-value: 0px;
+}
+.shell[data-layout='single'] {
+  --sidebar-width: min(84vw, 360px);
+  --sidebar-offset: 0px;
+  overflow-x: clip;
+  transition: --sidebar-offset var(--dur-canvas) var(--ease-canvas);
+}
+.shell[data-layout='single']:has(.sidebar-sheet[open]:not([data-closing])) {
+  --sidebar-offset: var(--sidebar-width);
+}
+.shell[data-sidebar-dragging] {
+  transition: none;
+}
+.shell:has(.sidebar-sheet[open]) .frame {
+  translate: var(--sidebar-offset) 0;
+  background: var(--surface-page);
+  border-radius: 28px 0 0 28px;
+  box-shadow:
+    -1px 0 0 var(--line-strong),
+    -12px 0 48px var(--theme-scrim-medium);
+  overflow: clip;
+}
+.shell:has(.sidebar-sheet[open]) .menu-fab {
+  translate: var(--sidebar-offset) 0;
+}
 .sidebar-sheet {
   position: fixed;
-  inset: 0 auto 0 0;
-  width: min(84vw, 360px);
+  inset: 0;
+  width: 100%;
   max-width: none;
   height: 100dvh;
   max-height: none;
   margin: 0;
   padding: 0;
   border: 0;
-  /* The hairline keeps the panel's edge on a dimmed dark page, where the shadow cannot. */
-  border-right: 1px solid var(--line-strong);
-  border-radius: 0 var(--radius-sheet) var(--radius-sheet) 0;
-  background: var(--surface-chrome);
+  background: transparent;
   color: var(--text);
-  box-shadow: var(--shadow-3);
   overflow: hidden;
-  transition: transform var(--dur-exit) var(--ease-exit);
-}
-.sidebar-sheet[open] {
-  animation: side-in var(--dur-enter) var(--ease-enter);
-}
-.sidebar-sheet[data-closing] {
-  transform: translateX(-100%);
-}
-/* While a finger drags it the panel follows exactly; it animates only once released. */
-.sidebar-sheet[data-dragging] {
-  transition: none;
 }
 .sidebar-sheet::backdrop {
-  /* The strong scrim: on Daintree the medium one dims the page to the panel's own value, and the edge is lost. */
-  background: var(--theme-scrim-strong);
-  backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
-  animation: side-fade var(--dur-enter) var(--ease-enter);
-  transition: opacity var(--dur-exit) var(--ease-exit);
-}
-.sidebar-sheet[data-closing]::backdrop {
-  opacity: 0;
+  background: transparent;
 }
 .side-sheet-body {
-  /* Vertical scrolling and pinch zoom stay native; a horizontal drag is the swipe that closes the panel. */
+  width: var(--sidebar-width);
+  /* The sidebar stays still. Only its revealed area grows as the canvas moves above it. */
+  clip-path: inset(0 max(0px, calc(var(--sidebar-width) - var(--sidebar-offset))) 0 0);
   touch-action: pan-y pinch-zoom;
 }
-@keyframes side-in {
-  from {
-    transform: translateX(-100%);
-  }
-}
+/* Shared by the other modal drawers. */
 @keyframes side-fade {
   from {
-    opacity: 0;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-sheet {
-    transition: opacity var(--dur-exit) var(--ease-out);
-  }
-  .sidebar-sheet[open] {
-    animation-name: side-fade;
-  }
-  .sidebar-sheet[data-closing] {
-    transform: none;
     opacity: 0;
   }
 }

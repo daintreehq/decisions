@@ -51,10 +51,10 @@
   color: var(--text);
   box-shadow: var(--shadow-3);
   overflow: hidden;
-  transition: transform var(--dur-exit) var(--ease-exit);
+  transition: transform 260ms var(--ease-canvas);
 }
 .term-drawer[open] {
-  animation: term-in var(--dur-enter) var(--ease-enter);
+  animation: term-in 300ms var(--ease-canvas);
 }
 .term-drawer[data-closing] {
   transform: translateX(100%);
@@ -66,8 +66,8 @@
   background: var(--theme-scrim-strong);
   backdrop-filter: blur(var(--scrim-blur));
   -webkit-backdrop-filter: blur(var(--scrim-blur));
-  animation: side-fade var(--dur-enter) var(--ease-enter);
-  transition: opacity var(--dur-exit) var(--ease-exit);
+  animation: side-fade 300ms var(--ease-canvas);
+  transition: opacity 260ms var(--ease-canvas);
 }
 .term-drawer[data-closing]::backdrop {
   opacity: 0;
@@ -160,11 +160,6 @@
 }
 .term-title:focus {
   outline: none;
-}
-.term-title:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-  border-radius: 4px;
 }
 .term-status {
   flex: none;

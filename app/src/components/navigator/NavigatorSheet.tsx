@@ -5,6 +5,7 @@ import { Link } from '../../app/router.js';
 import { CloseIcon } from '../Icons.js';
 import { HistoryGlyph, SettingsGlyph } from '../NavGlyphs.js';
 import { NavigatorPanel } from './Navigator.js';
+import { useDialogMotion } from '../useDialogMotion.js';
 
 let wantSearch = false;
 
@@ -32,12 +33,12 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
   const dismiss = useLayer(open, closeNavigator);
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const present = useDialogMotion(ref, open);
 
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) {
-      d.showModal();
+    if (open) {
       const target =
         (wantSearch && d.querySelector<HTMLElement>('input[type="search"]')) ||
         d.querySelector<HTMLElement>('.qrow[aria-current="page"]') ||
@@ -45,7 +46,6 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
       target?.focus({ preventScroll: !wantSearch });
       wantSearch = false;
     }
-    if (!open && d.open) d.close();
   }, [open]);
 
   return (
@@ -61,7 +61,7 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      {open && (
+      {present && (
         <div className="nav-sheet-body">
           <header className="nav-sheet-head">
             <h2 className="sheet-title" id={titleId} tabIndex={-1}>

@@ -1,0 +1,124 @@
+/* Snapshots animate the whole screen, including its header and composer, without duplicating live workspaces. */
+html[data-page-motion] .shell {
+  view-transition-name: page;
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-group(page) {
+  animation-duration: var(--dur-canvas);
+  animation-timing-function: var(--ease-canvas);
+}
+::view-transition-old(page),
+::view-transition-new(page) {
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  mix-blend-mode: normal;
+  animation-duration: var(--dur-canvas);
+  animation-timing-function: var(--ease-canvas);
+  animation-fill-mode: both;
+}
+html[data-page-motion='forward']::view-transition-old(page) {
+  animation-name: page-recede;
+}
+html[data-page-motion='forward']::view-transition-new(page) {
+  animation-name: page-enter;
+}
+html[data-page-motion='back']::view-transition-old(page) {
+  z-index: 2;
+  animation-name: page-leave;
+}
+html[data-page-motion='back']::view-transition-new(page) {
+  animation-name: page-return;
+}
+html[data-page-motion='fade']::view-transition-old(page) {
+  animation: page-fade-out 160ms ease-out both;
+}
+html[data-page-motion='fade']::view-transition-new(page) {
+  animation: page-fade-in 200ms ease-out both;
+}
+@keyframes page-enter {
+  from {
+    transform: translateX(100%);
+  }
+}
+@keyframes page-recede {
+  to {
+    transform: translateX(-18%);
+    filter: brightness(0.82);
+  }
+}
+@keyframes page-leave {
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes page-return {
+  from {
+    transform: translateX(-18%);
+    filter: brightness(0.82);
+  }
+}
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes page-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+/* Sheets keep their contents until the exit ends, including when Back dismisses them. */
+.sheet,
+.nav-sheet {
+  transition:
+    transform 200ms var(--ease-canvas),
+    opacity 200ms ease-out;
+}
+.sheet[data-closing],
+.nav-sheet[data-closing] {
+  transform: translateY(32px);
+  opacity: 0;
+}
+.sheet::backdrop,
+.nav-sheet::backdrop {
+  transition: opacity 200ms ease-out;
+}
+.sheet[data-closing]::backdrop,
+.nav-sheet[data-closing]::backdrop {
+  opacity: 0;
+}
+@media (min-width: 45em) {
+  .nav-sheet[data-closing] {
+    transform: translateX(-32px);
+  }
+  .sheet[data-closing] {
+    transform: translateY(8px);
+  }
+}
+/* The desktop panes stay anchored beside the sidebar. */
+@media (min-width: 68.75em) {
+  html[data-page-motion] .shell {
+    view-transition-name: none;
+  }
+  html[data-page-motion] .frame {
+    view-transition-name: page;
+  }
+  html[data-page-motion]::view-transition-old(page) {
+    animation: page-fade-out 120ms ease-out both;
+  }
+  html[data-page-motion]::view-transition-new(page) {
+    animation: page-fade-in 180ms ease-out both;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 1ms !important;
+  }
+}
