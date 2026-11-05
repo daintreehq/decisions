@@ -34,7 +34,8 @@ import { AllFilesSheet, QuestionSheet } from './files/Sheets.js';
 import { useFileLoader } from './files/useFileLoader.js';
 import { slidesFor, Viewer } from './files/Viewer.js';
 import { FIT_NORMAL, type NormalView, type Size } from './files/zoom.js';
-import { CompareIcon, ExpandIcon, GridIcon } from './Icons.js';
+import { useFocusKeeper } from './files/Layer.js';
+import { CheckIcon, CompareIcon, ExpandIcon, GridIcon } from './Icons.js';
 
 export type { ReviewState } from './files/evidence.js';
 export { NO_REVIEW } from './files/evidence.js';
@@ -159,19 +160,48 @@ export function AttachmentGallery({
   const stage = useRef<FileStageHandle>(null);
   const opener = useRef<HTMLElement | null>(null);
   const strip = useRef<HTMLDivElement>(null);
+  const section = useRef<HTMLElement>(null);
+  // Arrow keys move focus along the strip without selecting (manual activation); the selected tab stays the strip's
+  // one Tab stop, so leaving and coming back lands on the file that is shown.
   const [focusTab, setFocusTab] = useState(0);
   useEffect(() => setFocusTab(active), [active]);
+  // Retry, once its file loads, goes away under the finger: focus moves to the stage rather than the page.
+  useFocusKeeper(section, () => stage.current?.el);
 
-  // Keep the active thumbnail in view inside the strip without scrolling the page.
+  // Whether thumbnails lie past either edge of the strip, so that edge fades instead of cutting one in half.
+  const [more, setMore] = useState<'left' | 'right' | 'both' | null>(null);
   useEffect(() => {
     const s = strip.current;
-    const tab = s?.children[active] as HTMLElement | undefined;
+    if (!s) return;
+    const check = () => {
+      const left = s.scrollLeft > 1;
+      const right = s.scrollLeft + s.clientWidth < s.scrollWidth - 1;
+      setMore(left && right ? 'both' : left ? 'left' : right ? 'right' : null);
+    };
+    check();
+    s.addEventListener('scroll', check, { passive: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(check);
+    ro?.observe(s);
+    return () => {
+      s.removeEventListener('scroll', check);
+      ro?.disconnect();
+    };
+  }, [n > 1, itemKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep a thumbnail in view inside the strip without scrolling the page, clear of the 32 px edge fades (8 px at the
+  // first and last, where there is no fade on that side).
+  const reveal = useCallback((i: number) => {
+    const s = strip.current;
+    const tab = s?.children[i] as HTMLElement | undefined;
     if (!s || !tab) return;
     const left = tab.offsetLeft - s.offsetLeft;
-    if (left < s.scrollLeft) s.scrollLeft = left - 8;
-    else if (left + tab.offsetWidth > s.scrollLeft + s.clientWidth)
-      s.scrollLeft = left + tab.offsetWidth - s.clientWidth + 8;
-  }, [active]);
+    const lead = i > 0 ? 40 : 8;
+    const trail = i < s.children.length - 1 ? 40 : 8;
+    if (left - lead < s.scrollLeft) s.scrollLeft = left - lead;
+    else if (left + tab.offsetWidth + trail > s.scrollLeft + s.clientWidth)
+      s.scrollLeft = left + tab.offsetWidth - s.clientWidth + trail;
+  }, []);
+  useEffect(() => reveal(active), [active, reveal]);
 
   /* ---------- inline presentation ---------- */
   const [inlineVisible, setInlineVisible] = useState(
@@ -223,10 +253,12 @@ export function AttachmentGallery({
   const rememberOpener = () => {
     if (!viewer && compare === null) opener.current = document.activeElement as HTMLElement | null;
   };
-  const focusBack = () =>
-    opener.current?.isConnected && opener.current !== document.body
-      ? opener.current
-      : stage.current?.el;
+  // The opener, unless it has gone or can no longer take focus (Enlarge on a file that is not ready).
+  const focusBack = () => {
+    const o = opener.current;
+    const usable = o?.isConnected && o !== document.body && !(o as HTMLButtonElement).disabled;
+    return usable ? o : stage.current?.el;
+  };
   const openViewer = () => {
     if (!ready) return;
     rememberOpener();
@@ -242,6 +274,9 @@ export function AttachmentGallery({
   };
   const stageKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // One file: Enter and Space enlarge; the arrows, Home and End stay the page's.
+    if (n < 2 && e.key !== 'Enter' && e.key !== ' ') return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
       select(stepIndex(active, e.key === 'ArrowLeft' ? -1 : 1, n));
     else if (e.key === 'Home') select(0);
@@ -251,21 +286,131 @@ export function AttachmentGallery({
     e.preventDefault();
   };
   const tabKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     let next = focusTab;
-    if (e.key === 'ArrowRight') next = Math.min(n - 1, focusTab + 1);
-    else if (e.key === 'ArrowLeft') next = Math.max(0, focusTab - 1);
+    // Arrows wrap at the ends, as in the APG tabs pattern.
+    if (e.key === 'ArrowRight') next = (focusTab + 1) % n;
+    else if (e.key === 'ArrowLeft') next = (focusTab - 1 + n) % n;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = n - 1;
     else return;
     e.preventDefault();
     setFocusTab(next);
-    (strip.current?.children[next] as HTMLElement | undefined)?.focus();
+    (strip.current?.children[next] as HTMLElement | undefined)?.focus({ preventScroll: true });
+    reveal(next);
   };
   const panelId = `${uid}-panel`;
   const tabId = (i: number) => `${uid}-tab-${i}`;
 
+  const metaRow = (
+    <div className="fx-files-meta">
+      {/* With the Before | After switch, the selected half is the label and the count. */}
+      {!switcher && (
+        <>
+          <span className="fx-files-label" title={item.label}>
+            {item.label}
+          </span>
+          {n > 1 && (
+            <span className="fx-files-count tabular">
+              {active + 1} of {n}
+            </span>
+          )}
+        </>
+      )}
+      <span className="fx-spacer" />
+      {pair && (
+        <button type="button" className="btn ghost small fx-meta-btn" onClick={openCompare}>
+          <CompareIcon size={16} />
+          Compare
+        </button>
+      )}
+      <button
+        type="button"
+        className="btn ghost small fx-meta-btn"
+        aria-label={`Enlarge ${item.label}`}
+        disabled={!ready}
+        onClick={openViewer}
+      >
+        <ExpandIcon size={16} />
+        Enlarge
+      </button>
+    </div>
+  );
+  const stripRow = n > 1 && (
+    <div className="fx-strip-row">
+      {/* Exactly one Before and one After: a labelled Before | After switch (guide 5.5), since two thumbnails of
+              near-identical screenshots don't say which is which. Any other set keeps its thumbnails. */}
+      <div
+        ref={strip}
+        className={switcher ? 'fx-strip seg fx-pair-switch' : 'fx-strip'}
+        data-more={(!switcher && more) || undefined}
+        role="tablist"
+        aria-label="Files"
+        onKeyDown={tabKey}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocusTab(active);
+        }}
+      >
+        {items.map((it) => {
+          const ri = results[it.d.attachment_id];
+          const st = statusOf(ri);
+          const on = it.index === active;
+          const seen = st === 'ready' && presented.has(it.key);
+          return (
+            <button
+              key={it.key}
+              type="button"
+              role="tab"
+              id={tabId(it.index)}
+              aria-selected={on}
+              aria-controls={panelId}
+              tabIndex={on ? 0 : -1}
+              className={switcher ? undefined : `fx-thumb${on ? ' is-active' : ''} is-${st}`}
+              aria-label={`${it.label}, file ${it.index + 1} of ${n}${st === 'ready' ? (seen ? ', viewed' : '') : `, ${STATUS_SHORT[st]}`}`}
+              onClick={() => {
+                setFocusTab(it.index);
+                select(it.index);
+              }}
+            >
+              {switcher ? (
+                <span className="fx-pair-label" aria-hidden="true">
+                  {st !== 'ready' && <StatusGlyph status={st} />}
+                  {it.label}
+                  {seen && <CheckIcon size={14} />}
+                </span>
+              ) : ri?.ok ? (
+                <>
+                  <img src={ri.image.url} alt="" draggable={false} />
+                  {seen && (
+                    <span className="fx-thumb-seen" aria-hidden="true">
+                      <CheckIcon size={12} />
+                    </span>
+                  )}
+                </>
+              ) : (
+                <StatusGlyph status={st} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {/* Two files are both in the switch already; All files is for a set worth seeing at once. */}
+      {!switcher && (
+        <button type="button" className="fx-strip-all" onClick={() => setAllFiles(true)}>
+          <GridIcon size={18} />
+          <span>All files</span>
+        </button>
+      )}
+    </div>
+  );
+
   return (
-    <section className="fx-files" data-pair={switcher || undefined} aria-labelledby={`${uid}-h`}>
+    <section
+      ref={section}
+      className="fx-files"
+      data-pair={switcher || undefined}
+      aria-labelledby={`${uid}-h`}
+    >
       {/* The count is in the meta row ("1 of 2"), and All files ends the strip, so the heading is for assistive
           tech only: the stage starts right under the question. */}
       <h2 className="sr-only" id={`${uid}-h`}>
@@ -295,86 +440,17 @@ export function AttachmentGallery({
         {n > 1 ? ' Arrow keys show other files.' : ''}
       </span>
 
-      <div className="fx-files-meta">
-        {/* With the Before | After switch, the selected half is the label and the count. */}
-        {!switcher && (
-          <>
-            <span className="fx-files-label" title={item.label}>
-              {item.label}
-            </span>
-            {n > 1 && (
-              <span className="fx-files-count tabular">
-                {active + 1} of {n}
-              </span>
-            )}
-          </>
-        )}
-        <span className="fx-spacer" />
-        {pair && (
-          <button type="button" className="btn ghost small fx-meta-btn" onClick={openCompare}>
-            <CompareIcon size={16} />
-            Compare
-          </button>
-        )}
-        <button
-          type="button"
-          className="btn ghost small fx-meta-btn"
-          aria-label={`Enlarge ${item.label}`}
-          disabled={!ready}
-          onClick={openViewer}
-        >
-          <ExpandIcon size={16} />
-          Enlarge
-        </button>
-      </div>
-
-      {n > 1 && (
-        <div className="fx-strip-row">
-          {/* Exactly one Before and one After: a labelled Before | After switch (guide 5.5), since two thumbnails of
-              near-identical screenshots don't say which is which. Any other set keeps its thumbnails. */}
-          <div
-            ref={strip}
-            className={switcher ? 'fx-strip seg fx-pair-switch' : 'fx-strip'}
-            role="tablist"
-            aria-label="Files"
-            onKeyDown={tabKey}
-          >
-            {items.map((it) => {
-              const ri = results[it.d.attachment_id];
-              const st = statusOf(ri);
-              const on = it.index === active;
-              return (
-                <button
-                  key={it.key}
-                  type="button"
-                  role="tab"
-                  id={tabId(it.index)}
-                  aria-selected={on}
-                  aria-controls={panelId}
-                  tabIndex={it.index === focusTab ? 0 : -1}
-                  className={switcher ? undefined : `fx-thumb${on ? ' is-active' : ''} is-${st}`}
-                  aria-label={`${it.label}, file ${it.index + 1} of ${n}${st === 'ready' ? '' : `, ${STATUS_SHORT[st]}`}`}
-                  onClick={() => select(it.index)}
-                >
-                  {switcher ? (
-                    <span aria-hidden="true">{it.label}</span>
-                  ) : ri?.ok ? (
-                    <img src={ri.image.url} alt="" draggable={false} />
-                  ) : (
-                    <StatusGlyph status={st} />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-          {/* Two files are both in the switch already; All files is for a set worth seeing at once. */}
-          {!switcher && (
-            <button type="button" className="fx-strip-all" onClick={() => setAllFiles(true)}>
-              <GridIcon size={18} />
-              <span>All files</span>
-            </button>
-          )}
-        </div>
+      {/* With the Before | After switch the row reads switch, then Compare and Enlarge: the DOM keeps that order. */}
+      {switcher ? (
+        <>
+          {stripRow}
+          {metaRow}
+        </>
+      ) : (
+        <>
+          {metaRow}
+          {stripRow}
+        </>
       )}
 
       <div className="sr-only" role="status" aria-live="polite">
@@ -411,6 +487,7 @@ export function AttachmentGallery({
       )}
       {allFiles && (
         <AllFilesSheet
+          view={view}
           items={items}
           results={results}
           active={active}
@@ -420,6 +497,7 @@ export function AttachmentGallery({
             setAllFiles(false);
           }}
           onDismiss={() => setAllFiles(false)}
+          onQuestion={() => setQuestion(true)}
         />
       )}
       {question && <QuestionSheet view={view} onDismiss={() => setQuestion(false)} />}
