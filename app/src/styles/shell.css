@@ -175,10 +175,6 @@ main.bare {
   grid-template-columns: var(--ws-lead) minmax(0, 1fr) var(--ws-lead);
   min-height: calc(var(--safe-t) + var(--fab-size) + 12px);
 }
-/* Clear of the menu button's count badge when a long project name fills the title. */
-.shell[data-layout='single'] .ws-title {
-  padding-inline: 2px;
-}
 .shell[data-layout='single'] .ws-menu-slot {
   display: block;
 }
