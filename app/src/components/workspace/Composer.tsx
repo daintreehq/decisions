@@ -359,11 +359,9 @@ export function Composer(p: ComposerProps) {
           </div>
         )}
         <div className="composer-actions">
-          {(two || !!verdict.hint) && (
-            <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
-              {note}
-            </span>
-          )}
+          <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
+            {note}
+          </span>
           <span className="composer-buttons">
             {!textless && (
               <DictateButton
@@ -580,7 +578,9 @@ function Field(
                 : ''
             : p.focused
               ? p.focusedPlaceholder
-              : p.placeholder
+              : p.canHold || !p.voice
+                ? p.placeholder
+                : 'Type or tap the microphone'
         }
         readOnly={p.disabled}
         enterKeyHint="enter"

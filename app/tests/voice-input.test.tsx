@@ -621,7 +621,8 @@ describe('the Dictate button', () => {
     );
     const btn = host.querySelector('button')!;
     expect(btn.getAttribute('aria-label')).toBe('Stop dictation');
-    expect(btn.getAttribute('aria-pressed')).toBe('true');
+    // The label says what a press does now; a toggle state on top of a changing label would contradict it.
+    expect(btn.getAttribute('aria-pressed')).toBeNull();
     expect(host.textContent).not.toMatch(/Send/);
     act(() => void btn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })));
     expect(onToggle).toHaveBeenCalledTimes(1);
