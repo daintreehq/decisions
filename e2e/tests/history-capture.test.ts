@@ -12,6 +12,7 @@ import {
   approveCandidate,
   claimRelay,
   createPairingInvite,
+  type DecisionView,
   type InjectResult,
   type LocateResult,
   type ProxyEngine,
@@ -173,11 +174,11 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
     await page.getByRole('searchbox', { name: 'Search history' }).fill(q);
     await page.waitForTimeout(400);
   };
-  const decision = async (key: string, check: (d: Record<string, unknown> | null) => boolean) =>
+  const decision = async (key: string, check: (d: DecisionView) => boolean) =>
     until(
       async () => {
         await bridge.pump();
-        const d = (await bridge.getDecision(ids[key]!)) as Record<string, unknown> | null;
+        const d = await bridge.getDecision(ids[key]!);
         return check(d) ? d : null;
       },
       30_000,
@@ -432,7 +433,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
       'Describe v3 only. Move the v2 steps to an appendix titled “Upgrading from v2”, keep the three v2 screenshots there, and link it from the first paragraph so nobody on v2 gets lost.',
     );
     await send.click();
-    await decision('guide', (d) => !!d && d.provenance === 'human');
+    await decision('guide', (d) => d.provenance === 'human');
 
     // The deploy, whose delivery cannot be confirmed.
     await openQ('deploy');
@@ -441,7 +442,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
       .first()
       .check();
     await send.click();
-    await decision('deploy', (d) => !!d && d.provenance === 'human');
+    await decision('deploy', (d) => d.provenance === 'human');
 
     // The retry strategy: the model said backoff yesterday; the person overrules it with a reason.
     await openQ('retry');
@@ -456,7 +457,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
       .fill('Restarts drop in-flight retries with backoff alone; the partner retries for a day.');
     await page.locator('.dock').getByRole('button', { name: 'Send correction' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
-    await decision('retry', (d) => !!d && d.choice === 'queue');
+    await decision('retry', (d) => d.choice === 'queue');
 
     // The changelog: the model answer, confirmed.
     await openQ('changelog');
