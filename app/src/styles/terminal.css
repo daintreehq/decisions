@@ -1,6 +1,6 @@
 /* ---------- the asking agent's terminal (TerminalDrawer.tsx) ----------
  * The chat header's terminal button, and the drawer it opens: a modal panel from the right below 1100px (the
- * sidebar's mirror image, over the dimmed chat), a column beside the chat from 1100px. The lines sit on Daintree's
+ * sidebar's mirror image, beneath the displaced chat), a column beside the chat from 1100px. The lines sit on Daintree's
  * terminal surface, dark in both themes.
  */
 
@@ -33,61 +33,30 @@
     0 0 0 2px var(--surface-chrome);
 }
 
-/* ---------- the drawer (below 1100px) ---------- */
+/* ---------- the right-hand underlay (below 1100px), mirroring the sidebar ---------- */
 .term-drawer {
   position: fixed;
-  inset: 0 0 0 auto;
-  width: min(85vw, 440px);
+  inset: 0;
+  width: 100%;
   max-width: none;
   height: 100dvh;
   max-height: none;
   margin: 0;
   padding: 0;
   border: 0;
-  /* The hairline keeps the panel's edge on a dimmed dark page, where the shadow cannot. */
-  border-left: 1px solid var(--line-strong);
-  border-radius: var(--radius-sheet) 0 0 var(--radius-sheet);
-  background: var(--surface-chrome);
+  background: transparent;
   color: var(--text);
-  box-shadow: var(--shadow-3);
   overflow: hidden;
-  transition: transform 260ms var(--ease-canvas);
-}
-.term-drawer[open] {
-  animation: term-in 300ms var(--ease-canvas);
-}
-.term-drawer[data-closing] {
-  transform: translateX(100%);
-}
-.term-drawer[data-dragging] {
-  transition: none;
 }
 .term-drawer::backdrop {
-  background: var(--theme-scrim-strong);
-  backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
-  animation: side-fade 300ms var(--ease-canvas);
-  transition: opacity 260ms var(--ease-canvas);
+  background: transparent;
 }
-.term-drawer[data-closing]::backdrop {
-  opacity: 0;
-}
-@keyframes term-in {
-  from {
-    transform: translateX(100%);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .term-drawer {
-    transition: opacity var(--dur-exit) var(--ease-out);
-  }
-  .term-drawer[open] {
-    animation-name: side-fade;
-  }
-  .term-drawer[data-closing] {
-    transform: none;
-    opacity: 0;
-  }
+.term-drawer .term-panel-body {
+  width: var(--drawer-width);
+  margin-left: auto;
+  background: var(--surface-chrome);
+  /* The panel stays still while the chat moves left, revealing it from the screen's right edge. */
+  clip-path: inset(0 0 0 max(0px, calc(var(--drawer-width) - var(--terminal-offset))));
 }
 
 /* ---------- the column beside the chat (1100px and up) ---------- */
@@ -125,6 +94,15 @@
   /* Its text starts on the terminal text's column, so the drawer has one left edge for words. */
   padding: 6px 6px 6px 20px;
   border-bottom: 1px solid var(--line);
+}
+.term-drawer .term-head {
+  min-height: 72px;
+  padding: 20px 8px 16px 20px;
+  border-bottom: 0;
+}
+.term-drawer .term-title:not(:has(.sr-only)) {
+  font-size: 1.25rem;
+  line-height: 28px;
 }
 .term-dock .term-head {
   /* Level with the chat header beside it. */

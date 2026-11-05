@@ -160,9 +160,7 @@ main.bare {
   top: calc(var(--vv-top, 0px) + var(--fab-y));
   z-index: 31;
 }
-/* The file viewer and the full-height editor bring their own top bars, and the terminal drawer covers the chat as a
-   modal; the button steps aside for each (it would only peek out under the drawer's edge). */
-.shell:has(.term-drawer[open]) .menu-fab,
+/* The file viewer and the full-height editor bring their own top bars, so the menu button steps aside. */
 .shell:has(.ws-overlay:not(:empty)) .menu-fab,
 .shell:has(.ws.editor-full) .menu-fab {
   display: none;
@@ -413,14 +411,26 @@ main.bare {
   inherits: true;
   initial-value: 0px;
 }
+@property --terminal-offset {
+  syntax: '<length-percentage>';
+  inherits: true;
+  initial-value: 0px;
+}
 html:has(.shell[data-layout='single']) {
-  --sidebar-width: min(84vw, 360px);
-  transition: --sidebar-offset var(--dur-canvas) var(--ease-canvas);
+  --drawer-width: min(84vw, 360px);
+  --sidebar-width: var(--drawer-width);
+  transition:
+    --sidebar-offset var(--dur-canvas) var(--ease-canvas),
+    --terminal-offset var(--dur-canvas) var(--ease-canvas);
 }
 html:has(.shell[data-layout='single'] .sidebar-sheet[open]:not([data-closing])) {
   --sidebar-offset: var(--sidebar-width);
 }
-html[data-sidebar-dragging] {
+html:has(.shell[data-layout='single'] .term-drawer[open]:not([data-closing])) {
+  --terminal-offset: var(--drawer-width);
+}
+html[data-sidebar-dragging],
+html[data-terminal-dragging] {
   transition: none;
 }
 .shell[data-layout='single'] {
@@ -428,31 +438,50 @@ html[data-sidebar-dragging] {
 }
 /* iOS can paint the status/overscroll area from the document background, outside a modal's top layer.
  * Carry the same moving sidebar/canvas split into that paint, rather than leaving a page-colored strip. */
-html:has(.sidebar-sheet[open]) {
+html:has(:is(.sidebar-sheet, .term-drawer)[open]) {
   background-color: var(--surface-chrome);
+  background-attachment: fixed;
+}
+html:has(.sidebar-sheet[open]) {
   background-image: linear-gradient(
     to right,
     var(--surface-chrome) var(--sidebar-offset),
     var(--surface-page) var(--sidebar-offset)
   );
-  background-attachment: fixed;
 }
-html:has(.sidebar-sheet[open]) body {
+html:has(.term-drawer[open]) {
+  background-image: linear-gradient(
+    to right,
+    var(--surface-page) calc(100% - var(--terminal-offset)),
+    var(--surface-chrome) calc(100% - var(--terminal-offset))
+  );
+}
+html:has(:is(.sidebar-sheet, .term-drawer)[open]) body {
   background: transparent;
 }
-.shell:has(.sidebar-sheet[open]) {
+.shell:has(:is(.sidebar-sheet, .term-drawer)[open]) {
   /* The rounded canvas exposes this surface at its corners, beyond the sidebar's rectangular content. */
   background: var(--surface-chrome);
 }
 .shell:has(.sidebar-sheet[open]) .frame {
   translate: var(--sidebar-offset) 0;
   background: var(--surface-page);
-  border-radius: 28px 0 0 28px;
+  border-radius: var(--radius-canvas) 0 0 var(--radius-canvas);
   box-shadow: -1px 0 0 var(--line-subtle);
   overflow: clip;
 }
 .shell:has(.sidebar-sheet[open]) .menu-fab {
   translate: var(--sidebar-offset) 0;
+}
+.shell:has(.term-drawer[open]) .frame {
+  translate: calc(-1 * var(--terminal-offset)) 0;
+  background: var(--surface-page);
+  border-radius: 0 var(--radius-canvas) var(--radius-canvas) 0;
+  box-shadow: 1px 0 0 var(--line-subtle);
+  overflow: clip;
+}
+.shell:has(.term-drawer[open]) .menu-fab {
+  translate: calc(-1 * var(--terminal-offset)) 0;
 }
 .sidebar-sheet {
   position: fixed;
