@@ -395,7 +395,7 @@ describe.skipIf(!chromiumPath)('follow-ups after an answer', () => {
       .getByRole('textbox', { name: 'Reason for the change' })
       .fill('It changes behaviour; it is not a bug fix.');
     await page.locator('.dock').getByRole('button', { name: 'Send correction' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Send correction' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Send correction' }).click();
     await until(async () => sink.typed.length > before, 30_000, 'the overrule');
     const view = await bridge.getDecision(ids.model!);
     expect(view).toMatchObject({ choice: 'changed', provenance: 'human' });

@@ -1112,7 +1112,12 @@
   align-items: center;
 }
 
-/* ---------- sheets ---------- */
+/* ---------- sheets and dialogs: one modal family ---------- */
+/*
+ * Modal (components/Modal.tsx) behind Sheet and Dialog: a bottom sheet below 720px, a centred panel from 720px.
+ * The head holds the title (and Close, when there are no actions), the content scrolls on its own, and the actions
+ * stay in view at the foot.
+ */
 .sheet {
   border: 0;
   padding: 0;
@@ -1125,18 +1130,33 @@
   border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   box-shadow: var(--shadow-3);
   border-top: 1px solid var(--line-default);
+  overflow: hidden;
+}
+.sheet.wide {
+  max-width: min(96vw, 1040px);
 }
 .sheet[open] {
   animation: sheet-in var(--dur-enter) var(--ease-enter);
 }
+/* Only the standard property: the build adds the -webkit- copy. Writing both by hand makes the minifier keep just
+   the prefixed one when the value is a var(), and Chromium ignores that, so the scrim never blurred there. */
 .sheet::backdrop {
   background: var(--scrim);
   backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
+}
+/* The scrim arrives with the panel, on the entry tier, as it leaves with it on the exit tier (motion.css). */
+.sheet[open]::backdrop {
+  animation: scrim-in var(--dur-enter) var(--ease-enter);
+}
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
 }
 @media (min-width: 720px) {
   .sheet {
     margin: auto;
+    width: calc(100% - 48px);
     border-radius: var(--radius-xl);
     border: 1px solid var(--line-default);
   }
@@ -1156,25 +1176,79 @@
   max-height: 88dvh;
 }
 .sheet-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 8px 4px 20px;
+  flex: none;
+  min-height: 56px;
+  padding: 10px 20px 0;
+  transition: box-shadow var(--dur) var(--ease-out);
+}
+/* Close is a 44px target; the head gives up its right gutter to it rather than growing. */
+.sheet-head:has(> .btn) {
+  padding-right: 8px;
+}
+/* A hairline under the head once the content has scrolled beneath it (Modal sets it). */
+.sheet-head[data-scrolled] {
+  box-shadow: 0 1px 0 var(--line-subtle);
 }
 .sheet-head h2 {
   flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--text-lg);
+  line-height: 1.35;
+  text-wrap: balance;
+}
+/* The grab handle, on phones only, where a downward swipe on the head closes the sheet. Close, an action, Back,
+   Escape and a tap on the dimmed page are the alternatives. Painted at 3:1 against the sheet (--line-input). */
+@media (max-width: 719.98px) {
+  .sheet-head {
+    min-height: 0;
+    padding-top: 22px;
+    padding-bottom: 10px;
+    touch-action: pan-x pinch-zoom;
+  }
+  /* Close keeps its 44px target without making the head taller than a head without it. */
+  .sheet-head > .btn.icon {
+    margin-block: -10px;
+  }
+  .sheet-head::before {
+    content: '';
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    width: 36px;
+    height: 4px;
+    margin-left: -18px;
+    border-radius: 2px;
+    background: var(--line-input);
+  }
 }
 .sheet-content {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px 20px 16px;
+}
+/* A sheet without actions ends at its content, which then keeps clear of the home indicator. */
+.sheet-content:last-child {
+  padding-bottom: calc(20px + var(--safe-b));
+}
+.sheet-content > :first-child {
+  margin-top: 0.25rem;
+}
+.sheet-content > :last-child {
+  margin-bottom: 0;
 }
 .sheet-content p {
   margin: 0.5rem 0;
 }
 .sheet-foot {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
@@ -1183,10 +1257,24 @@
 }
 .sheet-foot .btn {
   min-height: var(--tap);
+  min-width: 100px;
 }
-@media (max-width: 719px) {
+/* Phones: an equal pair while every label fits half the row, otherwise a full-width stack in reading order, so the
+   committing action ends nearest the thumb. Modal measures the labels and sets .stacked. */
+@media (max-width: 719.98px) {
   .sheet-foot .btn {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .sheet-foot.measuring .btn {
+    flex: none;
+  }
+  .sheet-foot.stacked {
+    flex-direction: column;
+  }
+  .sheet-foot.stacked .btn {
+    flex: none;
+    width: 100%;
   }
 }
 .choice-sheet .options {
@@ -1209,6 +1297,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .sheet[open],
+  .sheet[open]::backdrop,
   .menu {
     animation: none;
   }
