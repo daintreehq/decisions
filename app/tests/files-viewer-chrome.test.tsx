@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { AttachmentDescriptor } from '@daintreehq/decisions-protocol';
 import type { QuestionView } from '../src/domain/model.js';
 import type { DictState } from '../src/features/voice/dictation.js';
@@ -89,7 +89,7 @@ let host: HTMLElement | null = null;
 let announced: string[] = [];
 let stopAnnounce: (() => void) | null = null;
 let m: FilesModel;
-let onClose: ReturnType<typeof vi.fn>;
+let onClose: Mock<() => void>;
 
 function props(active = 0) {
   return {
@@ -156,7 +156,7 @@ beforeEach(async () => {
   announced = [];
   stopAnnounce = onAnnounce((msg) => announced.push(msg));
   m = model();
-  onClose = vi.fn();
+  onClose = vi.fn<() => void>();
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
