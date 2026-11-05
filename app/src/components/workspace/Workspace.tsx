@@ -127,6 +127,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const headingRef = useRef<HTMLDivElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<GalleryHandle | null>(null);
+  const [filesOpen, setFilesOpen] = useState(false);
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -359,6 +360,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     return `${answer.provenance === 'proxy' ? 'Model answer' : 'Answer'}: ${line}`;
   })();
   const offerChoices = composing && mode === 'answer' && !!shape?.hasOptions;
+  // Short, self-contained choices live in the dock; described choices are read once in the thread.
+  const compactChoices =
+    !!content &&
+    content.options.length <= 3 &&
+    content.options.every((option) => !option.description && option.label.length <= 40);
 
   // A draft emptied by a revision change simply follows the question; one with words in it waits for Review update.
   // Capture for it settles first: words still arriving belong to the revision they were spoken for.
@@ -407,11 +413,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     if (!h || !root || typeof IntersectionObserver === 'undefined') return;
     const io = new IntersectionObserver(([e]) => setHeadingAway(!e!.isIntersecting), {
       root,
+      rootMargin: wide
+        ? '0px'
+        : `-${rootRef.current?.querySelector('.ws-head')?.clientHeight ?? 60}px 0px 0px`,
       threshold: 0,
     });
     io.observe(h);
     return () => io.disconnect();
-  }, [content]);
+  }, [content, wide]);
 
   const binding = (): Binding => ({
     questionId: id,
@@ -621,10 +630,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       refocus: false,
     });
   };
-  /** Moving on, as the dock's whole width: the one thing left to do once an answer is on its way. */
-  const moveOn = (strong: boolean) =>
+  /** Moving on stays a quiet, thumb-reachable action after an answer is on its way. */
+  const moveOn = () =>
     next ? (
-      <button type="button" className={`btn${strong ? ' primary' : ''} dock-next`} onClick={goNext}>
+      <button type="button" className="btn dock-next" onClick={goNext}>
         Next question
         <ArrowRight size={18} />
       </button>
@@ -643,12 +652,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             ? 'This device can’t read this question, so it can’t be answered here.'
             : 'This question could not be verified, so it can’t be answered.'}
         </p>
-        {next && moveOn(false)}
+        {next && moveOn()}
       </AnswerDock>
     );
   } else if (pendingEntry && !following) {
     // The reply and its receipt are in the thread; the dock offers what comes next.
-    dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
+    dock = <AnswerDock>{moveOn()}</AnswerDock>;
   } else if (failed.length > 0) {
     dock = (
       <AnswerDock>
@@ -677,9 +686,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         : mode === 'correction'
           ? 'Write the corrected answer'
           : shape.textIsAnswer
-            ? voice
-              ? 'Type or hold to talk'
-              : 'Type an answer'
+            ? 'Type an answer'
             : 'Add a note';
     const focusedPlaceholder = reason
       ? 'Why are you changing it?'
@@ -749,9 +756,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           stale={stale}
           error={error}
           sending={busy}
-          // The choice is pinned beside the field in both modes; a correction marks the answer in force.
+          // Compact choices live beside the field; file review brings card labels into reach too.
           options={
-            (offerChoices || (inCorrection && shape.hasOptions)) && content
+            (offerChoices || (inCorrection && shape.hasOptions)) &&
+            (compactChoices || filesOpen) &&
+            content
               ? content.options.map((o) => ({ id: o.id, label: o.label }))
               : null
           }
@@ -832,22 +841,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       </AnswerDock>
     );
   } else if (modelReview && proxy) {
-    // Confirm and Overrule live on the model's message; moving on stays here as a quiet trailing action, so the
-    // thumb's easiest tap isn't skipping the review.
-    dock = (
-      <AnswerDock>
-        {next ? (
-          <div className="dock-quiet-row">
-            <button type="button" className="btn small ghost dock-next-quiet" onClick={goNext}>
-              Next question
-              <ArrowRight size={16} />
-            </button>
-          </div>
-        ) : (
-          moveOn(false)
-        )}
-      </AnswerDock>
-    );
+    dock = <AnswerDock>{moveOn()}</AnswerDock>;
   } else if (decided && followUps === 'desktop') {
     // The relay takes follow-ups, but the computer that asked can't type them into the terminal yet.
     dock = (
@@ -857,12 +851,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             ? `Update Daintree on ${machine} to send follow\u2011ups.`
             : 'Update Daintree on the computer that asked to send follow\u2011ups.'}
         </p>
-        {moveOn(true)}
+        {moveOn()}
       </AnswerDock>
     );
   } else {
     // Answered, expired or withdrawn: the thread says which; the dock offers the next question.
-    dock = <AnswerDock>{moveOn(true)}</AnswerDock>;
+    dock = <AnswerDock>{moveOn()}</AnswerDock>;
   }
 
   /* ---------- the thread ---------- */
@@ -912,17 +906,26 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         view={view}
         now={now}
         headingRef={headingRef}
-        files={<Gallery view={view} onReview={onReview} handleRef={galleryRef} />}
+        files={
+          <Gallery
+            view={view}
+            onReview={onReview}
+            handleRef={galleryRef}
+            onFocusChange={setFilesOpen}
+          />
+        }
         context={content.context ? <MessageContext text={content.context} /> : undefined}
         choices={
           offerChoices ? (
-            <OptionCards
-              view={view}
-              selected={draft.selected}
-              onSelect={select}
-              disabled={stale || busy}
-              legend={content.kind === 'approval' ? 'Your decision' : 'Choose one'}
-            />
+            compactChoices ? null : (
+              <OptionCards
+                view={view}
+                selected={draft.selected}
+                onSelect={select}
+                disabled={stale || busy}
+                legend={content.kind === 'approval' ? 'Your decision' : 'Choose one'}
+              />
+            )
           ) : (
             <StaticChoices
               view={view}
@@ -1285,7 +1288,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // The answer in force is already in the thread just above.
             showCurrent={false}
             draft={correctionDraft}
-            hasOptions={shape.hasOptions}
+            hasOptions={shape.hasOptions && !compactChoices}
             reasonInPage={shape.fields.length > 1}
             onSelect={select}
             onReason={() => {

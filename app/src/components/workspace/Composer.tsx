@@ -96,22 +96,19 @@ export interface ComposerProps {
 }
 
 /**
- * The composer: one rounded pill at the foot of the chat. Resting and empty, it is the field ("Type or hold to talk")
- * and the mic. Once there is something to send it opens into two rows inside the same pill: the field across the
- * top, and an action row with the Send reason (or the quiet save state) at the left, the mic, and Send in the
- * mic's old place at the right edge. Dictation, errors and notices speak in a lane at the pill's top; choices sit
- * as chips just above it. The right edge never changes while capture runs, and Send arms only after the hand has
- * left the mic, so a double tap on Stop can never send. `+` sits at the pill's leading edge (on the action row once it
- * opens), and chosen photos line up above the field; on a desktop, a photo pasted into the field or dropped on the
- * pill is added the same way.
+ * A compact message bar, expanding only when the words wrap, photos arrive, or a notice needs room.
+ * Capture freezes the Send slot and arms it only after the hand leaves Stop.
  */
 export function Composer(p: ComposerProps) {
   const { shape, draft, verdict, dict, field } = p;
   const phase: DictPhase = dict?.phase ?? 'idle';
   const capturing = isCapture(phase);
   const value = fieldValue(draft, field);
-  const hasText = !!value.trim();
   const [focused, setFocused] = useState(false);
+  const [multiline, setMultiline] = useState(false);
+  useEffect(() => {
+    if (!value) setMultiline(false);
+  }, [value]);
   const [reviewing, setReviewing] = useState(false);
   const quietUntil = useRef(0);
   // The hand-off is visible: Send reads as not ready (and is) until the quiet period after the mic has passed.
@@ -155,9 +152,9 @@ export function Composer(p: ComposerProps) {
   const textless = shape.fields.length === 0;
   const photos = p.photos;
   const hasPhotos = !!photos?.list.length;
-  // Open with the keyboard, before the first keystroke. Typing and clearing text then keep the same control row;
-  // capture also opens before the first word lands, so Stop stays under the finger.
-  const two = focused || textless || sendSlot || hasText || hasPhotos || capturing;
+  // Focus alone never enlarges the input. Once text wraps, keep the wider writing surface until it is cleared.
+  const two =
+    textless || multiline || hasPhotos || capturing || (verdict.hasContent && !!verdict.hint);
   const [dropping, setDropping] = useState(false);
   const takesDrop = !!photos && !p.disabled && !p.stale;
   const dropped = (list: FileList | null | undefined) => {
@@ -271,6 +268,7 @@ export function Composer(p: ComposerProps) {
             onContact={quiet}
             onPastePhotos={takesDrop ? dropped : undefined}
             open={two}
+            onMultiline={setMultiline}
           />
         )}
         {photos && (
@@ -279,11 +277,9 @@ export function Composer(p: ComposerProps) {
           </div>
         )}
         <div className="composer-actions">
-          {two && (
-            <span className="composer-note" id="ws-send-hint">
-              {note}
-            </span>
-          )}
+          <span className={two ? 'composer-note' : 'sr-only'} id="ws-send-hint">
+            {note}
+          </span>
           <span className="composer-buttons">
             {!textless && (
               <DictateButton
@@ -342,6 +338,7 @@ function Field(
     onPastePhotos?: (files: FileList) => boolean;
     /** The pill is open into two rows; the field measures itself again when it changes. */
     open: boolean;
+    onMultiline: (value: boolean) => void;
   },
 ) {
   const { draft, field, dict, fieldRef: ref, value } = p;
@@ -369,10 +366,28 @@ function Field(
   useLayoutEffect(() => {
     const t = ref.current;
     if (!t) return;
-    t.style.height = 'auto';
-    t.style.height = `${t.scrollHeight}px`;
-    if (p.capturing) t.scrollTop = t.scrollHeight;
-  }, [value, p.capturing, interim, ref, p.open]);
+    const measure = () => {
+      t.style.height = 'auto';
+      const style = getComputedStyle(t);
+      const line =
+        parseFloat(style.lineHeight) +
+        parseFloat(style.paddingTop) +
+        parseFloat(style.paddingBottom);
+      if (!p.open && value && t.scrollHeight > line + 2) p.onMultiline(true);
+      t.style.height = `${t.scrollHeight}px`;
+      if (p.capturing) t.scrollTop = t.scrollHeight;
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    let width = t.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (t.clientWidth === width) return;
+      width = t.clientWidth;
+      measure();
+    });
+    observer.observe(t);
+    return () => observer.disconnect();
+  }, [value, p.capturing, interim, ref, p.open, p.onMultiline]);
 
   const caret = () => {
     const t = ref.current;
@@ -774,7 +789,10 @@ function Lane(i: ComposerProps & { unsure: Unsure | null; onReviewWords: () => v
     );
   if (dict?.message)
     return (
-      <span className={`lane${dict.message.tone === 'error' ? ' error' : ''}`}>
+      <span
+        className={`lane${dict.message.tone === 'error' ? ' error' : ''}`}
+        role={dict.message.tone === 'error' ? 'alert' : 'status'}
+      >
         <span className="lane-text">{dict.message.text}</span>
         {dict.message.retry && action('Try again', i.onDictate)}
         {dismiss(() => dictation.dismissMessage())}

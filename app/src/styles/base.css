@@ -130,6 +130,10 @@ main:focus,
 [tabindex='-1']:focus {
   outline: none;
 }
+/* Native dialogs restore focus after dismissal. A tap must not leave a keyboard ring behind. */
+html[data-input='pointer'] :focus-visible {
+  outline: none;
+}
 
 ::selection {
   background: color-mix(in oklab, var(--accent) 30%, transparent);

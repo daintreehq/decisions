@@ -116,7 +116,7 @@ export function TerminalButton({
  * input. Opening it asks the desktop for a fresh one; if none arrives (the computer asleep or offline) the last one
  * stays, marked stale with its age.
  *
- * Below 1100px it is a modal drawer from the right over the dimmed chat (Back, Escape, a right swipe or a tap on the
+ * Below 1100px it is revealed beneath the chat as the canvas slides left (Back, Escape, a right swipe or a tap on the
  * chat close it). From 1100px it sits beside the chat as a column, and the chat stays usable.
  */
 export function TerminalDrawer({
@@ -265,7 +265,28 @@ function ModalTerminal({
   // The contents stay through the exit slide, so what leaves is what was being read.
   const [mounted, setMounted] = useState(open);
   if (open && !mounted) setMounted(true);
-  const swipe = useSwipeClose(ref, 'right', onClose);
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset.terminalDragging;
+      document.documentElement.style.removeProperty('--terminal-offset');
+    },
+    [],
+  );
+  const panelWidth = () =>
+    ref.current?.querySelector<HTMLElement>('.term-panel-body')?.offsetWidth ?? 0;
+  const swipe = useSwipeClose(ref, 'right', onClose, {
+    width: panelWidth,
+    move: (distance) => {
+      const root = document.documentElement;
+      if (distance === null) {
+        delete root.dataset.terminalDragging;
+        root.style.removeProperty('--terminal-offset');
+      } else {
+        root.dataset.terminalDragging = '';
+        root.style.setProperty('--terminal-offset', `${Math.max(0, panelWidth() - distance)}px`);
+      }
+    },
+  });
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
@@ -290,12 +311,13 @@ function ModalTerminal({
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 110);
+      const t = setTimeout(finish, 380);
       return () => clearTimeout(t);
     }
   }, [open, titleId]);
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={DRAWER_ID}
       className="term-drawer"
@@ -306,15 +328,11 @@ function ModalTerminal({
         onClose();
       }}
       onClick={(e) => {
-        // The panel fills the dialog's box, so a click on the dialog itself is on the dimmed chat.
+        // The panel occupies the right edge; a click on the transparent dialog is on the exposed chat.
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      {mounted && (
-        <div className="term-panel-body" {...swipe}>
-          {children}
-        </div>
-      )}
+      {mounted && <div className="term-panel-body">{children}</div>}
     </dialog>
   );
 }
@@ -518,6 +536,7 @@ function SnapshotBody({
     const first = shown.current === null;
     shown.current = tv.snapshotId;
     if (first || atEnd.current) el.scrollTop = el.scrollHeight;
+    el.toggleAttribute('data-scrolled', el.scrollTop > 1);
   }, [tv.snapshotId]);
   const observed = new Date(tv.observedAt).toLocaleTimeString(undefined, {
     hour: '2-digit',
@@ -568,6 +587,7 @@ function SnapshotBody({
         onScroll={(e) => {
           const el = e.currentTarget;
           atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          el.toggleAttribute('data-scrolled', el.scrollTop > 1);
         }}
       >
         {tv.lines.length > 0 ? (

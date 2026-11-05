@@ -849,3 +849,94 @@
     box-shadow: inset 0 0 0 1px var(--fx-stage-ink-2);
   }
 }
+
+/* A before/after pair has one compact control row, rather than two stacked toolbars. */
+.fx-files[data-pair] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 8px;
+}
+.fx-files[data-pair] .fx-inline-stage {
+  grid-column: 1 / -1;
+}
+.fx-files[data-pair] .fx-files-meta {
+  grid-column: 2;
+  grid-row: 2;
+  gap: 0;
+  margin-top: 0;
+}
+.fx-files[data-pair] .fx-strip-row {
+  grid-column: 1;
+  grid-row: 2;
+}
+.fx-files[data-pair] .fx-pair-switch {
+  margin: 0;
+}
+@media (max-width: 359px) {
+  .fx-files[data-pair] .fx-meta-btn {
+    font-size: 0;
+    gap: 0;
+    padding: 0 10px;
+  }
+  .fx-files[data-pair] .fx-meta-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+.fx-zoom-menu {
+  position: relative;
+}
+.fx-zoom-menu > summary {
+  list-style: none;
+}
+.fx-zoom-menu > summary::before {
+  display: none;
+}
+.fx-zoom-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.fx-zoom-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  width: 180px;
+  padding: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-2);
+}
+.fx-zoom-popover button {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 44px;
+}
+@media (pointer: coarse) and (max-width: 44.999em) {
+  .fx-tools {
+    position: absolute;
+    bottom: 10px;
+    align-self: center;
+    z-index: 3;
+    width: max-content;
+    max-width: calc(100% - 24px);
+    min-height: 48px;
+    padding: 2px 8px;
+    border: 1px solid var(--line-default);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--surface-chrome) 92%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-2);
+  }
+  .fx-overlay.is-fixed .fx-tools {
+    bottom: calc(var(--safe-b) + 10px);
+    padding-bottom: 2px;
+  }
+  .fx-compare:not(.is-wide) .fx-id-file {
+    height: 0;
+  }
+  .fx-compare-seg {
+    border-radius: 999px;
+  }
+}

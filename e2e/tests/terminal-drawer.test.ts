@@ -1,8 +1,8 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type Page } from 'playwright-core';
+import { chromium, webkit, type Browser, type Page } from 'playwright-core';
 import {
   DecisionsBridge,
   FileKeyStore,
@@ -25,8 +25,10 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
  * asks the desktop for a fresh one on opening, marks it stale when the desktop does not answer, says when sharing is
  * off, and closes on Back before the chat does.
  */
-const PORT = 8841;
+const PORT = Number(process.env.TERMINAL_E2E_PORT ?? 8841);
 const chromiumPath = findChromium();
+const browserEngine = process.env.E2E_BROWSER === 'webkit' ? webkit : chromium;
+const motionDir = process.env.MOTION_CAPTURE_DIR;
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -100,12 +102,17 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
   };
 
   beforeAll(async () => {
+    if (motionDir) mkdirSync(motionDir, { recursive: true });
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    browser = await browserEngine.launch({
+      ...(browserEngine === chromium ? { executablePath: chromiumPath! } : {}),
+      headless: true,
+    });
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
-      serviceWorkers: 'allow',
+      serviceWorkers: browserEngine === webkit ? 'block' : 'allow',
       hasTouch: true,
+      ...(motionDir ? { recordVideo: { dir: motionDir, size: { width: 390, height: 844 } } } : {}),
     });
     page = await context.newPage();
 
@@ -185,6 +192,7 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
 
   afterAll(async () => {
     await bridge?.stop?.();
+    for (const context of browser?.contexts() ?? []) await context.close();
     await browser?.close();
     await relay?.stop();
   });
@@ -251,7 +259,32 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
     await drawer()
       .getByText(/Terminal sharing is off on E2E Mac/)
       .waitFor();
+    expect(
+      await drawer()
+        .locator('.term-title')
+        .evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('none');
+    await drawer().getByRole('button', { name: /Close/ }).click();
+    await until(
+      async () => (await drawer().count()) === 0,
+      10_000,
+      'the drawer to close after a tap',
+    );
+    expect(
+      await page.locator('#terminal-button').evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('none');
+    // Keyboard users still have a visible, neutral focus indicator after dismissal.
+    await page.keyboard.press('Space');
+    await drawer().waitFor();
     await page.keyboard.press('Escape');
+    await until(
+      async () => (await drawer().count()) === 0,
+      5000,
+      'the keyboard-opened terminal to close',
+    );
+    expect(
+      await page.locator('#terminal-button').evaluate((el) => getComputedStyle(el).outlineStyle),
+    ).toBe('solid');
   });
 
   it('closes on Back before leaving the chat', async () => {
@@ -261,5 +294,121 @@ describe.skipIf(!chromiumPath)('terminal drawer', () => {
     await until(async () => (await drawer().count()) === 0, 10_000, 'Back to close the drawer');
     expect(new URL(page.url()).pathname).toBe(`/q/${ids.shared}`);
     await page.locator('.ws .ws-head').waitFor();
+  });
+
+  it('reveals the terminal beneath the chat with matching safe-area paint and preserves the draft', async () => {
+    await go('unshared');
+    const field = page.locator('.composer-input');
+    await field.fill('Keep this unsent answer.');
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--safe-t', '59px');
+      document.documentElement.style.setProperty('--safe-b', '34px');
+    });
+    try {
+      for (const colorScheme of ['dark', 'light'] as const) {
+        await page.emulateMedia({ colorScheme });
+        await openDrawer();
+        await drawer().getByRole('heading', { name: 'Not shared', exact: true }).waitFor();
+        await until(
+          async () =>
+            page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left < -327),
+          5000,
+          'the chat to reveal the terminal',
+        );
+        const paint = await page.evaluate(() => {
+          const root = getComputedStyle(document.documentElement);
+          const panel = document.querySelector('.term-drawer .term-panel-body')!;
+          const frame = document.querySelector('.frame')!;
+          return {
+            document: root.backgroundColor,
+            panel: getComputedStyle(panel).backgroundColor,
+            split: root.backgroundImage,
+            scrim: getComputedStyle(document.querySelector('.term-drawer')!, '::backdrop')
+              .backgroundColor,
+            frameRight: frame.getBoundingClientRect().right,
+            panelLeft: panel.getBoundingClientRect().left,
+            frameWidth: frame.getBoundingClientRect().width,
+            titleTop: panel.querySelector('.term-title')!.getBoundingClientRect().top,
+            radius: getComputedStyle(frame).borderTopRightRadius,
+          };
+        });
+        expect(paint.document).toBe(paint.panel);
+        expect(paint.split).toContain('linear-gradient');
+        expect(paint.scrim).toBe('rgba(0, 0, 0, 0)');
+        expect(paint.frameRight).toBeCloseTo(paint.panelLeft, 0);
+        expect(paint.frameWidth).toBe(390);
+        expect(paint.titleTop).toBeGreaterThan(59);
+        expect(paint.radius).toBe('28px');
+        if (motionDir)
+          await page.screenshot({ path: join(motionDir, `terminal-safe-area-${colorScheme}.png`) });
+        if (colorScheme === 'dark') {
+          await page.mouse.click(10, 420);
+        } else {
+          await page.evaluate(async () => {
+            const panel = document.querySelector('.term-drawer .term-panel-body')!;
+            const fire = (type: string, x: number) =>
+              panel.dispatchEvent(
+                new PointerEvent(type, {
+                  bubbles: true,
+                  pointerId: 7,
+                  pointerType: 'touch',
+                  isPrimary: true,
+                  clientX: x,
+                  clientY: 400,
+                }),
+              );
+            fire('pointerdown', 140);
+            for (let x = 160; x <= 340; x += 30) {
+              fire('pointermove', x);
+              await new Promise((resolve) => setTimeout(resolve, 16));
+            }
+            fire('pointerup', 340);
+          });
+        }
+        await until(async () => (await drawer().count()) === 0, 5000, 'the terminal to close');
+        expect(await field.inputValue()).toBe('Keep this unsent answer.');
+        expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(
+          0,
+        );
+        expect(
+          await page.locator('html').evaluate((el) => getComputedStyle(el).backgroundImage),
+        ).toBe('none');
+      }
+      await field.fill('');
+    } finally {
+      await page.evaluate(() => {
+        document.documentElement.style.removeProperty('--safe-t');
+        document.documentElement.style.removeProperty('--safe-b');
+      });
+      await page.emulateMedia({ colorScheme: 'light' });
+    }
+  });
+
+  it('respects reduced motion and returns to the docked desktop layout', async () => {
+    await go('unshared');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    try {
+      await openDrawer();
+      await page.keyboard.press('Escape');
+      await until(
+        async () => (await drawer().count()) === 0,
+        5000,
+        'the terminal to close without motion',
+      );
+      await page.setViewportSize({ width: 1280, height: 820 });
+      await page.locator('.home-pane #terminal-button').click();
+      await page.locator('.term-dock').waitFor();
+      expect(
+        await page.locator('html').evaluate((el) => getComputedStyle(el).backgroundImage),
+      ).toBe('none');
+      expect(await page.locator('.frame').evaluate((el) => getComputedStyle(el).translate)).toBe(
+        'none',
+      );
+      await page.locator('.term-dock').getByRole('button', { name: 'Close terminal' }).click();
+      await page.locator('.term-dock').waitFor({ state: 'detached' });
+    } finally {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+    }
   });
 });

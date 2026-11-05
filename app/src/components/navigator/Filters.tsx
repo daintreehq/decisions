@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef } from 'react';
 import { useLayer } from '../../app/layers.js';
+import { useSwipeClose } from '../useSwipeClose.js';
+import { useDialogMotion } from '../useDialogMotion.js';
 import { setQuestions } from '../../app/listState.js';
 import { CheckIcon, CloseIcon } from '../Icons.js';
 
@@ -120,15 +122,15 @@ export function FilterSheet({
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const uid = useId();
+  const present = useDialogMotion(ref, open);
+  const swipe = useSwipeClose(ref, 'down', dismiss);
 
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) {
-      d.showModal();
+    if (open) {
       d.querySelector<HTMLElement>('.sheet-title')?.focus({ preventScroll: true });
     }
-    if (!open && d.open) d.close();
   }, [open]);
 
   const showComputers = computers.length > 1 || !!computer;
@@ -147,9 +149,13 @@ export function FilterSheet({
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      {open && (
+      {present && (
         <div className="filter-sheet-body">
-          <header className="filter-sheet-head">
+          <header
+            className="filter-sheet-head"
+            {...swipe}
+            style={{ touchAction: 'pan-x pinch-zoom' }}
+          >
             <h2 className="sheet-title" id={titleId} tabIndex={-1}>
               Filter questions
             </h2>

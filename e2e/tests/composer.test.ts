@@ -201,6 +201,14 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
         { id: 'now', label: 'Ship it to everyone' },
       ],
     });
+    await ask('detailed', {
+      question: 'Which rollout strategy should we use?',
+      kind: 'choice',
+      options: [
+        { id: 'canary', label: 'Canary', description: 'Start with one region and monitor errors.' },
+        { id: 'all', label: 'Everywhere', description: 'Update every region together.' },
+      ],
+    });
     await ask('voice', { question: 'What should the 429 body say?', kind: 'text', options: [] });
     await ask('draft', { question: 'Name the new retry setting?', kind: 'text', options: [] });
     await bridge.pump();
@@ -218,9 +226,13 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await expect(
       page.locator('.dock').getByRole('button', { name: 'Send answer' }).count(),
     ).resolves.toBe(0);
-    // Opening the keyboard establishes the action row before typing, so the first character doesn't move it.
+    // Focusing a short message keeps the reference app's compact, single-row input.
+    const resting = await composer().boundingBox();
     await page.locator('.dock .composer-field').click();
-    await page.locator('.composer[data-rows="two"]').waitFor();
+    await page.locator('.composer[data-rows="one"]').waitFor();
+    const focused = await composer().boundingBox();
+    expect(resting!.height).toBeLessThanOrEqual(60);
+    expect(Math.abs(focused!.height - resting!.height)).toBeLessThanOrEqual(1);
     const micBefore = await mic().boundingBox();
     await field().fill('Use 5173, the Vite default.');
     const micAfter = await mic().boundingBox();
@@ -238,17 +250,47 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     const chip = page.locator('.dock').getByRole('radio', { name: 'Behind a flag' });
     await chip.click();
     await expect(chip.getAttribute('aria-checked')).resolves.toBe('true');
-    // The same choice, in the agent's message.
-    await expect(
-      page
-        .locator('.ws-body')
-        .getByRole('radio', { name: /Behind a flag/ })
-        .isChecked(),
-    ).resolves.toBe(true);
+    // Short choices appear once, in the dock, and selection alone never submits.
+    await expect(page.locator('.ws-body').getByRole('radio').count()).resolves.toBe(0);
+    await expect(page.getByRole('radio', { name: 'Behind a flag' }).count()).resolves.toBe(1);
+    expect(sink.typed.some((t) => t.includes('choice: flag'))).toBe(false);
     await field().fill('Default it off for a week.');
     await page.locator('.dock').getByRole('button', { name: 'Send decision' }).click();
     await typedHas('Default it off for a week.');
     expect(sink.typed.find((t) => t.includes('Default it off'))).toContain('choice: flag');
+  });
+
+  it('keeps described choices in the question and sends the selected card from the compact dock', async () => {
+    await openId('detailed');
+    await expect(page.locator('.dock').getByRole('radio').count()).resolves.toBe(0);
+    await page
+      .locator('.ws-body')
+      .getByRole('radio', { name: /Canary/ })
+      .check();
+    await expect(
+      page.getByText('Start with one region and monitor errors.').isVisible(),
+    ).resolves.toBe(true);
+    await page.locator('.dock').getByRole('button', { name: 'Send answer' }).click();
+    await typedHas('choice: canary');
+  });
+
+  it('grows for wrapped words and returns to a compact bar when cleared', async () => {
+    await openId('draft');
+    await field().fill(
+      'Keep the retry budget configurable and document how it applies to each request.\nInclude an example for the default value.',
+    );
+    await page.locator('.composer[data-rows="two"]').waitFor();
+    const writing = await composer().boundingBox();
+    expect(writing!.height).toBeGreaterThan(60);
+    expect(writing!.height).toBeLessThan(220);
+    await field().fill('');
+    await page.locator('.composer[data-rows="one"]').waitFor();
+    await page.setViewportSize({ width: 320, height: 700 });
+    expect((await composer().boundingBox())!.height).toBeLessThanOrEqual(60);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
+      false,
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
   });
 
   it('dictates with a tap to start and a tap to stop', async () => {
@@ -271,7 +313,7 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     // Restoring the preceding dictation adds Send and moves the mic; wait before measuring its position.
     await fieldHas('Tell the client to slow down.');
     // The relay's voice configuration loads separately from the cached question and draft.
-    await page.locator('.dock textarea[placeholder="Type or hold to talk"]').waitFor();
+    await page.locator('.dock textarea[placeholder="Type an answer"]').waitFor();
     voice = { words: [{ afterMs: 150, text: 'Include a retry after header.', final: true }] };
     await hold('.dock .dictate-btn', async () => {
       await stop().waitFor({ timeout: 20_000 });
@@ -295,11 +337,32 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await typedHas('Say when to try again.');
   });
 
+  it('shows microphone permission failures visibly above the compact empty input', async () => {
+    await openId('draft');
+    await field().fill('');
+    await page.evaluate(() => {
+      navigator.mediaDevices.getUserMedia = async () => {
+        throw new DOMException('Denied for this check', 'NotAllowedError');
+      };
+    });
+    await mic().click();
+    const error = page.locator('.dock .lane[role="alert"]');
+    await error.getByText('Microphone access is blocked.').waitFor();
+    const errorBox = (await error.boundingBox())!;
+    expect(errorBox.height).toBeGreaterThan(20);
+    expect(errorBox.y).toBeGreaterThan(0);
+    expect(errorBox.y + errorBox.height).toBeLessThan(844);
+    await expect(page.locator('.composer[data-rows="one"]').count()).resolves.toBe(1);
+  });
+
   it('keeps a draft when the person leaves the question and comes back', async () => {
     await openId('draft');
     await field().fill('retry_budget, in seconds');
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-    await page.locator('.dock').getByText('Saved on this device').waitFor({ timeout: 10_000 });
+    await page
+      .locator('.dock')
+      .getByText('Saved on this device')
+      .waitFor({ state: 'attached', timeout: 10_000 });
     await page.goto(`${relay.origin}/`);
     await page.locator('#main').waitFor();
     await openId('draft');

@@ -419,3 +419,36 @@
     outline-offset: -2px;
   }
 }
+
+@media (max-width: 44.999em) {
+  .history-controls .page-head {
+    display: block;
+  }
+  .history-controls .history-modes {
+    margin-top: 10px;
+    width: fit-content;
+    border-radius: 999px;
+  }
+  .history-controls .search-field input {
+    border-radius: 999px;
+  }
+  .record-sheet {
+    inset: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    transition: transform 200ms var(--ease-canvas);
+  }
+  .record-sheet[open] {
+    animation: sheet-right var(--dur-canvas) var(--ease-canvas);
+  }
+  .record-sheet[data-closing] {
+    transform: translateX(100%);
+  }
+  .record-sheet .record-head {
+    padding-top: calc(var(--safe-t) + 8px);
+  }
+  .record-sheet .hist-record {
+    touch-action: pan-y pinch-zoom;
+  }
+}

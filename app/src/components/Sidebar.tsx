@@ -117,7 +117,6 @@ function RecentRow({
         data-row-id={v.id}
         aria-current={current ? 'page' : undefined}
       >
-        <span className="side-q-dot" data-on={waiting || undefined} aria-hidden="true" />
         {waiting && <span className="sr-only">Needs you: </span>}
         <span className="side-q-body">
           <span className="side-q-text">{text}</span>
@@ -126,9 +125,16 @@ function RecentRow({
               <span className="sr-only">, </span>
               {project}
             </span>
-            {slot && (
+            {(slot || waiting) && (
               <span className="side-q-state">
-                {shown && <AgentStateMark a={shown} age={false} />}
+                {waiting ? (
+                  <span className="agent-state" data-tone="waiting" aria-hidden="true">
+                    <span className="agent-dot" />
+                    <span className="agent-label">Needs you</span>
+                  </span>
+                ) : (
+                  shown && <AgentStateMark a={shown} age={false} />
+                )}
               </span>
             )}
           </span>
@@ -294,8 +300,8 @@ const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * The sidebar as an overlay (below 1100px): a modal dialog from the left, covering about 84% of a phone, with the
- * current screen dimmed beside it. It is a layer (Back closes it before anything navigates) and a modal dialog
+ * The sidebar under the foreground canvas (below 1100px), revealed as the page moves right. A transparent
+ * modal dialog keeps the revealed navigation accessible and the displaced page inert. It is a layer
  * (focus stays inside, Escape closes it). Tapping the dimmed edge or swiping it left closes it too. Focus returns
  * to the menu button, or to the new page when a row navigated.
  */
@@ -305,6 +311,14 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const openedAt = useRef<string>('');
+
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset.sidebarDragging;
+      document.documentElement.style.removeProperty('--sidebar-offset');
+    },
+    [],
+  );
 
   useEffect(() => {
     const d = ref.current;
@@ -338,16 +352,30 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 110);
+      const t = setTimeout(finish, 380);
       return () => clearTimeout(t);
     }
   }, [open]);
 
   // A left swipe on the panel follows the finger and closes it past a third of its width (or on a flick).
-  const swipe = useSwipeClose(ref, 'left', dismiss);
+  const sidebarWidth = () => ref.current?.querySelector<HTMLElement>('.side')?.offsetWidth ?? 0;
+  const swipe = useSwipeClose(ref, 'left', dismiss, {
+    width: sidebarWidth,
+    move: (distance) => {
+      const root = document.documentElement;
+      if (distance === null) {
+        delete root.dataset.sidebarDragging;
+        root.style.removeProperty('--sidebar-offset');
+      } else {
+        root.dataset.sidebarDragging = '';
+        root.style.setProperty('--sidebar-offset', `${Math.max(0, sidebarWidth() - distance)}px`);
+      }
+    },
+  });
 
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={SHEET_ID}
       className="sidebar-sheet"
@@ -361,7 +389,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      <div className="side side-sheet-body" {...swipe}>
+      <div className="side side-sheet-body">
         <SidebarContent
           currentId={currentId}
           titleId={titleId}

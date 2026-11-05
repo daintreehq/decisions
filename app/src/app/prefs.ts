@@ -24,18 +24,26 @@ export const DEFAULT_PREFS: LocalPrefs = {
   dismissedInstall: false,
 };
 
-export function applyTheme(theme: Theme): void {
-  const r = document.documentElement;
+/** Match browser/system chrome to the actual panel surface while a modal covers the canvas. */
+export function syncThemeColor(theme: Theme, panel = false): void {
   const metas = document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]');
-  if (theme === 'system') {
-    r.removeAttribute('data-theme');
-    metas.forEach((m) => {
-      const light = m.media.includes('light');
-      m.content = light ? CHROME.bondi : CHROME.daintree;
-    });
-    return;
-  }
-  const id = THEME_IDS[theme];
-  r.setAttribute('data-theme', id);
-  metas.forEach((m) => (m.content = CHROME[id]));
+  const color = panel
+    ? getComputedStyle(document.documentElement).getPropertyValue('--surface-chrome').trim()
+    : '';
+  metas.forEach((meta) => {
+    meta.content =
+      color ||
+      (theme === 'system'
+        ? meta.media.includes('light')
+          ? CHROME.bondi
+          : CHROME.daintree
+        : CHROME[THEME_IDS[theme]]);
+  });
+}
+
+export function applyTheme(theme: Theme): void {
+  const root = document.documentElement;
+  if (theme === 'system') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', THEME_IDS[theme]);
+  syncThemeColor(theme);
 }

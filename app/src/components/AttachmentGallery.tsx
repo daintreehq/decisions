@@ -56,10 +56,12 @@ export function AttachmentGallery({
   view,
   onReview,
   handleRef,
+  onFocusChange,
 }: {
   view: QuestionView;
   onReview: (s: ReviewState) => void;
   handleRef?: Ref<GalleryHandle>;
+  onFocusChange?: (open: boolean) => void;
 }) {
   const uid = useId();
   const attachments = view.content?.attachments;
@@ -107,6 +109,7 @@ export function AttachmentGallery({
   /* ---------- layers ---------- */
   const [viewer, setViewer] = useState(false);
   const [compare, setCompare] = useState<Side | null>(null);
+  useEffect(() => onFocusChange?.(viewer || compare !== null), [viewer, compare, onFocusChange]);
   const [allFiles, setAllFiles] = useState(false);
   const [question, setQuestion] = useState(false);
   // Each is a history layer: Back closes the topmost. Closing by state unwinds its entry silently, and moving
@@ -262,7 +265,7 @@ export function AttachmentGallery({
   const tabId = (i: number) => `${uid}-tab-${i}`;
 
   return (
-    <section className="fx-files" aria-labelledby={`${uid}-h`}>
+    <section className="fx-files" data-pair={switcher || undefined} aria-labelledby={`${uid}-h`}>
       {/* The count is in the meta row ("1 of 2"), and All files ends the strip, so the heading is for assistive
           tech only: the stage starts right under the question. */}
       <h2 className="sr-only" id={`${uid}-h`}>

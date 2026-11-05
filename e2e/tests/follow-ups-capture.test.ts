@@ -422,7 +422,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     await page.locator('dialog.sidebar-sheet[open]').waitFor({ timeout: 10_000 });
     await page
       .locator('dialog.sidebar-sheet[open] .side-q', { hasText: 'Which retry limit' })
-      .locator('.side-q-dot[data-on]')
+      .locator('.side-q-state .agent-state[data-tone="waiting"]')
       .waitFor({ timeout: 10_000 });
     await shot('f-sidebar-light');
     await page.keyboard.press('Escape');

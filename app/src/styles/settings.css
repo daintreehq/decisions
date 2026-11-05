@@ -609,25 +609,17 @@ input.s-switch:disabled {
   color: var(--text-2);
 }
 /* While dirty the bar stays in view at the foot of the screen, lifted, with the modified marker. */
-.s-savebar.dirty {
+.s-save-dock.dirty {
   position: sticky;
   bottom: calc(var(--safe-b) + 12px);
   z-index: 5;
+  isolation: isolate;
+}
+.s-save-dock.dirty .s-savebar {
+  margin-bottom: 0;
   background: var(--surface-raised);
   border-color: var(--line-strong);
   box-shadow: var(--shadow-2);
-}
-/* The page's own field fills the gap under the lifted bar, so the card it floats over never shows beneath it. */
-.s-savebar.dirty::after {
-  content: '';
-  position: absolute;
-  /* Out past the bar's own 1 px border, so the card's edges beneath don't show either side of it. */
-  left: -2px;
-  right: -2px;
-  top: 100%;
-  height: calc(var(--safe-b) + 13px);
-  background: var(--surface-page);
-  pointer-events: none;
 }
 .s-savebar.dirty .s-savebar-status {
   color: var(--text);
@@ -966,4 +958,14 @@ input.s-switch:disabled {
   padding: 12px 20px 20px;
   background: var(--surface-dialog);
   border-top: 1px solid var(--line-subtle);
+}
+
+/* Mask the form behind the lifted save bar, with the raised card painted above the mask. */
+.s-save-dock.dirty::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: -20px -2px calc(-1 * (var(--safe-b) + 13px));
+  background: linear-gradient(to bottom, transparent, var(--surface-page) 20px);
+  pointer-events: none;
 }

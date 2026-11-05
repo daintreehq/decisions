@@ -15,6 +15,8 @@ import { NavGlyph } from '../components/NavGlyphs.js';
 import { SearchField, useDebounced } from '../components/navigator/SearchField.js';
 import { StatusGlyph } from '../components/navigator/StatusGlyph.js';
 import { SafeText } from '../components/SafeText.js';
+import { useSwipeClose } from '../components/useSwipeClose.js';
+import { useDialogMotion } from '../components/useDialogMotion.js';
 import {
   closedLine,
   groupByDay,
@@ -178,14 +180,17 @@ function RecordSheet({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const open = !!v;
+  const previous = useRef(v);
+  if (v) previous.current = v;
+  const present = useDialogMotion(ref, open);
+  const shown = present ? (v ?? previous.current) : undefined;
+  const swipe = useSwipeClose(ref, 'right', onClose);
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) {
-      d.showModal();
+    if (open) {
       d.querySelector<HTMLElement>('.record-q')?.focus({ preventScroll: true });
     }
-    if (!open && d.open) d.close();
   }, [open]);
   return (
     <dialog
@@ -197,7 +202,9 @@ function RecordSheet({
         onClose();
       }}
     >
-      {v && <Record v={v} now={now} sheet onClose={onClose} />}
+      <div style={{ height: '100%' }} {...swipe}>
+        {shown && <Record v={shown} now={now} sheet onClose={onClose} />}
+      </div>
     </dialog>
   );
 }

@@ -1,0 +1,128 @@
+/* The root snapshot is the viewport, not the document-height shell. Freeze its geometry: the browser's
+ * default group animation would otherwise interpolate different page sizes and make the chat appear to scale. */
+html[data-page-motion]::view-transition-group(root) {
+  animation: none;
+  width: var(--motion-width, 100vw);
+  height: var(--motion-height, 100dvh);
+  transform: none;
+}
+html[data-page-motion]::view-transition-old(root),
+html[data-page-motion]::view-transition-new(root) {
+  width: 100%;
+  height: 100%;
+  mix-blend-mode: normal;
+  animation-duration: var(--dur-canvas);
+  animation-timing-function: var(--ease-canvas);
+  animation-fill-mode: both;
+}
+html[data-page-motion='forward']::view-transition-old(root) {
+  animation-name: page-recede;
+}
+html[data-page-motion='forward']::view-transition-new(root) {
+  animation-name: page-enter;
+}
+html[data-page-motion='back']::view-transition-old(root) {
+  z-index: 2;
+  animation-name: page-leave;
+}
+html[data-page-motion='back']::view-transition-new(root) {
+  animation-name: page-return;
+}
+html[data-page-motion='fade']::view-transition-old(root) {
+  animation: page-fade-out 160ms ease-out both;
+}
+html[data-page-motion='fade']::view-transition-new(root) {
+  animation: page-fade-in 200ms ease-out both;
+}
+@keyframes page-enter {
+  from {
+    transform: translateX(100vw);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes page-recede {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-18vw);
+  }
+}
+@keyframes page-leave {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100vw);
+  }
+}
+@keyframes page-return {
+  from {
+    transform: translateX(-18vw);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes page-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+/* Sheets keep their contents until the exit ends, including when Back dismisses them. */
+.sheet,
+.nav-sheet {
+  transition:
+    transform 200ms var(--ease-canvas),
+    opacity 200ms ease-out;
+}
+.sheet[data-closing],
+.nav-sheet[data-closing] {
+  transform: translateY(32px);
+  opacity: 0;
+}
+.sheet::backdrop,
+.nav-sheet::backdrop {
+  transition: opacity 200ms ease-out;
+}
+.sheet[data-closing]::backdrop,
+.nav-sheet[data-closing]::backdrop {
+  opacity: 0;
+}
+@media (min-width: 45em) {
+  .nav-sheet[data-closing] {
+    transform: translateX(-32px);
+  }
+  .sheet[data-closing] {
+    transform: translateY(8px);
+  }
+}
+/* Desktop columns keep their positions; only their changed pixels crossfade. */
+@media (min-width: 68.75em) {
+  html[data-page-motion]::view-transition-old(root) {
+    animation: page-fade-out 120ms ease-out both;
+  }
+  html[data-page-motion]::view-transition-new(root) {
+    animation: page-fade-in 180ms ease-out both;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-duration: 1ms !important;
+  }
+}

@@ -1160,3 +1160,20 @@
   line-height: 1;
   padding-top: 1px;
 }
+
+.nav-sheet-head,
+.filter-sheet-head {
+  cursor: default;
+}
+@media (max-width: 44.999em) {
+  .nav-sheet[data-closing],
+  .filter-sheet[data-closing] {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  .filter-sheet {
+    transition:
+      transform 200ms var(--ease-canvas),
+      opacity 200ms ease-out;
+  }
+}
