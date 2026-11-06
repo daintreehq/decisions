@@ -1,8 +1,8 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type Page } from 'playwright-core';
+import { chromium, webkit, type Browser, type Page } from 'playwright-core';
 import {
   DecisionsBridge,
   FileKeyStore,
@@ -18,8 +18,10 @@ import {
 } from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
-const PORT = 8823;
+const PORT = Number(process.env.SIDEBAR_E2E_PORT ?? 8823);
 const chromiumPath = findChromium();
+const browserEngine = process.env.E2E_BROWSER === 'webkit' ? webkit : chromium;
+const motionDir = process.env.MOTION_CAPTURE_DIR;
 
 class Sink implements TerminalSink {
   async locate(o: QuestionOrigin): Promise<LocateResult> {
@@ -82,12 +84,19 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     until(async () => (await sheet().count()) === 0, 10_000, 'the sidebar to close');
 
   beforeAll(async () => {
+    if (motionDir) mkdirSync(motionDir, { recursive: true });
     relay = await startRelay(PORT);
-    browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
+    browser = await browserEngine.launch({
+      ...(browserEngine === chromium ? { executablePath: chromiumPath! } : {}),
+      headless: true,
+    });
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
-      serviceWorkers: 'allow',
+      // WebKit's test runner can lose its network process during worker-controlled reloads. These checks
+      // exercise navigation and gestures; Chromium's full suite also exercises the service worker.
+      serviceWorkers: browserEngine === webkit ? 'block' : 'allow',
       hasTouch: true,
+      ...(motionDir ? { recordVideo: { dir: motionDir, size: { width: 390, height: 844 } } } : {}),
     });
     page = await context.newPage();
 
@@ -150,6 +159,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
 
   afterAll(async () => {
     await bridge?.stop?.();
+    for (const context of browser?.contexts() ?? []) await context.close();
     await browser?.close();
     await relay?.stop();
   });
@@ -185,7 +195,7 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     await menu().waitFor();
     expect(await menu().getAttribute('aria-expanded')).toBe('false');
     await openSidebar();
-    const dialog = page.getByRole('dialog', { name: 'Daintree' });
+    const dialog = page.getByRole('dialog', { name: 'Menu' });
     await dialog.waitFor();
     expect(
       await page.evaluate(() => !!document.activeElement?.closest('dialog.sidebar-sheet')),
@@ -237,6 +247,225 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     await closed();
   });
 
+  it('reveals stationary navigation beneath the displaced conversation canvas', async () => {
+    await page.goto(relay.origin + `/q/${ids.newer}`);
+    await page.locator('.ws .dock').waitFor();
+    const draft = page.locator('.composer-input');
+    await draft.fill('Keep this draft while browsing recent questions.');
+    await openSidebar();
+    await until(
+      async () =>
+        page.evaluate(() => {
+          const frame = document.querySelector('.frame')!.getBoundingClientRect();
+          const side = document.querySelector('.side-sheet-body')!.getBoundingClientRect();
+          return Math.abs(frame.left - side.width) < 1 && side.left === 0;
+        }),
+      5000,
+      'the foreground canvas to uncover the sidebar',
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          getComputedStyle(document.querySelector('.sidebar-sheet')!, '::backdrop').backgroundColor,
+      ),
+    ).toBe('rgba(0, 0, 0, 0)');
+    expect(
+      await page.locator('.shell').evaluate((el) => getComputedStyle(el).backgroundColor),
+    ).toBe(
+      await page.locator('.side-sheet-body').evaluate((el) => getComputedStyle(el).backgroundColor),
+    );
+    if (motionDir) await page.screenshot({ path: join(motionDir, 'sidebar-corner.png') });
+    // The exposed edge belongs to the conversation; tapping it returns to the same live draft.
+    await page.mouse.click(380, 420);
+    await closed();
+    expect(await draft.inputValue()).toBe('Keep this draft while browsing recent questions.');
+    expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(0);
+    await draft.fill('');
+  });
+
+  it('carries the sidebar paint through the top safe area while keeping controls below it', async () => {
+    await page.goto(relay.origin + '/');
+    await menu().waitFor();
+    await page.evaluate(() => {
+      document.documentElement.style.setProperty('--safe-t', '59px');
+      document.documentElement.style.setProperty('--safe-b', '34px');
+    });
+    try {
+      for (const colorScheme of ['dark', 'light'] as const) {
+        await page.emulateMedia({ colorScheme });
+        await openSidebar();
+        await until(
+          async () =>
+            // The sidebar is min(82vw, 360px): 319.8px on a 390px phone.
+            page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left > 319),
+          5000,
+          'the sidebar to reveal',
+        );
+        const paint = await page.evaluate(() => {
+          const root = getComputedStyle(document.documentElement);
+          const side = document.querySelector<HTMLElement>('.side-sheet-body')!;
+          return {
+            document: root.backgroundColor,
+            sidebar: getComputedStyle(side).backgroundColor,
+            split: root.backgroundImage,
+            body: getComputedStyle(document.body).backgroundColor,
+            top: side.getBoundingClientRect().top,
+            titleTop: side.querySelector('.side-name')!.getBoundingClientRect().top,
+            menuTop: document.querySelector('.menu-fab')!.getBoundingClientRect().top,
+          };
+        });
+        expect(paint.document).toBe(paint.sidebar);
+        expect(paint.split).toContain('linear-gradient');
+        expect(paint.body).toBe('rgba(0, 0, 0, 0)');
+        expect(paint.top).toBe(0);
+        expect(paint.titleTop).toBeGreaterThan(59);
+        expect(paint.menuTop).toBeGreaterThanOrEqual(59);
+        if (motionDir)
+          await page.screenshot({ path: join(motionDir, `safe-area-${colorScheme}.png`) });
+        await page.keyboard.press('Escape');
+        await closed();
+        expect(
+          await page.locator('html').evaluate((el) => getComputedStyle(el).backgroundImage),
+        ).toBe('none');
+      }
+    } finally {
+      await page.evaluate(() => {
+        document.documentElement.style.removeProperty('--safe-t');
+        document.documentElement.style.removeProperty('--safe-b');
+      });
+      await page.emulateMedia({ colorScheme: 'light' });
+    }
+  });
+
+  it('slides viewport-sized snapshots without scaling when the outgoing page is taller', async () => {
+    await page.goto(relay.origin + '/');
+    await page.locator('main .qrow').first().waitFor();
+    await page.locator('.questions-page').evaluate((el) => {
+      (el as HTMLElement).style.minHeight = '1800px';
+    });
+    await page.evaluate(() => {
+      type Sample = {
+        width: number;
+        height: number;
+        a: number;
+        b: number;
+        c: number;
+        d: number;
+        x: number;
+        y: number;
+      };
+      const root = document.documentElement;
+      const output: Sample[] = [];
+      (window as unknown as { slideFrames: Sample[] }).slideFrames = output;
+      const sample = () => {
+        const group = getComputedStyle(root, '::view-transition-group(root)');
+        const incoming = getComputedStyle(root, '::view-transition-new(root)');
+        if (incoming.animationName === 'page-enter') {
+          const matrix = new DOMMatrix(
+            incoming.transform === 'none' ? undefined : incoming.transform,
+          );
+          output.push({
+            width: parseFloat(group.width),
+            height: parseFloat(group.height),
+            a: matrix.a,
+            b: matrix.b,
+            c: matrix.c,
+            d: matrix.d,
+            x: matrix.e,
+            y: matrix.f,
+          });
+        }
+        if (root.dataset.pageMotion) requestAnimationFrame(sample);
+      };
+      const observer = new MutationObserver(() => {
+        if (root.dataset.pageMotion === 'forward') {
+          observer.disconnect();
+          requestAnimationFrame(sample);
+        }
+      });
+      observer.observe(root, { attributes: true, attributeFilter: ['data-page-motion'] });
+    });
+    await page.locator('main .qrow').first().click();
+    await page.locator('.ws .dock').waitFor();
+    await until(
+      async () => page.evaluate(() => !document.documentElement.dataset.pageMotion),
+      5000,
+      'the slide to finish',
+    );
+    const frames = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            slideFrames: {
+              width: number;
+              height: number;
+              a: number;
+              b: number;
+              c: number;
+              d: number;
+              x: number;
+              y: number;
+            }[];
+          }
+        ).slideFrames,
+    );
+    expect(frames.length).toBeGreaterThan(3);
+    for (const frame of frames) {
+      expect(frame.width).toBeCloseTo(390, 0);
+      expect(frame.height).toBeCloseTo(844, 0);
+      expect([frame.a, frame.b, frame.c, frame.d, frame.y]).toEqual([1, 0, 0, 1, 0]);
+    }
+    expect(frames.some((frame) => frame.x > 40 && frame.x < 350)).toBe(true);
+    if (motionDir) await page.screenshot({ path: join(motionDir, 'compact-composer.png') });
+  });
+
+  it('animates question navigation in both directions and honors reduced motion', async () => {
+    await page.goto(relay.origin + '/');
+    await page.locator('main .qrow').first().waitFor();
+    await page.evaluate(() => {
+      const root = document.documentElement;
+      (window as unknown as { routeMotions: string[] }).routeMotions = [];
+      new MutationObserver(() => {
+        if (root.dataset.pageMotion)
+          (window as unknown as { routeMotions: string[] }).routeMotions.push(
+            root.dataset.pageMotion,
+          );
+      }).observe(root, { attributes: true, attributeFilter: ['data-page-motion'] });
+    });
+    await page.locator('main .qrow').first().click();
+    await page.locator('.ws .dock').waitFor();
+    await page.goBack();
+    await page.waitForURL((u) => u.pathname === '/');
+    await until(
+      async () => page.evaluate(() => !document.documentElement.dataset.pageMotion),
+      5000,
+      'route motion to finish',
+    );
+    expect(
+      await page.evaluate(() => (window as unknown as { routeMotions: string[] }).routeMotions),
+    ).toEqual(expect.arrayContaining(['forward', 'back']));
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    try {
+      await page.evaluate(() => {
+        (window as unknown as { routeMotions: string[] }).routeMotions = [];
+      });
+      await page.locator('main .qrow').first().click();
+      await page.locator('.ws .dock').waitFor();
+      await openSidebar();
+      await page.keyboard.press('Escape');
+      await closed();
+      expect(await page.locator('.frame').evaluate((el) => el.getBoundingClientRect().left)).toBe(
+        0,
+      );
+      expect(
+        await page.evaluate(() => (window as unknown as { routeMotions: string[] }).routeMotions),
+      ).toEqual([]);
+    } finally {
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+    }
+  });
+
   it('closes on Back before it navigates, on the dimmed edge, and on a left swipe', async () => {
     await page.goto(relay.origin + '/');
     await openSidebar();
@@ -281,6 +510,108 @@ describe.skipIf(!chromiumPath)('the app shell: a menu button and a sidebar, no b
     });
     await closed();
     expect(new URL(page.url()).pathname).toBe('/');
+  });
+
+  it('opens drawers with canvas swipes while leaving controls and vertical scrolling alone', async () => {
+    await page.goto(relay.origin + `/q/${ids.newer}`);
+    await page.locator('.ws .dock').waitFor();
+    const swipe = async (x: number, y: number, dx: number, dy = 0) => {
+      if (browserEngine === chromium) {
+        // Native touch dispatch also exercises touch-action and the browser's gesture arbitration.
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+        for (let n = 1; n <= 8; n++) {
+          await cdp.send('Input.dispatchTouchEvent', {
+            type: 'touchMove',
+            touchPoints: [{ x: x + (dx * n) / 8, y: y + (dy * n) / 8 }],
+          });
+          await page.waitForTimeout(16);
+        }
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await cdp.detach();
+      } else {
+        await page.evaluate(
+          async ({ x, y, dx, dy }) => {
+            const target = document.elementFromPoint(x, y)!;
+            const fire = (type: string, n: number) => {
+              const event = new Event(type, { bubbles: true, cancelable: true });
+              Object.defineProperty(event, 'touches', {
+                value:
+                  type === 'touchend'
+                    ? []
+                    : [{ clientX: x + (dx * n) / 8, clientY: y + (dy * n) / 8 }],
+              });
+              target.dispatchEvent(event);
+            };
+            fire('touchstart', 0);
+            for (let n = 1; n <= 8; n++) {
+              fire('touchmove', n);
+              await new Promise((r) => setTimeout(r, 16));
+            }
+            fire('touchend', 8);
+          },
+          { x, y, dx, dy },
+        );
+      }
+    };
+    const field = page.locator('.dock textarea');
+    await field.fill('Preserve my answer');
+    const box = (await field.boundingBox())!;
+    await swipe(box.x + 10, box.y + 10, 100);
+    expect(await sheet().count()).toBe(0);
+    await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    await swipe(70, 180, 12, 120);
+    expect(await sheet().count()).toBe(0);
+    await swipe(70, 180, 180);
+    await sheet().waitFor();
+    await page.keyboard.press('Escape');
+    await closed();
+    await swipe(280, 180, -180);
+    await page.locator('dialog.term-drawer[open]').waitFor();
+    await page.keyboard.press('Escape');
+    await until(
+      async () => (await page.locator('dialog.term-drawer[open]').count()) === 0,
+      5000,
+      'terminal to close',
+    );
+    expect(await field.inputValue()).toBe('Preserve my answer');
+    await page.goto(relay.origin + '/settings/appearance');
+    await page.getByRole('heading', { name: 'Appearance', exact: true }).waitFor();
+    expect(await menu().count()).toBe(0);
+    await swipe(90, 95, 180);
+    await page.waitForURL((u) => u.pathname === '/settings');
+    await menu().waitFor();
+  });
+
+  it('hides background chrome and dismisses bottom sheets from their headers', async () => {
+    await page.goto(relay.origin + '/');
+    await page.getByRole('button', { name: 'Filter questions', exact: true }).click();
+    await page.locator('dialog.filter-sheet[open]').waitFor();
+    expect(await menu().isVisible()).toBe(false);
+    await page.locator('.filter-sheet .filter-sheet-head').evaluate(async (header) => {
+      const fire = (type: string, y: number) =>
+        header.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            pointerId: 9,
+            pointerType: 'touch',
+            clientX: 150,
+            clientY: y,
+          }),
+        );
+      fire('pointerdown', 400);
+      for (let y = 420; y <= 650; y += 30) {
+        fire('pointermove', y);
+        await new Promise((r) => setTimeout(r, 16));
+      }
+      fire('pointerup', 650);
+    });
+    await until(
+      async () => (await page.locator('dialog.filter-sheet[open]').count()) === 0,
+      5000,
+      'filters to close',
+    );
+    expect(await menu().isVisible()).toBe(true);
   });
 
   it('is a persistent column with no menu button at 1100px and up', async () => {

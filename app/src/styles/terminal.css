@@ -1,6 +1,6 @@
 /* ---------- the asking agent's terminal (TerminalDrawer.tsx) ----------
  * The chat header's terminal button, and the drawer it opens: a modal panel from the right below 1100px (the
- * sidebar's mirror image, over the dimmed chat), a column beside the chat from 1100px. The lines sit on Daintree's
+ * sidebar's mirror image, beneath the displaced chat), a column beside the chat from 1100px. The lines sit on Daintree's
  * terminal surface, dark in both themes.
  */
 
@@ -33,70 +33,44 @@
     0 0 0 2px var(--surface-chrome);
 }
 
-/* ---------- the drawer (below 1100px) ---------- */
+/* ---------- the right-hand underlay (below 1100px), mirroring the sidebar ---------- */
 .term-drawer {
   position: fixed;
-  inset: 0 0 0 auto;
-  width: min(85vw, 440px);
+  inset: 0;
+  width: 100%;
   max-width: none;
   height: 100dvh;
   max-height: none;
   margin: 0;
   padding: 0;
   border: 0;
-  /* The hairline keeps the panel's edge on a dimmed dark page, where the shadow cannot. */
-  border-left: 1px solid var(--line-strong);
-  border-radius: var(--radius-sheet) 0 0 var(--radius-sheet);
-  background: var(--surface-chrome);
+  background: transparent;
   color: var(--text);
-  box-shadow: var(--shadow-3);
   overflow: hidden;
-  transition: transform var(--dur-exit) var(--ease-exit);
-}
-.term-drawer[open] {
-  animation: term-in var(--dur-enter) var(--ease-enter);
-}
-.term-drawer[data-closing] {
-  transform: translateX(100%);
-}
-.term-drawer[data-dragging] {
-  transition: none;
 }
 .term-drawer::backdrop {
-  background: var(--theme-scrim-strong);
-  backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
-  animation: side-fade var(--dur-enter) var(--ease-enter);
-  transition: opacity var(--dur-exit) var(--ease-exit);
+  background: transparent;
 }
-.term-drawer[data-closing]::backdrop {
-  opacity: 0;
-}
-@keyframes term-in {
-  from {
-    transform: translateX(100%);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .term-drawer {
-    transition: opacity var(--dur-exit) var(--ease-out);
-  }
-  .term-drawer[open] {
-    animation-name: side-fade;
-  }
-  .term-drawer[data-closing] {
-    transform: none;
-    opacity: 0;
-  }
+.term-drawer .term-panel-body {
+  width: var(--drawer-width);
+  margin-left: auto;
+  background: var(--surface-chrome);
+  /* The panel stays still while the chat moves left, revealing it from the screen's right edge. */
+  clip-path: inset(0 0 0 max(0px, calc(var(--drawer-width) - var(--terminal-offset))));
 }
 
 /* ---------- the column beside the chat (1100px and up) ---------- */
+/* The column's share is of the workspace, not the window: beside Home's list at 1280px the workspace is about 540px,
+   and a 30vw column left the chat a 150px strip. The chat keeps at least half. */
 .ws[data-terminal='docked'] {
-  grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 440px);
+  grid-template-columns: minmax(0, 1fr) clamp(260px, 40%, 440px);
 }
 .ws > .term-dock {
   grid-row: 1 / 4;
   grid-column: 2;
+  /* Above the chat column, so a header slot that overflows a narrow chat tucks under the column's edge. */
+  position: relative;
+  z-index: 1;
   display: flex;
   min-height: 0;
   border-left: 1px solid var(--line);
@@ -126,10 +100,19 @@
   padding: 6px 6px 6px 20px;
   border-bottom: 1px solid var(--line);
 }
+.term-drawer .term-head {
+  min-height: 72px;
+  padding: 20px 8px 16px 20px;
+  border-bottom: 0;
+}
+.term-drawer .term-title:not(:has(.sr-only)) {
+  font-size: 1.25rem;
+  line-height: 28px;
+}
 .term-dock .term-head {
-  /* Level with the chat header beside it. */
+  /* Level with the chat header beside it; a title that wraps in a narrow column keeps a little air above and below. */
   min-height: 52px;
-  padding-block: 0;
+  padding-block: 4px;
 }
 .term-titles {
   display: flex;
@@ -161,11 +144,6 @@
 .term-title:focus {
   outline: none;
 }
-.term-title:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
 .term-status {
   flex: none;
   display: flex;
@@ -187,8 +165,10 @@
   font-size: var(--text-md);
   line-height: 24px;
 }
-/* The row mark keeps its words on one line; here the longer drawer words may wrap beside the dot. */
+/* The row mark keeps its words on one line; here the longer drawer words may wrap beside the dot. The 8px gap puts
+   the words on the same column as the freshness line and note under them. */
 .term-state.agent-state {
+  gap: 8px;
   white-space: normal;
   align-items: first baseline;
 }
@@ -209,6 +189,8 @@
   color: var(--text-2);
   /* Under the state's words, not under its dot (an 8 px dot and its 8 px gap). */
   padding-left: 16px;
+  /* The age ticks every second; fixed-width digits keep "s ago" from shuffling sideways. */
+  font-variant-numeric: tabular-nums;
 }
 .term-stale {
   font-weight: 600;
@@ -225,9 +207,10 @@
   text-wrap: pretty;
 }
 
-/* Refresh sits beside the freshness it changes. Busy, it says so and spins; it never fades. */
+/* Refresh sits beside the freshness it changes. Busy, it says so and spins; it never fades. One glyph stays in place
+   while only the word changes, so nothing under the finger moves on the tap. */
 .term-refresh {
-  gap: 0;
+  gap: 6px;
   min-height: var(--tap-min);
   padding: 0 10px;
   font-size: var(--text-sm);
@@ -235,29 +218,28 @@
   color: var(--text);
   white-space: nowrap;
 }
+/* When a narrow column puts Refresh on its own row, its glyph lands on the words' column above (20 + 6 + 10 = 36). */
+.term-status .term-refresh {
+  margin-left: 6px;
+}
 .term-refresh-label {
   display: grid;
 }
 .term-refresh-label > span {
   grid-area: 1 / 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  /* In the status row the face sits flush right, on the Close glyph's edge; under an empty state, centred. */
-  justify-self: end;
+  justify-self: start;
   visibility: hidden;
-}
-.term-empty .term-refresh-label > span {
-  justify-self: center;
 }
 .term-refresh-label > span[data-on] {
   visibility: visible;
 }
-.term-refresh[aria-disabled='true'] {
+/* Asking keeps the quiet button's own secondary text: the words carry the state, so they never step down to muted. */
+.btn.term-refresh[aria-disabled='true'] {
   opacity: 1;
   cursor: default;
+  color: var(--text-2);
 }
-.term-refresh[data-busy] [data-on] svg {
+.term-refresh[data-busy] svg {
   animation: term-spin 900ms linear infinite;
 }
 @keyframes term-spin {
@@ -266,7 +248,7 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .term-refresh[data-busy] [data-on] svg {
+  .term-refresh[data-busy] svg {
     animation: none;
   }
 }
@@ -278,12 +260,57 @@
   overflow: auto;
   overscroll-behavior: contain;
   margin: 0 8px calc(8px + var(--safe-b));
-  padding: 10px 12px;
+  /* With the 1px edge, the text starts on the drawer's 20px column (8 + 1 + 11). */
+  padding: 9px 11px;
+  /* The edge carries the surface on Daintree, where the terminal is the canvas's own near-black. A border, not an
+     inset ring, so scrolled lines and the cues inside never draw over it. */
+  border: 1px solid var(--line-default);
   border-radius: var(--radius-lg);
   background: var(--term-bg);
   color: var(--term-fg);
-  /* The edge carries the surface on Daintree, where the terminal is the canvas's own near-black. */
-  box-shadow: inset 0 0 0 1px var(--line-default);
+}
+/* In the modal drawer the card runs to the panel's foot, a terminal pane the height of the canvas beside it (the
+   sidebar's mirror); beside the chat it stays as tall as its lines. */
+.term-drawer .term-screen {
+  flex: 1 1 auto;
+}
+/* More above (older lines) or below (newer, once the reader has scrolled up): the card's own surface veils the edge
+   row, inside the card, so its corners and edge stay whole. Shown only while there is more that way. */
+.term-screen::before,
+.term-screen::after {
+  content: '';
+  position: sticky;
+  z-index: 1;
+  display: block;
+  /* Solid across the card's 9px padding, so a row scrolled into it is cut cleanly at the text's edge, then an 18px
+     fade over the first row inside. */
+  height: 27px;
+  pointer-events: none;
+  visibility: hidden;
+}
+.term-screen::before {
+  top: -9px;
+  margin: -9px 0 -18px;
+  background: linear-gradient(var(--term-bg) 9px, transparent);
+}
+.term-screen::after {
+  bottom: -9px;
+  margin: -18px 0 -9px;
+  background: linear-gradient(transparent, var(--term-bg) calc(100% - 9px));
+}
+.term-screen[data-scrolled]::before,
+.term-screen[data-more-below]::after {
+  visibility: visible;
+}
+/* On Bondi the dark card is its own edge against the sand, and a light hairline around it reads as a halo; the border
+   keeps its width (and the text its column) in the card's own colour. */
+:root[data-theme='bondi'] .term-screen {
+  border-color: var(--term-bg);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .term-screen {
+    border-color: var(--term-bg);
+  }
 }
 .term-screen:focus {
   outline: none;
@@ -318,8 +345,9 @@
 .term-frame {
   display: flex;
   white-space: pre;
-  /* The font's own line height, so a box's sides join from row to row as they do in a terminal. */
-  line-height: 1.32;
+  /* Box-drawing glyphs come from the fallback monospace face (the self-hosted JetBrains Mono subset has none): its
+     sides only join from row to row at a line height no taller than that face's glyphs, as they do in a terminal. */
+  line-height: 1.15;
   min-height: 0;
   /* Its own leading spaces place it; no hanging indent. */
   padding-left: 0;
@@ -332,6 +360,14 @@
 }
 .term-frame-end {
   flex: none;
+}
+/* Words wrap whole (a path never splits at its hyphen); a word too long for any row (a URL, a deep path) breaks where
+   the row ends, starting on its marker's row. */
+.term-word {
+  white-space: nowrap;
+}
+.term-long {
+  word-break: break-all;
 }
 /* A symbol from a fallback font (⎿, ⏺, ✻ …) is held to one column, as a terminal cell would hold it. */
 .term-cell {
@@ -411,7 +447,16 @@
   .ws-terminal-dot .agent-dot {
     box-shadow: none;
   }
+  /* The button's stale ring in system colours (the dot opts out of forced colours, so it names them itself). */
+  .ws-terminal-dot.agent-state[data-fresh='stale'] .agent-dot {
+    background: Canvas;
+    box-shadow: inset 0 0 0 1.5px CanvasText;
+  }
   .term-screen {
     border: 1px solid CanvasText;
+  }
+  /* Forced colours flatten the panel and the chat to one Canvas; an edge keeps the drawer's boundary. */
+  .term-drawer .term-panel-body {
+    border-left: 1px solid CanvasText;
   }
 }

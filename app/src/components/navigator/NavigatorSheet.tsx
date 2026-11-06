@@ -1,10 +1,13 @@
 import { useEffect, useId, useRef } from 'react';
 import { useLayer } from '../../app/layers.js';
+import { setQuestions } from '../../app/listState.js';
 import { closeNavigator, openNavigator, useNavigatorOpen } from '../../app/navigator.js';
 import { Link } from '../../app/router.js';
 import { CloseIcon } from '../Icons.js';
 import { HistoryGlyph, SettingsGlyph } from '../NavGlyphs.js';
 import { NavigatorPanel } from './Navigator.js';
+import { useDialogMotion } from '../useDialogMotion.js';
+import { useSwipeClose } from '../useSwipeClose.js';
 
 let wantSearch = false;
 
@@ -32,12 +35,13 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
   const dismiss = useLayer(open, closeNavigator);
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const present = useDialogMotion(ref, open);
+  const swipe = useSwipeClose(ref, 'down', dismiss);
 
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) {
-      d.showModal();
+    if (open) {
       const target =
         (wantSearch && d.querySelector<HTMLElement>('input[type="search"]')) ||
         d.querySelector<HTMLElement>('.qrow[aria-current="page"]') ||
@@ -45,7 +49,6 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
       target?.focus({ preventScroll: !wantSearch });
       wantSearch = false;
     }
-    if (!open && d.open) d.close();
   }, [open]);
 
   return (
@@ -55,15 +58,23 @@ export function NavigatorSheet({ currentId }: { currentId?: string }) {
       aria-labelledby={titleId}
       onCancel={(e) => {
         e.preventDefault();
+        // Escape clears a query before it closes anything, wherever focus is in the sheet (the search, or a result
+        // reached from it with the arrow keys), and puts focus back in the search. The next Escape closes.
+        const field = ref.current?.querySelector<HTMLInputElement>('input[type="search"]');
+        if (field && field.value) {
+          setQuestions({ query: '' });
+          field.focus();
+          return;
+        }
         dismiss();
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      {open && (
+      {present && (
         <div className="nav-sheet-body">
-          <header className="nav-sheet-head">
+          <header className="nav-sheet-head" {...swipe} style={{ touchAction: 'pan-x pinch-zoom' }}>
             <h2 className="sheet-title" id={titleId} tabIndex={-1}>
               Questions &amp; answers
             </h2>

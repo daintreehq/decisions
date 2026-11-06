@@ -13,7 +13,11 @@ export interface RunningRelay {
 }
 
 /** Starts the real Worker (workerd via `wrangler dev`) with a fresh, empty storage directory. */
-export async function startRelay(port: number): Promise<RunningRelay> {
+export async function startRelay(
+  port: number,
+  // E2E_INSPECTOR_PORT keeps a run inside a fixed port range (several design runs share this machine).
+  inspectorPort = Number(process.env.E2E_INSPECTOR_PORT) || port + 1000,
+): Promise<RunningRelay> {
   if (!existsSync(join(ROOT, 'app/dist/index.html'))) {
     throw new Error('app/dist is missing: run `pnpm build` before the end-to-end tests');
   }
@@ -30,7 +34,7 @@ export async function startRelay(port: number): Promise<RunningRelay> {
       '127.0.0.1',
       // Each relay gets its own inspector port so several suites can run side by side.
       '--inspector-port',
-      String(port + 1000),
+      String(inspectorPort),
       '--var',
       `CLAIM_SECRET:${CLAIM_SECRET}`,
       '--persist-to',

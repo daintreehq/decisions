@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Capture } from '../src/features/voice/capture.js';
+import { MicUnavailableError, type Capture } from '../src/features/voice/capture.js';
 import {
   DictationSession,
   type SessionPhase,
@@ -29,6 +29,8 @@ function rig(
   const frames: ArrayBuffer[] = [];
   let onReady: () => void = () => undefined;
   let frameSink: (b: ArrayBuffer) => void = () => undefined;
+  let micFailure: (error: MicUnavailableError) => void = () => undefined;
+  const onFailure = vi.fn();
   const client: VoiceLike & { collected: string } = {
     collected: 'what was said',
     start: () => startGate.promise.then(() => void (opts.readyImmediately !== false && onReady())),
@@ -49,9 +51,11 @@ function rig(
       onFrame: (b: ArrayBuffer) => void,
       _onLevel?: (rms: number) => void,
       _signal?: AbortSignal,
+      onFailure?: (error: MicUnavailableError) => void,
     ) => {
       log.push('startMic');
       frameSink = onFrame;
+      micFailure = onFailure ?? (() => undefined);
       return micGate.promise;
     },
   );
@@ -65,6 +69,7 @@ function rig(
       ...(opts.readyTimeoutMs ? { readyTimeoutMs: opts.readyTimeoutMs } : {}),
       ...(opts.maxQueuedFrames ? { maxQueuedFrames: opts.maxQueuedFrames } : {}),
       onMicLive: () => log.push('micLive'),
+      onFailure,
     },
     (p) => phases.push(p),
   );
@@ -79,11 +84,27 @@ function rig(
     phases,
     client,
     feed: (b: ArrayBuffer) => frameSink(b),
+    failMic: (error: MicUnavailableError) => micFailure(error),
+    onFailure,
     flush: () => new Promise((r) => setTimeout(r, 0)),
   };
 }
 
 describe('dictation session startup races', () => {
+  it('reports a runtime microphone failure, preserves received words, and ignores failures after cancel', async () => {
+    const t = rig();
+    const starting = t.session.start();
+    t.startGate.resolve();
+    t.micGate.resolve(t.mic);
+    await starting;
+    const error = new MicUnavailableError('The microphone disconnected. Try again.');
+    t.failMic(error);
+    expect(t.onFailure).toHaveBeenCalledWith(error);
+    await expect(t.session.finish()).resolves.toBe('what was said');
+    t.session.cancel();
+    t.failMic(error);
+    expect(t.onFailure).toHaveBeenCalledTimes(1);
+  });
   it('goes idle → starting → listening and streams audio', async () => {
     const t = rig();
     const p = t.session.start();

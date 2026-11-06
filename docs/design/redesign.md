@@ -69,7 +69,7 @@ The rules carried over from Daintree (its `.claude/rules/design-system.md` and `
 - **Green is scarce.** Status success (`#6B8D72` on Daintree, `#017249` on Bondi) is only for named outcomes and finite completed steps (delivered, confirmed), never ambient "healthy" chrome.
 - **Status colour sits on the glyph and the tint, never the words.** A status chip is a 10–15% tint of its hue with a coloured icon and neutral text.
 - **Never fade text with alpha.** Step down the hierarchy: primary → secondary → muted. `text-muted` is not for icons or load-bearing text.
-- **Shadows only from tokens**; borders are 1 px hairlines; the input edge is the solid `border-input` token (it owes 3:1).
+- **Shadows only from tokens**; borders are 1 px hairlines; the input edge is the solid `border-input` token (it owes 3:1). The composer pill is the one exception, a raised surface with a hairline edge (§6.1).
 
 ### 2.2 Tokens
 
@@ -254,6 +254,8 @@ Both specs ask for this and it is required for approvals:
 
 Tapping the active preview (or Enlarge) opens the viewer as a **mode of the workspace**, not a modal that makes the dock inert. Top: Close, a short question identity with a **Question** button that reveals the full text in a sheet, the file label and "2 of 4". Centre: the darkest stage with the largest practical area. Near the stage: Previous / Next, zoom −/+ and Fit. Bottom: **the same dock**, including Stop while recording.
 
+**Tap to hide the chrome.** A single tap on the image, at Fit or zoomed, hides the top bar, the tools and the dock (and any other app chrome on screen); another single tap brings them back. The bars slide off their edges briefly, instantly under reduced motion. The stage then fills the whole viewport on the darkest stage colour, edge to edge under the safe areas, while the image area stays exactly where it was: the image keeps its zoom, position and size, and a zoomed image gets the whole screen to run into. The tap counts only once the double-tap window has passed, so a double-tap zooms without the chrome flashing; drags, swipes, pans and pinches never toggle it. Space on the focused stage toggles it from the keyboard, focus never stays on a hidden control, and the change is announced with how to undo it. Every gesture keeps working while hidden, moving to another file keeps it hidden, Escape and Back still close the viewer, and opening the viewer again starts with the chrome shown. While dictation is active, a compact Stop with the recording clock stays on screen.
+
 Gesture ownership (custom zoom and pan only in the viewer and comparison; inline previews stay fitted and the page scrolls normally):
 
 | Input                        | At Fit                                          | Zoomed                                   |
@@ -261,9 +263,11 @@ Gesture ownership (custom zoom and pan only in the viewer and comparison; inline
 | Horizontal swipe in stage    | Previous / next file (one per gesture, no wrap) | Pan; never changes file, even at an edge |
 | Vertical drag in stage       | Nothing (no dismiss)                            | Pan                                      |
 | Pinch                        | Zoom around the midpoint                        | Continue                                 |
+| Single tap / click           | Hide or show the chrome                         | Same                                     |
 | Double-tap / double-click    | Zoom 2.5× into that point                       | Back to Fit                              |
 | Arrow keys (stage focused)   | Left/Right change file                          | Pan                                      |
 | `+` `-` `0` (viewer focused) | Zoom in, out, Fit                               | Same                                     |
+| Space (stage focused)        | Hide or show the chrome                         | Same                                     |
 
 Thresholds to tune on devices: 10 px slop, horizontal intent > 1.3× vertical, commit at one fifth of the stage width or a fast fling. A two-pointer gesture owns input until every pointer lifts. A completed drag suppresses the following click. Zoom is a multiple of Fit up to 8×. Pan is bounded. Zoom and pan are remembered per file for the session and reset when bytes change. A visible **Move** control reveals directional pan buttons so panning never requires dragging.
 
@@ -286,9 +290,12 @@ On phones, one large image at a time with a full-width **Before | After** segmen
 One rounded pill pinned to the bottom of the chat, inside the safe area and above the on-screen keyboard. Resting and empty it is the field ("Type or hold to talk"; "Add a note" beside a choice) and the mic on one row. Once there is something to send it opens into two rows inside the same pill: the field across the top, and an action row with the one reason Send can't send yet (or the quiet save state) at the left, the mic, and **Send answer** / **Send decision** / **Send correction** (contrast button) at the right edge, in the mic's old place. `+` sits at the pill's left (§6.4). All Q&A is gone from the dock: other questions are in the sidebar (the menu button carries the waiting count) and behind Ctrl/⌘ + K.
 
 - **The field** is a real, labelled textarea at 16/24 that grows with its text to about five lines (less with the keyboard up), then scrolls. Return inserts a newline. It never focuses itself because dictation produced text.
-- **The lane** at the pill's top says one thing at a time: Starting microphone…, Recording · 00:24 with Discard, Finishing your words…, Tidying wording… with Use original wording, then (in priority order) a failed save with Retry and Copy, an error, a changed question with Review update, Undo, dictation messages, the cleanup marks, Draft restored.
+- **The lane** at the pill's top says one thing at a time, and only when it needs the width: Recording · 00:24 with Discard, Finishing your words…, Tidying wording…, then (in priority order) a failed save with Retry and Copy, an error, a changed question with Review update, Undo, dictation messages, what was heard at a changed word, Review 2 words. Starting into an empty answer is the field's placeholder, not a lane row.
+- **The slot** on the action row, between `+` and the mic, holds one quiet thing: the reason Send can't send yet, else **Use original wording** (from the moment the tidy-up starts until the passage is edited, so it never moves), else Draft restored, Saving… or Saved on this device. A tidied one-line answer is two rows: the words, then `+` · Use original wording · mic · Send.
+- **Small actions** (Use original wording, Review 2 words, Discard, Retry, Copy, Undo, Try again, Review update) are one bounded neutral chip, 32 px with a 44 px target, never a bare link that could read as part of the answer.
+- **Changed words** after a tidy-up are underlined on the answer itself for 5 s, drawn under the field's own text; placing the caret in one says what was heard there.
 - **Choices** are a row of chips just above the pill, synchronised with the radio cards in the agent's message (which keep the descriptions). One tap picks, another changes; the chosen chip shows its whole label with a check, a raised neutral fill and a text-secondary edge. A correction's chips mark the answer in force.
-- The pill keeps the input boundary token in every state, is concentric with the 46 px buttons it holds, and its focus ring is the field's.
+- The pill is a raised surface with a hairline edge (after the Claude iOS composer, November 2026), not an outlined input: it is the only enclosing input surface on the screen, and its placeholder, `+` and mic identify it. It is concentric with the 46 px buttons it holds (one line of text is exactly their height), and its focus ring is the field's.
 
 ### 6.2 States
 
@@ -297,11 +304,11 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 | Empty, text allowed           | Field and mic on one row                                                                                                             |
 | Choice, nothing chosen        | Chips; field ("Add a note") and mic                                                                                                  |
 | Choice chosen or text entered | Two rows; save state or Send reason; mic; Send                                                                                       |
-| Starting                      | Lane "Starting microphone…"; the mic is Stop with the wait arc                                                                       |
+| Starting                      | The compact bar, the field saying "Starting microphone…"; the mic is Stop with the wait arc                                          |
 | Recording                     | Lane "Recording · 00:24" and Discard; locked words in the field, interim words (two lines at most) beneath them; Stop with the orbit |
-| Finishing, cleaning           | Lane says so; Send not ready                                                                                                         |
+| Finishing, cleaning           | Lane says so; Use original wording in the slot while cleaning; Send not ready                                                        |
 | Answer sent, queued, answered | Follow-ups (§6.3): the pill with "Add a follow-up" and a quiet **Next question** above it                                            |
-| Expired, withdrawn            | The composer gives way to a 60 px **Next question** (or "No more questions need you")                                                |
+| Expired, withdrawn            | The composer gives way to a compact **Next question** at the trailing edge (or "No more questions need you")                         |
 | Conflict                      | "Your answer was not applied. Your words are kept." and **Review change**                                                            |
 | Unreadable, unverified        | The trust explanation, and Next question when there is one                                                                           |
 
@@ -311,7 +318,7 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 
 - The placeholder says what it is: "Add a follow-up", or "Reply to Claude Code" while the agent's latest message waits on a reply. Send reads **Send** (named "Send follow-up" or "Send reply" for assistive tech and in its tooltip), so the save state beside it keeps one line.
 - **Next question** sits just above the pill at its trailing edge, quiet, one tap away; moving on is never automatic.
-- A follow-up becomes an outgoing bubble labelled **Follow-up**, with its own receipt (§10). The person's answer is labelled **Your answer**, and once the question scrolls away the header's second line keeps the answer in force in view ("Your answer: Yes, rename").
+- A follow-up becomes an outgoing bubble labelled **Follow-up**, with its own receipt (§10). The person's answer is labelled **Your answer**, and once the question scrolls away the header's second line keeps the answer in force in view as Home's rows say it ("You: Yes, rename", or "Model: Changed" beside the model's diamond).
 - The agent's messages are incoming bubbles under its name. One that expects a reply carries "Waiting for your reply" beside the amber Needs-you ring.
 - A model answer awaiting review is decided first (Confirm answer or Overrule on its message); the follow-up composer appears after, or at once when the agent is asking something.
 - When the computer that asked doesn't take follow-ups yet, the dock says so above **Next question**.
@@ -327,7 +334,7 @@ One rounded pill pinned to the bottom of the chat, inside the safe area and abov
 - **Sending**: at Send each photo is encrypted on the phone under a fresh attachment id, exactly as a question attachment is, and queued with its answer or follow-up. Before the signed record can commit, each photo is reserved for that record, uploaded and completed; the record is then committed with their ids. A photo whose reservation the relay lost is encrypted again once under a fresh id, and the record signed again.
 - **On the way**: the outgoing bubble shows the photos at once (from this device's own copy, checked as a download would be), each dimmed with a ring that fills as it uploads; the receipt reads "Uploading photo 2 of 3" before the usual steps. An upload that stops keeps the words and photos on screen with a warning badge, "The upload stopped. It will try again." and **Try again**; it retries by itself after 3, 10 and 30 s. Offline they wait with their message ("Queued · Sends when you’re back online").
 - **In the thread**: photos sit above the words in the person's bubble in fixed frames, so nothing moves as they load: one at 4:3, two side by side, three as one large and two small, four as a 2 × 2 grid with 3 px gutters. A tap opens the file viewer (§5.4) on that photo; photos are never evidence for an approval. A photo that can't be fetched or verified shows its state in its frame; photos that disagree with their signed record are not shown at all and the bubble says so.
-- Lists and the header count photos as part of what was said: "You: Keep Canopy · 2 photos", or "Answer: 2 photos".
+- Lists and the header count photos as part of what was said: "You: Keep Canopy · 2 photos", or "You: 2 photos".
 
 Dictation availability changes only the mic: an unconfigured relay says "Dictation isn't set up for this relay"; offline says "Dictation needs a connection". Never a silently disabled icon. The placeholder only promises holding when dictation can start.
 
@@ -357,8 +364,8 @@ Dictation is an input method for the current draft field. It never starts on its
 ### 9.1 Start
 
 1. First tap ever: a compact disclosure naming the speech provider and the cleanup provider, explaining that audio goes through the relay to them and is not end-to-end encrypted, with **Enable and start dictation** and **Keep typing**. Consent is recorded only by that button.
-2. The browser permission prompt follows that tap. Show "Allow microphone access to continue" with Cancel. A permission that resolves after Cancel closes its stream immediately.
-3. **Daintree parity:** open the microphone in parallel with the relay session and queue captured frames (up to 15 s) until the provider is ready, instead of dropping everything said while connecting. Show "Starting microphone…" until the microphone is delivering real audio; only then show Recording. If no audio level arrives within 3 s, say "No sound from your microphone" with help, without stopping.
+2. A tap requests the microphone on release, so the permission prompt cannot cancel its initiating pointer. Show "Allow microphone access to continue" with Cancel. A permission that resolves after Cancel closes its stream immediately. Permission belongs to the browser: Settings explains persistent site allowance where available and the iOS Home Screen relaunch limitation.
+3. **Daintree parity:** open the microphone in parallel with the relay session and queue captured frames (up to 15 s) until the provider is ready, instead of dropping everything said while connecting. Unlock Web Audio before awaiting permission. Allow the person time to answer the prompt; after permission, audio setup and the first frame have an 8 s deadline. Show "Starting microphone…" until the microphone is delivering real audio; only then show Recording. Digital silence can continue with "No sound from your microphone" after 3 s; a pipeline that stops delivering frames for 5 s releases capture with a retry message. Resume interrupted audio contexts while recording, and keep received words if recovery fails.
 
 ### 9.2 While recording
 
@@ -409,7 +416,7 @@ A **Discard** control in the expanded transcript cancels the passage and removes
 | Cleanup failed       | Kept your original wording.                                                          |
 | Storage failed       | Your text is still here but couldn't be saved on this device. Retry · Copy           |
 
-Both gestures work without a setting. **Resolved (issue #43):** tap the mic to start and tap again to stop; press and hold the mic, or the empty resting field, to talk while held. Capture starts on the press, so a hold loses no words; a release after 250 ms stops, a quicker one leaves it running. A cancelled press or a lost pointer always ends what that press started. Holding the field uses a surface over the empty field that is not editable text, so the platform's long-press (caret, callout, magnifier) never fights it; once the caret is in the field, the platform owns every press. Enter and Space toggle the mic, untimed. Release finishes the passage, never sends.
+Both gestures work without a setting. **Resolved (issue #43):** tap the mic to start and tap again to stop. Taps start on release. When the browser reports microphone permission is granted, holding the mic or the empty resting field past 250 ms starts push-to-talk; release, cancellation or a lost pointer ends that hold. With unknown or pending permission, even a long mic press requests access only on release and starts tap-to-dictate; the field says "Type or tap the microphone" and offers ordinary editing. This keeps permission prompts out of an unfinished hold gesture. Holding the field uses a surface over the empty field that is not editable text, so the platform's long-press (caret, callout, magnifier) never fights it; once the caret is in the field, the platform owns every press. Enter and Space toggle the mic, untimed. Release finishes the passage, never sends.
 
 ## 10. Sending and delivery
 
@@ -550,10 +557,23 @@ safe areas, file overlays and the keyboard retain their geometry. It now shares 
 fade into the reading area instead of a bar, divider, blur and floating shadow. Outgoing bubbles keep their neutral
 fill with 20 px corners; model messages retain an explicit provenance label and violet leading rule.
 
-Phone body and input type is 17 px. The composer opens its action row on focus, before the first keystroke, and holds
-that layout while the keyboard is open, including when the draft is cleared. A resize observer keeps the thread's
+Phone body and input type is 17 px. The composer stays on one row on focus and for short answers. It expands when words wrap, photos arrive, or a
+visible notice needs room; clearing the words returns it to the compact bar. Errors stay visible above the field. A resize observer keeps the thread's
 end visible across keyboard and draft height changes only while the person is already following the end.
 
 Interaction timing is 70 ms for small feedback, 120 ms for state changes, 160 ms to enter and 100 ms to exit. Touch
 controls opt into manipulation and show pressed feedback immediately. Pinch zoom and native text selection remain
 available. The 750 ms dictation-to-send protection is unchanged: animation timing must not weaken the send gate.
+
+Short choices (up to three labels of 40 characters with no descriptions) appear once as dock chips. Described or
+longer choices stay as cards in the question; opening a file brings their labels into the dock while the cards are
+covered. Selecting a choice never submits it: Send remains explicit. Inline before/after switching and image actions
+share one row. Touch viewers use a floating compact toolbar, with keyboard-accessible zoom and Move commands under
+More image controls. Comparison switching belongs in its header.
+
+The exposed conversation edge is quiet while either drawer is open, and tapping or swiping it returns to the same
+draft. Canvas swipes open navigation to the left and the terminal to the right, while inputs, images, text selection,
+horizontal strips and vertical scrolling keep their gestures. Settings child pages use their back link and a right
+swipe to return to Settings. Bottom sheets dismiss from a downward header swipe; History records fill the phone
+height and slide from the right. Global floating controls stay hidden behind modal sheets. Root backgrounds carry
+the drawer/canvas colour split through safe areas without fixed background attachment.

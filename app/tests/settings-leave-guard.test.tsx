@@ -107,7 +107,7 @@ describe('quiet hours: unsaved changes are never lost silently', () => {
     expect(location.pathname).toBe('/settings/quiet-hours');
     expect(byLabel('Quiet hours').checked).toBe(true);
     expect(host.textContent).toContain('Couldn’t save to your relay');
-    expect(host.textContent).toContain('Your changes are still here');
+    expect(host.textContent).toContain('They’re still here');
   });
 
   it('browser Back with edits puts the page back and asks', async () => {

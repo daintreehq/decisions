@@ -54,7 +54,7 @@
   margin-bottom: 18px;
 }
 .navigator[data-presentation='sheet'] .nav-tools {
-  padding: 10px 12px 12px;
+  padding: 10px 16px 12px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -93,6 +93,9 @@
 }
 .float-search .search-field input:focus {
   border-color: var(--theme-selection-outline);
+  box-shadow:
+    inset 0 0 0 1px var(--theme-selection-outline),
+    var(--shadow-2);
   background: var(--surface-raised);
 }
 /* A count of active filters on the filter button's shoulder, in contrast ink (never accent). */
@@ -113,12 +116,20 @@
   font-variant-numeric: tabular-nums;
   box-shadow: 0 0 0 2px var(--surface-page);
 }
+/* Filters on: the round button wears the same filter-chip face as the inline one, so a filter stays plain on the
+   button itself once its chip has scrolled away. */
+.float-tools .float-btn[data-active] {
+  background: var(--theme-filter-selected-bg-strong);
+  box-shadow:
+    var(--shadow-2),
+    inset 0 0 0 1px var(--text-2);
+}
 /* The list starts just below the button row. */
 .navigator[data-tools='floating'] .nav-scroll {
   padding-top: calc(var(--fab-size) + 12px);
 }
-/* A section reached by a jump lands below the round buttons, not under them. */
-.navigator[data-tools='floating'] .qgroup {
+/* A section reached by a jump, or a row or control reached by the keyboard, lands below the round buttons. */
+.navigator[data-tools='floating'] :is(.qgroup, .qrow, .fchip, .jump-link, .qgroup-sort select) {
   scroll-margin-top: calc(var(--fab-y) + var(--fab-size) + 12px);
 }
 
@@ -160,6 +171,8 @@
 .search-field input:focus {
   outline: none;
   border-color: var(--theme-selection-outline);
+  /* A 2px neutral edge, so focus reads at a glance (as the active filter and facet edges do), still no accent. */
+  box-shadow: inset 0 0 0 1px var(--theme-selection-outline);
   background: color-mix(in oklab, var(--surface-page) 100%, var(--text) 4%);
 }
 :root[data-theme='bondi'] .search-field input:focus {
@@ -401,7 +414,8 @@
 .qrow-meta .m + .m.agent::before {
   content: none;
 }
-.qrow .skeleton-row {
+.navigator .qrow.skeleton-row,
+.qrow.skeleton-row {
   grid-column: 1 / -1;
   min-height: 64px;
   border: 0;
@@ -417,6 +431,10 @@
   row-gap: 2px;
   min-height: 0;
   padding: 10px 14px 11px;
+}
+/* The glyph's box matches the question's first line, so the ring sits on its centre. */
+.navigator .qrow > .qrow-glyph {
+  height: 22px;
 }
 .qrow-line {
   display: flex;
@@ -434,9 +452,27 @@
 /* What is asking for you reads a step stronger than what is settled: so do an answer whose delivery needs you and a
    model answer waiting for your review. */
 .navigator
-  .qrow:is([data-status='needs'], [data-status='delivery'], [data-status='review'])
+  .qrow:is(
+    [data-status='needs'],
+    [data-status='delivery'],
+    [data-status='review'],
+    [data-status='sending']
+  )
   .qrow-q {
   font-weight: 500;
+}
+/* What is settled steps down a tier (never by alpha): its question and its author in secondary ink, so history reads
+   as history beside the work above it. */
+.navigator
+  .qrow:is(
+    [data-status='answered'],
+    [data-status='expired'],
+    [data-status='withdrawn'],
+    [data-status='unverified'],
+    [data-status='unreadable']
+  )
+  :is(.qrow-q, .qrow-a .who) {
+  color: var(--text-2);
 }
 .navigator .qrow-time {
   font-size: var(--text-sm);
@@ -592,11 +628,19 @@
   background: var(--sidebar-active-bg, var(--selected));
   box-shadow: inset -2px 0 0 var(--text-2);
 }
+/* The lift is its own edge: no inset hairline cuts into it from above or below. */
+.navigator[data-presentation='page'] .qrow[aria-current]::before,
+.navigator[data-presentation='page']
+  .qrow-item:has(> .qrow[aria-current])
+  + .qrow-item
+  .qrow::before {
+  display: none;
+}
 
 /* Sheet: Daintree's sidebar rows. A resting plane per row, a 2px gutter of the surface behind. */
 .navigator[data-presentation='sheet'] .qrow {
   min-height: 0;
-  padding: 11px 16px 12px 14px;
+  padding: 11px 16px 12px;
   background: var(--sidebar-card-bg, var(--theme-overlay-soft));
   box-shadow: var(--sidebar-card-shadow, none);
 }
@@ -611,10 +655,16 @@
     background: var(--sidebar-hover-bg, var(--hover));
   }
 }
-/* The current question: the neutral lift and a text-secondary edge on the side facing the workspace. */
+/* The current question: the neutral lift and a text-secondary edge. From the bottom (phones) nothing lies to the
+   right, and an edge there reads as the scroll indicator, so it leads; the side sheet's faces the workspace. */
 .navigator[data-presentation='sheet'] .qrow[aria-current] {
   background: var(--sidebar-active-bg, var(--selected));
-  box-shadow: inset -2px 0 0 var(--text-2);
+  box-shadow: inset 2px 0 0 var(--text-2);
+}
+@media (min-width: 45em) {
+  .navigator[data-presentation='sheet'] .qrow[aria-current] {
+    box-shadow: inset -2px 0 0 var(--text-2);
+  }
 }
 
 /* ---------- sections, new questions, empty states ---------- */
@@ -647,7 +697,8 @@
 }
 .navigator[data-presentation='sheet'] .qgroup-head {
   margin: 0;
-  padding: 14px 16px 8px;
+  /* 12px on the right, so the sort control's own -4px margin lands its chevron on the rows' 16px time edge. */
+  padding: 14px 12px 8px 16px;
 }
 .qgroup-title .count {
   font-size: 0.6875rem;
@@ -690,6 +741,27 @@
   cursor: pointer;
   font-size: var(--text-md);
 }
+/* The sort's 44px target overhangs its 24px row by 10px each way; the row below starts clear of it. */
+.navigator[data-presentation='page'] .qgroup-head:has(.qgroup-sort) {
+  margin-bottom: 10px;
+}
+.navigator[data-presentation='sheet'] .qgroup-head:has(.qgroup-sort) {
+  padding-bottom: 10px;
+}
+/* With the jump line beneath, the sort's target grows up from its row instead of down into the line (32px: it is a
+   per-device preference, set rarely), so the line can sit close under the heading without the two targets meeting. */
+.navigator[data-presentation='page'] .qgroup-head:has(+ .jump-links) {
+  margin-bottom: 0;
+}
+.navigator[data-presentation='sheet'] .qgroup-head:has(+ .jump-links) {
+  padding-bottom: 0;
+}
+.qgroup-head:has(+ .jump-links) .qgroup-sort {
+  min-height: 0;
+  height: 32px;
+  margin: -8px -4px 0;
+  padding: 8px 6px 0;
+}
 .qgroup-sort:has(select:focus-visible) {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -725,32 +797,44 @@
 .list-note-clear {
   display: block;
 }
-/* A long Needs you points down to the model answers waiting for review. */
+/* A long Needs you points down to what follows it: one quiet line under the heading, set as links in the eyebrow's
+   column rather than as rows on the glyph column, so the first row is still the first thing under Needs you. Each
+   keeps a whole 44px target; the line only looks short. */
+.jump-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 18px;
+  /* Its targets start where the heading row ends and stop where the first row starts (no target overlaps another);
+     its words sit high in their target, so the line reads as the heading's and not the card's. */
+  margin: 0;
+  padding: 0 2px;
+}
 .jump-link {
   display: flex;
   align-items: center;
-  gap: 12px;
-  /* As wide as its words, so it never meets the sort control's target at the heading's right. */
-  width: fit-content;
+  gap: 6px;
   min-height: var(--tap-min);
-  margin: -4px 0 4px;
-  /* The glyph sits on the rows' glyph column and the words on their title column. */
-  padding: 0 0 0 15px;
+  margin: 0;
+  padding: 4px 0 20px;
   border: 0;
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 500;
   cursor: pointer;
 }
+.jump-link .sglyph,
+.jump-link .sglyph svg {
+  width: 14px;
+  height: 14px;
+}
 .jump-link > svg {
-  margin-left: -6px;
   color: var(--text-2);
 }
-.jump-link + .jump-link {
-  /* Stacked links keep whole 44px targets: 48px apart, never overlapping. */
-  margin-top: 0;
+.navigator[data-presentation='sheet'] .jump-links {
+  margin: 0;
+  padding: 0 16px;
 }
 @media (hover: hover) {
   .jump-link:hover {
@@ -774,7 +858,11 @@
   animation: spin 0.9s linear infinite;
 }
 .nav-empty .list-note-link {
-  margin-top: 12px;
+  /* On its own line it is a control: a whole 44px target, still set as a link. */
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  margin-top: 4px;
 }
 .nav-new {
   position: sticky;
@@ -905,6 +993,16 @@
   backdrop-filter: blur(var(--scrim-blur));
   -webkit-backdrop-filter: blur(var(--scrim-blur));
 }
+/* The navigator's edge holds against the dimmed page in both themes, as the filter sheet's does: the strong scrim
+   and a hairline on the side that meets the page. */
+.nav-sheet {
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 var(--line-strong);
+}
+.nav-sheet::backdrop {
+  background: var(--theme-scrim-strong, var(--scrim));
+}
 @keyframes sheet-up {
   from {
     transform: translateY(24px);
@@ -967,6 +1065,11 @@
   }
   .nav-sheet[open] {
     animation-name: sheet-left;
+  }
+  .nav-sheet {
+    box-shadow:
+      var(--shadow-3),
+      inset -1px 0 0 var(--line-strong);
   }
   .nav-sheet-head::before {
     display: none;
@@ -1159,4 +1262,21 @@
   height: 20px;
   line-height: 1;
   padding-top: 1px;
+}
+
+.nav-sheet-head,
+.filter-sheet-head {
+  cursor: default;
+}
+@media (max-width: 44.999em) {
+  .nav-sheet[data-closing],
+  .filter-sheet[data-closing] {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  .filter-sheet {
+    transition:
+      transform 200ms var(--ease-canvas),
+      opacity 200ms ease-out;
+  }
 }

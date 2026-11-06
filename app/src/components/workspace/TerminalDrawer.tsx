@@ -8,6 +8,7 @@ import {
   useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import type { ProtocolFeature } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
@@ -116,7 +117,7 @@ export function TerminalButton({
  * input. Opening it asks the desktop for a fresh one; if none arrives (the computer asleep or offline) the last one
  * stays, marked stale with its age.
  *
- * Below 1100px it is a modal drawer from the right over the dimmed chat (Back, Escape, a right swipe or a tap on the
+ * Below 1100px it is revealed beneath the chat as the canvas slides left (Back, Escape, a right swipe or a tap on the
  * chat close it). From 1100px it sits beside the chat as a column, and the chat stays usable.
  */
 export function TerminalDrawer({
@@ -226,6 +227,8 @@ function useOutcomeMessage(
     } else if (tv.kind === 'none' && tv.phase === 'unanswered' && was.kind === 'none')
       say = `${computer} didn’t reply.`;
     else if (tv.kind === 'off') say = 'Terminal sharing is off on that computer.';
+    else if (tv.kind === 'closed' && was.kind !== 'closed')
+      say = 'This question has closed, so its terminal is no longer shared.';
     if (say) speak(say);
   }, [open, key, attemptKey]); // eslint-disable-line react-hooks/exhaustive-deps
   return [message, speak] as const;
@@ -265,7 +268,28 @@ function ModalTerminal({
   // The contents stay through the exit slide, so what leaves is what was being read.
   const [mounted, setMounted] = useState(open);
   if (open && !mounted) setMounted(true);
-  const swipe = useSwipeClose(ref, 'right', onClose);
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset.terminalDragging;
+      document.documentElement.style.removeProperty('--terminal-offset');
+    },
+    [],
+  );
+  const panelWidth = () =>
+    ref.current?.querySelector<HTMLElement>('.term-panel-body')?.offsetWidth ?? 0;
+  const swipe = useSwipeClose(ref, 'right', onClose, {
+    width: panelWidth,
+    move: (distance) => {
+      const root = document.documentElement;
+      if (distance === null) {
+        delete root.dataset.terminalDragging;
+        root.style.removeProperty('--terminal-offset');
+      } else {
+        root.dataset.terminalDragging = '';
+        root.style.setProperty('--terminal-offset', `${Math.max(0, panelWidth() - distance)}px`);
+      }
+    },
+  });
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
@@ -290,12 +314,13 @@ function ModalTerminal({
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 110);
+      const t = setTimeout(finish, 380);
       return () => clearTimeout(t);
     }
   }, [open, titleId]);
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={DRAWER_ID}
       className="term-drawer"
@@ -306,15 +331,11 @@ function ModalTerminal({
         onClose();
       }}
       onClick={(e) => {
-        // The panel fills the dialog's box, so a click on the dialog itself is on the dimmed chat.
+        // The panel occupies the right edge; a click on the transparent dialog is on the exposed chat.
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      {mounted && (
-        <div className="term-panel-body" {...swipe}>
-          {children}
-        </div>
-      )}
+      {mounted && <div className="term-panel-body">{children}</div>}
     </dialog>
   );
 }
@@ -377,6 +398,20 @@ function TerminalContent({
   onClose: () => void;
 }) {
   const paneTitle = tv.kind === 'snapshot' ? tv.paneTitle : '';
+  // When the body swaps (the first snapshot replaces the empty state, or the question closes under it), focus on a
+  // control that has gone would fall to the page. It goes to the same control in its new place, the status row's
+  // Refresh, or else to the drawer's title.
+  const kind = tv.kind;
+  useLayoutEffect(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const panel = document.getElementById(titleId)?.closest('.term-panel-body');
+    if (!panel) return;
+    const target =
+      panel.querySelector<HTMLElement>('.term-status .term-refresh') ??
+      document.getElementById(titleId);
+    target?.focus({ preventScroll: true });
+  }, [kind, refusal, titleId]);
   return (
     <>
       <header className="term-head">
@@ -390,7 +425,8 @@ function TerminalContent({
             {paneTitle ? (
               <>
                 <span className="sr-only">Terminal snapshot: </span>
-                {paneTitle}
+                {/* A wrapped title breaks before its separator, never leaving "·" hanging at a row's end. */}
+                {paneTitle.replace(/ · /g, ' ·\u00a0')}
               </>
             ) : (
               'Terminal'
@@ -441,14 +477,14 @@ function RefreshButton({
       data-busy={busy || undefined}
       onClick={() => !busy && onRefresh()}
     >
-      {/* Both faces share one cell, so the button keeps its size and place while it asks. */}
+      {/* One glyph that stays put, and both words in one cell, so the button keeps its size and place while it
+          asks and only the word changes. */}
+      <RefreshIcon size={16} />
       <span className="term-refresh-label">
         <span aria-hidden={busy || undefined} data-on={!busy || undefined}>
-          <RefreshIcon size={16} />
           Refresh
         </span>
         <span aria-hidden={!busy || undefined} data-on={busy || undefined}>
-          <RefreshIcon size={16} />
           Asking…
         </span>
       </span>
@@ -457,15 +493,26 @@ function RefreshButton({
 }
 
 /**
- * A line's leading marker: any single symbol (a bullet, a tool-output or tree corner, a tick, a prompt, a spinner
- * such as "✻") or a list number, followed by spaces.
+ * A line's leading markers: a single symbol (a bullet, a tool-output or tree corner, a tick, a prompt, a spinner such
+ * as "✻") or a list number, followed by spaces; two of them when a tool's output starts with its own prompt or tick
+ * ("⎿  > vitest run", "⎿  ✓ versions agree").
  */
-const MARKER = /^(\s*)(?:[^\p{L}\p{N}\s([{<"'`]|\d{1,3}[.)])\s+(?=\S)/u;
-/** Where a line's continuation rows start, in columns: under its first word of text (at most 16 in). */
-const hangOf = (line: string): number => {
+const MARKER = /^(\s*)(?:(?:[^\p{L}\p{N}\s([{<"'`]|\d{1,3}[.)])\s+){1,2}(?=\S)/u;
+/**
+ * Where a line's continuation rows start, in columns: under its first word of text, past its indent and markers (at
+ * most 16 in), or, for a label and its value set apart by a run of spaces ("Total cost:   $0.84", "RUN  v4.1.2"),
+ * under the value. Always leaves at least 12 columns to wrap into.
+ */
+const VALUE = /^(\s*\S(?:.*?\S)?) {2,}(?=\S)/;
+const hangOf = (line: string, cols: number): number => {
   const m = MARKER.exec(line);
-  const n = m ? m[0].length : line.length - line.trimStart().length;
-  return Math.min(16, n);
+  const v = m ? null : VALUE.exec(line);
+  const n = m
+    ? Math.min(16, m[0].length)
+    : v
+      ? v[0].length
+      : Math.min(16, line.length - line.trimStart().length);
+  return Math.max(0, Math.min(n, cols - 12));
 };
 /**
  * Symbols JetBrains Mono does not draw (Miscellaneous Technical such as "⎿" and "⏺", arrows, geometric shapes,
@@ -486,6 +533,51 @@ function cells(text: string): ReactNode {
   );
 }
 /**
+ * Words wrap whole, as a terminal reader expects: a path or a flag never splits at its hyphen ("dead-" / "letter.ts").
+ * A word too long for any row of this line (a URL, a deep path: longer than the columns left past the hang) breaks
+ * wherever the row ends instead, starting on its marker's row, so a marker never stands alone above it.
+ */
+const WORD = /(\S+)/;
+function lineText(text: string, room: number): ReactNode {
+  if (!/[-\u2010/]/.test(text) && !text.split(/\s+/).some((w) => w.length > room))
+    return cells(text);
+  return text.split(WORD).map((part, k) => {
+    if (k % 2 === 0) return part && <span key={k}>{cells(part)}</span>;
+    if (part.length > room) {
+      // Too long for any row: it breaks after a "/" or "-" where it can ("tests/" / "webhooks/sign.test.ts"), and
+      // anywhere only within a piece that is still too long, or when its first piece would not fit beside the marker.
+      // A piece still too long ("vitest@4.1.2_@types+node@22.10.1/") splits again after "@", "_" or "+".
+      const pieces = (part.match(/[^-\u2010/]*[-\u2010/]|[^-\u2010/]+$/g) ?? [part]).flatMap(
+        (piece) =>
+          piece.length > room ? (piece.match(/[^@_+]*[@_+]|[^@_+]+$/g) ?? [piece]) : [piece],
+      );
+      if (pieces.length < 2 || pieces[0]!.length > room)
+        return (
+          <span key={k} className="term-long">
+            {cells(part)}
+          </span>
+        );
+      return (
+        <span key={k} className="term-path">
+          {pieces.map((piece, j) => (
+            <span key={j}>
+              {j > 0 && <wbr />}
+              {cells(piece)}
+            </span>
+          ))}
+        </span>
+      );
+    }
+    if (/[-\u2010/]/.test(part))
+      return (
+        <span key={k} className="term-word">
+          {cells(part)}
+        </span>
+      );
+    return <span key={k}>{cells(part)}</span>;
+  });
+}
+/**
  * A drawn frame line (a prompt box's top or bottom, a rule, an empty framed row such as "│ >   │"): it starts with a
  * box-drawing character and holds almost nothing else. It clips at the edge rather than wrapping into broken shapes.
  * A line with real content after a box character (a tree's "└── src/…", a framed row with text) still wraps, so
@@ -495,6 +587,39 @@ const BOX = /[\u2500-\u257f]/g;
 const BOX_ONE = /^[\u2500-\u257f]$/;
 const isFrame = (line: string): boolean =>
   /^\s*[\u2500-\u257f]/.test(line) && line.replace(BOX, '').replace(/\s+/g, '').length <= 2;
+/**
+ * How many terminal columns fit across the card, kept current as it resizes (the phone drawer, the docked column,
+ * larger text). Until it is measured, a phone's 40.
+ */
+function useColumns(ref: RefObject<HTMLElement | null>): number {
+  const [cols, setCols] = useState(40);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      const probe = document.createElement('span');
+      probe.style.cssText = 'position:absolute;visibility:hidden;width:100ch;font:inherit';
+      const pre = el.querySelector('.term-text') ?? el;
+      pre.appendChild(probe);
+      const ch = probe.getBoundingClientRect().width / 100;
+      probe.remove();
+      const cs = getComputedStyle(el);
+      const inner = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (ch > 0 && inner > 0) setCols(Math.max(12, Math.floor(inner / ch)));
+    };
+    measure();
+    if (typeof ResizeObserver !== 'function') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return cols;
+}
+/** Marks which edges of the lines have more beyond them, for the card's quiet cues: older above, newer below. */
+const edges = (el: HTMLElement) => {
+  el.toggleAttribute('data-scrolled', el.scrollTop > 1);
+  el.toggleAttribute('data-more-below', el.scrollHeight - el.scrollTop - el.clientHeight > 1);
+};
 
 function SnapshotBody({
   tv,
@@ -510,6 +635,7 @@ function SnapshotBody({
   const screen = useRef<HTMLDivElement>(null);
   const atEnd = useRef(true);
   const shown = useRef<string | null>(null);
+  const cols = useColumns(screen);
   // Scrolled to the newest line on open, and kept there as new snapshots arrive, unless the person has scrolled up
   // to read: then the view stays where it is.
   useLayoutEffect(() => {
@@ -518,20 +644,24 @@ function SnapshotBody({
     const first = shown.current === null;
     shown.current = tv.snapshotId;
     if (first || atEnd.current) el.scrollTop = el.scrollHeight;
-  }, [tv.snapshotId]);
+    edges(el);
+    // Re-run when the column count changes too: rewrapped lines change the height under a reader at the end.
+  }, [tv.snapshotId, cols]);
   const observed = new Date(tv.observedAt).toLocaleTimeString(undefined, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
   });
-  // A new attempt under way speaks for itself; otherwise say why the picture is old.
-  const note = tv.refreshing
-    ? null
-    : refusal
-      ? refusalLine(refusal, computer, true)
-      : tv.unanswered
-        ? `${computer} didn’t send a newer snapshot. It may be asleep or offline.`
-        : null;
+  // Why the picture is old. While a new attempt is under way the last word on it stays (Refresh already says
+  // "Asking…"), so a tap never moves the lines; it changes when that attempt settles.
+  const settled = refusal
+    ? refusalLine(refusal, computer, true)
+    : tv.unanswered
+      ? `${computer} didn’t send a newer snapshot. It may be asleep or offline.`
+      : null;
+  const held = useRef<string | null>(null);
+  if (!tv.refreshing) held.current = settled;
+  const note = tv.refreshing ? held.current : settled;
   return (
     <>
       <div
@@ -553,7 +683,7 @@ function SnapshotBody({
           )}
           <p className="term-fresh" title={`Observed at ${observed} on ${computer}`}>
             {tv.stale && <span className="term-stale">Stale · </span>}
-            as of {tv.age}
+            as of <time dateTime={tv.observedAt}>{tv.age}</time>
           </p>
         </div>
         <RefreshButton busy={tv.refreshing} quiet onRefresh={onRefresh} />
@@ -568,6 +698,7 @@ function SnapshotBody({
         onScroll={(e) => {
           const el = e.currentTarget;
           atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          edges(el);
         }}
       >
         {tv.lines.length > 0 ? (
@@ -591,9 +722,9 @@ function SnapshotBody({
                 <span
                   key={i}
                   className="term-line"
-                  style={{ '--i': hangOf(line) } as CSSProperties}
+                  style={{ '--i': hangOf(line, cols) } as CSSProperties}
                 >
-                  {cells(line)}
+                  {lineText(line, cols - hangOf(line, cols))}
                 </span>
               );
             })}

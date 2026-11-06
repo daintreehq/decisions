@@ -12,6 +12,8 @@ import {
   InstallNudge,
   Mark,
   UpdateAffordance,
+  useConnection,
+  useLongReconnect,
   useShellAttention,
 } from './AppStatus.js';
 import { AgentStateMark } from './AgentState.js';
@@ -104,6 +106,7 @@ function RecentRow({
 }) {
   const { project } = originParts(v);
   const waiting = needsYou(v, now);
+  const clamp = useClamped<HTMLSpanElement>();
   const shown = slot && agent?.fresh === 'fresh' ? agent : null;
   // The whole question as plain text: the CSS clamp shortens what is seen, never what is read out.
   const text = v.content
@@ -117,18 +120,32 @@ function RecentRow({
         data-row-id={v.id}
         aria-current={current ? 'page' : undefined}
       >
-        <span className="side-q-dot" data-on={waiting || undefined} aria-hidden="true" />
         {waiting && <span className="sr-only">Needs you: </span>}
         <span className="side-q-body">
-          <span className="side-q-text">{text}</span>
+          {/* A clamped question shows in full on hover; on the text, not the link, so it is not read twice. */}
+          <span className="side-q-text" ref={clamp.ref} title={clamp.clamped ? text : undefined}>
+            {text}
+          </span>
           <span className="side-q-meta">
             <span className="side-q-project">
               <span className="sr-only">, </span>
               {project}
             </span>
-            {slot && (
+            {(slot || waiting) && (
               <span className="side-q-state">
-                {shown && <AgentStateMark a={shown} age={false} />}
+                {waiting ? (
+                  <span className="agent-state side-q-needs" data-tone="waiting" aria-hidden="true">
+                    <span className="agent-dot" />
+                    <span className="agent-label">Needs you</span>
+                  </span>
+                ) : (
+                  shown && (
+                    <>
+                      <span className="sr-only">, </span>
+                      <AgentStateMark a={shown} age={false} />
+                    </>
+                  )
+                )}
               </span>
             )}
           </span>
@@ -136,6 +153,52 @@ function RecentRow({
       </Link>
     </li>
   );
+}
+
+/** Whether a line-clamped element is cutting its text, re-measured when its box changes. */
+function useClamped<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [clamped, setClamped] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setClamped(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  return { ref, clamped };
+}
+
+/**
+ * Whether a scrolling list has rows below what is shown, so its foot can fade instead of cutting a row in half.
+ * Re-measured on scroll, on resize, and whenever the number of rows changes.
+ */
+function useMoreBelow<T extends HTMLElement>(rows: number, shown: boolean) {
+  const ref = useRef<T>(null);
+  const [below, setBelow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) {
+      setBelow(false);
+      return;
+    }
+    const measure = () =>
+      setBelow(el.clientHeight > 0 && el.scrollHeight - el.scrollTop - el.clientHeight > 2);
+    measure();
+    // Once more after layout settles: the overlay's list has no size until the dialog opens.
+    const frame = requestAnimationFrame(measure);
+    el.addEventListener('scroll', measure, { passive: true });
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      el.removeEventListener('scroll', measure);
+      ro?.disconnect();
+    };
+  }, [rows, shown]);
+  return { ref, below };
 }
 
 /**
@@ -164,6 +227,28 @@ function SidebarContent({
   const slots = useStateSlots(recent, agentOf, hold);
   const recentId = useId();
   const waiting = useActionCount(now);
+  const more = useMoreBelow<HTMLUListElement>(recent.length, hold);
+  const { state: conn } = useConnection();
+  const longReconnect = useLongReconnect();
+  // A connection problem outranks the app's own update, so it sits above it; the quiet line stays last.
+  const connProblem = conn === 'off' || (conn === 'wait' && longReconnect);
+  // The open question stays in view in Recent when it changes from elsewhere (Home, history, a link), unless the
+  // sidebar is in use, when nothing moves under the pointer or the finger.
+  // Only a change of question scrolls: leaving the sidebar after scrolling it leaves it where it was.
+  const shownId = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (currentId === shownId.current) return;
+    // Opened from the sidebar itself (in use): it is already where the person tapped, so only note it.
+    if (hold) {
+      shownId.current = currentId;
+      return;
+    }
+    shownId.current = currentId;
+    if (!currentId) return;
+    more.ref.current
+      ?.querySelector<HTMLElement>('.side-q[aria-current="page"]')
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }, [currentId, hold, more.ref]);
   return (
     <>
       <div className="side-head">
@@ -214,7 +299,7 @@ function SidebarContent({
             Recent
           </h3>
           {recent.length > 0 ? (
-            <ul className="side-qlist">
+            <ul className="side-qlist" ref={more.ref} data-more={more.below || undefined}>
               {recent.map((v) => (
                 <RecentRow
                   key={v.id}
@@ -227,17 +312,34 @@ function SidebarContent({
               ))}
             </ul>
           ) : (
-            <p className="side-empty">Questions from your agents appear here.</p>
+            <p className="side-empty">The latest questions show here, newest first.</p>
           )}
         </section>
       </div>
       <div className="side-foot">
         {install && <InstallNudge />}
+        {connProblem && <ConnectionLine />}
         <UpdateAffordance />
-        <ConnectionLine />
+        {!connProblem && <ConnectionLine />}
       </div>
     </>
   );
+}
+
+/** Whether the document has scrolled further than `px` (only measured while `active`). */
+function useScrolledPast(active: boolean, px: number): boolean {
+  const [past, setPast] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setPast(false);
+      return;
+    }
+    const on = () => setPast(window.scrollY > px);
+    on();
+    window.addEventListener('scroll', on, { passive: true });
+    return () => window.removeEventListener('scroll', on);
+  }, [active, px]);
+  return past;
 }
 
 /**
@@ -251,9 +353,11 @@ export function MenuButton() {
   const attention = useShellAttention();
   const route = useRoute();
   const now = useNow();
-  // Waiting work, where the page itself does not already count it (Home's scopes do).
+  // Waiting work, where the page itself does not already count it. Home's scopes do, at the top of the page; once
+  // that count has scrolled away under the button, the button carries it again.
   const counted = useActionCount(now);
-  const waiting = route.name === 'inbox' ? 0 : counted;
+  const scrolled = useScrolledPast(route.name === 'inbox', 40);
+  const waiting = route.name === 'inbox' && !scrolled ? 0 : counted;
   // Both can be true: the count is what needs the person, the dot what the app needs. Neither hides the other.
   const state =
     attention === 'offline'
@@ -272,7 +376,7 @@ export function MenuButton() {
       id={BUTTON_ID}
       className="menu-fab"
       aria-label={name}
-      title="Menu"
+      title={name}
       aria-haspopup="dialog"
       aria-expanded={open}
       aria-controls={SHEET_ID}
@@ -294,8 +398,8 @@ const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * The sidebar as an overlay (below 1100px): a modal dialog from the left, covering about 84% of a phone, with the
- * current screen dimmed beside it. It is a layer (Back closes it before anything navigates) and a modal dialog
+ * The sidebar under the foreground canvas (below 1100px), revealed as the page moves right. A transparent
+ * modal dialog keeps the revealed navigation accessible and the displaced page inert. It is a layer
  * (focus stays inside, Escape closes it). Tapping the dimmed edge or swiping it left closes it too. Focus returns
  * to the menu button, or to the new page when a row navigated.
  */
@@ -306,14 +410,24 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
   const titleId = useId();
   const openedAt = useRef<string>('');
 
+  useEffect(
+    () => () => {
+      delete document.documentElement.dataset.sidebarDragging;
+      document.documentElement.style.removeProperty('--sidebar-offset');
+    },
+    [],
+  );
+
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) {
+    if (open) {
+      // Reopened while it was still closing: it is already a modal, so it only stops closing (and takes focus again).
+      const closing = d.open;
       d.removeAttribute('data-closing');
       d.style.transform = '';
       openedAt.current = location.pathname;
-      d.showModal();
+      if (!closing) d.showModal();
       const target =
         d.querySelector<HTMLElement>('.side-q[aria-current="page"]') ||
         d.querySelector<HTMLElement>('.side-row[aria-current="page"]') ||
@@ -338,20 +452,34 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
       }
       d.setAttribute('data-closing', '');
       d.style.transform = '';
-      const t = setTimeout(finish, 110);
+      const t = setTimeout(finish, 380);
       return () => clearTimeout(t);
     }
   }, [open]);
 
   // A left swipe on the panel follows the finger and closes it past a third of its width (or on a flick).
-  const swipe = useSwipeClose(ref, 'left', dismiss);
+  const sidebarWidth = () => ref.current?.querySelector<HTMLElement>('.side')?.offsetWidth ?? 0;
+  const swipe = useSwipeClose(ref, 'left', dismiss, {
+    width: sidebarWidth,
+    move: (distance) => {
+      const root = document.documentElement;
+      if (distance === null) {
+        delete root.dataset.sidebarDragging;
+        root.style.removeProperty('--sidebar-offset');
+      } else {
+        root.dataset.sidebarDragging = '';
+        root.style.setProperty('--sidebar-offset', `${Math.max(0, sidebarWidth() - distance)}px`);
+      }
+    },
+  });
 
   return (
     <dialog
+      {...swipe}
       ref={ref}
       id={SHEET_ID}
       className="sidebar-sheet"
-      aria-labelledby={titleId}
+      aria-label="Menu"
       onCancel={(e) => {
         e.preventDefault();
         dismiss();
@@ -361,7 +489,7 @@ export function SidebarSheet({ currentId, install }: { currentId?: string; insta
         if (e.target === e.currentTarget) dismiss();
       }}
     >
-      <div className="side side-sheet-body" {...swipe}>
+      <div className="side side-sheet-body">
         <SidebarContent
           currentId={currentId}
           titleId={titleId}

@@ -69,7 +69,25 @@ describe('quiet hours validation', () => {
 
   it('summarises for the index', () => {
     expect(quietHoursSummary({ quiet_hours: qh })).toBe('22:00–07:00');
-    expect(quietHoursSummary({ quiet_hours: { ...qh, enabled: false } })).toBe('Off');
+    const rm = { enabled: true, first_ms: 4 * 3_600_000, interval_ms: 86_400_000, max: 3 };
+    // Off only when nothing else in the section is running.
+    expect(
+      quietHoursSummary({
+        quiet_hours: { ...qh, enabled: false },
+        reminders: { ...rm, enabled: false },
+        proxy_review_reminder: false,
+      }),
+    ).toBe('Off');
+    expect(quietHoursSummary({ quiet_hours: { ...qh, enabled: false }, reminders: rm })).toBe(
+      'Reminders on',
+    );
+    expect(
+      quietHoursSummary({
+        quiet_hours: { ...qh, enabled: false },
+        reminders: { ...rm, enabled: false },
+        proxy_review_reminder: true,
+      }),
+    ).toBe('Reminders on');
     expect(quietHoursSummary(null)).toBe('');
   });
 
@@ -123,24 +141,24 @@ describe('reminder copy', () => {
 describe('unpair summary', () => {
   it('lists unsent answers and drafts first, with counts', () => {
     const items = unpairErasures({ questions: 7, unsent: 2, drafts: 1 });
-    expect(items[0]).toBe('2 unsent answers, which will never be sent');
+    expect(items[0]).toBe('2 unsent answers');
     expect(items[1]).toBe('1 draft');
     expect(items[2]).toBe('7 saved questions and their answers');
     expect(items.join(' ')).toMatch(/keys/);
     expect(items.join(' ')).toMatch(/settings on this device/);
   });
 
-  it('says so when there is nothing unsent', () => {
+  it('lists only what is really there', () => {
     const items = unpairErasures({ questions: 1, unsent: 0, drafts: 0 });
-    expect(items).toContain('No unsent answers');
-    expect(items).toContain('No drafts');
-    expect(items).toContain('1 saved question and their answers');
+    expect(items.join(' ')).not.toMatch(/unsent|draft/);
+    expect(items[0]).toBe('1 saved question and its answers');
+    expect(unpairErasures({ questions: 0, unsent: 0, drafts: 0 }).join(' ')).not.toMatch(
+      /saved question/,
+    );
   });
 
   it('uses the singular for one unsent answer', () => {
-    expect(unpairErasures({ questions: 0, unsent: 1, drafts: 3 })[0]).toBe(
-      '1 unsent answer, which will never be sent',
-    );
+    expect(unpairErasures({ questions: 0, unsent: 1, drafts: 3 })[0]).toBe('1 unsent answer');
   });
 });
 
@@ -168,7 +186,7 @@ describe('notification state', () => {
 });
 
 describe('devices summary', () => {
-  it('counts computers and other devices, never revoked ones', () => {
+  it('counts paired devices, this one included, never revoked ones', () => {
     const d = (id: string, role: string, revoked: string | null = null) => ({
       device_id: id,
       role,
@@ -181,7 +199,7 @@ describe('devices summary', () => {
       d('ipad', 'tablet'),
       d('old', 'phone', '2026-01-01T00:00:00Z'),
     ];
-    expect(devicesSummary(list, 'me', 'phone')).toBe('This phone + 2 computers + 1 other');
+    expect(devicesSummary(list, 'me')).toBe('4 devices');
   });
 });
 

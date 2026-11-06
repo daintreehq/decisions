@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ImageResult } from '../../data/images.js';
 import { ClockIcon, ErrorIcon, RefreshIcon, WarningIcon } from '../Icons.js';
 
@@ -21,7 +22,7 @@ export const STATUS_TEXT: Record<FileStatus, string> = {
 export const STATUS_SHORT: Record<FileStatus, string> = {
   preparing: 'Preparing…',
   ready: 'Ready',
-  error: 'Could not load',
+  error: 'Not loaded',
   expired: 'Expired',
   unverified: 'Not verified',
 };
@@ -40,14 +41,7 @@ export function FilePlaceholder({
   compact?: boolean;
 }) {
   if (status === 'ready') return null;
-  if (status === 'preparing') {
-    return (
-      <div className="fx-state is-preparing" role="status">
-        <span className="fx-state-pulse" aria-hidden="true" />
-        <span className="fx-state-text">{STATUS_TEXT.preparing}</span>
-      </div>
-    );
-  }
+  if (status === 'preparing') return <Preparing />;
   const Icon = status === 'expired' ? ClockIcon : status === 'unverified' ? WarningIcon : ErrorIcon;
   return (
     <div className={`fx-state is-${status}`} role="status">
@@ -74,6 +68,21 @@ export function FilePlaceholder({
           Retry
         </button>
       )}
+    </div>
+  );
+}
+
+/** Preparing preview…, then "Still loading…" once it has taken more than 5 s (guide 2.6). */
+function Preparing() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 5000);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div className="fx-state is-preparing" role="status">
+      <span className="fx-state-pulse" aria-hidden="true" />
+      <span className="fx-state-text">{slow ? 'Still loading…' : STATUS_TEXT.preparing}</span>
     </div>
   );
 }

@@ -13,6 +13,16 @@ export interface VoiceScript {
   words: { afterMs: number; text: string; final: boolean }[];
 }
 
+/**
+ * The relay's wording tidy-up (`/voice/correct`), scripted for a capture: what the passage becomes and how long it
+ * takes. Unscripted passages come back unchanged.
+ */
+export interface CleanupScript {
+  afterMs?: number;
+  corrected: string;
+  spans?: { start: number; end: number; raw: string; candidate: string; reason: string }[];
+}
+
 /** Launch flags for a Chromium whose microphone is the fake device (a steady tone). */
 export const FAKE_MIC_ARGS = [
   '--use-fake-ui-for-media-stream',
@@ -23,12 +33,14 @@ export async function mockVoice(
   context: BrowserContext,
   page: Page,
   script: () => VoiceScript,
+  /** When given, the relay also reports the tidy-up as set up and answers it from this script. */
+  cleanup?: () => CleanupScript | null,
 ): Promise<void> {
   await context.grantPermissions(['microphone']);
   await page.route('**/api/v1/info', async (route) => {
     const res = await route.fetch();
     const body = (await res.json()) as { voice?: Record<string, boolean> };
-    body.voice = { ...(body.voice ?? {}), xai: true };
+    body.voice = { ...(body.voice ?? {}), xai: true, ...(cleanup ? { anthropic: true } : {}) };
     await route.fulfill({ response: res, json: body });
   });
   await page.route('**/voice/session', (route) =>
@@ -43,6 +55,23 @@ export async function mockVoice(
       },
     }),
   );
+  if (cleanup)
+    await page.route('**/voice/correct', async (route) => {
+      const raw = (route.request().postDataJSON() as { raw_transcript: string }).raw_transcript;
+      const c = cleanup();
+      await new Promise((r) => setTimeout(r, c?.afterMs ?? 300));
+      await route.fulfill({
+        json: {
+          model: 'claude-haiku-5-5',
+          result: {
+            corrected_text: c?.corrected ?? raw,
+            uncertain_spans: c?.spans ?? [],
+            applied_commands: [],
+            warnings: [],
+          },
+        },
+      });
+    });
   await page.routeWebSocket(/\/voice\/stream/, (ws) => {
     const s = script();
     const timers: ReturnType<typeof setTimeout>[] = [];

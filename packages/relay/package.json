@@ -1,6 +1,6 @@
 {
   "name": "@daintreehq/decisions-relay",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "The prebuilt Decisions relay (Cloudflare Worker bundle, phone app assets and Wrangler config) with a SHA-256 manifest, deployed by `decisions deploy`.",
   "license": "Apache-2.0",
   "type": "module",

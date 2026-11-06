@@ -7,6 +7,7 @@ import {
   type HTMLAttributes,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { CloseIcon } from '../Icons.js';
@@ -58,13 +59,47 @@ export function useFocusInOut(
       queueMicrotask(() => {
         const now = document.activeElement;
         if (now && now !== document.body && now.isConnected) return;
-        const back =
-          from && from.isConnected && from !== document.body ? from : fallbackRef.current?.();
+        // The opener, unless it has gone or can no longer take focus (a button disabled meanwhile).
+        const usable =
+          from &&
+          from.isConnected &&
+          from !== document.body &&
+          !(from as HTMLButtonElement).disabled;
+        const back = usable ? from : fallbackRef.current?.();
         back?.focus({ preventScroll: true });
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+}
+
+/**
+ * A control that disables or removes itself when used (Fit at Fit, Next on the last file, Retry once it loads) would
+ * drop focus on the page body, where the layer's keys no longer reach. Inside `root`, focus goes to `fallback`
+ * instead. Focus that moves anywhere else (the dock, another control) is left alone.
+ */
+export function useFocusKeeper(
+  root: RefObject<HTMLElement | null>,
+  fallback: (from: HTMLElement) => HTMLElement | null | undefined,
+) {
+  const fallbackRef = useRef(fallback);
+  fallbackRef.current = fallback;
+  useEffect(() => {
+    const node = root.current;
+    if (!node) return;
+    const lost = (e: FocusEvent) => {
+      if (e.relatedTarget) return;
+      const from = e.target as HTMLElement;
+      setTimeout(() => {
+        const now = document.activeElement;
+        if (now && now !== document.body) return;
+        const gone = !from.isConnected || (from as HTMLButtonElement).disabled === true;
+        if (gone && node.isConnected) fallbackRef.current(from)?.focus({ preventScroll: true });
+      }, 0);
+    };
+    node.addEventListener('focusout', lost);
+    return () => node.removeEventListener('focusout', lost);
+  }, [root]);
 }
 
 const FOCUSABLE =
@@ -95,6 +130,7 @@ export function Sheet({
   onDismiss,
   children,
   footer,
+  lead,
   className = '',
   wide,
 }: {
@@ -103,12 +139,16 @@ export function Sheet({
   onDismiss: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** Stays put above the scrolling body (what the sheet is about). */
+  lead?: ReactNode;
   className?: string;
   wide?: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
-  useFocusInOut(() => panel.current);
+  // A menu item that opens a sheet unmounts with its menu, so focus comes back to the menu's trigger instead.
+  const [opener] = useState(openerForLayer);
+  useFocusInOut(() => panel.current, undefined, opener);
   return (
     <Overlay className="fx-sheet-layer">
       <div className="fx-scrim" aria-hidden="true" onClick={onDismiss} />
@@ -129,10 +169,17 @@ export function Sheet({
       >
         <div className="fx-sheet-head">
           <h2 id={`${id}-t`}>{title}</h2>
-          <button type="button" className="btn ghost icon" aria-label="Close" onClick={onDismiss}>
+          <button
+            type="button"
+            className="btn ghost icon"
+            aria-label="Close"
+            title="Close (Esc)"
+            onClick={onDismiss}
+          >
             <CloseIcon />
           </button>
         </div>
+        {lead && <div className="fx-sheet-lead">{lead}</div>}
         <div className="fx-sheet-body">{children}</div>
         {footer && <div className="fx-sheet-foot">{footer}</div>}
       </div>
@@ -140,11 +187,22 @@ export function Sheet({
   );
 }
 
+/** The trigger of the open menu, while one is open: what a layer opened from a menu item gives focus back to. */
+let menuAnchor: HTMLElement | null = null;
+
+function openerForLayer(): HTMLElement | null {
+  const at = document.activeElement as HTMLElement | null;
+  if (at?.closest('[role="menu"]') && menuAnchor?.isConnected) return menuAnchor;
+  return at;
+}
+
 export interface MenuItem {
   key: string;
   label: string;
   icon: ReactNode;
   disabled?: boolean;
+  /** Starts a new group: a hairline above it. */
+  group?: boolean;
   onSelect: () => void;
 }
 
@@ -172,10 +230,38 @@ export function Menu({
     setPos({ top: a.bottom - h.top + 4, right: h.right - a.right });
   }, [anchor]);
   useEffect(() => {
-    list.current
-      ?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')
-      ?.focus();
-  }, []);
+    menuAnchor = anchor;
+    return () => {
+      if (menuAnchor === anchor) menuAnchor = null;
+    };
+  }, [anchor]);
+  // Focus moves in once the menu is placed (it is hidden until then, and a hidden element cannot take focus), so
+  // Escape and the arrow keys reach the menu rather than the layer under it. With every item unavailable the menu
+  // itself holds focus.
+  // The answer dock and the sidebar sit outside the menu's catch layer: a tap or focus there closes it too.
+  const dismissRef = useRef(onDismiss);
+  dismissRef.current = onDismiss;
+  useEffect(() => {
+    const outside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && !list.current?.contains(t) && !anchor?.contains(t)) dismissRef.current();
+    };
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('focusin', outside, true);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('focusin', outside, true);
+    };
+  }, [anchor]);
+  const noteId = useId();
+  const placed = pos !== null;
+  useEffect(() => {
+    if (!placed) return;
+    const first = list.current?.querySelector<HTMLElement>(
+      '[role="menuitem"]:not([aria-disabled="true"])',
+    );
+    (first ?? list.current)?.focus();
+  }, [placed]);
   useFocusInOut(
     () => null,
     () => anchor,
@@ -208,12 +294,15 @@ export function Menu({
       <div
         ref={list}
         role="menu"
+        tabIndex={-1}
         aria-label={label}
+        aria-describedby={note ? noteId : undefined}
         className="fx-menu"
         style={pos ? { top: pos.top, right: pos.right } : { visibility: 'hidden' }}
         onKeyDown={move}
       >
-        {items.map((it) => (
+        {items.map((it) => [
+          it.group && <hr key={`${it.key}-sep`} className="fx-menu-sep" aria-hidden="true" />,
           <button
             key={it.key}
             type="button"
@@ -226,9 +315,13 @@ export function Menu({
           >
             {it.icon}
             <span>{it.label}</span>
-          </button>
-        ))}
-        {note && <p className="fx-menu-note">{note}</p>}
+          </button>,
+        ])}
+        {note && (
+          <p className="fx-menu-note" id={noteId}>
+            {note}
+          </p>
+        )}
       </div>
     </Overlay>
   );

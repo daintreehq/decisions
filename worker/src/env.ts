@@ -20,4 +20,4 @@ export interface Env {
   VOICE_MONTHLY_MINUTES?: string;
 }
 
-export const WORKER_VERSION = '0.5.0';
+export const WORKER_VERSION = '0.6.0';

@@ -40,11 +40,13 @@
   flex: none;
 }
 @media (hover: hover) {
-  .btn:not(:disabled):hover {
+  .btn:not(:disabled, [aria-disabled='true']):hover {
     background: color-mix(in oklab, var(--surface-raised) 100%, var(--text) 4%);
   }
 }
-.btn:not(:disabled):active,
+/* A control that can't act right now (aria-disabled, e.g. while its action is under way) gives no press or hover
+   feedback, so it never suggests a second tap was taken. */
+.btn:not(:disabled, [aria-disabled='true']):active,
 .chip:not(:disabled):active {
   transform: scale(0.98);
   transition-duration: 1ms;
@@ -58,11 +60,11 @@
   font-weight: 600;
 }
 @media (hover: hover) {
-  .btn.primary:not(:disabled):hover {
+  .btn.primary:not(:disabled, [aria-disabled='true']):hover {
     background: color-mix(in oklab, var(--text) 90%, var(--text-inverse));
   }
 }
-.btn.primary:not(:disabled):active {
+.btn.primary:not(:disabled, [aria-disabled='true']):active {
   background: color-mix(in oklab, var(--text) 82%, var(--text-inverse));
   box-shadow: none;
 }
@@ -73,7 +75,7 @@
   box-shadow: none;
 }
 @media (hover: hover) {
-  .btn.ghost:not(:disabled):hover {
+  .btn.ghost:not(:disabled, [aria-disabled='true']):hover {
     background: var(--hover);
     color: var(--text);
   }
@@ -84,6 +86,16 @@
   box-shadow: var(--shadow-1);
   font-weight: 600;
 }
+/* Hover and press step the red itself; the neutral hover above would otherwise wash it out. */
+@media (hover: hover) {
+  .btn.danger:not(:disabled):hover {
+    background: var(--theme-destructive-fill-hover, var(--destructive));
+  }
+}
+.btn.danger:not(:disabled):active {
+  background: var(--theme-destructive-fill-active, var(--destructive));
+  box-shadow: none;
+}
 /* Opens a destructive confirmation; the filled red is kept for the final, confirming tap. */
 .btn.danger-outline {
   background: transparent;
@@ -91,7 +103,7 @@
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--danger) 55%, transparent);
 }
 @media (hover: hover) {
-  .btn.danger-outline:not(:disabled):hover {
+  .btn.danger-outline:not(:disabled, [aria-disabled='true']):hover {
     background: var(--danger-surface);
   }
 }
@@ -709,50 +721,16 @@ details[open] > summary::before {
   transform: rotate(45deg) translate(-2px, -2px);
 }
 
-/* ---------- dialog and sheet ---------- */
-.dialog {
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-xl);
-  padding: 20px;
-  width: min(94vw, 560px);
-  max-width: none;
-  background: var(--surface-dialog);
-  color: var(--text);
-  box-shadow: var(--shadow-3);
-}
-.dialog.wide {
-  width: min(96vw, 1040px);
-}
-.dialog h2 {
-  margin-top: 0;
-  font-size: var(--text-lg);
-}
+/* ---------- dialog ---------- */
+/* Dialog wears the sheet's classes (workspace.css): one modal family. Only what is particular to it lives here. */
 .dialog .seg {
   margin-top: 0;
-}
-.dialog::backdrop {
-  background: var(--scrim);
-  backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
-}
-.dialog[open] {
-  animation: dialog-in var(--dur-enter) var(--ease-enter);
 }
 @keyframes dialog-in {
   from {
     opacity: 0;
     transform: scale(0.97);
   }
-}
-.dialog-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-  margin-top: 20px;
-  flex-wrap: wrap;
-}
-.dialog-actions .btn {
-  min-width: 100px;
 }
 .change-summary {
   margin: 8px 0;
@@ -941,5 +919,10 @@ kbd {
   .agent-state[data-fresh='stale'] .agent-dot {
     background: none;
     box-shadow: inset 0 0 0 1.5px CanvasText;
+  }
+  /* The checked radio's fill and dot are both forced to Canvas; keep the dot so the choice still shows. */
+  input[type='radio']:checked::before {
+    forced-color-adjust: none;
+    background: CanvasText;
   }
 }

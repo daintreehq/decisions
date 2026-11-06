@@ -6,6 +6,7 @@ import {
 } from 'react';
 
 import { addEntry, leaveLayers } from './layers.js';
+import { transitionPage } from './motion.js';
 
 const EVT = 'decisions:navigate';
 
@@ -38,16 +39,38 @@ export function navigate(to: string, replace = false, state: object | null = nul
     }
     addEntry(state, to, replace);
     window.dispatchEvent(new Event(EVT));
-    window.scrollTo(0, 0);
   });
 }
 
+const listeners = new Set<() => void>();
+let renderedPath = typeof location === 'undefined' ? '/' : location.pathname;
+function routeChanged(event: Event): void {
+  const from = renderedPath;
+  const to = location.pathname;
+  renderedPath = to;
+  transitionPage(
+    from,
+    to,
+    () => {
+      if (from !== to) window.scrollTo(0, 0);
+      listeners.forEach((cb) => cb());
+    },
+    'hasUAVisualTransition' in event && event.hasUAVisualTransition === true,
+  );
+}
+
 function subscribe(cb: () => void): () => void {
-  window.addEventListener('popstate', cb);
-  window.addEventListener(EVT, cb);
+  if (!listeners.size) {
+    renderedPath = location.pathname;
+    window.addEventListener('popstate', routeChanged);
+    window.addEventListener(EVT, routeChanged);
+  }
+  listeners.add(cb);
   return () => {
-    window.removeEventListener('popstate', cb);
-    window.removeEventListener(EVT, cb);
+    listeners.delete(cb);
+    if (listeners.size) return;
+    window.removeEventListener('popstate', routeChanged);
+    window.removeEventListener(EVT, routeChanged);
   };
 }
 

@@ -51,7 +51,8 @@
   align-items: baseline;
   gap: 0;
   max-width: 100%;
-  margin: 0 0 10px;
+  /* Closer to its own message than the message's foot is to the next speaker. */
+  margin: 0 0 6px;
   font-size: var(--text-xs);
   line-height: 18px;
   color: var(--text-2);
@@ -77,8 +78,14 @@
 }
 .msg-origin::before,
 .msg-from .msg-time::before {
-  content: '·';
+  /* Drawn, not read (the time carries a spoken pause), and in the UI face even beside the mono model id. */
+  content: '·' / '';
   margin: 0 6px;
+  font-family: var(--font-ui);
+}
+/* The agent's next message in the same turn: no name, so no dot before its time. */
+.msg.note.grouped .msg-from .msg-time::before {
+  content: none;
 }
 .msg-time {
   flex: none;
@@ -113,7 +120,8 @@
   background: var(--out-bg);
   color: var(--text);
 }
-.msg.out.wide .bubble {
+/* Only the wrapper's own bubble: a bubble nested inside it (the conflict's unsent words) keeps its outgoing width. */
+.msg.out.wide > .bubble {
   max-width: none;
 }
 .msg.out.draft .bubble {
@@ -121,7 +129,9 @@
   border: 1px dashed var(--line-strong);
 }
 
-/* The question: body size and weight. It is the page's h1 for assistive tech, not a headline. */
+/* The question: the subject of the whole thread, one step above the body and heavier than the option labels under
+   it, so the eye lands on it first. It stays message-sized rather than a page headline (the conversation reads as a
+   chat): 18/26 semibold, between the 17 px body and the inbox's 22 px question title. */
 #q-title {
   outline: none;
   scroll-margin-top: 16px;
@@ -129,6 +139,10 @@
 .msg-question {
   max-width: 68ch;
   color: var(--text);
+  font-size: var(--text-lg);
+  line-height: 26px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
 }
 .msg-question p {
   margin: 0 0 0.5rem;
@@ -150,10 +164,18 @@
   line-height: 18px;
   color: var(--text-2);
 }
-/* The agent's later messages: the same incoming voice as its question, sized to their words. */
+/* The agent's later messages: the same incoming voice as its question, sized to their words. Straight after another
+   of its messages it is the same turn, 8 px under it instead of the 20 px between speakers. */
 .msg.in.note .bubble {
   width: auto;
   max-width: min(92%, 640px);
+}
+.msg.in.note.grouped {
+  margin-top: -12px;
+}
+/* The message the agent is waiting on reads as the current ask, a step heavier than its reports. */
+.msg.in.note.asking .msg-text {
+  font-weight: 500;
 }
 .msg-text {
   max-width: 68ch;
@@ -172,16 +194,18 @@
 }
 .ask-ring {
   flex: none;
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: color-mix(in oklab, var(--waiting) 12%, transparent);
   box-shadow: inset 0 0 0 1.5px var(--waiting);
 }
 
-/* A follow-up the relay refused: the words stay, with what happened and what can be done. */
+/* A follow-up the relay refused, or a reply the terminal never got: the words stay, edged in the warning hue, with
+   what happened and what can be done beneath. */
+.msg.out.flagged .bubble,
 .msg.out.failed .bubble {
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--warning) 45%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--warning) 65%, transparent);
 }
 .msg-failure {
   display: flex;
@@ -238,9 +262,11 @@
   /* Short enough that a choice question's first options still show above the dock on a phone. */
   height: clamp(160px, 24svh, 220px);
 }
+/* Wider screens give the column more width, not more height to spend on the preview: the options must still show
+   above the composer at 1280 x 820. */
 @media (min-width: 720px) {
   .bubble .fx-inline-stage {
-    height: clamp(240px, 36vh, 340px);
+    height: clamp(200px, 28vh, 300px);
   }
 }
 .bubble .fx-files-meta {
@@ -281,9 +307,10 @@
 }
 .msg-context .safe-text {
   padding: 0 0 4px;
-  font-size: 0.9375rem;
-  line-height: 22px;
-  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 24px;
+  /* Supporting the question, never outweighing it: a step down the text ladder. */
+  color: var(--text-2);
 }
 .msg-context .safe-text p:first-child {
   margin-top: 0;
@@ -317,7 +344,7 @@
   align-items: center;
   min-height: 56px;
   padding: 12px 14px;
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   /* A control's edge owes 3:1, so options take the input edge rather than a decorative hairline. */
   border: 1px solid var(--line-input);
   background: var(--surface-card);
@@ -339,7 +366,7 @@
   }
 }
 .option:active {
-  transform: scale(0.99);
+  transform: scale(0.98);
   transition-duration: 1ms;
 }
 .option:has(.option-desc) {
@@ -359,6 +386,10 @@
 .option:has(input:focus-visible) {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+/* One ring per focus: the card's, not a second one round the radio inside it. */
+.option input:focus-visible {
+  outline: none;
 }
 .options:disabled .option {
   cursor: not-allowed;
@@ -411,8 +442,8 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  font-size: 0.9375rem;
-  line-height: 22px;
+  font-size: var(--text-sm);
+  line-height: 20px;
   color: var(--text-2);
 }
 .choice-mark {
@@ -420,7 +451,7 @@
   display: grid;
   place-items: center;
   width: 16px;
-  height: 22px;
+  height: 20px;
 }
 .choice-mark:empty::before {
   content: '';
@@ -434,6 +465,13 @@
 }
 .choice-list li.on .choice-label {
   font-weight: 600;
+}
+/* This device's answer, still on its way: marked, but a step down until the relay has it. */
+.msg-choices.pending li.on {
+  color: var(--text-2);
+}
+.msg-choices.pending li.on .choice-label {
+  font-weight: 500;
 }
 /* The decision model's pick, before anyone has confirmed it: its violet mark, not the check a decision gets. */
 .choice-list li.on .choice-mark.model svg {
@@ -510,10 +548,10 @@
 }
 /* An outgoing message's time and its receipt, on one line under the bubble. */
 .msg-foot {
-  /* A grid, so an opened stepper takes its own row under the line and the time stays beside the receipt's words. */
+  /* A grid, so an opened stepper (or a problem's explanation) takes its own row under the line and the time stays
+     beside the receipt's words. The empty first track takes any width a wide row adds, so the two stay together. */
   display: grid;
-  grid-template-columns: auto auto;
-  justify-content: end;
+  grid-template-columns: 1fr auto auto;
   align-items: start;
   max-width: 100%;
   margin-top: 4px;
@@ -522,33 +560,43 @@
   color: var(--text-2);
 }
 .msg-foot > .msg-time {
+  grid-column: 2;
   /* Level with the receipt's words, which sit in a 44 px button pulled up by its negative margin. */
   padding-top: 7px;
 }
 .msg-foot > .msg-time:not(:last-child)::after {
-  content: '·';
-  margin: 0 2px 0 6px;
-}
-/* The time alone (delivery needs attention): it sits on its own line, so it needs no lift to meet a receipt. */
-.msg-foot > .msg-time:last-child {
-  padding-top: 0;
-  margin-bottom: 6px;
+  content: '·' / '';
+  /* 6 px either side once the receipt button's own inset is counted. */
+  margin: 0 4px 0 6px;
 }
 .msg-foot .receipt {
   display: contents;
+}
+.msg-foot .receipt-button {
+  grid-column: 3;
 }
 .msg-foot .receipt > :not(.receipt-button) {
   grid-column: 1 / -1;
   justify-self: end;
 }
 
-/* The decision model's message: violet only on the mark and a faint edge; the words always say "Model answer". */
+/* The decision model's message: a card with a hairline edge in the model's family and the violet leading rule,
+   drawn straight inside the edge so the card's corners never bend it; the words always say "Model answer". */
 .msg.model .bubble {
-  padding: 12px 14px;
-  border-radius: var(--radius-xl);
-  border-left: 2px solid var(--model);
-  border-color: color-mix(in oklab, var(--model) 32%, var(--line-default));
+  padding: 12px 14px 12px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in oklab, var(--model) 26%, var(--line-default));
   background: color-mix(in oklab, var(--surface-card) 100%, var(--model) 4%);
+}
+.msg.model .bubble::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--model);
 }
 .model-meta {
   margin: 6px 0 0;
@@ -641,6 +689,11 @@
 .receipt-button.static {
   cursor: default;
 }
+/* It takes focus only when a problem replaced the button that had it. */
+.receipt-button.static:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
 .receipt-button.static:hover {
   background: transparent;
   color: var(--text-2);
@@ -658,9 +711,12 @@
 .receipt-glyph.done svg {
   stroke-width: 3;
 }
-.receipt-note::before {
-  content: '·';
-  margin-right: 6px;
+/* A quiet extra (sends when back online) on its own line under the receipt's words. */
+.receipt-note {
+  margin-top: -2px;
+  font-size: var(--text-xs);
+  line-height: 18px;
+  color: var(--text-2);
 }
 .receipt-steps {
   width: min(100%, 320px);
@@ -673,10 +729,28 @@
 .receipt-steps[hidden] {
   display: none;
 }
-/* A problem never waits behind a tap: its explanation sits under the reply at once, in the warning tint. */
-.receipt.attention {
+/* A problem keeps the receipt's line (the warning mark and its label, in the body colour) and never waits behind a
+   tap: its explanation sits under it at once, in the warning tint, without repeating the label. */
+.receipt.attention .receipt-button > svg {
+  color: var(--warning-text);
+}
+.receipt.attention .receipt-label {
+  color: var(--text);
+  font-weight: 500;
+}
+.receipt.attention > .callout {
   width: min(100%, 520px);
   margin-top: 8px;
+}
+.callout.bare {
+  padding: 10px 14px;
+}
+.callout.bare .callout-text {
+  margin-top: 0;
+}
+/* Inside the model's card the receipt is one of its facts: the disclosure under it keeps the card's rhythm. */
+.msg.model .receipt + .msg-context {
+  margin-top: 6px;
 }
 .callout-code {
   margin: 4px 0 0;
@@ -735,10 +809,6 @@
 }
 .sys-icon svg {
   color: var(--text-2);
-}
-.sys-icon .model-mark svg {
-  color: var(--model);
-  fill: color-mix(in oklab, var(--model) 30%, transparent);
 }
 .sys-text {
   font-weight: 500;
@@ -812,30 +882,64 @@
   font-weight: 600;
 }
 .field-button-empty {
-  color: var(--text-placeholder);
+  /* The app's placeholder colour (base.css ::placeholder): text-secondary, never below 4.5:1. */
+  color: var(--text-2);
 }
 .field-button-value {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-/* Conflict: what is in force, and what this device tried to send. */
+/* Conflict: why the answer was not applied (the answer in force is the message above it, named, not repeated),
+   then the unsent words as the person's own reply that never went: a dashed outgoing bubble on the control edge,
+   with what can still be done with them right under it. */
 .conflict {
   display: grid;
-  gap: 10px;
+  gap: 14px;
   scroll-margin-top: 12px;
 }
-.conflict-pane {
-  padding: 10px 14px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--line-default);
-  background: var(--surface-card);
+.msg.out.unsent .bubble {
+  background: transparent;
+  border: 1px dashed var(--line-input);
 }
-.conflict-pane.mine {
-  border-style: dashed;
+.conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  /* As wide as an outgoing bubble at most, so on a wide column the row stays with the words it acts on. */
+  max-width: min(100%, 560px);
+  margin-top: 10px;
 }
-.conflict-pane h3 {
-  margin: 0 0 4px;
+/* The decisions on one line, the utilities (Copy text, Discard) on the next. */
+.conflict-break {
+  flex-basis: 100%;
+  height: 0;
+}
+/* A copy that failed says so on its own line under the buttons, so they never move. */
+.conflict-actions .copy-fail {
+  flex-basis: 100%;
+  order: 10;
+  text-align: right;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text-2);
+}
+.conflict-error {
+  justify-self: end;
+  margin: 0;
+}
+.conflict-actions .btn.small {
+  min-height: var(--tap-min);
+}
+.conflict-ask {
+  flex-basis: 100%;
+  margin: 0 0 2px;
+  text-align: right;
+  font-size: var(--text-sm);
+  line-height: 20px;
+  color: var(--text);
 }
 .callout-title {
   font-size: var(--text-sm);
@@ -943,8 +1047,8 @@
   font-weight: 600;
 }
 .stepper li.waiting .step-mark {
-  border-style: dashed;
-  border-color: var(--text-2);
+  /* The clock is the mark (it has its own ring); the card colour behind it still masks the track. */
+  border-color: transparent;
   color: var(--text-2);
 }
 

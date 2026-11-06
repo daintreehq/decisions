@@ -88,6 +88,10 @@
   max-height: 100%;
   object-fit: contain;
   -webkit-user-drag: none;
+  /* A hairline of stage ink, so a dark capture on the dark stage still shows where it ends. Drawn inside the image,
+     so a capture fitted edge to edge keeps it. */
+  outline: 1px solid var(--fx-stage-line);
+  outline-offset: -1px;
 }
 .fs-slide img.is-sized {
   position: absolute;
@@ -153,16 +157,20 @@
   place-items: center;
   color: var(--fx-stage-ink-2);
 }
-.fx-state-glyph.is-error,
-.fx-state-glyph.is-unverified {
+.fx-state-glyph.is-error {
   color: var(--fx-stage-danger);
 }
+/* The glyph and its hue are a fixed pair: the triangle is a warning, the clock reads as one too. */
+.fx-state-glyph.is-unverified,
 .fx-state-glyph.is-expired {
   color: var(--fx-stage-warning);
 }
 .fx-retry {
   margin-top: 4px;
   min-height: var(--tap-min);
+}
+.fx-state .btn:focus-visible {
+  outline-color: var(--fx-stage-focus);
 }
 
 /* ---------- inline gallery ---------- */
@@ -189,6 +197,13 @@
 @media (min-width: 720px) {
   .fx-inline-stage {
     height: clamp(280px, 40vh, 400px);
+  }
+}
+/* Inside the agent's message on a phone the stage is shorter than on its own, but never below the 240 px floor
+   (guide 5.1). From 720 px the message's own rule sizes it, so the options still show above the composer. */
+@media (max-width: 719px) {
+  .fx-files .fx-inline-stage {
+    height: clamp(240px, 32svh, 300px);
   }
 }
 .fx-files-meta {
@@ -221,7 +236,7 @@
   min-height: var(--tap-min);
   padding: 0 10px;
 }
-.fx-files-meta .btn.ghost {
+.fx-files-meta .btn.ghost:not(:disabled) {
   color: var(--text);
 }
 .fx-files-meta .fx-meta-btn:last-child {
@@ -271,10 +286,35 @@
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  /* Room for the active ring, which sits outside the thumbnail. */
-  padding: 6px 4px;
-  margin: 2px -4px 0;
+  /* Room for the active ring and the focus ring, which sit outside the thumbnail. */
+  padding: 8px;
+  margin: 0 -8px;
   scrollbar-width: none;
+}
+/* More thumbnails past an edge: that edge fades rather than cutting one in half. */
+.fx-strip[data-more='right'] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+.fx-strip[data-more='left'] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px);
+  mask-image: linear-gradient(to right, transparent, #000 32px);
+}
+.fx-strip[data-more='both'] {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 32px,
+    #000 calc(100% - 32px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 32px,
+    #000 calc(100% - 32px),
+    transparent
+  );
 }
 .fx-strip::-webkit-scrollbar {
   display: none;
@@ -291,8 +331,8 @@
   flex: 1 1 0;
   /* Lighter than an option card inside the same card: a shorter, smaller switch whose 44 px target is kept by its
      ::after, with the selected half on a hairline rather than a raised shadow. */
-  min-height: 34px;
-  font-size: var(--text-xs);
+  min-height: 40px;
+  font-size: var(--text-sm);
 }
 .fx-pair-switch button::after {
   content: '';
@@ -300,7 +340,25 @@
   inset: -5px 0;
 }
 .fx-pair-switch button[aria-selected='true'] {
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  background: var(--raised-select);
+  box-shadow: inset 0 0 0 1px var(--text-2);
+}
+.fx-pair-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.fx-pair-label .fx-state-glyph.is-error {
+  color: var(--danger-text);
+}
+.fx-pair-label .fx-state-glyph.is-unverified,
+.fx-pair-label .fx-state-glyph.is-expired {
+  color: var(--warning-text);
+}
+.fx-pair-label .fx-thumb-pulse {
+  border-color: var(--line-strong);
+  border-top-color: var(--text-2);
 }
 .fx-thumb {
   position: relative;
@@ -342,7 +400,22 @@
 }
 .fx-thumb:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 6px;
+  outline-offset: 5px;
+}
+/* Viewed: a small neutral check in the corner, from presented evidence only. */
+.fx-thumb-seen {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  z-index: 1;
+  background: var(--text);
+  color: var(--text-inverse);
+  box-shadow: 0 0 0 1.5px var(--surface-page);
 }
 .fx-thumb-pulse {
   width: 12px;
@@ -350,7 +423,20 @@
   border-radius: 50%;
   border: 2px solid var(--fx-stage-line);
   border-top-color: var(--fx-stage-ink-2);
-  animation: spin 0.9s linear infinite;
+  /* Doherty gate, like the stage: nothing for the first 400 ms. */
+  opacity: 0;
+  animation:
+    appear 1ms 400ms forwards,
+    spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The arc stays, still: loading reads without movement. */
+  .fx-thumb-pulse {
+    animation: appear 1ms 400ms forwards;
+  }
+  .fx-state-pulse {
+    animation: none;
+  }
 }
 @media (forced-colors: active) {
   .fx-thumb.is-active {
@@ -411,13 +497,41 @@
   background: var(--surface-chrome);
   border-bottom: 1px solid var(--line);
 }
-.fx-bar .btn.ghost {
+.fx-bar .btn.ghost:not(:disabled) {
   color: var(--text);
+}
+.fx-menu-trigger[aria-expanded='true'] {
+  background: var(--hover);
 }
 .fx-id {
   flex: 1;
   min-width: 0;
   padding: 0 6px;
+}
+/* The identity is the Question button: the whole block opens the full question. */
+.fx-id-btn {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: var(--tap-min);
+  margin: 0 4px 0 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .fx-id-btn:hover {
+    background: var(--hover);
+  }
+}
+.fx-id-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 .fx-id-file {
   display: flex;
@@ -441,36 +555,42 @@
   color: var(--text-2);
 }
 .fx-id-q {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
   font-size: var(--text-xs);
   line-height: 1.4;
   color: var(--text-2);
 }
+.fx-id-q-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fx-id-q svg {
+  flex: none;
+}
 .fx-id-project {
   font-weight: 500;
-}
-.fx-question-btn {
-  flex: none;
-  min-height: 36px;
-  padding: 0 12px;
-  margin: 0 4px;
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-}
-/* The visible chip is 36 px; the hit area still reaches 44. */
-.fx-question-btn::before {
-  content: '';
-  position: absolute;
-  inset: -4px 0;
 }
 .fx-viewer-stage {
   flex: 1;
   min-height: 0;
 }
 .fx-viewer-stage:focus-visible {
-  outline: 2px solid var(--fx-stage-focus);
-  outline-offset: -4px;
+  outline: none;
+}
+/* Drawn above the image, so a zoomed capture never hides part of the ring. */
+.fx-viewer-stage:focus-visible::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  z-index: 2;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 2px var(--fx-stage-focus);
+  pointer-events: none;
 }
 .fx-tools {
   flex: none;
@@ -497,6 +617,12 @@
   height: var(--tap-min);
   color: var(--text);
 }
+/* Compare names itself where there is room; on a phone's pill it is the icon alone (with its tooltip). */
+.fx-tool.fx-tool-labelled {
+  width: auto;
+  gap: 6px;
+  padding: 0 12px;
+}
 .fx-tools .btn.ghost:not(:disabled, [aria-disabled='true']) {
   color: var(--text);
 }
@@ -522,12 +648,6 @@
 }
 
 /* ---------- comparison ---------- */
-.fx-compare-bar {
-  flex: none;
-  padding: 8px 12px;
-  background: var(--surface-chrome);
-  border-bottom: 1px solid var(--line);
-}
 .fx-compare-seg {
   margin: 0;
   flex-wrap: nowrap;
@@ -535,8 +655,6 @@
 .fx-compare-seg button {
   position: relative;
   flex: 1 1 0;
-  min-height: 40px;
-  font-size: var(--text-md);
 }
 .fx-compare-seg button:focus-visible {
   z-index: 1;
@@ -546,8 +664,12 @@
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 1px;
-  background: var(--fx-stage-line);
+}
+.fx-pane + .fx-pane .fx-pane-head {
+  border-left: 1px solid var(--line);
+}
+.fx-pane + .fx-pane .fx-viewer-stage {
+  border-left: 1px solid var(--fx-stage-line);
 }
 .fx-pane {
   display: flex;
@@ -574,11 +696,38 @@
   font-size: var(--text-xs);
   color: var(--text-2);
 }
+/* Link zoom off: the pane the toolbar and keys work on carries a text-primary underline. */
+.fx-pane.is-current .fx-pane-head {
+  box-shadow: inset 0 -2px 0 var(--text);
+}
+/* Flipping Before | After swaps in place, so the eye sees only what changed. */
+.fx-flip-stage .fs-track,
+.fx-flip-stage .fs-slide {
+  transition: none;
+}
+.fx-compare-switch {
+  flex: none;
+  padding: 8px max(12px, var(--safe-r)) 0 max(12px, var(--safe-l));
+  background: var(--surface-chrome);
+  border-top: 1px solid var(--line);
+}
+/* Switch and tools are one chrome band under the stage. */
+.fx-compare-switch + .fx-tools {
+  border-top: 0;
+}
+.fx-compare-switch .fx-compare-seg {
+  margin: 0;
+}
+.fx-compare-switch .fx-compare-seg button {
+  min-height: var(--tap-min);
+  font-size: var(--text-md);
+}
 .fx-link {
   min-height: var(--tap-min);
 }
 /* Selection is neutral: a raised fill with a text-secondary edge, never accent. */
-.fx-link[aria-pressed='true'] {
+.fx-link[aria-pressed='true'],
+.fx-compare-seg button[aria-pressed='true'] {
   background: var(--raised-select);
   box-shadow: inset 0 0 0 1px var(--text-2);
 }
@@ -634,18 +783,65 @@
   font-size: var(--text-lg);
   font-weight: 600;
 }
-.fx-sheet-head .btn.ghost {
+.fx-sheet-head .btn.ghost:not(:disabled) {
   color: var(--text);
 }
 .fx-sheet-count {
   color: var(--text-2);
   font-weight: 500;
 }
+.fx-sheet-lead {
+  flex: none;
+  padding: 0 20px 12px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.fx-sheet-lead .fx-sheet-sub {
+  margin: 2px 0 0;
+}
+.fx-sheet-id {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: calc(100% + 16px);
+  min-height: var(--tap-min);
+  margin: 0 -8px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.43;
+  text-align: left;
+  cursor: pointer;
+}
+.fx-sheet-id svg {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-2);
+}
+.fx-sheet-id-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+@media (hover: hover) {
+  .fx-sheet-id:hover {
+    background: var(--hover);
+  }
+}
+.fx-sheet-id:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 .fx-sheet-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 0 20px 16px;
+  scroll-padding: 12px;
   overscroll-behavior: contain;
 }
 .fx-sheet-body > p {
@@ -694,20 +890,38 @@
   }
 }
 .fx-question {
-  font-size: 1.25rem;
-  font-weight: 600;
-  line-height: 1.4;
+  font-size: var(--text-question);
+  font-weight: 400;
+  line-height: 30px;
   letter-spacing: -0.01em;
+  max-width: 68ch;
+}
+.fx-question-context {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.fx-question-context .eyebrow {
+  margin: 0 0 6px;
+}
+.fx-question-context-text {
+  font-size: var(--text-sm);
+  line-height: 1.43;
+  color: var(--text-2);
   max-width: 68ch;
 }
 .fx-question p {
   margin: 0 0 0.6rem;
 }
+.fx-question p:last-child,
+.fx-question-context-text p:last-child {
+  margin-bottom: 0;
+}
 
 /* ---------- All files grid ---------- */
 .fx-grid {
   list-style: none;
-  margin: 0;
+  margin: 12px 0 0;
   padding: 0 0 4px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
@@ -737,7 +951,9 @@
 }
 .fx-tile.is-current {
   background: var(--raised-select);
-  border-color: var(--text-2);
+  /* The file in front of you: the same 2 px text-primary edge as its thumbnail in the strip. */
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--text);
 }
 .fx-tile-well {
   position: relative;
@@ -755,18 +971,23 @@
 }
 .fx-tile-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 0 4px;
 }
 .fx-tile-label {
   padding: 0 4px;
   font-size: var(--text-sm);
+  line-height: 1.3;
   min-width: 0;
+  /* Two lines, so a caption keeps the words that tell files apart; rows stay aligned. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-height: calc(2 * 1.3em);
   font-weight: 600;
 }
 .fx-tile-index {
@@ -778,17 +999,40 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
   font-size: var(--text-xs);
+  color: var(--text-2);
+}
+/* Not viewed yet is the one that asks for something: it reads in primary ink; Viewed steps back. */
+.fx-tile-state.is-ready {
+  color: var(--text);
+  font-weight: 500;
+}
+.fx-tile-state.is-seen svg {
   color: var(--text-2);
 }
 .fx-tile-state svg {
   color: var(--text);
+}
+.fx-tile-state .fx-state-glyph.is-error svg {
+  color: var(--danger-text);
+}
+.fx-tile-state .fx-state-glyph.is-unverified svg,
+.fx-tile-state .fx-state-glyph.is-expired svg {
+  color: var(--warning-text);
+}
+.fx-tile-state .fx-state-glyph svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* ---------- menu ---------- */
 .fx-menu-catch {
   position: absolute;
   inset: 0;
+}
+.fx-menu:focus {
+  outline: none;
 }
 .fx-menu {
   position: absolute;
@@ -835,6 +1079,11 @@
 .fx-menu [role='menuitem'][aria-disabled='true'] svg {
   color: var(--text-3);
 }
+.fx-menu-sep {
+  margin: 6px 4px;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 .fx-menu-note {
   max-width: 28ch;
   margin: 6px 12px 6px;
@@ -847,5 +1096,247 @@
   .fx-thumb,
   .fx-inline-stage {
     box-shadow: inset 0 0 0 1px var(--fx-stage-ink-2);
+  }
+}
+
+/*
+ * A before/after pair: on a phone the Before | After switch takes the full width under the stage (guide 5.5), with
+ * Compare and Enlarge on the row below; from 720 px it shares one row with them, at a width that suits two words.
+ */
+.fx-files[data-pair] .fx-strip-row {
+  margin-top: 8px;
+}
+.fx-files[data-pair] .fx-pair-switch {
+  margin: 0;
+}
+.fx-files[data-pair] .fx-files-meta {
+  margin-top: 2px;
+}
+@media (min-width: 720px) {
+  .fx-files[data-pair] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0 8px;
+  }
+  .fx-files[data-pair] .fx-inline-stage {
+    grid-column: 1 / -1;
+  }
+  .fx-files[data-pair] .fx-strip-row {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .fx-files[data-pair] .fx-pair-switch {
+    flex: 0 1 320px;
+  }
+  .fx-files[data-pair] .fx-files-meta {
+    grid-column: 2;
+    grid-row: 2;
+    gap: 4px;
+    margin-top: 8px;
+  }
+}
+.fx-zoom-menu {
+  position: relative;
+}
+.fx-zoom-trigger {
+  width: auto;
+  gap: 2px;
+  padding: 0 8px;
+}
+.fx-zoom-trigger[aria-expanded='true'] {
+  background: var(--hover);
+}
+.fx-zoom-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  width: 180px;
+  padding: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-2);
+}
+.fx-zoom-popover button {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 44px;
+}
+@media (pointer: coarse) and (max-width: 44.999em) {
+  .fx-tools {
+    position: absolute;
+    bottom: 10px;
+    align-self: center;
+    z-index: 3;
+    width: max-content;
+    max-width: calc(100% - 24px);
+    min-height: 48px;
+    gap: 4px;
+    padding: 2px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--surface-chrome) 92%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--shadow-2);
+  }
+  .fx-overlay.is-fixed .fx-tools {
+    bottom: calc(var(--safe-b) + 10px);
+    padding-bottom: 2px;
+  }
+  .fx-tools .fx-zoom-value {
+    min-width: 48px;
+  }
+  .fx-tools .fx-done {
+    border-radius: 999px;
+  }
+  .fx-tool.fx-tool-labelled {
+    width: var(--tap-min);
+    padding: 0;
+  }
+  .fx-tool-labelled .fx-tool-text {
+    display: none;
+  }
+  /* The Before | After switch floats full width above the pill, inside the thumb's reach. */
+  .fx-compare-switch {
+    border-top: 0;
+    position: absolute;
+    left: max(12px, var(--safe-l));
+    right: max(12px, var(--safe-r));
+    bottom: 66px;
+    z-index: 3;
+    padding: 0;
+    background: none;
+  }
+  .fx-overlay.is-fixed .fx-compare-switch {
+    bottom: calc(66px + var(--safe-b));
+  }
+  .fx-compare-switch .fx-compare-seg {
+    padding: 3px;
+    border-radius: var(--radius-xl);
+    background: color-mix(in oklab, var(--surface-chrome) 92%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow:
+      inset 0 0 0 1px var(--line-strong),
+      var(--shadow-2);
+  }
+  .fx-compare-switch .fx-compare-seg button {
+    border-radius: calc(var(--radius-xl) - 3px);
+  }
+  .fx-compare:not(.is-wide) .fx-viewer-stage .fs-track {
+    bottom: 124px;
+  }
+  .fx-overlay.is-fixed .fx-compare:not(.is-wide) .fx-viewer-stage .fs-track {
+    bottom: calc(124px + var(--safe-b));
+  }
+  /* Fit keeps the whole image clear of the floating tools; a zoomed image still runs under them. */
+  .fx-viewer .fx-viewer-stage .fs-track {
+    bottom: 64px;
+  }
+  .fx-overlay.is-fixed .fx-viewer .fx-viewer-stage .fs-track {
+    bottom: calc(64px + var(--safe-b));
+  }
+}
+
+/* ---------- viewer with its chrome hidden ----------
+ * A single tap on the image hides the bar, the tools and the dock; another brings them back. The bars slide off
+ * their edges over the stage, which grows to the whole viewport. The image area itself stays where it was
+ * (--fx-bare-*, captured as the chrome hid), so the image keeps its size and position and a zoomed image gets the
+ * whole screen to run into. Without a captured frame (the viewport changed meanwhile) it takes the whole stage.
+ */
+.fx-viewer .fx-bar,
+.fx-viewer .fx-tools {
+  transition:
+    transform var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease-out);
+}
+.fx-viewer.is-bare .fx-bar {
+  position: absolute;
+  top: var(--fx-bare-bar-t, 0px);
+  left: var(--fx-bare-bar-l, 0px);
+  width: var(--fx-bare-bar-w, 100%);
+  z-index: 3;
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+.fx-viewer.is-bare .fx-tools {
+  position: absolute;
+  top: var(--fx-bare-tools-t, auto);
+  bottom: var(--fx-bare-tools-b, 0px);
+  left: var(--fx-bare-tools-l, 0px);
+  width: var(--fx-bare-tools-w, 100%);
+  right: auto;
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+.fx-overlay .fx-viewer.is-bare .fx-viewer-stage {
+  position: absolute;
+  inset: 0;
+}
+.fx-overlay .fx-viewer.is-bare .fx-viewer-stage .fs-track {
+  top: var(--fx-bare-t, 0px);
+  left: var(--fx-bare-l, 0px);
+  width: var(--fx-bare-w, 100%);
+  height: var(--fx-bare-h, 100%);
+  right: auto;
+  bottom: auto;
+}
+/* Where the image area no longer spans the screen (a sidebar was beside it), its neighbours would show beside it:
+   they wait a whole viewport further out, and still slide in and out when the file changes. */
+.fx-viewer.is-bare.is-inset .fs-stage {
+  --fs-gap: 100vw;
+}
+.fx-viewer.is-settling .fs-slide {
+  transition: none;
+}
+/* Stop stays reachable while recording, with everything else hidden. */
+.fx-stop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(12px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 2px 2px 2px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface-chrome) 92%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  animation: fx-fade-in var(--dur) var(--ease-out);
+}
+.fx-stop-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fx-stop-btn {
+  width: var(--tap-min);
+  height: var(--tap-min);
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface-page);
+}
+.fx-stop-btn[aria-disabled='true'] {
+  opacity: 0.6;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fx-viewer .fx-bar,
+  .fx-viewer .fx-tools {
+    transition: none;
+  }
+  .fx-stop {
+    animation: none;
   }
 }

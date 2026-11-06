@@ -1,4 +1,4 @@
-import type { Capture } from './capture.js';
+import type { Capture, MicUnavailableError } from './capture.js';
 
 /** The subset of VoiceClient the session needs (lets tests drive it without a socket). */
 export interface VoiceLike {
@@ -18,6 +18,7 @@ export interface SessionDeps {
     onFrame: (pcm: ArrayBuffer) => void,
     onLevel?: (rms: number) => void,
     signal?: AbortSignal,
+    onFailure?: (error: MicUnavailableError) => void,
   ): Promise<Capture>;
   onLevel?: (rms: number) => void;
   /** The microphone delivered something other than digital silence (Daintree's mic-live signal). */
@@ -212,6 +213,9 @@ export class DictationSession {
         (pcm) => this.onFrame(gen, client, pcm),
         this.deps.onLevel,
         micAbort.signal,
+        (error) => {
+          if (current() && this.phase === 'listening') this.deps.onFailure?.(error);
+        },
       );
       // A microphone this attempt never adopts (cancelled, or the provider failed first) is stopped the moment the
       // permission resolves, so none keeps running without a visible owner.

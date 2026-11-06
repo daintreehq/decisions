@@ -1,13 +1,31 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { announce } from '../../lib/announce.js';
 import { originParts } from '../../domain/selectors.js';
-import { CloseIcon, CompareIcon } from '../Icons.js';
+import { ChevronDown, CloseIcon, CompareIcon } from '../Icons.js';
 import { FileMenu } from './FileMenu.js';
 import { FileStage, type FileStageHandle, type StageSlide } from './FileStage.js';
 import { FilePlaceholder, statusOf } from './FileState.js';
-import { Overlay, useFocusInOut } from './Layer.js';
+import { Overlay, useFocusInOut, useFocusKeeper } from './Layer.js';
 import type { FilesModel } from './model.js';
 import { altFor } from './sequence.js';
-import { useMoveFocus, PanPad, StepButtons, ZoomButtons, zoomCommands } from './Tools.js';
+import { ViewerStop } from './ViewerStop.js';
+import {
+  isModified,
+  toolFallback,
+  useMoveFocus,
+  PanPad,
+  StepButtons,
+  ZoomButtons,
+  zoomCommands,
+} from './Tools.js';
 import { FIT, fromNormal, isZoomed, toNormal, type Size, type View } from './zoom.js';
 
 /** One line of the question for the viewer's identity, without markup characters. */
@@ -36,9 +54,108 @@ export function slidesFor(model: FilesModel, onRetry: (id: string) => void): Sta
 }
 
 /**
+ * Which question this is, in every file mode (guide 1.4 rule 2): what is shown on the first line, the project and as
+ * much of the question as fits on the second. The whole block opens the full question, so the excerpt gets the
+ * bar's width instead of sharing it with a separate button.
+ */
+export function QuestionIdentity({
+  id,
+  title,
+  project,
+  excerpt,
+  onQuestion,
+}: {
+  id: string;
+  title: ReactNode;
+  project: string;
+  excerpt: string;
+  onQuestion: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="fx-id fx-id-btn"
+        aria-describedby={`${id}-qa`}
+        onClick={onQuestion}
+      >
+        <span className="fx-id-file" id={`${id}-t`}>
+          {title}
+        </span>
+        <span className="fx-id-q" id={`${id}-q`}>
+          <span className="fx-id-q-text">
+            <span className="fx-id-project">{project}</span>
+            <span aria-hidden="true"> · </span>
+            {excerpt}
+          </span>
+          <ChevronDown size={14} />
+        </span>
+      </button>
+      <span hidden id={`${id}-qa`}>
+        Shows the full question
+      </span>
+    </>
+  );
+}
+
+const px = (n: number) => `${n}px`;
+
+/** The track's current horizontal translation (a swipe in progress or settling), which is not where it sits. */
+function shiftOf(el: HTMLElement): number {
+  try {
+    const t = getComputedStyle(el).transform;
+    return t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+interface Bare {
+  frame: Record<string, string> | null;
+  /** The image area does not span the viewport's width (a sidebar was beside it). */
+  inset: boolean;
+}
+
+/**
+ * Where the image area and the bars sit with the chrome shown, as the custom properties the hidden layout pins them
+ * with: the image keeps its size and position, and the bars leave from where they were.
+ */
+function frameOf(
+  track: HTMLElement | null | undefined,
+  bar: HTMLElement | null,
+  tools: HTMLElement | null,
+): Bare {
+  if (!track || !bar || !tools) return { frame: null, inset: false };
+  const r = track.getBoundingClientRect();
+  const dx = shiftOf(track);
+  const t = { top: r.top, left: r.left - dx, width: r.width, height: r.height };
+  const b = bar.getBoundingClientRect();
+  const o = tools.getBoundingClientRect();
+  const inset = t.left > 0.5 || t.left + t.width < window.innerWidth - 0.5;
+  const frame = {
+    '--fx-bare-t': px(t.top),
+    '--fx-bare-l': px(t.left),
+    '--fx-bare-w': px(t.width),
+    '--fx-bare-h': px(t.height),
+    '--fx-bare-bar-t': px(b.top),
+    '--fx-bare-bar-l': px(b.left),
+    '--fx-bare-bar-w': px(b.width),
+    '--fx-bare-tools-t': px(o.top),
+    '--fx-bare-tools-b': 'auto',
+    '--fx-bare-tools-l': px(o.left),
+    '--fx-bare-tools-w': px(o.width),
+  };
+  return { frame, inset };
+}
+
+/**
  * The file viewer: a mode of the workspace, not a modal. Close, the question's identity (with the full text one
  * tap away), the file's label and position, the file menu; the darkest stage at the largest practical size; then
  * Previous/Next, zoom and Move. Recording and the answer dock carry on underneath.
+ *
+ * A single tap on the image (or Space on the stage) hides all of that, the dock included, and the stage fills the
+ * viewport; another brings it back. The image area stays exactly where it was, so the image neither moves nor
+ * resizes: a zoomed image simply has the whole screen to run into. Stop stays on screen while recording.
  */
 export function Viewer({
   model,
@@ -71,8 +188,15 @@ export function Viewer({
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   const [moving, setMoving] = useState(false);
   const tools = useRef<HTMLDivElement>(null);
+  const bar = useRef<HTMLElement>(null);
+  // Chrome hidden: where the image area and the bars sat with it shown (viewport px), so nothing jumps. Null while
+  // shown; its frame is dropped after a resize while hidden, when the image area takes the whole viewport.
+  const [bare, setBare] = useState<Bare | null>(null);
+  // The frame the hidden layout first applies in: slides move to it without animating (no neighbour sweeps past).
+  const [settling, setSettling] = useState(false);
   useMoveFocus(moving, tools, () => stage.current?.el);
   useFocusInOut(() => stage.current?.el, focusFallback);
+  useFocusKeeper(root, (from) => toolFallback(from, () => stage.current?.el));
 
   const r = results[item.d.attachment_id];
   const natural = naturals[item.d.attachment_id];
@@ -93,6 +217,40 @@ export function Viewer({
     if (!zoomed) setMoving(false);
   }, [zoomed]);
 
+  const hidden = bare !== null;
+  const toggleChrome = () => {
+    if (hidden) {
+      setBare(null);
+      announce('Controls shown.');
+      return;
+    }
+    // Focus never stays on a control that is about to be hidden (the bars, the dock, anything else on screen).
+    const el = stage.current?.el;
+    if (el && document.activeElement !== el) el.focus({ preventScroll: true });
+    setMoving(false);
+    setBare(frameOf(stage.current?.track, bar.current, tools.current));
+    setSettling(true);
+    announce('Controls hidden. Tap the image or press Space to show them.');
+  };
+
+  useEffect(() => {
+    if (!settling) return;
+    // Two frames: the first paints the hidden layout with slide transitions off, the second turns them back on.
+    let id = requestAnimationFrame(() => {
+      id = requestAnimationFrame(() => setSettling(false));
+    });
+    return () => cancelAnimationFrame(id);
+  }, [settling]);
+
+  // A new viewport (rotation, a resized window) has no "where it was": the image area takes the whole screen.
+  useEffect(() => {
+    if (!hidden) return;
+    const drop = () => setBare((b) => (b?.frame ? { frame: null, inset: false } : b));
+    window.addEventListener('resize', drop);
+    return () => window.removeEventListener('resize', drop);
+  }, [hidden]);
+  const bareStyle = (bare?.frame ?? undefined) as CSSProperties | undefined;
+
   const step = (dir: -1 | 1) => {
     const next = active + dir;
     if (next >= 0 && next < total) onActive(next);
@@ -102,10 +260,22 @@ export function Viewer({
     if (!root.current?.contains(e.target as Node)) return; // a sheet or menu above us
     const t = e.target as HTMLElement;
     if (t.closest('input, textarea, select, [contenteditable="true"]')) return;
-    const onStage = t === stage.current?.el || t === root.current;
+    if (isModified(e)) return;
+    // Arrow keys act on the image from the stage and from the toolbar (not from inside the zoom popover).
+    const onStage =
+      t === stage.current?.el ||
+      t === root.current ||
+      (!!tools.current?.contains(t) && !t.closest('.fx-zoom-popover'));
     switch (e.key) {
+      case ' ':
+        // Space on the stage itself shows or hides the chrome (a button keeps Space for itself).
+        if (t !== stage.current?.el) return;
+        if (!e.repeat) toggleChrome();
+        break;
       case 'Escape':
-        onClose();
+        // Move is a mode of the toolbar: Escape leaves it before it leaves the viewer.
+        if (moving) setMoving(false);
+        else onClose();
         break;
       case 'ArrowLeft':
       case 'ArrowRight':
@@ -149,39 +319,41 @@ export function Viewer({
     <Overlay className="fx-viewer-layer">
       <div
         ref={root}
-        className="fx-viewer"
+        className={`fx-viewer${hidden ? ' is-bare' : ''}${bare?.inset ? ' is-inset' : ''}${
+          settling ? ' is-settling' : ''
+        }`}
+        style={bareStyle}
         role="dialog"
         aria-labelledby={`${id}-t`}
         aria-describedby={`${id}-q`}
         onKeyDown={key}
       >
-        <header className="fx-bar">
+        <header ref={bar} className="fx-bar" inert={hidden}>
           <button
             type="button"
             className="btn ghost icon"
             aria-label="Close viewer"
+            title="Close (Esc)"
             onClick={onClose}
           >
             <CloseIcon size={20} />
           </button>
-          <div className="fx-id">
-            <div className="fx-id-file" id={`${id}-t`}>
-              <span className="fx-id-label">{item.label}</span>
-              {total > 1 && (
-                <span className="fx-id-count tabular">
-                  {active + 1} of {total}
-                </span>
-              )}
-            </div>
-            <div className="fx-id-q" id={`${id}-q`}>
-              <span className="fx-id-project">{project}</span>
-              <span aria-hidden="true"> · </span>
-              {excerpt}
-            </div>
-          </div>
-          <button type="button" className="btn small fx-question-btn" onClick={onQuestion}>
-            Question
-          </button>
+          <QuestionIdentity
+            id={id}
+            project={project}
+            excerpt={excerpt}
+            onQuestion={onQuestion}
+            title={
+              <>
+                <span className="fx-id-label">{item.label}</span>
+                {total > 1 && (
+                  <span className="fx-id-count tabular">
+                    {active + 1} of {total}
+                  </span>
+                )}
+              </>
+            }
+          />
           <FileMenu item={item} result={r} total={total} onAllFiles={onAllFiles} />
         </header>
 
@@ -194,6 +366,7 @@ export function Viewer({
           view={ready ? view : undefined}
           onView={setView}
           onStep={total > 1 ? step : undefined}
+          onTap={toggleChrome}
           canStep={(d) => active + d >= 0 && active + d < total}
           onNatural={model.onNatural}
           onSize={setSize}
@@ -204,10 +377,20 @@ export function Viewer({
             zoomed
               ? 'Drag or use the arrow keys to move around; double-tap or press 0 for Fit.'
               : 'Swipe or use the arrow keys for other files; pinch, double-tap or press + to zoom.'
+          } ${
+            hidden
+              ? 'Controls hidden: tap or press Space to show them.'
+              : 'Tap or press Space to hide the controls.'
           }`}
         />
 
-        <div ref={tools} className="fx-tools" role="group" aria-label="Viewer controls">
+        <div
+          ref={tools}
+          className="fx-tools"
+          role="group"
+          aria-label="Viewer controls"
+          inert={hidden}
+        >
           {moving && zoomed ? (
             <PanPad cmd={cmd} onDone={() => setMoving(false)} />
           ) : (
@@ -217,16 +400,19 @@ export function Viewer({
               {onCompare && (
                 <button
                   type="button"
-                  className="btn ghost icon fx-tool"
+                  className="btn ghost icon fx-tool fx-tool-labelled"
                   aria-label="Compare before and after"
+                  title="Compare before and after"
                   onClick={onCompare}
                 >
                   <CompareIcon size={20} />
+                  <span className="fx-tool-text">Compare</span>
                 </button>
               )}
             </>
           )}
         </div>
+        {hidden && <ViewerStop fallback={() => stage.current?.el} />}
       </div>
     </Overlay>
   );

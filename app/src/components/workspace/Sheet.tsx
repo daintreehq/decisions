@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { useLayer } from '../../app/layers.js';
-import { CloseIcon } from '../Icons.js';
+import { Modal } from '../Modal.js';
 
 /**
- * A bottom sheet on phones and a centred panel on wide screens, built on the native modal <dialog> (focus is
- * contained and returned by the platform). It is a workspace layer: Back and Escape close it, one layer at a time.
+ * A bottom sheet on phones and a centred panel on wide screens (the shared Modal). It is a workspace layer: Back,
+ * Escape, a tap on the dimmed page and a downward swipe on its head close it, one layer at a time. A sheet with a
+ * footer is a confirmation, answered by its actions; one without has a Close button.
  */
 export function Sheet({
   open,
@@ -14,6 +15,7 @@ export function Sheet({
   footer,
   className,
   describedBy,
+  animateExit = true,
 }: {
   open: boolean;
   title: ReactNode;
@@ -22,50 +24,21 @@ export function Sheet({
   footer?: ReactNode;
   className?: string;
   describedBy?: string;
+  /** Native camera/library handoffs release the modal immediately. */
+  animateExit?: boolean;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const id = useId();
-  const dismiss = useLayer(open, onClose);
-  useEffect(() => {
-    const d = ref.current;
-    if (!d) return;
-    if (open && !d.open) {
-      try {
-        d.showModal();
-      } catch {
-        d.setAttribute('open', '');
-      }
-    }
-    if (!open && d.open) d.close();
-  }, [open]);
   return (
-    <dialog
-      ref={ref}
-      className={`sheet${className ? ` ${className}` : ''}`}
-      aria-labelledby={`${id}-t`}
-      aria-describedby={describedBy}
-      onCancel={(e) => {
-        e.preventDefault();
-        dismiss();
-      }}
-      onClick={(e) => {
-        // A tap on the scrim (the dialog box itself, outside its content) closes it.
-        if (e.target === e.currentTarget) dismiss();
-      }}
+    <Modal
+      open={open}
+      title={title}
+      onClose={onClose}
+      footer={footer}
+      className={className ? `sheet ${className}` : 'sheet'}
+      describedBy={describedBy}
+      animateExit={animateExit}
     >
-      {open && (
-        <div className="sheet-body">
-          <header className="sheet-head">
-            <h2 id={`${id}-t`}>{title}</h2>
-            <button type="button" className="btn ghost icon" aria-label="Close" onClick={dismiss}>
-              <CloseIcon />
-            </button>
-          </header>
-          <div className="sheet-content">{children}</div>
-          {footer && <div className="sheet-foot">{footer}</div>}
-        </div>
-      )}
-    </dialog>
+      {children}
+    </Modal>
   );
 }
 

@@ -37,6 +37,17 @@
 .ws > .ws-overlay:empty {
   display: none;
 }
+/* The viewer with its chrome hidden (a tap on the image) has the whole viewport, over the dock and the app's own
+   chrome, edge to edge under the safe areas. Nothing is unmounted, so recording and drafts carry on. */
+.ws > .ws-overlay:has(.fx-viewer.is-bare) {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+.shell:has(.fx-viewer.is-bare)
+  :is(.ws > .dock, .ws > .ws-head, .menu-fab, .sidebar, .frame > .nudge) {
+  visibility: hidden;
+}
 
 /* Below 1100px (the shell's single layout, which follows its em breakpoint) the workspace is the whole frame: no
    strips, no page gutter or scroll. */
@@ -97,8 +108,20 @@
   z-index: 7;
 }
 .shell[data-layout='column'] .ws-head {
-  padding-top: 0;
-  min-height: 52px;
+  padding-top: 4px;
+  min-height: 56px;
+}
+/* Beside the sidebar column the thread is clipped at the header's edge: a short fade, as on a phone, so a line
+   passing under it is never sliced in half. Over the thread's own top padding at rest, so only seen once scrolled. */
+.shell[data-layout='column'] .ws-head::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 10px;
+  background: linear-gradient(to bottom, var(--surface-page), transparent);
+  pointer-events: none;
 }
 .ws-lead,
 .ws-tools {
@@ -134,40 +157,153 @@
 .ws-back:hover {
   background: var(--hover);
 }
-.ws-more {
-  color: var(--text);
+.ws-back:active {
+  background: var(--pressed);
+}
+/* Open, as the terminal button is while its drawer is. */
+.ws-more[aria-expanded='true'] {
+  background: var(--sidebar-active-bg, var(--selected));
 }
 /* The three dots are drawn as round caps; a heavier stroke keeps them legible at a glance. */
 .ws-more svg {
   stroke-width: 3;
 }
+/* On a phone the controls float above the thread, as in the reference app. Reading content can pass beneath
+ * the status area; its initial padding and scroll padding still keep the question and focused items clear. */
+.shell[data-layout='single'] .ws > .ws-body {
+  grid-row: 1 / 3;
+  scroll-padding-top: calc(var(--safe-t) + var(--top-row) + 16px);
+}
+.shell[data-layout='single'] .ws-column {
+  padding-top: calc(var(--safe-t) + var(--top-row) + 16px);
+}
+.shell[data-layout='single'] .ws-head {
+  background: transparent;
+  isolation: isolate;
+}
+.shell[data-layout='single'] .ws-head::before {
+  content: '';
+  position: absolute;
+  /* Opaque to the header's own edge, then a fade short enough that no whole line of the thread hangs in it. */
+  inset: 0 0 -10px;
+  z-index: -1;
+  background: linear-gradient(to bottom, var(--surface-page) calc(100% - 10px), transparent);
+  pointer-events: none;
+}
+.shell[data-layout='single'] .ws-tools {
+  gap: 0;
+  /* 44px buttons in a 48px pill: the same height as the menu button and Back beside it. */
+  padding: 1px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 999px;
+  /* The menu button's and Back's material: the band behind is opaque, so the three read as one set of controls. */
+  background: var(--surface-card);
+}
+.shell[data-layout='single'] .ws-tools .btn {
+  border-radius: 50%;
+}
 .ws-title {
+  /* Both titles share one cell so the hand-over never changes the header's size or what is under the finger. */
+  display: grid;
   min-width: 0;
   text-align: center;
 }
 .ws-origin,
 .ws-excerpt {
+  grid-area: 1 / 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 100%;
+  min-width: 0;
   min-height: var(--tap-min);
   margin: 0;
+  transition: visibility 0s;
+}
+.ws-title[data-excerpt] .ws-origin,
+.ws-title:not([data-excerpt]) .ws-excerpt {
+  visibility: hidden;
+  pointer-events: none;
+  transition: visibility 0s var(--dur-enter);
+}
+/* The roll: each line is a clipped lane, and the two titles' lines pass through their own lanes together, a lane
+   apart, at full strength, in the scroll's direction (the excerpt up into place as the question scrolls away, the
+   origin back down as it returns). A first line only ever meets a first line. */
+.ws-line {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: transform var(--dur-enter) var(--ease-enter);
+}
+.ws-title[data-excerpt] .ws-origin .ws-line {
+  transform: translateY(-100%);
+}
+.ws-title:not([data-excerpt]) .ws-excerpt .ws-line {
+  transform: translateY(100%);
+}
+/* The incoming title is added to the page as the roll starts, so it starts from its side of the cell. Only while
+   rolling: a question that opens does not animate its title in. */
+@starting-style {
+  .ws-title[data-rolling][data-excerpt] .ws-excerpt .ws-line {
+    transform: translateY(100%);
+  }
+  .ws-title[data-rolling]:not([data-excerpt]) .ws-origin .ws-line {
+    transform: translateY(-100%);
+  }
+}
+/* Reduced motion: the title is simply replaced, the outgoing one hidden at once rather than after the roll. */
+@media (prefers-reduced-motion: reduce) {
+  .ws-origin,
+  .ws-excerpt,
+  .ws-title[data-excerpt] .ws-origin,
+  .ws-title:not([data-excerpt]) .ws-excerpt,
+  .ws-line,
+  .ws-title[data-excerpt] .ws-origin .ws-line,
+  .ws-title:not([data-excerpt]) .ws-excerpt .ws-line {
+    transform: none;
+    transition: none;
+  }
 }
 .ws-excerpt {
   font: inherit;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
   color: inherit;
   cursor: pointer;
+  touch-action: manipulation;
+}
+/* Clear of the controls either side. */
+.ws-excerpt:focus-visible {
+  outline-offset: -2px;
+}
+/* The condensed title is a way back to the question: a quiet underline says so without a glyph or more width. */
+.ws-excerpt .ws-title-main .ws-line {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
 }
 @media (hover: hover) {
   .ws-excerpt:hover {
     background: var(--hover);
   }
+  .ws-excerpt:hover .ws-title-main .ws-line {
+    text-decoration-color: currentColor;
+  }
+}
+/* Beside the sidebar column the title is far narrower than the cell: the hover and press fill hug it. */
+.shell[data-layout='column'] .ws-excerpt {
+  width: max-content;
+  max-width: 100%;
+  justify-self: center;
+}
+/* Pressed feedback snaps on, as every control's does (the roll is left running). */
+.ws-excerpt:active {
+  background: var(--pressed);
 }
 .ws-title-main,
 .ws-title-sub {
@@ -188,26 +324,54 @@
   line-height: 18px;
   color: var(--text-2);
 }
-.ws-excerpt .ws-title-sub:has(.ws-sub-project) {
+/* Project · computer once the question has scrolled away. The project is the question's identity: it keeps its
+   whole name, and the computer follows only when at least a 7em stem of it fits beside the project; otherwise it
+   wraps onto a second, clipped line and is simply not shown (the full origin is in the button's name). */
+.ws-excerpt .ws-title-sub .ws-line:has(.ws-sub-project) {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  height: 18px;
 }
-.ws-sub-project,
-.ws-sub-machine {
+.ws-sub-project {
   flex: 0 1 auto;
-  min-width: 2.5em;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ws-sub-project {
-  flex-shrink: 2;
+.ws-sub-on {
+  display: flex;
+  /* The 7em basis decides whether it fits on the line; a shorter computer name keeps its own width. */
+  flex: 1 1 7em;
+  min-width: 0;
+  max-width: max-content;
+  overflow: hidden;
 }
 .ws-sub-machine {
-  min-width: min(9em, 55%);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ws-sub-sep {
   flex: none;
   white-space: pre;
+}
+/* The answer in force, as Home's rows say it. A model's carries the model's diamond in its violet; the words stay
+   neutral. */
+.ws-sub-who {
+  font-weight: 500;
+  color: var(--text);
+}
+.ws-model-mark {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-inline-end: 4px;
+  vertical-align: -1px;
+  fill: color-mix(in oklab, var(--model) 22%, transparent);
+  stroke: var(--model);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
 }
 .menu-anchor {
   position: relative;
@@ -285,21 +449,59 @@
   color: var(--text);
   margin: 0 0 6px;
 }
+/* The opening states' one action: a full target, a step below the words it answers. */
+.ws[data-state='opening'] .ws-state .btn {
+  min-height: var(--tap-min);
+  margin-top: 8px;
+}
+.ws[data-state='opening'] .ws-state p {
+  margin: 0;
+}
+/* "Trying again…" is the state of the wait, not an unavailable control: it stays readable. */
+.ws[data-state='opening'] .ws-state .btn[aria-disabled='true'] {
+  color: var(--text-2);
+}
+.ws-slow {
+  padding-top: 28px;
+}
+/* The skeleton is the part of the thread every question has, on the thread's own line boxes: the sender line
+   (13/18 and its 6 px), then the question's first two lines (18/26). Bars are text-shaped, not cards: an opaque step
+   off the page with no edge. Doherty gate: nothing for 400 ms, then a gentle pulse; reduced motion leaves them static (base.css). */
 .ws-loading {
-  display: grid;
-  gap: 12px;
-  padding-top: 8px;
+  display: block;
 }
-.sk-line {
-  min-height: 26px;
-  width: 92%;
+.sk {
+  display: block;
   border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--surface-page), var(--text) 9%);
+  opacity: 0;
+  animation:
+    appear 1ms 400ms forwards,
+    pulse 1.6s 400ms ease-in-out infinite;
 }
-.sk-line.short {
-  width: 60%;
+.sk-from {
+  display: flex;
+  align-items: center;
+  height: 18px;
+  margin-bottom: 6px;
 }
-.sk-stage {
-  min-height: 240px;
+.sk-name {
+  width: 32%;
+  height: 10px;
+}
+.sk-question {
+  display: flex;
+  flex-direction: column;
+}
+.sk-question > .sk {
+  height: 14px;
+  margin: 6px 0;
+}
+.sk-q1 {
+  width: 90%;
+}
+.sk-q2 {
+  width: 58%;
 }
 
 /* ---------- the dock ----------
@@ -334,8 +536,12 @@
   margin-left: auto;
   margin-right: auto;
 }
-/* From 720px the dock lines up with the thread's column (760px less its 32px padding). */
+/* From 720px the dock lines up with the thread's column (760px less its 32px padding), in a narrow pane too. */
 @media (min-width: 720px) {
+  .dock {
+    padding-left: calc(32px + var(--safe-l));
+    padding-right: calc(32px + var(--safe-r));
+  }
   .dock > * {
     max-width: 696px;
   }
@@ -353,7 +559,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 60px;
+  min-height: 56px;
   font-size: var(--text-sm);
   color: var(--text-2);
 }
@@ -383,8 +589,7 @@
 }
 
 /* ---------- the composer ----------
- * One rounded pill. Resting and empty: the field and the mic on one row. With something to send: the field across
- * the top, and an action row (the Send reason or save state, the mic, Send at the right edge) inside the same pill.
+ * A compact message bar. Wrapped text, photos and capture gain a writing row above the controls.
  * The lane (dictation, errors, notices) sits at the pill's top; choice chips sit just above the pill.
  */
 .composer {
@@ -415,15 +620,19 @@
     'lane lane'
     'field actions';
   align-items: end;
-  min-height: 60px;
-  padding: 6px;
-  /* Concentric with the 46 px mic and Send it holds (23 + 6), so they sit in its corners rather than against them. */
-  border-radius: 30px;
-  border: 1px solid var(--line-strong);
-  background: color-mix(in oklab, var(--surface-page), var(--surface-input) 65%);
-  box-shadow: none;
+  min-height: 56px;
+  padding: 4px;
+  /* The toolbar's circular controls nest inside a softer, rounded writing surface. */
+  border-radius: 28px;
+  border: 1px solid var(--line-subtle);
+  background: color-mix(in oklab, var(--surface-raised) 86%, var(--surface-page));
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--text) 4%, transparent);
+  transition:
+    border-color var(--dur) var(--ease-out),
+    box-shadow var(--dur) var(--ease-out);
 }
 .composer-pill.two {
+  border-radius: 24px;
   grid-template-areas:
     'lane lane'
     'field field'
@@ -441,7 +650,7 @@
   }
 }
 .composer-pill.placeholder {
-  min-height: 60px;
+  min-height: 56px;
 }
 .composer-lane {
   grid-area: lane;
@@ -458,11 +667,13 @@
   justify-content: center;
 }
 .composer-input {
+  position: relative;
   display: block;
   width: 100%;
   min-height: 46px;
-  max-height: calc(5 * 1.5em + 22px);
-  padding: 11px 8px 11px 12px;
+  max-height: calc(5 * 1.5em + 46px - 1.5em);
+  /* One line is exactly the buttons' 46 px at any text size, so the resting pill stays concentric with them. */
+  padding: calc((46px - 1.5em) / 2) 8px calc((46px - 1.5em) / 2) 12px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -477,18 +688,42 @@
   outline: none;
 }
 .composer-pill.two .composer-input {
-  /* Clear of the pill's 30 px corner. The room is margin, not padding, so a scrolled field clips its text below
+  /* Clear of the surface's rounded corner. The room is margin, not padding, so a scrolled field clips its text below
      the corner instead of sliding it up under the curve. */
   min-height: 1.5em;
   max-height: calc(5 * 1.5em);
   padding: 0 12px;
-  margin: 12px 0 4px;
+  margin: 8px 0 6px;
 }
 .composer-pill.two .composer-lane + .composer-field .composer-input {
   margin-top: 4px;
 }
 .ws[data-kb] .composer-input {
   max-height: max(3 * 1.5em, min(5 * 1.5em, calc(var(--vv-h, 100dvh) * 0.22)));
+}
+/* The changed words after a tidy-up: the field's own text, transparent, with only the underline showing through. */
+.composer-marks {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  color: transparent;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.composer-mark {
+  text-decoration: underline wavy var(--accent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: none;
+}
+/* The word being checked: a quiet tint behind it rather than a selection, so the keyboard can stay down. */
+.composer-mark.is-check {
+  text-decoration: none;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent);
 }
 .composer-interim {
   display: flex;
@@ -530,8 +765,11 @@
 .composer-pill.two .composer-actions {
   padding-left: 6px;
 }
-/* The mic and Send travel together; the note beside them takes two short lines rather than a row of its own. */
+/* The mic and Send travel together; the note beside them takes two short lines rather than a row of its own. Their
+   targets sit above the field's hold surface, which would otherwise take the edge of the mic's. */
 .composer-buttons {
+  position: relative;
+  z-index: 2;
   flex: none;
   display: flex;
   flex-wrap: wrap;
@@ -543,6 +781,8 @@
 }
 /* Beside Send: the one reason it can't send yet, or the quiet save state, in two short lines at most. */
 .composer-note {
+  display: flex;
+  align-items: center;
   flex: 1 1 0;
   min-width: 0;
   padding-left: 5px;
@@ -615,12 +855,19 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0 12px;
+  gap: 4px 8px;
   min-height: 36px;
   /* A step below the field's 16 px, so a lane line never reads as a second placeholder. */
   font-size: var(--text-xs);
   line-height: 18px;
   color: var(--text-2);
+}
+/* A row of chips and nothing else is only as tall as the chips; a row of words, only as tall as its line. */
+.lane.only-actions {
+  min-height: 32px;
+}
+.lane:not(:has(.composer-action, .lane-x)) {
+  min-height: 26px;
 }
 .lane-text {
   display: inline-flex;
@@ -635,7 +882,7 @@
   font-variant-numeric: tabular-nums;
 }
 /* Discard sits at the far end, away from the running clock. */
-.lane.rec .lane-action {
+.lane.rec .composer-action {
   margin-left: auto;
 }
 .lane-quiet {
@@ -658,33 +905,79 @@
 .lane.error .lane-text {
   color: var(--text);
 }
-.lane-action {
+/* The composer's own small actions (Use original wording, Review 2 words, Discard, Retry, Undo…): a bounded neutral
+   chip, so a control never reads as words in the answer. 32 px to look at, its target taken out to 44. */
+.composer-action {
+  position: relative;
+  flex: none;
   font: inherit;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  min-height: 44px;
-  padding: 0 2px;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 12px;
   border: 0;
-  background: transparent;
+  border-radius: 16px;
+  background: var(--surface-card);
+  /* The control-boundary token (3:1 on both themes), so the chip reads as bounded on Bondi's near-white pill too. */
+  box-shadow: inset 0 0 0 1px var(--line-input);
   color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 18px;
   font-weight: 500;
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
-  text-decoration-color: var(--text-2);
+  white-space: nowrap;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+/* In the slot beside Send the label wraps to a second line rather than run under the mic on a narrow screen. */
+.composer-note .composer-action {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  white-space: normal;
+  text-align: left;
+  line-height: 15px;
+}
+.composer-action svg {
+  flex: none;
+  color: var(--text-2);
+}
+.composer-action::after {
+  content: '';
+  position: absolute;
+  inset: -6px -2px;
+}
+@media (hover: hover) {
+  .composer-action:hover {
+    background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 5%);
+  }
+}
+.composer-action:active {
+  background: color-mix(in oklab, var(--surface-card) 100%, var(--text) 8%);
+}
+.composer-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 .lane-x {
+  position: relative;
   display: inline-grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  margin: 0 -6px 0 auto;
+  width: 32px;
+  height: 32px;
+  margin: 0 -2px 0 auto;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: 50%;
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
+}
+.lane-x::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
 }
 .rec-dot {
   width: 8px;
@@ -692,25 +985,6 @@
   border-radius: 50%;
   background: var(--accent);
 }
-.review-text {
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.review-text .mark {
-  font: inherit;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  text-decoration: underline wavy;
-  text-decoration-color: var(--accent);
-  text-underline-offset: 0.22em;
-}
-
 /* Choices: one row of chips above the pill. Selection is a raised neutral fill, an edge and a check. */
 .chips {
   position: relative;
@@ -836,7 +1110,8 @@
   font-size: var(--text-sm);
 }
 .unsure mark {
-  background: var(--warning-surface);
+  /* The same tint the word wears on the answer below. */
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
   color: var(--text);
   padding: 0 3px;
   border-radius: 4px;
@@ -848,7 +1123,12 @@
   align-items: center;
 }
 
-/* ---------- sheets ---------- */
+/* ---------- sheets and dialogs: one modal family ---------- */
+/*
+ * Modal (components/Modal.tsx) behind Sheet and Dialog: a bottom sheet below 720px, a centred panel from 720px.
+ * The head holds the title (and Close, when there are no actions), the content scrolls on its own, and the actions
+ * stay in view at the foot.
+ */
 .sheet {
   border: 0;
   padding: 0;
@@ -861,18 +1141,33 @@
   border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   box-shadow: var(--shadow-3);
   border-top: 1px solid var(--line-default);
+  overflow: hidden;
+}
+.sheet.wide {
+  max-width: min(96vw, 1040px);
 }
 .sheet[open] {
   animation: sheet-in var(--dur-enter) var(--ease-enter);
 }
+/* Only the standard property: the build adds the -webkit- copy. Writing both by hand makes the minifier keep just
+   the prefixed one when the value is a var(), and Chromium ignores that, so the scrim never blurred there. */
 .sheet::backdrop {
   background: var(--scrim);
   backdrop-filter: blur(var(--scrim-blur));
-  -webkit-backdrop-filter: blur(var(--scrim-blur));
+}
+/* The scrim arrives with the panel, on the entry tier, as it leaves with it on the exit tier (motion.css). */
+.sheet[open]::backdrop {
+  animation: scrim-in var(--dur-enter) var(--ease-enter);
+}
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
 }
 @media (min-width: 720px) {
   .sheet {
     margin: auto;
+    width: calc(100% - 48px);
     border-radius: var(--radius-xl);
     border: 1px solid var(--line-default);
   }
@@ -892,25 +1187,79 @@
   max-height: 88dvh;
 }
 .sheet-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 8px 4px 20px;
+  flex: none;
+  min-height: 56px;
+  padding: 10px 20px 0;
+  transition: box-shadow var(--dur) var(--ease-out);
+}
+/* Close is a 44px target; the head gives up its right gutter to it rather than growing. */
+.sheet-head:has(> .btn) {
+  padding-right: 8px;
+}
+/* A hairline under the head once the content has scrolled beneath it (Modal sets it). */
+.sheet-head[data-scrolled] {
+  box-shadow: 0 1px 0 var(--line-subtle);
 }
 .sheet-head h2 {
   flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--text-lg);
+  line-height: 1.35;
+  text-wrap: balance;
+}
+/* The grab handle, on phones only, where a downward swipe on the head closes the sheet. Close, an action, Back,
+   Escape and a tap on the dimmed page are the alternatives. Painted at 3:1 against the sheet (--line-input). */
+@media (max-width: 719.98px) {
+  .sheet-head {
+    min-height: 0;
+    padding-top: 22px;
+    padding-bottom: 10px;
+    touch-action: pan-x pinch-zoom;
+  }
+  /* Close keeps its 44px target without making the head taller than a head without it. */
+  .sheet-head > .btn.icon {
+    margin-block: -10px;
+  }
+  .sheet-head::before {
+    content: '';
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    width: 36px;
+    height: 4px;
+    margin-left: -18px;
+    border-radius: 2px;
+    background: var(--line-input);
+  }
 }
 .sheet-content {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px 20px 16px;
+}
+/* A sheet without actions ends at its content, which then keeps clear of the home indicator. */
+.sheet-content:last-child {
+  padding-bottom: calc(20px + var(--safe-b));
+}
+.sheet-content > :first-child {
+  margin-top: 0.25rem;
+}
+.sheet-content > :last-child {
+  margin-bottom: 0;
 }
 .sheet-content p {
   margin: 0.5rem 0;
 }
 .sheet-foot {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
@@ -919,10 +1268,24 @@
 }
 .sheet-foot .btn {
   min-height: var(--tap);
+  min-width: 100px;
 }
-@media (max-width: 719px) {
+/* Phones: an equal pair while every label fits half the row, otherwise a full-width stack in reading order, so the
+   committing action ends nearest the thumb. Modal measures the labels and sets .stacked. */
+@media (max-width: 719.98px) {
   .sheet-foot .btn {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .sheet-foot.measuring .btn {
+    flex: none;
+  }
+  .sheet-foot.stacked {
+    flex-direction: column;
+  }
+  .sheet-foot.stacked .btn {
+    flex: none;
+    width: 100%;
   }
 }
 .choice-sheet .options {
@@ -945,6 +1308,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .sheet[open],
+  .sheet[open]::backdrop,
   .menu {
     animation: none;
   }
@@ -959,4 +1323,24 @@
   .chips .chip.on {
     outline: 2px solid Highlight;
   }
+}
+
+.dock-next {
+  align-self: flex-end;
+  width: auto;
+  min-height: 48px;
+  padding: 0 18px;
+  font-size: var(--text-sm);
+}
+.shell[data-layout='single'] .ws-back {
+  border-radius: 50%;
+  /* The menu button's material beside it, so the two leading controls read as one pair. */
+  background: var(--surface-card);
+  box-shadow: inset 0 0 0 1px var(--line-subtle);
+}
+.shell[data-layout='single'] .ws-back:hover {
+  background: linear-gradient(var(--hover), var(--hover)), var(--surface-card);
+}
+.shell[data-layout='single'] .ws-back:active {
+  background: linear-gradient(var(--pressed), var(--pressed)), var(--surface-card);
 }

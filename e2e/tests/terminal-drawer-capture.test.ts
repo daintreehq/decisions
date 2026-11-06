@@ -26,9 +26,10 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
  * Skipped unless DESIGN_CAPTURE_DIR is set. Everything goes through the real seams: a real relay, the real desktop
  * client publishing encrypted questions and pane snapshots (and answering the phone's refresh requests, except for
  * the questions whose computer plays asleep), and the PWA paired through its own UI. The states: working, waiting at
- * its prompt, waiting on a question, exited, a long line wrapping, stale (a refresh nobody answers), not shared, no
- * snapshot yet, refreshing, and the drawer beside the chat on a wide screen. Each capture checks what it claims to
- * show before it writes, and the run fails if any expected file is missing.
+ * its prompt, waiting on a question, exited, a long line wrapping, stale (a refresh nobody answers), asking again
+ * from stale (the card must not move), not shared, no snapshot yet, refreshing, and the drawer beside the chat on a
+ * wide screen. Each capture checks what it claims to show before it writes, and the run fails if any expected file is
+ * missing.
  */
 const OUT = process.env.DESIGN_CAPTURE_DIR;
 const chromiumPath = findChromium();
@@ -488,6 +489,18 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the chat’s terminal drawer
       if (t === 'light') await shot('p-refreshing-light');
       await expectSnapshot('working', 'stale');
       await shot(`p-stale-${t}`);
+      if (t === 'light') {
+        // Asking again keeps the last word on the old snapshot in place, so the lines do not move on the tap.
+        const top = () =>
+          page.locator(`${drawer()} .term-screen`).evaluate((el) => el.getBoundingClientRect().top);
+        const before = await top();
+        await budget();
+        await page.locator(`${drawer()} .term-status .term-refresh`).click();
+        await expectSnapshot('working', 'refreshing');
+        await page.locator(`${drawer()} .term-status .term-note`).waitFor({ timeout: 5_000 });
+        expect(await top()).toBe(before);
+        await shot('p-stale-asking-light');
+      }
       await close();
 
       await go('unshared');
@@ -520,7 +533,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the chat’s terminal drawer
     await close();
     await page.setViewportSize(PHONE);
 
-    expect(written.length).toBe(20);
+    expect(written.length).toBe(21);
     // The relay's refresh cap (six a minute) paces the openings, and stale needs its 15 s deadline twice.
   }, 600_000);
 });

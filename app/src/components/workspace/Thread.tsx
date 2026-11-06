@@ -33,9 +33,11 @@ export const Thread = forwardRef(function Thread(
 
 export { agentName } from '../../domain/selectors.js';
 
+/** The time, with a spoken pause before it: the dot that separates it on screen is drawn, not read. */
 function Time({ iso, now }: { iso: string; now: number }) {
   return (
     <time className="msg-time" dateTime={iso} title={absoluteLabel(iso)}>
+      <span className="sr-only">, </span>
       {momentLabel(iso, now)}
     </time>
   );
@@ -87,25 +89,30 @@ export function AgentMessage({
 }
 
 /**
- * A message from the asking agent after its question: the agent's name and the time, then what it said. When it is
- * waiting on the person, the words say so beneath it, beside the same amber ring that marks Needs you in the list.
+ * A message from the asking agent after its question: the agent's name and the time, then what it said. Straight
+ * after another of its messages it is the same turn: only the time shows, closer to the message above (the name
+ * stays for assistive tech). When it is waiting on the person, the words say so beneath it, beside the same amber
+ * ring that marks Needs you in the list.
  */
 export function AgentNote({
   view,
   m,
   now,
   asking,
+  grouped,
 }: {
   view: QuestionView;
   m: ThreadMessage;
   now: number;
   /** This message is the one the agent is waiting on a reply to. */
   asking: boolean;
+  /** It follows another message from the agent closely: one turn. */
+  grouped?: boolean;
 }) {
   return (
-    <div className={`msg in agent note${asking ? ' asking' : ''}`}>
+    <div className={`msg in agent note${asking ? ' asking' : ''}${grouped ? ' grouped' : ''}`}>
       <p className="msg-from">
-        <span className="msg-name">{agentName(view)}</span>
+        <span className={grouped ? 'sr-only' : 'msg-name'}>{agentName(view)}</span>
         <Time iso={m.createdAt} now={now} />
       </p>
       <div className="bubble">
@@ -126,7 +133,7 @@ export function MessageContext({ text, title = 'Context' }: { text: string; titl
   return (
     <details className="msg-context">
       <summary>
-        <span className="summary-title">{title}</span>
+        <span className="summary-title">{title}</span>{' '}
         <span className="summary-preview">{previewText(text, 120)}</span>
       </summary>
       <SafeText text={text} />
@@ -143,17 +150,20 @@ export function StaticChoices({
   chosen,
   caption,
   byModel,
+  pending,
 }: {
   view: QuestionView;
   chosen: readonly string[];
   caption?: string;
   /** The marked option is the decision model's, still waiting for review: it wears the model's mark, not a check. */
   byModel?: boolean;
+  /** The marked option is this device's answer on its way, not yet saved: its check steps down until it lands. */
+  pending?: boolean;
 }) {
   const opts = view.content?.options ?? [];
   if (!opts.length) return null;
   return (
-    <div className="msg-choices">
+    <div className={`msg-choices${pending ? ' pending' : ''}`}>
       {caption && <p className="msg-caption">{caption}</p>}
       <ul className="choice-list">
         {opts.map((o) => {
@@ -168,11 +178,20 @@ export function StaticChoices({
                   {o.label}
                   {on && (
                     <span className="sr-only">
-                      {byModel ? ' (the model’s answer, not yet confirmed)' : ' (in force)'}
+                      {byModel
+                        ? ' (the model’s answer, not yet confirmed)'
+                        : pending
+                          ? ' (your answer, not saved yet)'
+                          : ' (in force)'}
                     </span>
                   )}
                 </span>
-                {o.description && <SafeText text={o.description} className="choice-desc" />}
+                {o.description && (
+                  <>
+                    <span className="sr-only">. </span>
+                    <SafeText text={o.description} className="choice-desc" />
+                  </>
+                )}
               </span>
             </li>
           );
@@ -184,9 +203,9 @@ export function StaticChoices({
 
 /**
  * One of the person's own messages, right-aligned. With a receipt, its time and the receipt share one quiet line
- * under the bubble ("17:57 · Typed into the terminal"); when delivery needs attention the line is the time alone and
- * the explanation follows it. Without a receipt the time sits inside the bubble. `tone` marks a pending reply or one
- * that was not applied.
+ * under the bubble ("17:57 · Typed into the terminal"); when delivery needs attention the line reads "17:57 · Needs
+ * attention on your computer" with the warning mark, the bubble takes a warning edge, and the explanation follows.
+ * Without a receipt the time sits inside the bubble. `tone` marks a pending reply or one that was not applied.
  */
 export function OutgoingMessage({
   label,
@@ -208,8 +227,7 @@ export function OutgoingMessage({
   id?: string;
   children: ReactNode;
 }) {
-  // With a receipt the time is always on the line under the bubble, so the bubble's shape never depends on
-  // delivery; when delivery needs attention that line is the time alone and the explanation follows it.
+  // With a receipt the time is always on the line under the bubble, so the bubble's shape never depends on delivery.
   const footed = !!receipt && !!at;
   return (
     <div className={`msg out${tone ? ` ${tone}` : ''}${flagged ? ' flagged' : ''}`} id={id}>
@@ -229,15 +247,9 @@ export function OutgoingMessage({
           </span>
         )}
       </div>
-      {footed && flagged ? (
-        <>
-          <div className="msg-foot">
-            <span className="sr-only">Not typed into the terminal, </span>
-            <Time iso={at!} now={now} />
-          </div>
-          {receipt}
-        </>
-      ) : footed ? (
+      {footed ? (
+        // The same line in every stage, a problem included: the time, then the receipt's mark and words. A problem's
+        // explanation takes the row beneath it, open at once.
         <div className="msg-foot">
           <Time iso={at!} now={now} />
           {receipt}
@@ -336,7 +348,10 @@ export function ModelMessage({
           <ModelIcon size={12} />
           Model answer
         </span>
-        <span className="msg-origin">{c.model_id}</span>
+        <span className="msg-origin">
+          <span className="sr-only">, </span>
+          {c.model_id}
+        </span>
         <Time iso={a.createdAt} now={now} />
       </p>
       <div className="bubble">
@@ -347,7 +362,7 @@ export function ModelMessage({
             <>
               <span aria-hidden="true"> · </span>
               <span className="sr-only">, </span>
-              based on {refs} of your earlier decision{refs === 1 ? '' : 's'}
+              based on {refs} of your earlier decisions
             </>
           )}
         </p>
@@ -367,7 +382,12 @@ export function ModelMessage({
                 {busy ? 'Confirming…' : 'Confirm answer'}
               </button>
               {onOverrule && (
-                <button type="button" className="btn" onClick={onOverrule}>
+                <button
+                  type="button"
+                  className="btn"
+                  aria-disabled={busy || undefined}
+                  onClick={() => !busy && onOverrule()}
+                >
                   Overrule
                 </button>
               )}

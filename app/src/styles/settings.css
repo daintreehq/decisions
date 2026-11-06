@@ -22,14 +22,21 @@
   padding: 8px 14px 8px 12px;
 }
 .s-index-list .value {
+  /* The value keeps its full width (summaries are written to be short); a value wider than half the row, as with
+     enlarged text, wraps within that half rather than painting over the label or losing words. */
+  flex: 0 0 auto;
+  max-width: 50%;
   margin-left: auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .s-index-list a::after {
-  margin-left: 6px;
+  /* The chevron belongs to the value it follows. */
+  margin-left: -4px;
+}
+.s-index-list a:focus-visible,
+.s-device:focus-visible,
+.s-nav-rows :is(a, button):focus-visible {
+  /* Inside a clipped group card the ring is drawn inward, so it is never cut off. */
+  outline-offset: -2px;
 }
 .s-index-icon {
   display: grid;
@@ -42,15 +49,27 @@
   box-shadow: inset 0 0 0 1px var(--line-subtle);
   color: var(--text-2);
 }
-.s-index-label {
-  /* The label keeps its words before the value does, and on a narrow screen or with large text it may take a
-     second line rather than push the value out entirely. */
-  flex: 0 1 auto;
+.s-split .s-index-text {
+  /* In the rail the value line may ellipsise; the title still wraps first. */
   min-width: 0;
+}
+.s-index-text {
+  /* The label wraps onto a second line before it ever shrinks below its longest word. */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.s-index-label {
   font-weight: 500;
 }
-.s-index-list .value {
-  flex: 0 1 auto;
+.s-index-sub {
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .s-version {
   margin: 20px 0 0;
@@ -61,7 +80,8 @@
 
 /* Wide: the index is a sidebar beside the open section, marking the open page with the highlight fill alone. */
 .s-split {
-  max-width: 1120px;
+  /* The two columns' own width (248 + 48 + 680), so the pair centres in the page. */
+  max-width: 976px;
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
   gap: 48px;
@@ -86,8 +106,15 @@
   }
 }
 .s-aside {
+  /* Sticks at main's own top padding, so at rest it sits exactly where it would without sticking and its title
+     shares a line with the section's. */
   position: sticky;
-  top: calc(var(--safe-t) + var(--top-row) + 8px);
+  top: calc(var(--safe-t) + 6px);
+}
+.shell[data-layout='single'] .s-split .s-title {
+  display: flex;
+  align-items: center;
+  min-height: var(--fab-size);
 }
 .s-split .s-index-list {
   border: 0;
@@ -105,9 +132,12 @@
   border-top: 0;
 }
 .s-split .s-index-list a {
-  min-height: 44px;
+  min-height: 48px;
   padding: 6px 10px 6px 8px;
   border-radius: var(--radius-md);
+  color: var(--text);
+}
+.s-split .s-index-list .s-index-icon {
   color: var(--text-2);
 }
 .s-split .s-index-list a::after {
@@ -120,8 +150,16 @@
   box-shadow: none;
 }
 .s-split .s-index-list a.on {
-  background: var(--selected);
+  /* Neutral selection (guide 2.1): the raised fill and a text-secondary edge, as the sidebar marks its page. */
+  background: var(--raised-select);
+  box-shadow: inset 0 0 0 1px var(--text-2);
   color: var(--text);
+}
+@media (hover: hover) {
+  .s-split .s-index-list a:not(.on):hover {
+    background: var(--hover);
+    color: var(--text);
+  }
 }
 .s-split .s-index-list a.on .s-index-icon {
   color: var(--text);
@@ -171,6 +209,10 @@
 .s-title:focus {
   outline: none;
 }
+/* A section with no lead still leaves the lead's room before its first group. */
+.s-title + :not(.s-lead) {
+  margin-top: 16px;
+}
 .s-lead {
   margin: 0 0 20px;
   max-width: 62ch;
@@ -181,6 +223,22 @@
   margin: -8px 0 24px;
   color: var(--text-2);
   font-size: var(--text-sm);
+}
+/* Links in running Settings text are text-coloured and underlined: nothing on a page body is accent at rest. */
+.s-foot a,
+.s-lead a,
+.s-group-foot a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+/* A group's footer note, under its card (the grouped list's footer). */
+.s-group-foot {
+  margin: 8px 2px 0;
+  max-width: 62ch;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
 /* ---------- groups and rows ---------- */
@@ -247,7 +305,7 @@ h2.s-group-label {
   flex: none;
 }
 .s-row-label {
-  font-size: 0.9375rem;
+  font-size: var(--text-md);
   line-height: 1.4;
   font-weight: 500;
   color: var(--text);
@@ -285,6 +343,14 @@ h2.s-group-label {
   align-items: flex-start;
   gap: 14px;
 }
+/* Who sees what reads as a diagram: the party, then what it can see in a few words, then the detail. */
+.s-flow-verdict {
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  font-weight: 500;
+  color: var(--text);
+}
 .s-actions {
   display: flex;
   flex-wrap: wrap;
@@ -317,12 +383,36 @@ h2.s-group-label {
 }
 .s-dependents .s-row {
   /* A step in, not the whole way to the parent's text, so their labels keep one line on a phone. */
-  padding-left: 32px;
+  padding-left: 28px;
   min-height: 52px;
 }
 .s-row.stacked .s-select.wide {
   width: 100%;
   max-width: 320px;
+}
+/* The times and the reminder choices share one control width, so their edges form a column. */
+.s-dependents .s-row:not(.stacked) :is(.s-select, .s-time) {
+  width: 9rem;
+  min-width: 0;
+}
+/* Under 360 px each dependent row stacks: label, then its control at the text edge. */
+@media (max-width: 359px) {
+  .s-dependents .s-row:not(.stacked) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  /* In a column the text's flex basis would become a height. */
+  .s-dependents .s-row:not(.stacked) > .s-row-text {
+    flex: none;
+  }
+  .s-dependents .s-row:not(.stacked) > .s-row-control {
+    margin-left: 0;
+  }
+  .s-dependents .s-row:not(.stacked) :is(.s-select, .s-time) {
+    width: 100%;
+    max-width: 320px;
+  }
 }
 .s-row-actions {
   margin-top: 10px;
@@ -349,10 +439,14 @@ h2.s-group-label {
 input[aria-invalid='true'] {
   border-color: var(--danger);
 }
-.s-field-error {
+/* The validation message sits right under the times it is about, as a callout (tint and glyph, neutral words). */
+.s-dependents .s-row.s-field-error {
+  min-height: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.s-field-error > .s-callout {
   margin: 0;
-  color: var(--danger-text);
-  font-size: var(--text-sm);
 }
 
 /* ---------- switch: on is text-primary (Daintree's rule), never accent ---------- */
@@ -415,11 +509,18 @@ input.s-switch:disabled {
 /* ---------- segmented choice on the rail ---------- */
 .s-seg {
   margin: 0;
-  flex-wrap: nowrap;
+  /* Whole choices wrap onto a second line when enlarged text needs it. */
+  flex-wrap: wrap;
+  align-self: flex-start;
 }
 .s-seg button {
-  min-height: 34px;
-  padding: 0 12px;
+  padding: 0 14px;
+}
+/* The chosen segment carries a text-secondary edge, so it holds 3:1 against its neighbours in both themes. */
+.s-seg button[aria-checked='true'] {
+  box-shadow:
+    inset 0 0 0 1px var(--text-2),
+    var(--shadow-1);
 }
 
 /* ---------- radio rows (descriptive choices) ---------- */
@@ -489,7 +590,6 @@ input.s-switch:disabled {
 .theme-card.on {
   background: var(--raised-select);
   border-color: var(--text-2);
-  box-shadow: inset 0 0 0 1px var(--text-2);
 }
 .theme-card:has(input:focus-visible) {
   outline: 2px solid var(--focus);
@@ -519,6 +619,8 @@ input.s-switch:disabled {
   clip-path: polygon(100% 0, 100% 100%, 0 100%);
 }
 .theme-check {
+  /* A ring of the card's own surface keeps the mark clear of any art behind it. */
+  outline: 2px solid var(--surface-card);
   position: absolute;
   top: 6px;
   right: 6px;
@@ -551,21 +653,28 @@ input.s-switch:disabled {
 }
 .mic-test-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
+  gap: 10px 14px;
+}
+/* Test and Stop share one width, so the meter never moves when they swap. */
+.mic-test-row > .btn {
+  flex: none;
+  min-width: 10.5rem;
+  justify-content: center;
 }
 .mic-meter {
   position: relative;
-  flex: 1;
-  height: 8px;
+  flex: 1 1 7rem;
+  height: 10px;
   border-radius: 999px;
   background: var(--surface-inset);
-  box-shadow: inset 0 0 0 1px var(--line-subtle);
+  box-shadow: inset 0 0 0 1px var(--line-input);
   overflow: hidden;
 }
 .mic-meter > span {
   position: absolute;
-  inset: 0;
+  inset: 1px;
   border-radius: inherit;
   background: var(--text-3);
   transform-origin: left center;
@@ -579,6 +688,19 @@ input.s-switch:disabled {
 .mic-test-status {
   margin: 0;
 }
+/* Once a test has run, its words are the outcome, so they step up from helper text. */
+.mic-test-status.active [role='status'],
+.s-outcome {
+  color: var(--text);
+}
+@media (forced-colors: active) {
+  .mic-meter {
+    border: 1px solid CanvasText;
+  }
+  .mic-meter > span {
+    background: Highlight;
+  }
+}
 
 /* ---------- quiet hours: explicit save ---------- */
 .s-form > fieldset {
@@ -587,18 +709,20 @@ input.s-switch:disabled {
 .s-form > .s-callout {
   margin-bottom: 16px;
 }
+.s-save-dock {
+  margin: 0 0 24px;
+}
+/* At rest the bar is quiet: no card, only the disabled Save at the form's foot. */
 .s-savebar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  min-height: 56px;
-  margin: 0 0 24px;
-  padding: 8px 10px 8px 16px;
+  gap: 8px 12px;
+  min-height: 60px;
+  padding: 8px 0;
   border-radius: var(--radius-lg);
-  border: 1px solid var(--line-default);
-  background: var(--surface-card);
+  border: 1px solid transparent;
 }
 .s-savebar-status {
   display: inline-flex;
@@ -608,26 +732,58 @@ input.s-switch:disabled {
   font-size: var(--text-sm);
   color: var(--text-2);
 }
-/* While dirty the bar stays in view at the foot of the screen, lifted, with the modified marker. */
-.s-savebar.dirty {
+.s-savebar-status:empty {
+  display: none;
+}
+.s-savebar-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+/* While there is anything to say about saving (dirty, saving, saved, failed) the bar stays in view at the foot of
+   the screen, lifted, so the outcome of Save is where the person pressed it. */
+.s-save-dock.docked {
   position: sticky;
   bottom: calc(var(--safe-b) + 12px);
   z-index: 5;
+  isolation: isolate;
+  margin-bottom: 0;
+}
+.s-save-dock.docked .s-savebar {
+  padding: 8px 8px 8px 16px;
   background: var(--surface-raised);
   border-color: var(--line-strong);
   box-shadow: var(--shadow-2);
 }
-/* The page's own field fills the gap under the lifted bar, so the card it floats over never shows beneath it. */
-.s-savebar.dirty::after {
-  content: '';
-  position: absolute;
-  /* Out past the bar's own 1 px border, so the card's edges beneath don't show either side of it. */
-  left: -2px;
-  right: -2px;
-  top: 100%;
-  height: calc(var(--safe-b) + 13px);
-  background: var(--surface-page);
-  pointer-events: none;
+.s-save-dock.docked > .s-callout {
+  margin: 0 0 8px;
+  /* Opaque: the tint is laid over the raised surface so rows never show through it. */
+  background: linear-gradient(var(--danger-surface), var(--danger-surface)), var(--surface-raised);
+  box-shadow: var(--shadow-2);
+}
+.s-savebar.saved .s-savebar-status {
+  color: var(--text);
+  font-weight: 500;
+}
+.s-savebar.saved .s-savebar-status > svg {
+  color: var(--success-text);
+}
+.s-savebar.failed .s-savebar-status {
+  color: var(--text);
+  font-weight: 500;
+}
+.s-savebar.failed .s-savebar-status > svg {
+  color: var(--danger-text);
+}
+/* Focus moved by Tab is never parked under the docked bar (WCAG 2.4.11). */
+html:has(.s-save-dock.docked) {
+  scroll-padding-bottom: calc(var(--safe-b) + 12px + var(--s-dock-h, 100px) + 16px);
+}
+/* On a narrow phone the status takes its own line and the two buttons stay together beneath it. */
+@media (max-width: 359px) {
+  .s-savebar-status {
+    flex: 1 1 100%;
+  }
 }
 .s-savebar.dirty .s-savebar-status {
   color: var(--text);
@@ -728,9 +884,11 @@ input.s-switch:disabled {
   color: var(--text);
 }
 .fingerprint {
-  display: grid;
-  grid-template-columns: repeat(4, max-content);
-  justify-content: start;
+  /* Four groups to a line; whole groups wrap to fewer when text is enlarged. */
+  display: flex;
+  flex-wrap: wrap;
+  /* Four groups of four, their letter-spacing, three gaps, padding and border. */
+  max-width: calc(17.5ch + 3 * 16px + 32px);
   gap: 4px 16px;
   min-height: 72px;
   margin: 10px 0 12px;
@@ -804,6 +962,9 @@ input.s-switch:disabled {
   margin: 0 0 4px;
   font-size: var(--text-md);
 }
+.s-sheet-sub + .s-row-desc {
+  margin-top: 0;
+}
 @media (min-width: 720px) {
   .s-sheet {
     width: min(520px, 92vw);
@@ -829,6 +990,7 @@ input.s-switch:disabled {
 }
 .s-keys-list {
   margin: 0;
+  container-type: inline-size;
 }
 .s-keys-list > div {
   display: grid;
@@ -839,6 +1001,13 @@ input.s-switch:disabled {
   border-bottom: 1px solid var(--line-subtle);
   font-size: var(--text-sm);
 }
+/* After the two-column rule, so it wins: when the sheet is narrow for its text size (enlarged text), the keys sit above what they do. */
+@container (max-width: 22em) {
+  .s-keys-list > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}
 .s-keys-list dd {
   margin: 0;
   color: var(--text);
@@ -846,7 +1015,20 @@ input.s-switch:disabled {
 .s-keys {
   display: inline-flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
+}
+.s-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.s-keys-or {
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+.s-keys-list > div:last-child {
+  border-bottom: 0;
 }
 .s-keys kbd {
   font-family: var(--font-ui);
@@ -878,6 +1060,10 @@ input.s-switch:disabled {
 .s-erase-list li {
   margin: 4px 0;
 }
+/* The reassurance belongs to the list above it, not the paragraph below. */
+.dialog-body > .s-row-desc.s-erase-note {
+  margin: -6px 0 12px;
+}
 .dialog-body > .s-callout {
   margin: 0 0 12px;
 }
@@ -895,6 +1081,9 @@ input.s-switch:disabled {
   .theme-card:active {
     transform: none;
   }
+  .s-sheet[open] {
+    animation: none;
+  }
   .mic-meter > span {
     transition: none;
   }
@@ -904,13 +1093,14 @@ input.s-switch:disabled {
   display: block;
 }
 
-/* Save / Discard / Keep editing: stacked full width on phones, Save on top; a row from 480 px. */
+/* Keep editing / Discard / Save: stacked full width on phones with Save nearest the thumb, a row from 480 px; the
+   order on screen is the document's, so Tab follows it. */
 .dialog-actions:has(> .s-dialog-actions) {
   display: block;
 }
 .s-dialog-actions {
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   gap: 8px;
 }
 .s-dialog-actions .btn {
@@ -958,12 +1148,37 @@ input.s-switch:disabled {
   outline-offset: -2px;
 }
 
-/* A dialog taller than the screen (the dictation disclosure on a phone) keeps its answer in view. */
-.dialog .dialog-actions {
-  position: sticky;
-  bottom: -20px;
-  margin: 20px -20px -20px;
-  padding: 12px 20px 20px;
-  background: var(--surface-dialog);
-  border-top: 1px solid var(--line-subtle);
+/* Mask only the strip under the lifted bar, so rows scrolling past show through its lift gap without fading the
+   rows above it into a disabled look. */
+.s-save-dock.docked::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: auto -2px calc(-1 * (var(--safe-b) + 13px));
+  height: calc(var(--safe-b) + 13px + 12px);
+  background: var(--surface-page);
+  pointer-events: none;
+}
+/* With the error above the bar, the slot between the two cards is masked too. */
+.s-save-dock.docked:has(> .s-callout)::before {
+  height: auto;
+  /* From the callout's middle, so nothing square shows past its rounded top corners. */
+  top: 24px;
+}
+
+/* Settings' small actions keep the phone floor of 44 px (guide 2.4), inside sections and their sheets. */
+:is(.s-section, .s-sheet) .btn.small {
+  min-height: var(--tap-min);
+}
+
+/* A read-only value sits level with its row's label, wherever the row's description runs. */
+.s-row:has(.s-row-desc) > .s-row-control:has(> .s-value:only-child) {
+  align-self: flex-start;
+}
+/* A read-only value takes the label's line box, so the two share a baseline. */
+.s-row-control > .s-value:only-child {
+  line-height: calc(var(--text-md) * 1.4);
+}
+.s-sheet-body > .s-row-desc:first-child {
+  margin-top: 0;
 }

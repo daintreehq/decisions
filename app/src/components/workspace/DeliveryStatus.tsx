@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState, type FocusEvent } from 'react';
 import {
   DELIVERY_LABELS,
   type DeliveryProgress,
@@ -38,7 +38,7 @@ export function stageTone(p: DeliveryProgress): 'done' | 'progress' | 'attention
  * answer; a problem keeps the stage's own words.
  */
 const RECEIPT_LABELS: Record<Exclude<DeliveryStep, 'attention'>, string> = {
-  queued: 'Queued',
+  queued: 'Queued on this device',
   sending: 'Sending…',
   confirmed: 'Saved on your relay',
   desktop: 'Received by your computer',
@@ -50,9 +50,10 @@ export const receiptLabel = (p: DeliveryProgress): string =>
 
 /**
  * The small receipt under an answer: a glyph and the one short label the evidence supports. The glyph says only
- * whether delivery is still under way (a clock) or finished (the success mark); the words say how far it has got.
- * Tapping it opens the full stepper underneath. A delivery problem is never hidden behind the tap: its explanation
- * shows beneath at once. `steps={false}` is for replies that are not typed anywhere (a confirmation): no stepper.
+ * whether delivery is still under way (a clock), finished (the success mark) or stopped (the warning mark); the
+ * words say how far it has got. Tapping it opens the full stepper underneath. A delivery problem keeps the same line
+ * (time, warning mark, its label) and is never hidden behind the tap: its explanation shows beneath at once.
+ * `steps={false}` is for replies that are not typed anywhere (a confirmation): no stepper.
  */
 export function Receipt({
   progress,
@@ -75,11 +76,43 @@ export function Receipt({
   const [open, setOpen] = useState(false);
   const id = useId();
   const tone = stageTone(progress);
+  // A problem replaces the receipt's button with a plain line. If the button had focus, hand it to that line
+  // rather than letting it fall to the page; otherwise leave focus where the person put it.
+  const focused = useRef(false);
+  const summaryRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (tone === 'attention' && focused.current) summaryRef.current?.focus({ preventScroll: true });
+  }, [tone]);
+  const track = {
+    onFocus: () => (focused.current = true),
+    onBlur: (e: FocusEvent) => {
+      if (e.relatedTarget) focused.current = false;
+    },
+  };
   const label = words ?? receiptLabel(progress);
+  // The receipt itself stays quiet; this one status says the milestones that matter (saved, typed, a problem) when
+  // they change, never the steps in between. It is mounted with the receipt, so an old reply announces nothing.
+  const milestone =
+    tone !== 'progress' || progress.step === 'confirmed'
+      ? `${subject ?? (fromPhone ? 'Your answer' : 'The model answer')}: ${label}`
+      : '';
+  const spoken = (
+    <span className="sr-only" role="status">
+      {milestone}
+    </span>
+  );
   if (tone === 'attention')
     return (
-      <div className="receipt attention" aria-live="off">
-        <DeliveryStepper progress={progress} fromPhone={fromPhone} subject={subject} />
+      <div className="receipt attention" aria-live="off" {...track}>
+        {spoken}
+        <span className="receipt-button static" ref={summaryRef} tabIndex={-1}>
+          <WarningIcon size={14} />
+          <span className="receipt-label">
+            <span className="sr-only">Delivery: </span>
+            {label}
+          </span>
+        </span>
+        <DeliveryStepper progress={progress} fromPhone={fromPhone} subject={subject} untitled />
       </div>
     );
   const face = (
@@ -95,17 +128,21 @@ export function Receipt({
         <span className="sr-only">Delivery: </span>
         {label}
       </span>
-      {note && <span className="receipt-note">{note}</span>}
     </>
   );
+  // A note is its own quiet line under the receipt, so a long one never pushes the receipt past its bubble.
+  const noted = note && <span className="receipt-note">{note}</span>;
   if (!steps)
     return (
       <div className={`receipt ${tone}`} aria-live="off">
+        {spoken}
         <span className="receipt-button static">{face}</span>
+        {noted}
       </div>
     );
   return (
-    <div className={`receipt ${tone}`} aria-live="off">
+    <div className={`receipt ${tone}`} aria-live="off" {...track}>
+      {spoken}
       <button
         type="button"
         className="receipt-button"
@@ -116,6 +153,7 @@ export function Receipt({
         {face}
         <ChevronDown size={14} />
       </button>
+      {noted}
       <div id={id} className="receipt-steps" hidden={!open}>
         {open && <DeliveryStepper progress={progress} fromPhone={fromPhone} subject={subject} />}
       </div>
@@ -131,20 +169,28 @@ export function DeliveryStepper({
   progress,
   fromPhone,
   subject: named,
+  untitled,
 }: {
   progress: DeliveryProgress;
   fromPhone: boolean;
   subject?: string;
+  /** The problem's label is already on the receipt line above: the callout carries only the explanation. */
+  untitled?: boolean;
 }) {
   if (progress.step === 'attention') {
     const subject = named ?? (fromPhone ? 'Your answer' : 'The model answer');
     const uncertain = progress.detail === undefined && progress.label !== DELIVERY_LABELS.attention;
     const cause = progress.detail ? CAUSES[progress.detail] : undefined;
     return (
-      <div className="callout warn" role="status">
-        <WarningIcon size={16} />
+      // Under a receipt, the receipt's own status announces the problem; the explanation is there to be read.
+      <div
+        className={`callout warn${untitled ? ' bare' : ''}`}
+        role={untitled ? undefined : 'status'}
+      >
+        {!untitled && <WarningIcon size={16} />}
         <div>
-          <strong className="callout-title">{progress.label}</strong>
+          {/* Under a receipt the label is already on the line above (and said by its status). */}
+          {!untitled && <strong className="callout-title">{progress.label}</strong>}
           <p className="callout-text">
             {uncertain
               ? `${subject} is saved on your relay. Your computer can’t tell whether it was typed into the terminal, so it won’t type it again.`
@@ -186,10 +232,15 @@ export function DeliveryStepper({
             aria-current={current ? 'step' : undefined}
           >
             <span className="step-mark" aria-hidden="true">
-              {done ? <CheckIcon size={11} /> : waiting ? <ClockIcon size={11} /> : null}
+              {done ? <CheckIcon size={11} /> : waiting ? <ClockIcon size={14} /> : null}
             </span>
             <span>
-              {done ? (DONE_LABEL[s] ?? DELIVERY_LABELS[s]) : DELIVERY_LABELS[s]}
+              {done
+                ? (DONE_LABEL[s] ?? DELIVERY_LABELS[s])
+                : // Queued here and offline, nothing is being sent yet: the next step is waiting, not in flight.
+                  s === 'sending' && progress.step === 'queued'
+                  ? 'Waiting to send'
+                  : DELIVERY_LABELS[s]}
               <span className="sr-only">
                 {done ? ' (done)' : waiting ? ' (waiting)' : ' (not yet)'}
               </span>
