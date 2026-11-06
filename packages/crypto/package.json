@@ -1,6 +1,6 @@
 {
   "name": "@daintreehq/decisions-crypto",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "WebCrypto implementation of the Daintree Decisions crypto suite (P-256 ECDSA/ECDH, HKDF, AES-256-GCM). Runs in browsers, Node and Cloudflare Workers.",
   "license": "Apache-2.0",
   "type": "module",
