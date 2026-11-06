@@ -254,6 +254,8 @@ Both specs ask for this and it is required for approvals:
 
 Tapping the active preview (or Enlarge) opens the viewer as a **mode of the workspace**, not a modal that makes the dock inert. Top: Close, a short question identity with a **Question** button that reveals the full text in a sheet, the file label and "2 of 4". Centre: the darkest stage with the largest practical area. Near the stage: Previous / Next, zoom −/+ and Fit. Bottom: **the same dock**, including Stop while recording.
 
+**Tap to hide the chrome.** A single tap on the image, at Fit or zoomed, hides the top bar, the tools and the dock (and any other app chrome on screen); another single tap brings them back. The bars slide off their edges briefly, instantly under reduced motion. The stage then fills the whole viewport on the darkest stage colour, edge to edge under the safe areas, while the image area stays exactly where it was: the image keeps its zoom, position and size, and a zoomed image gets the whole screen to run into. The tap counts only once the double-tap window has passed, so a double-tap zooms without the chrome flashing; drags, swipes, pans and pinches never toggle it. Space on the focused stage toggles it from the keyboard, focus never stays on a hidden control, and the change is announced with how to undo it. Every gesture keeps working while hidden, moving to another file keeps it hidden, Escape and Back still close the viewer, and opening the viewer again starts with the chrome shown. While dictation is active, a compact Stop with the recording clock stays on screen.
+
 Gesture ownership (custom zoom and pan only in the viewer and comparison; inline previews stay fitted and the page scrolls normally):
 
 | Input                        | At Fit                                          | Zoomed                                   |
@@ -261,9 +263,11 @@ Gesture ownership (custom zoom and pan only in the viewer and comparison; inline
 | Horizontal swipe in stage    | Previous / next file (one per gesture, no wrap) | Pan; never changes file, even at an edge |
 | Vertical drag in stage       | Nothing (no dismiss)                            | Pan                                      |
 | Pinch                        | Zoom around the midpoint                        | Continue                                 |
+| Single tap / click           | Hide or show the chrome                         | Same                                     |
 | Double-tap / double-click    | Zoom 2.5× into that point                       | Back to Fit                              |
 | Arrow keys (stage focused)   | Left/Right change file                          | Pan                                      |
 | `+` `-` `0` (viewer focused) | Zoom in, out, Fit                               | Same                                     |
+| Space (stage focused)        | Hide or show the chrome                         | Same                                     |
 
 Thresholds to tune on devices: 10 px slop, horizontal intent > 1.3× vertical, commit at one fifth of the stage width or a fast fling. A two-pointer gesture owns input until every pointer lifts. A completed drag suppresses the following click. Zoom is a multiple of Fit up to 8×. Pan is bounded. Zoom and pan are remembered per file for the session and reset when bytes change. A visible **Move** control reveals directional pan buttons so panning never requires dragging.
 

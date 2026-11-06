@@ -37,6 +37,17 @@
 .ws > .ws-overlay:empty {
   display: none;
 }
+/* The viewer with its chrome hidden (a tap on the image) has the whole viewport, over the dock and the app's own
+   chrome, edge to edge under the safe areas. Nothing is unmounted, so recording and drafts carry on. */
+.ws > .ws-overlay:has(.fx-viewer.is-bare) {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+.shell:has(.fx-viewer.is-bare)
+  :is(.ws > .dock, .ws > .ws-head, .menu-fab, .sidebar, .frame > .nudge) {
+  visibility: hidden;
+}
 
 /* Below 1100px (the shell's single layout, which follows its em breakpoint) the workspace is the whole frame: no
    strips, no page gutter or scroll. */

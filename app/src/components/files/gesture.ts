@@ -231,11 +231,15 @@ export class GestureRecognizer {
     this.primary = null;
     this.pair = null;
     this.mode = 'idle';
+    this.lastTap = null;
   }
 
   private finish(t: number) {
-    if (this.mode !== 'pending' && this.mode !== 'idle')
+    if (this.mode !== 'pending' && this.mode !== 'idle') {
       this.suppressUntil = t + this.cfg.clickSuppressMs;
+      // A gesture that moved sits between two taps: the next tap starts afresh, never the second of a pair.
+      this.lastTap = null;
+    }
     this.mode = 'idle';
     this.primary = null;
     this.pair = null;
