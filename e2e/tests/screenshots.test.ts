@@ -361,6 +361,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.goto('about:blank');
     await page.goto(invite.url);
     await page.getByRole('button', { name: 'Pair this device' }).waitFor();
+    // Desktop Chromium would name itself "Mac"; give the phone the name a person would.
+    await page.getByLabel('Name this device').fill('Greg’s iPhone');
     await shot('05-pair-invite');
     await page.getByRole('button', { name: 'Pair this device' }).click();
     await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
@@ -380,10 +382,11 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   });
 
   it('captures a realistic inbox and every question state', async () => {
-    // One project (docs-site) comes from a host without a human label, to show the raw-id fallback.
+    // One project (docs-site) runs on a second computer, so Home shows questions from more than one machine.
+    const docs = (project: string) => project === 'docs-site';
     const origin = (pane: string, project: string, agent = 'claude-code'): QuestionOrigin => ({
-      ...(project === 'docs-site' ? {} : { machine_label: 'Greg’s MacBook Pro' }),
-      host_id: 'host_01JC8Z4MQ7',
+      machine_label: docs(project) ? 'Studio Mac mini' : 'Greg’s MacBook Pro',
+      host_id: docs(project) ? 'host_01JD2STUDIO' : 'host_01JC8Z4MQ7',
       pane_id: pane,
       terminal_generation: 1,
       ownership_principal: `principal-${pane}`,
@@ -539,6 +542,9 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await filesReady();
     await shot('09-detail-approval');
     await shot('09-detail-approval-full', { full: true });
+    // An approval with files can only be sent once every file has been seen, so look at After first.
+    await page.getByRole('tab', { name: /^After/ }).click();
+    await page.getByRole('tab', { name: /^After/, selected: true }).waitFor();
     await page
       .getByRole('radio', { name: /^Approve/ })
       .first()
@@ -546,6 +552,8 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('10-detail-approval-selected');
     // The README hero: the choice made, a note for the agent, Send in the composer.
     await typeAnswer('Ship it. Keep the tooltips on every icon.');
+    // Send is armed only once the choice is made and every file has been seen.
+    await page.locator('.composer-send:not([aria-disabled])').waitFor();
     await shot('10-detail-approval-note');
     await typeAnswer('');
     await page.getByRole('tab', { name: /^After/ }).click();
@@ -645,7 +653,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     });
     await page.goto(relay.origin + '/settings/dictation');
     await page.getByRole('switch', { name: 'Dictation' }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.getByRole('alertdialog').waitFor();
     await shot('72-dictation-consent');
     await page.getByRole('button', { name: /turn on dictation/ }).click();
     await page.getByText('Speech to text', { exact: true }).waitFor();
@@ -674,10 +682,14 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('74-quiet-hours-invalid', { full: true });
     await page.getByLabel('Until').fill('07:00');
     await page.locator('.s-back').click();
-    await page.getByRole('dialog', { name: 'Save your changes?' }).waitFor();
+    await page.getByRole('alertdialog', { name: 'Save your changes?' }).waitFor();
     await shot('74-quiet-hours-leave');
     await page.getByRole('button', { name: 'Keep editing' }).click();
-    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.getByRole('alertdialog').waitFor({ state: 'detached' });
+    await page
+      .getByRole('group', { name: 'Save changes' })
+      .getByRole('button', { name: 'Save' })
+      .click();
     await page.getByText('Saved on your relay').waitFor({ timeout: 20_000 });
     await shot('74-quiet-hours-saved');
 
@@ -694,11 +706,11 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('76-privacy', { full: true });
     await page.getByRole('button', { name: 'Unpair…' }).click();
     await page
-      .getByRole('dialog')
-      .getByText(/unsent answer/)
+      .getByRole('alertdialog')
+      .getByText(/saved question/)
       .waitFor();
     await shot('24-dialog-erase');
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click();
 
     await page.goto(relay.origin + '/settings/about');
     await page.getByRole('heading', { name: 'About & help' }).waitFor();
@@ -1013,7 +1025,6 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     const box = (await viewer.locator('.fx-viewer-stage').boundingBox())!;
     await page.mouse.dblclick(box.x + box.width * 0.3, box.y + box.height * 0.45);
     await shot('50-viewer-zoomed-phone');
-    await viewer.getByLabel('More image controls').click();
     await viewer.getByRole('button', { name: 'Move', exact: true }).click();
     await viewer.getByRole('button', { name: 'Move right' }).click();
     await shot('50-viewer-move-phone');
@@ -1029,7 +1040,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       .getByRole('dialog', { name: 'Download this file?' })
       .getByRole('button', { name: 'Cancel' })
       .click();
-    await viewer.getByRole('button', { name: 'Question', exact: true }).click();
+    await viewer.locator('.fx-id-btn').click();
     await page.getByRole('dialog', { name: 'Question', exact: true }).waitFor();
     await shot('50-viewer-question-phone');
     await page.keyboard.press('Escape');
@@ -1288,7 +1299,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.waitForTimeout(800);
     await openId('text');
     await page.getByRole('button', { name: /^Dictate/ }).click();
-    await page.getByRole('dialog').waitFor();
+    await page.getByRole('alertdialog').waitFor();
     await shot('40-ws-dictation-consent');
     await page.getByRole('button', { name: 'Enable and start dictation' }).click();
     await page.locator('.composer-lane .lane.rec').waitFor({ timeout: 15_000 });
@@ -1298,10 +1309,16 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await shot('40-ws-recording-dark');
     await theme('light');
     await page.getByRole('button', { name: 'Stop dictation' }).click();
-    await page.getByText('Tidying wording…').waitFor({ timeout: 15_000 });
+    await page
+      .getByRole('region', { name: 'Answer' })
+      .getByText('Tidying wording…')
+      .waitFor({ timeout: 15_000 });
     await shot('40-ws-cleaning');
     releaseCleanup();
-    await page.getByText('Tidying wording…').waitFor({ state: 'hidden', timeout: 15_000 });
+    await page
+      .getByRole('region', { name: 'Answer' })
+      .getByText('Tidying wording…')
+      .waitFor({ state: 'hidden', timeout: 15_000 });
     await shot('40-ws-cleaned');
     await page.setViewportSize(WIDE);
     await shot('40-ws-cleaned-w');

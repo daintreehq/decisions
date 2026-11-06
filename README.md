@@ -17,7 +17,7 @@ End-to-end encrypted. Self-hosted on your own Cloudflare account. Works with any
 
 <br>
 
-<img src="docs/readme/hero.png" alt="A Claude Code session calls ask_human to get approval for a design change and ends its turn. The phone shows the question with before and after screenshots, Approve selected and a note. Thirty-eight minutes later the signed answer is typed back into the same terminal and the agent merges." width="100%">
+<img src="docs/readme/hero.png" alt="A Claude Code session calls ask_human to get approval for a design change and ends its turn. The phone shows the question with its before and after screenshots, Approve chosen and a note in the composer ready to send. Thirty-eight minutes later the signed answer is typed back into the same terminal and the agent merges." width="100%">
 
 </div>
 
@@ -29,24 +29,24 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 
 ## How it works
 
-<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: the inbox, with questions from several projects and machines. Three: a design approval with before and after screenshots, Approve selected and a note. Four: the answered question, delivered to the agent's terminal, with Next question ready." width="100%">
+<img src="docs/readme/loop.png" alt="Four phones. One: a lock screen notification that says only 'A question needs your input'. Two: Home, with the questions that need you from several projects on two computers, then a model answer to review. Three: a design approval with before and after screenshots, Approve chosen and a note in the composer. Four: another question, answered Yes, rename and marked as typed into the terminal, with Next question below it." width="100%">
 
 1. **Your agent asks.** `ask_human` returns at once with an id, and the agent ends its turn (or carries on with unrelated work). Nothing holds a tool call open for hours, so it works with every agent CLI, survives restarts and sleep, and never looks stuck.
 2. **Your phone buzzes.** The notification says only that a question is waiting. The question itself is encrypted on your computer and decrypted on your phone.
 3. **You decide, with the context.** The agent's question, its notes, the options it is weighing and any screenshots it attached. Add a note if the agent should know why.
-4. **It lands in the right place.** Your answer is signed on the phone, and typed into the exact pane that asked once that agent is idle. You can watch each step: queued, sent, saved on your relay, received, typed.
+4. **It lands in the right place.** Your answer is signed on the phone, and typed into the exact pane that asked once that agent is idle. Tap the receipt under your answer to see each step: queued, sent, saved on your relay, received, typed.
 
 ## More than yes or no
 
-<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question with a description under each option; a free-text question with a typed answer; an answer from the decision model, labelled with its model, confidence and the earlier decisions it drew on, with Confirm answer and Overrule; and an answered question with two follow-up messages from the phone and the agent's reply in the same thread." width="100%">
+<img src="docs/readme/depth.png" alt="Four phones: a multiple-choice question whose first two options carry a description of the trade-off; a free-text question with a typed answer in the composer; an answer from the decision model, labelled Model answer with the model's name, its confidence and how many earlier decisions it drew on, with Confirm answer and Overrule; and an answered question with two follow-ups from the phone and the agent's reply in the same thread." width="100%">
 
 |                                      |                                                                                                                                                                                                                                                              |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Approvals, choices and free text** | Options can carry a description of the trade-off. Text answers can be typed or dictated.                                                                                                                                                                     |
-| **Screenshots that matter**          | Agents attach before and after images. They are encrypted like everything else and open full screen, zoomable.                                                                                                                                               |
+| **Screenshots that matter**          | Agents attach before and after images. They are encrypted like everything else, open in a zoomable viewer, and Compare puts before against after.                                                                                                            |
 | **Follow-ups**                       | Your answer is final; anything more is a follow-up in the same thread. It is typed into the agent's terminal marked as a message from your phone that does not change the answer. The agent can reply, and a question it asks there comes back to Needs you. |
 | **Photos from your phone**           | `+` in the composer takes a photo or chooses up to four from your library, to go with an answer or a follow-up. Each is scaled down with its location stripped, encrypted on the phone, and handed to the agent as a file.                                   |
-| **An optional decision model**       | It answers low-stakes questions the way you would, from your own history, only where a workflow allows it. Its answers are always labelled as a proxy, and you can confirm or overrule them. It can never answer anything that needs you.                    |
+| **An optional decision model**       | It answers low-stakes questions the way you would, from your own history, only where a workflow allows it. Its answers are always labelled "Model answer", and you can confirm or overrule them. It can never answer anything that needs you.                |
 | **Deadlines**                        | A question can expire. An expired question is reported to the agent as _not authorised_, never as consent.                                                                                                                                                   |
 | **Quiet hours**                      | Silence notifications overnight. Questions and answers still sync.                                                                                                                                                                                           |
 
@@ -59,17 +59,17 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 - An expired question never authorizes anything.
 - Push notifications say only "a question needs your input". Never the question.
 
-<img src="docs/readme/pairing.png" alt="Pairing and devices: the phone's pairing screen; a six-digit code to check against the same code on the computer; the Devices screen listing the computer and the phone, with the computer's identity fingerprint; and the Settings index: appearance, dictation, notifications, quiet hours, devices, privacy and help." width="100%">
+<img src="docs/readme/pairing.png" alt="Pairing and devices: the phone's pairing screen, where it is given a name; the six-digit code to check against the same code on the computer; the phone's details in Settings, Devices, with its key fingerprint; and the Settings index: Appearance, Dictation, Notifications, Quiet hours and reminders, Devices, Privacy and security, About and help." width="100%">
 
-Pairing is a QR code and a six-digit code you check on both screens. Every device is listed with a fingerprint you can compare against your computer. Revoking a device rotates the content key, so it cannot read anything new.
+Pairing is a QR code and a six-digit code you check on both screens. Open any device under Settings → Devices for its key fingerprint, to compare against your computer. Revoking a device rotates the content key, so it cannot read anything new.
 
 Read [docs/security-claims.md](docs/security-claims.md) for exactly what is and is not protected, including the places where plaintext necessarily exists (your computer, your phone, and the optional dictation path), and [docs/threat-model.md](docs/threat-model.md) for the attacker it is built against.
 
 ## On your phone, or anywhere else
 
-<img src="docs/readme/everywhere.png" alt="The same app on a desktop, with the questions rail beside an open question and its answer dock, and on a phone in the dark Daintree theme." width="100%">
+<img src="docs/readme/everywhere.png" alt="The same app in a desktop browser, with the sidebar, the questions that need you and an open approval with its answer composer side by side, and Home on a phone in the dark Daintree theme." width="100%">
 
-The app is an installable PWA served by your own Worker: no app store, push notifications, an offline outbox that sends when you are back in signal, and light and dark themes. On a wide screen the inbox and the question sit side by side.
+The app is an installable PWA served by your own Worker: no app store, push notifications, an offline outbox that sends when you are back in signal, and light and dark themes. On a wide screen the sidebar, your questions and the open question sit side by side.
 
 ## Under the hood
 

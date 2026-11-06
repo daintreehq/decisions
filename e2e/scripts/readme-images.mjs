@@ -55,55 +55,89 @@ const png = (path) => `data:image/png;base64,${readFileSync(path).toString('base
 const shot = (name) => png(join(SHOTS, `${name}.png`));
 const icon = png(join(repo, 'app/public/icons/icon-192.png'));
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const font = (weight) =>
+  `@font-face { font-family: 'JetBrains Mono'; font-weight: ${weight}; font-style: normal;
+    src: url(data:font/woff2;base64,${readFileSync(join(repo, `app/public/fonts/jetbrains-mono-latin-${weight}-normal.woff2`)).toString('base64')}) format('woff2'); }`;
 
 // ── shared pieces ──────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The app's own visual language (app/src/styles/theme.generated.css and tokens.css): the Daintree palette's charcoal
+ * surfaces and mint accent around the frames, the Bondi palette's cream inside them, the system UI face for words
+ * and JetBrains Mono for anything that reads as machine output.
+ */
+const C = {
+  canvas: '#1a1918',
+  chrome: '#151211',
+  panel: '#201f1f',
+  text: '#e4e4e7',
+  secondary: '#a1a1aa',
+  muted: '#82827c',
+  accent: '#36ce94',
+  selection: '#22392c',
+  cream: '#f6f0e6',
+  creamChrome: '#f2e9da',
+  creamInput: '#fdfbf7',
+  creamBorder: '#cfc7b8',
+  ink: '#1c2028',
+  inkSecondary: '#454d56',
+};
+const UI = `system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif`;
+const MONO = `'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace`;
+// The app's 3% grain, as an SVG noise tile.
+const GRAIN = `url("data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(#n)'/></svg>`,
+)}")`;
+
 const BASE_CSS = `
+  ${font(400)}
+  ${font(700)}
   * { box-sizing: border-box; margin: 0; }
   html, body { background: transparent; }
-  body { font-family: -apple-system, 'SF Pro Text', system-ui, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+  body { font-family: ${UI}; -webkit-font-smoothing: antialiased; }
   .canvas {
     position: relative; overflow: hidden; border-radius: 28px;
     background:
-      radial-gradient(900px 520px at 78% 18%, rgba(63,191,134,.20), transparent 60%),
-      radial-gradient(700px 500px at 8% 100%, rgba(63,191,134,.10), transparent 60%),
-      linear-gradient(160deg, #0f1d17 0%, #0a1310 55%, #08100d 100%);
+      radial-gradient(960px 560px at 80% 10%, rgba(54,206,148,.11), transparent 62%),
+      radial-gradient(760px 520px at 4% 104%, rgba(107,141,114,.12), transparent 62%),
+      linear-gradient(165deg, ${C.panel} 0%, ${C.canvas} 46%, ${C.chrome} 100%);
+  }
+  .canvas::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+    background-image: ${GRAIN}; opacity: .03; mix-blend-mode: overlay;
   }
   .canvas::after {
     content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
-    background-image: radial-gradient(rgba(255,255,255,.035) 1px, transparent 1px);
-    background-size: 22px 22px;
   }
   .phone {
     position: relative; flex: none; padding: 10px;
-    background: linear-gradient(145deg, #2a3530, #0b0f0d 40%, #1b2420);
+    background: linear-gradient(145deg, #3a3938, #121110 42%, #262524);
     box-shadow:
       0 0 0 1px rgba(255,255,255,.10),
       inset 0 0 0 2px rgba(0,0,0,.6),
       0 50px 90px -30px rgba(0,0,0,.85),
       0 20px 40px -20px rgba(0,0,0,.6);
   }
-  .phone .screen { position: relative; overflow: hidden; background: #f4f8f5; aspect-ratio: 390 / 844; }
+  .phone .screen { position: relative; overflow: hidden; background: ${C.cream}; aspect-ratio: 390 / 844; }
   .phone .screen > img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
   .phone .screen::after {
     content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-    background: linear-gradient(125deg, rgba(255,255,255,.10), transparent 30%);
+    background: linear-gradient(125deg, rgba(255,255,255,.08), transparent 30%);
   }
-  .label { color: #e6f1ea; }
-  .step { font: 600 13px/1 -apple-system, system-ui, sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #3fbf86; }
-  .caption { font: 600 19px/1.3 -apple-system, system-ui, sans-serif; color: #e6f1ea; letter-spacing: -.01em; }
-  .sub { font: 400 14.5px/1.45 -apple-system, system-ui, sans-serif; color: #93a79b; }
+  .step { font: 700 12.5px/1 ${MONO}; letter-spacing: .08em; color: ${C.accent}; }
+  .caption { font: 600 19px/1.3 ${UI}; color: ${C.text}; letter-spacing: -.01em; }
+  .sub { font: 400 14.5px/1.45 ${UI}; color: ${C.secondary}; }
   .notif {
     display: flex; gap: 12px; align-items: center; padding: 13px 16px 13px 13px; border-radius: 22px;
-    background: rgba(245, 248, 246, .80); backdrop-filter: blur(24px) saturate(1.6);
+    background: rgba(251, 248, 242, .82); backdrop-filter: blur(24px) saturate(1.4);
     box-shadow: 0 18px 40px -12px rgba(0,0,0,.55), 0 0 0 .5px rgba(255,255,255,.4);
-    color: #0b1411;
+    color: ${C.ink};
   }
   .notif img { width: 38px; height: 38px; border-radius: 9px; }
-  .notif .t { font: 600 15px/1.25 -apple-system, system-ui, sans-serif; display: flex; justify-content: space-between; gap: 18px; }
-  .notif .t span { font-weight: 400; color: #5d6b63; font-size: 13.5px; }
-  .notif .b { font: 400 15px/1.3 -apple-system, system-ui, sans-serif; }
+  .notif .t { font: 600 15px/1.25 ${UI}; display: flex; justify-content: space-between; gap: 18px; }
+  .notif .t span { font-weight: 400; color: ${C.inkSecondary}; font-size: 13.5px; }
+  .notif .b { font: 400 15px/1.3 ${UI}; }
   .notif.sm { gap: 9px; padding: 10px 11px 10px 10px; border-radius: 17px; }
   .notif.sm img { width: 30px; height: 30px; border-radius: 7px; }
   .notif.sm .t { font-size: 12.5px; white-space: nowrap; gap: 8px; }
@@ -136,10 +170,10 @@ const notification = (text = 'A question needs your input', when = 'now', cls = 
 const lockScreen = (width) => `
   <div class="phone" style="width:${width}px;${radii(width).frame}">
     <div class="screen" style="${radii(width).screen};background:
-        radial-gradient(120% 70% at 20% 0%, #2f6b52 0%, transparent 60%),
-        radial-gradient(90% 60% at 100% 100%, #1d4a6b 0%, transparent 60%),
-        linear-gradient(180deg, #13261e, #0a1512);">
-      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;color:#f4f8f5">
+        radial-gradient(120% 70% at 18% 0%, #1f5b45 0%, transparent 62%),
+        radial-gradient(95% 60% at 100% 100%, #3b4a3f 0%, transparent 62%),
+        linear-gradient(180deg, ${C.panel}, ${C.chrome});">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;color:${C.cream}">
         <div style="margin-top:${width * 0.19}px;font:500 ${width * 0.055}px/1 -apple-system,system-ui;opacity:.85">Monday 2 November</div>
         <div style="font:700 ${width * 0.27}px/1.05 -apple-system,'SF Pro Rounded',system-ui;letter-spacing:-.02em">9:41</div>
         <div style="margin-top:${width * 0.14}px;width:92%">${notification(undefined, 'now', 'sm')}</div>
@@ -168,15 +202,15 @@ const answerText = batchNotices([
 ])[0];
 
 const TERMINAL_CSS = `
-  .term { border-radius: 16px; overflow: hidden; background: rgba(9, 15, 12, .92);
-    box-shadow: 0 0 0 1px rgba(255,255,255,.09), 0 50px 100px -30px rgba(0,0,0,.9); backdrop-filter: blur(10px); }
-  .term .bar { display:flex; align-items:center; gap:8px; padding: 13px 16px; background: rgba(255,255,255,.035); border-bottom: 1px solid rgba(255,255,255,.06); }
+  .term { border-radius: 16px; overflow: hidden; background: ${C.canvas};
+    box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 50px 100px -30px rgba(0,0,0,.9); }
+  .term .bar { display:flex; align-items:center; gap:8px; padding: 13px 16px; background: ${C.chrome}; border-bottom: 1px solid rgba(255,255,255,.06); }
   .term .bar i { width: 12px; height: 12px; border-radius: 50%; display:inline-block; }
-  .term .bar b { flex:1; text-align:center; font: 500 12.5px/1 -apple-system, system-ui; color: #7d9187; margin-right: 52px; }
-  .term pre { margin: 0; padding: 18px 22px 22px; font: 12.6px/1.62 'SF Mono', ui-monospace, Menlo, monospace; color: #c9dbd1; white-space: pre-wrap; }
-  .u { color: #e6f1ea; } .p { color: #6f8579; } .dot { color: #3fbf86; } .tool { color: #e6f1ea; font-weight: 600; }
-  .dim { color: #6f8579; } .blk { color: #9fe7c2; } .key { color: #6fbf98; } .sep { color: #4e6358; }
-  .hl { background: rgba(63,191,134,.10); border-left: 2px solid #3fbf86; display:block; margin: 0 -22px; padding: 6px 20px; }
+  .term .bar b { flex:1; text-align:center; font: 500 12.5px/1 ${UI}; color: ${C.muted}; margin-right: 52px; }
+  .term pre { margin: 0; padding: 18px 22px 22px; font: 12.2px/1.64 ${MONO}; color: #c6c6ca; white-space: pre-wrap; }
+  .u { color: ${C.text}; } .p { color: ${C.muted}; } .dot { color: ${C.accent}; } .tool { color: ${C.text}; font-weight: 700; }
+  .dim { color: ${C.muted}; } .blk { color: #8fe3c0; } .key { color: ${C.accent}; } .sep { color: #4a4947; }
+  .hl { background: ${C.selection}; border-left: 2px solid ${C.accent}; display:block; margin: 0 -22px; padding: 6px 20px; }
 `;
 
 function terminal() {
@@ -236,8 +270,8 @@ const images = {
           ],
           [
             '02',
-            'One inbox, every agent',
-            'Questions from every project and machine, most urgent first.',
+            'Every agent, one Home',
+            'Questions from every project, what needs you first.',
             phone(shot('08-inbox'), 262),
           ],
           [
@@ -309,13 +343,13 @@ const images = {
     html: `
       <div class="canvas" style="width:1280px;height:720px">
         <div style="position:absolute;left:60px;top:52px;width:900px;border-radius:14px;overflow:hidden;
-             box-shadow:0 0 0 1px rgba(255,255,255,.1),0 50px 100px -30px rgba(0,0,0,.9);background:#f4f8f5">
-          <div style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:#e3ebe6;border-bottom:1px solid #d3dfd7">
+             box-shadow:0 0 0 1px rgba(255,255,255,.1),0 50px 100px -30px rgba(0,0,0,.9);background:${C.cream}">
+          <div style="display:flex;align-items:center;gap:8px;padding:11px 14px;background:${C.creamChrome};border-bottom:1px solid ${C.creamBorder}">
             <i style="width:11px;height:11px;border-radius:50%;background:#ff5f57"></i>
             <i style="width:11px;height:11px;border-radius:50%;background:#febc2e"></i>
             <i style="width:11px;height:11px;border-radius:50%;background:#28c840"></i>
             <div style="flex:1;display:flex;justify-content:center">
-              <div style="width:360px;padding:5px 12px;border-radius:7px;background:#f4f8f5;font:12px/1.2 -apple-system,system-ui;color:#55675d;text-align:center">decisions.your-name.workers.dev</div>
+              <div style="width:360px;padding:5px 12px;border-radius:8px;background:${C.creamInput};box-shadow:inset 0 0 0 1px ${C.creamBorder};font:12px/1.2 ${UI};color:${C.inkSecondary};text-align:center">decisions.your-name.workers.dev</div>
             </div>
           </div>
           <img src="${shot('30-wide-inbox-detail')}" style="display:block;width:100%">
@@ -330,7 +364,7 @@ const images = {
       <div class="canvas" style="width:1280px;height:600px;display:flex;align-items:center;justify-content:center;gap:40px">
         ${phone(shot('05-pair-invite'), 236)}
         ${phone(shot('06-pair-code'), 236)}
-        ${phone(shot('22-devices'), 236)}
+        ${phone(shot('75-device-details'), 236)}
         ${phone(shot('23-settings'), 236)}
       </div>`,
   },
