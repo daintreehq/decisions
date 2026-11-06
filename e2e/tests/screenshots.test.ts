@@ -247,6 +247,12 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
   const theme = async (scheme: 'light' | 'dark') => {
     await page.emulateMedia({ colorScheme: scheme });
   };
+  /** The same state again in the Daintree theme, as `{name}-dark`, then back to Bondi. The README shows these. */
+  const shotDark = async (name: string, opts: { full?: boolean } = {}) => {
+    await theme('dark');
+    await shot(`${name}-dark`, opts);
+    await theme('light');
+  };
   /** The inline gallery shows its active file and every thumbnail has loaded. */
   const filesReady = async () => {
     await page.locator('.fx-inline-stage .fs-slide.is-active img').waitFor({ timeout: 30_000 });
@@ -367,6 +373,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.getByRole('button', { name: 'Pair this device' }).click();
     await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
     await shot('06-pair-code');
+    await shotDark('06-pair-code');
     const cand = await until(
       async () =>
         (await client.pendingPairings()).pending.find((p) => p.pairing_id === invite.pairingId),
@@ -537,6 +544,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
       if (b) b.scrollTop = b.scrollHeight;
     });
     await shot('16-detail-follow-up');
+    await shotDark('16-detail-follow-up');
 
     await open('Approve the compact sidebar');
     await filesReady();
@@ -555,6 +563,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     // Send is armed only once the choice is made and every file has been seen.
     await page.locator('.composer-send:not([aria-disabled])').waitFor();
     await shot('10-detail-approval-note');
+    await shotDark('10-detail-approval-note');
     await typeAnswer('');
     await page.getByRole('tab', { name: /^After/ }).click();
     await page.getByRole('button', { name: /Enlarge After/ }).click();
@@ -565,6 +574,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
 
     await open('Which retry strategy');
     await shot('12-detail-choice', { full: true });
+    await shotDark('12-detail-choice');
     await open('Which version should it describe');
     await typeAnswer('Describe v3 only. Move the v2 steps to an appendix');
     await shot('13-detail-text');
@@ -801,6 +811,7 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await open('Approve the compact sidebar');
     await filesReady();
     await shot('30-wide-inbox-detail');
+    await shotDark('30-wide-inbox-detail');
     await page.goto(relay.origin + '/');
     await shot('31-wide-inbox');
     await theme('dark');
@@ -1325,6 +1336,28 @@ describe.skipIf(!OUT || !chromiumPath)('screenshots of the running app', () => {
     await page.setViewportSize(PHONE);
     await typeAnswer('');
     await context.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
+  it('captures the README approval once it is sent', async () => {
+    // Last, because every earlier capture needs this question still open.
+    await page.setViewportSize(PHONE);
+    await open('Approve the compact sidebar');
+    await filesReady();
+    await page.getByRole('tab', { name: /^After/ }).click();
+    await page.getByRole('tab', { name: /^After/, selected: true }).waitFor();
+    await page
+      .getByRole('radio', { name: /^Approve/ })
+      .first()
+      .check();
+    await typeAnswer('Ship it. Keep the tooltips on every icon.');
+    await page.locator('.composer-send:not([aria-disabled])').waitFor();
+    await page.getByRole('button', { name: 'Send decision' }).click();
+    await page
+      .locator('.ws .receipt')
+      .filter({ hasText: 'Typed into the terminal' })
+      .waitFor({ timeout: 30_000 });
+    await shot('17-detail-approval-answered');
+    await shotDark('17-detail-approval-answered');
   });
 
   it('captures the revoked phone', async () => {
