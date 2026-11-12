@@ -128,7 +128,7 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 | `POST /questions/{id}/confirm-proxy`    | phone, tablet | human affirms the proxy answer; not re-delivered                                                |
 | `POST /questions/{id}/proxy-answer`     | desktops      | rejected for `human-required`                                                                   |
 | `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                          |
-| `POST /questions/{id}/cancel`           | any           | idempotent; cannot remove a committed human answer; a phone/tablet only from `open` (6.1)        |
+| `POST /questions/{id}/cancel`           | any           | idempotent; cannot remove a committed human answer; a phone/tablet only from `open` (6.1)       |
 | `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                         |
 | `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, messages, attachments; emits `decision.deleted`                  |
 

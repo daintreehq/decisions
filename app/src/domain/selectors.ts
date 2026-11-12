@@ -1,4 +1,8 @@
-import { isPersonDecline, threadAwaitsHuman, type ActionKind } from '@daintreehq/decisions-protocol';
+import {
+  isPersonDecline,
+  threadAwaitsHuman,
+  type ActionKind,
+} from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
 import { NO_EPOCH_KEY } from './verify.js';
 

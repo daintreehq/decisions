@@ -312,8 +312,7 @@ function entries(v: QuestionView, now: number): Entry[] {
         at: a.createdAt,
         title: declined ? 'Declined by you' : 'Withdrawn by your agent',
       });
-    }
-    else if (a.action === 'reopen')
+    } else if (a.action === 'reopen')
       out.push({
         key: a.actionId,
         kind: 'reopen',

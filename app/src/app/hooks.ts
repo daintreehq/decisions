@@ -33,8 +33,7 @@ export function useActionCount(now: number, except?: (v: QuestionView) => boolea
   const refused = refusedFollowUps();
   // A question the person declined holds nothing for them, whatever its refused follow-ups.
   return all.filter(
-    (v) =>
-      !except?.(v) && (needsAction(v, now) || (refused.has(v.id) && !declinedByPerson(v))),
+    (v) => !except?.(v) && (needsAction(v, now) || (refused.has(v.id) && !declinedByPerson(v))),
   ).length;
 }
 

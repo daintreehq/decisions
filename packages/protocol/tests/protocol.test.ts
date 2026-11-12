@@ -196,9 +196,9 @@ describe('state machine', () => {
     // A retry after the question closed is a no-op, as for a desktop.
     expect(applyAction({ ...open, status: 'cancelled' }, 'cancel', 'phone', 0).noop).toBe(true);
     // Declining never answers, and a declined question cannot be answered.
-    expect(conflict(() => applyAction({ ...open, status: 'cancelled' }, 'answer', 'phone', 0))).toBe(
-      'invalid_state',
-    );
+    expect(
+      conflict(() => applyAction({ ...open, status: 'cancelled' }, 'answer', 'phone', 0)),
+    ).toBe('invalid_state');
   });
 });
 
