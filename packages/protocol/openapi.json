@@ -4492,17 +4492,14 @@
     },
     "/api/v1/questions/{id}/cancel": {
       "post": {
-        "summary": "Cancel an unanswered question (idempotent)",
+        "summary": "Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one",
         "operationId": "post_questions_id_cancel",
         "security": [
           {
             "DecisionsSig": []
           }
         ],
-        "x-roles": [
-          "owner-desktop",
-          "desktop-host"
-        ],
+        "x-roles": "any",
         "responses": {
           "201": {
             "description": "Success",

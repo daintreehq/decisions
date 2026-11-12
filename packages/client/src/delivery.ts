@@ -294,7 +294,9 @@ export class DeliveryEngine {
 
   private async resolveTarget(
     t: Thread,
-  ): Promise<{ target: TerminalTarget } | { defer: true } | { attention: string }> {
+  ): Promise<
+    { target: TerminalTarget } | { defer: true } | { attention: string } | { dropped: true }
+  > {
     const { q } = t;
     const loc = await this.o.sink.locate(q.origin);
     if (loc.state === 'alive') {
@@ -303,7 +305,37 @@ export class DeliveryEngine {
       if (!sameTarget(loc.target, targetOf(q.origin))) return { attention: 'target_mismatch' };
       return { target: loc.target };
     }
+    // A decline is news only for an agent still listening: one that has gone is never resumed, nor flagged to the
+    // person, just to hear that they will not answer. A host that is merely offline may still have it, so it waits.
+    if (
+      loc.state !== 'host-offline' &&
+      t.messages.length === 0 &&
+      t.answers.length > 0 &&
+      t.answers.every((e) => e.kind === 'declined')
+    ) {
+      await this.dropNotices(q, t.answers);
+      return { dropped: true };
+    }
     return this.unavailable(q, loc.state, t.answers.length > 0);
+  }
+
+  /** Stop trying to type `entries` (decline notices for an agent that has gone); the question records why. */
+  private async dropNotices(q: QuestionRow, entries: AnswerEntry[]): Promise<void> {
+    const ids = new Set(entries.map((e) => e.entry_id));
+    await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(q.question_id);
+      if (!row) return;
+      const next = parseAnswers(row.answers_json).map((e) =>
+        ids.has(e.entry_id) && !e.delivered ? { ...e, deliver: false } : e,
+      );
+      await this.ctx.store.updateQuestion(q.question_id, { answers_json: serializeAnswers(next) });
+    });
+    await this.ctx.audit.log({
+      event: 'delivery.skipped',
+      question_id: q.question_id,
+      requirement: q.requirement,
+      result: 'declined-agent-gone',
+    });
   }
 
   /**
@@ -460,6 +492,7 @@ export class DeliveryEngine {
     const items: Item[] = [];
     for (const t of threads) {
       const r = await this.resolveTarget(t);
+      if ('dropped' in r) continue;
       if ('defer' in r) {
         res.deferred++;
         break; // preserve ordering: nothing later in the lane may overtake

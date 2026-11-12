@@ -278,6 +278,24 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     expect(cancelOther.isError).toBe(true);
     expect((await call(mcp, 'cancel_question', { question_id: id })).isError).toBeUndefined();
   });
+  it('get_decision says plainly when the person declined, and reports no answer', async () => {
+    const { mcp, bridge, relay, phone } = await boot();
+    const ask = await call(mcp, 'ask_human', { question: 'Ship it?' });
+    const id = ask.structuredContent.question_id as string;
+    await bridge.pump();
+    await relay.plainActionEvent({ questionId: id, signer: phone, action: 'cancel' });
+    await bridge.catchUp();
+    const r = await call(mcp, 'get_decision', { question_id: id });
+    expect(r.structuredContent).toMatchObject({
+      status: 'cancelled',
+      closed_reason: 'declined',
+      provenance: null,
+      choice: null,
+      text: '',
+    });
+    expect(r.content[0].text).toContain('the person chose not to answer');
+    expect(r.content[0].text).toContain('Nothing was approved');
+  });
 });
 
 describe('HTTP MCP: send_followup', () => {

@@ -96,7 +96,7 @@ function oneLine(s: string, max = 200): string {
 }
 
 export interface AnswerNoticeInput {
-  kind: 'answer' | 'expired';
+  kind: 'answer' | 'expired' | 'declined';
   questionId: string;
   alias?: number;
   revision: number;
@@ -143,6 +143,13 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       lines.push('authorised: no');
       lines.push(
         'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
+      );
+    } else if (n.kind === 'declined') {
+      lines.push('source: human');
+      lines.push('status: declined');
+      lines.push('authorised: no');
+      lines.push(
+        'note: The person declined to answer this question. Nothing was decided or approved; stop waiting for it and do not continue the gated step.',
       );
     } else {
       lines.push(`source: ${n.source}`);

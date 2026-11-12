@@ -47,6 +47,7 @@ function decisionResult(v: DecisionView) {
     requirement: v.requirement,
     workflow_gate_id: v.workflowGateId,
     provenance: v.provenance,
+    closed_reason: v.closedReason,
     choice: v.choice,
     text: v.text,
     reviewed_digests_match: v.reviewedDigestsMatch,
@@ -226,7 +227,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images) and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -252,6 +253,12 @@ export const TOOLS = [
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
         provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
+        closed_reason: {
+          type: ['string', 'null'],
+          enum: ['declined', 'withdrawn', 'expired', null],
+          description:
+            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop) or expired. None authorises anything.',
+        },
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
         reviewed_digests_match: { type: 'boolean' },
@@ -495,7 +502,9 @@ export function createDecisionsMcpHandler(
           ? `q-${v.alias} is ${v.status}. Answer (${v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
             ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : `q-${v.alias} is ${v.status}; no answer in force.`;
+            : v.closedReason === 'declined'
+              ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+              : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;
         return text(
           messages > 0
