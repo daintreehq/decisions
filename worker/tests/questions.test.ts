@@ -398,6 +398,54 @@ describe('cancel, expiry and reopen', () => {
     );
   });
 
+  it('a phone or tablet declines an open question: it closes, stops its jobs and takes no answer', async () => {
+    const { world: w, phone } = await setup();
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    const a = await ask(w);
+    const pending = () =>
+      inRoom((room) =>
+        room.q<{ kind: string }>(
+          `SELECT kind FROM scheduled_jobs WHERE question_id = ? AND status = 'pending' AND kind != 'delete_attachments'`,
+          a.questionId,
+        ),
+      );
+    expect((await pending()).length).toBeGreaterThan(0);
+    const r = await act(w, phone, 'cancel', a.questionId, 0);
+    expect(r.res.status).toBe(201);
+    expect(r.res.json).toMatchObject({ status: 'cancelled', revision: 0 });
+    expect(await pending()).toEqual([]);
+    const ev = (await events(w.owner)).filter((e) => e.event_type === 'decision.cancelled');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.data).toMatchObject({
+      action: 'cancel',
+      provenance: null,
+      deliverable: false,
+      status: 'cancelled',
+      record: { signer_device_id: phone.id, action: 'cancel' },
+    });
+    // A retry from another device is a no-op: the first cancel keeps its signer.
+    expect((await act(w, tablet, 'cancel', a.questionId, 0)).res.status).toBe(200);
+    expect((await act(w, w.owner, 'cancel', a.questionId, 0)).res.status).toBe(200);
+    expect(
+      (await events(w.owner)).filter((e) => e.event_type === 'decision.cancelled'),
+    ).toHaveLength(1);
+    expect((await act(w, tablet, 'answer', a.questionId, 0)).res.status).toBe(409);
+  });
+
+  it('a person cannot decline a proxy answer, an answered question, or reopen one', async () => {
+    const { world: w, phone } = await setup();
+    const p = await ask(w, { requirement: 'proxy-ok' });
+    expect((await act(w, w.owner, 'proxy-answer', p.questionId, 0)).res.status).toBe(201);
+    expect((await act(w, phone, 'cancel', p.questionId, 1)).res.status).toBe(409);
+    const h = await ask(w);
+    expect((await act(w, phone, 'answer', h.questionId, 0)).res.status).toBe(201);
+    expect((await act(w, phone, 'cancel', h.questionId, 1)).res.status).toBe(409);
+    const o = await ask(w);
+    expect((await act(w, phone, 'cancel', o.questionId, 3)).res.status).toBe(409);
+    expect((await act(w, phone, 'cancel', o.questionId, 0)).res.status).toBe(201);
+    expect((await act(w, phone, 'reopen', o.questionId, 0)).res.status).toBe(403);
+  });
+
   it('a due question is expired lazily and an answer after the deadline is refused (410)', async () => {
     const { world: w, phone } = await setup();
     const a = await ask(w, { expiresAt: new Date(Date.now() + 60_000).toISOString() });

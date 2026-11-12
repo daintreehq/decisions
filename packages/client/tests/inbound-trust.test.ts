@@ -68,8 +68,8 @@ describe('A: event type is bound to the signed action', () => {
     expect(sink.typed).toHaveLength(0);
     expect(await reasons(store)).toContain('provenance-mismatch');
   });
-  it('a cancel record signed by a phone is rejected', async () => {
-    const { bridge, relay, qid, phone, store } = await asked();
+  it('a cancel signed by a phone is the person declining: the agent is told plainly, never as an answer', async () => {
+    const { bridge, relay, sink, qid, phone, store } = await asked();
     await relay.plainActionEvent({
       questionId: qid,
       signer: phone,
@@ -77,12 +77,118 @@ describe('A: event type is bound to the signed action', () => {
       status: 'cancelled',
     });
     await bridge.catchUp();
-    expect((await store.getQuestion(qid))!.local_status).toBe('open');
-    expect(
-      (await reasons(store)).some(
-        (r) => r === 'desktop-action-by-non-desktop-device' || r?.startsWith('transition:'),
-      ),
-    ).toBe(true);
+    const row = (await store.getQuestion(qid))!;
+    expect(row.local_status).toBe('cancelled');
+    expect(await reasons(store)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    const notice = sink.typed[0]!.text;
+    expect(notice).toContain('status: declined');
+    expect(notice).toContain('authorised: no');
+    expect(notice).not.toContain('choice:');
+    const d = await bridge.getDecision(qid);
+    expect(d).toMatchObject({
+      status: 'cancelled',
+      closedReason: 'declined',
+      provenance: null,
+      choice: null,
+      text: '',
+      reviewedDigestsMatch: false,
+      answers: [],
+    });
+    // Delivered once: another pass types nothing more.
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(1);
+  });
+  it('a tablet may decline too, and a desktop cancel stays a silent withdrawal', async () => {
+    const a = await asked();
+    const tablet = await makePhone(a.identity, 'tablet');
+    a.relay.devices.push(tablet.cert);
+    await a.relay.plainActionEvent({ questionId: a.qid, signer: tablet, action: 'cancel' });
+    await a.bridge.catchUp();
+    expect((await a.bridge.getDecision(a.qid)).closedReason).toBe('declined');
+
+    const b = await asked();
+    await b.relay.plainActionEvent({ questionId: b.qid, signer: b.desktop, action: 'cancel' });
+    await b.bridge.catchUp();
+    expect(b.sink.typed).toHaveLength(0);
+    expect(await b.bridge.getDecision(b.qid)).toMatchObject({
+      status: 'cancelled',
+      closedReason: 'withdrawn',
+    });
+  });
+  it('a decline for an agent that has gone is dropped, never resumed or flagged', async () => {
+    const { bridge, relay, sink, qid, phone, store } = await asked();
+    sink.panes.clear();
+    await relay.plainActionEvent({ questionId: qid, signer: phone, action: 'cancel' });
+    await bridge.catchUp();
+    const row = (await store.getQuestion(qid))!;
+    expect(sink.typed).toHaveLength(0);
+    expect(row.delivery_status).not.toBe('needs-attention');
+    expect(parseAnswers(row.answers_json)).toMatchObject([
+      { kind: 'declined', deliver: false, delivered: false },
+    ]);
+    expect((await store.listAudit(100)).map((a) => a.event)).not.toContain('delivery.attention');
+    expect((await bridge.getDecision(qid)).closedReason).toBe('declined');
+  });
+  it('a decline after a reopen is typed once and owes the relay no terminal receipt', async () => {
+    const { bridge, relay, sink, qid, phone, desktop, store } = await asked();
+    await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'cancel' });
+    await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'reopen' });
+    await relay.plainActionEvent({
+      questionId: qid,
+      signer: phone,
+      action: 'cancel',
+      expectedRevision: 1,
+    });
+    await bridge.catchUp();
+    expect(await reasons(store)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    expect(sink.typed[0]!.text).toContain('status: declined');
+    expect(sink.typed[0]!.text).toContain('revision: 1');
+    expect(relay.calls.some((c) => c.path === '/api/v1/deliveries/terminal')).toBe(false);
+    expect(await store.openIntents()).toEqual([]);
+    expect((await bridge.getDecision(qid)).closedReason).toBe('declined');
+  });
+  it('a decline whose agent goes away mid-write is dropped, never resumed or flagged', async () => {
+    const { bridge, relay, sink, qid, phone, store } = await asked();
+    sink.injectBehaviour = { unavailable: 'gone' };
+    sink.resumeTarget = {
+      hostId: 'host-local',
+      paneId: 'pane-9',
+      terminalGeneration: 1,
+      ownershipPrincipal: 'principal-1',
+      agentIncarnation: 'inc-9',
+      agentSessionId: 'sess-9',
+      worktreeId: 'wt-1',
+    };
+    await relay.plainActionEvent({ questionId: qid, signer: phone, action: 'cancel' });
+    await bridge.catchUp();
+    const events = (await store.listAudit(100)).map((a) => a.event);
+    expect(events).not.toContain('delivery.attention');
+    expect(events).not.toContain('agent.resumed');
+    const row = (await store.getQuestion(qid))!;
+    expect(row.delivery_status).not.toBe('needs-attention');
+    expect(parseAnswers(row.answers_json)).toMatchObject([{ kind: 'declined', deliver: false }]);
+    expect(relay.calls.some((c) => c.path === '/api/v1/deliveries/failed')).toBe(false);
+  });
+  it('a phone still cannot reopen, and a phone cancel with a relay-claimed provenance is rejected', async () => {
+    const { bridge, relay, qid, phone, desktop, store } = await asked();
+    await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'cancel' });
+    await relay.plainActionEvent({ questionId: qid, signer: phone, action: 'reopen' });
+    await bridge.catchUp();
+    expect((await store.getQuestion(qid))!.local_status).toBe('cancelled');
+    expect(await reasons(store)).toContain('desktop-action-by-non-desktop-device');
+
+    const b = await asked();
+    await b.relay.plainActionEvent({
+      questionId: b.qid,
+      signer: b.phone,
+      action: 'cancel',
+      provenance: 'human',
+    });
+    await b.bridge.catchUp();
+    expect((await b.store.getQuestion(b.qid))!.local_status).toBe('open');
+    expect(await reasons(b.store)).toContain('provenance-mismatch');
   });
 });
 

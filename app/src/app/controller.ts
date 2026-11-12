@@ -34,7 +34,12 @@ import { runPairing, type PairingPhase } from '../data/pairing.js';
 import { publicJson, Relay, RelayError } from '../data/relay.js';
 import { SnapshotStore } from '../data/snapshots.js';
 import { SyncEngine, type Connection } from '../data/sync.js';
-import { buildAnswerRequest, highestEpoch, type HumanActionKind } from '../domain/answer.js';
+import {
+  buildAnswerRequest,
+  buildDeclineRequest,
+  highestEpoch,
+  type HumanActionKind,
+} from '../domain/answer.js';
 import { buildMessageRequest } from '../domain/message.js';
 import { QuestionStore, type QuestionView } from '../domain/model.js';
 import { verifySnapshotResponse } from '../domain/snapshot.js';
@@ -645,6 +650,24 @@ export class AppController {
     );
     await this.drafts?.delete(args.view.id);
     void this.outbox.flush();
+  }
+
+  /**
+   * The person declines to answer an open question: a signed `cancel` from this device, sent now rather than queued,
+   * so the confirmation that asked for it can say whether it took. The relay stops its pushes and every paired device
+   * files it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
+   */
+  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<void> {
+    if (!this.keys || !this.snap.config || !this.relay) throw new Error('not paired');
+    const req = await buildDeclineRequest({
+      installationId: this.snap.config.installationId,
+      deviceId: this.snap.config.deviceId,
+      signingKey: this.keys.signingPrivate,
+      view,
+      expectedRevision,
+    });
+    await this.relay.jsonRaw('POST', req.path, req.bodyText);
+    await this.sync?.catchUp().catch(() => undefined);
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */

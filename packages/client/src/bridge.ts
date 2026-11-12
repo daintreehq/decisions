@@ -175,6 +175,12 @@ export interface DecisionView {
    * cancelled question reports no provenance, no choice and no text, whatever its history holds.
    */
   provenance: 'human' | 'proxy' | null;
+  /**
+   * Why a closed question is closed without an answer: `declined` when the person dismissed it from a phone or
+   * tablet, `withdrawn` when a desktop cancelled it, `expired` when its deadline passed. Null otherwise. None of
+   * them authorises anything.
+   */
+  closedReason: 'declined' | 'withdrawn' | 'expired' | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
   choice: string | null;
   /** The free text of the answer in force ('' when none). */
@@ -556,6 +562,11 @@ export class DecisionsBridge {
       }
     }
     const inForce = answered ? current : undefined;
+    // Only a reopen changes a cancelled question, and it moves the revision on: a decline at this revision is the
+    // cancellation in force.
+    const declined = entries.some(
+      (e) => e.kind === 'declined' && e.revision === row.question_revision,
+    );
     return {
       questionId: row.question_id,
       alias: row.alias,
@@ -572,6 +583,14 @@ export class DecisionsBridge {
             ? 'proxy'
             : 'human'
         : null,
+      closedReason:
+        row.local_status === 'cancelled'
+          ? declined
+            ? 'declined'
+            : 'withdrawn'
+          : row.local_status === 'expired'
+            ? 'expired'
+            : null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
       // Only a human answer that carried its own content attests to the images the phone displayed.
@@ -696,7 +715,7 @@ export class DecisionsBridge {
 
   private async deliverNow(): Promise<void> {
     const before = await this.ctx.store.listQuestions({
-      status: ['open', 'proxy-answered', 'human-answered', 'expired'],
+      status: ['open', 'proxy-answered', 'human-answered', 'expired', 'cancelled'],
     });
     const r = await this.delivery.drain();
     if (r.delivered > 0) {

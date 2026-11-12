@@ -368,6 +368,14 @@ export class QuestionStore {
           reject(e instanceof Error ? e.message : 'illegal transition');
           break;
         }
+        // A retry that changed nothing (a second cancel) is never an event the relay sends: it must not stand as
+        // the action in force, nor change who closed the question.
+        if (tr.noop) {
+          view.integrityIssues.push(
+            `${rec.action}: repeats a transition already applied (ignored)`,
+          );
+          break;
+        }
         if (parsed.data.status !== tr.status || parsed.data.revision !== tr.revision) {
           view.integrityIssues.push(
             `${rec.action}: relay status/revision differ from the verified transition (ignored)`,

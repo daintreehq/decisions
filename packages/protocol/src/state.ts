@@ -35,9 +35,22 @@ const ROLE_ALLOWED: Record<ActionKind, readonly Role[]> = {
   'confirm-proxy': HUMAN_ROLES,
   'proxy-answer': DESKTOP_ROLES,
   'proxy-abstain': DESKTOP_ROLES,
-  cancel: DESKTOP_ROLES,
+  /** A desktop withdraws its question; a phone or tablet declines to answer it (open questions only). */
+  cancel: [...DESKTOP_ROLES, ...HUMAN_ROLES],
   reopen: ['owner-desktop'],
 };
+
+/** Whether a device of `role` may sign `action` at all. Receivers check signers with it, as the relay does. */
+export function roleMaySign(action: ActionKind, role: Role): boolean {
+  return ROLE_ALLOWED[action].includes(role);
+}
+
+/**
+ * True when a `cancel` signed by `role` means the person declined to answer, rather than the desktop withdrawing
+ * the question. Only meaningful for a cancel whose signer certificate has been verified.
+ */
+export const isPersonDecline = (action: ActionKind, role: Role): boolean =>
+  action === 'cancel' && HUMAN_ROLES.includes(role);
 
 /** The provenance an action's signer role implies. Used by relay and clients alike. */
 export function provenanceForAction(action: ActionKind): 'human' | 'proxy' | 'none' {
@@ -63,7 +76,7 @@ export function applyAction(
   role: Role,
   expectedRevision: number,
 ): Transition {
-  if (!ROLE_ALLOWED[action].includes(role)) {
+  if (!roleMaySign(action, role)) {
     throw new ApiError('forbidden', `role ${role} may not perform ${action}`);
   }
   const conflict = () =>
@@ -161,6 +174,10 @@ export function applyAction(
       }
       if (state.status !== 'open' && state.status !== 'proxy-answered') {
         throw new ApiError('invalid_state', `cannot cancel a ${state.status} question`);
+      }
+      // A person declines only a question still waiting on them; a proxy answer is confirmed or overridden instead.
+      if (state.status !== 'open' && HUMAN_ROLES.includes(role)) {
+        throw new ApiError('invalid_state', `cannot decline a ${state.status} question`);
       }
       return {
         status: 'cancelled',

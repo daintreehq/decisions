@@ -214,6 +214,21 @@ describe('formatAnswerNotice', () => {
     expect(t).toContain('NOT authorised to continue');
     expect(t).not.toContain('choice:');
   });
+  it('decline notice says the person chose not to answer and nothing is authorised', () => {
+    const t = formatAnswerNotice({
+      kind: 'declined',
+      questionId: 'q1',
+      revision: 0,
+      source: 'human',
+      choices: [{ id: 'approve' }],
+      comment: 'ignored',
+    });
+    expect(t).toContain('status: declined');
+    expect(t).toContain('authorised: no');
+    expect(t).toContain('declined to answer');
+    expect(t).not.toContain('choice:');
+    expect(t).not.toContain('comment:');
+  });
   it('cannot be tricked into closing the block or forging fields', () => {
     const t = formatAnswerNotice({
       kind: 'answer',

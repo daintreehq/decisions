@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActionView, QuestionView } from '../src/domain/model.js';
 import {
   answerSummary,
+  closedLine,
   dayLabel,
   dueLabel,
   filterOptions,
@@ -85,6 +86,15 @@ function act(
     verified: true,
   };
 }
+
+/** A cancel signed by the asking desktop: a withdrawal. */
+const desktopCancel = (at: number): ActionView => ({
+  ...act('cancel', at),
+  provenance: null,
+  content: null,
+  signerDeviceId: 'desktop',
+  signerRole: 'owner-desktop',
+});
 
 const base: ListQuery = { sort: 'due', query: '', project: null, computer: null };
 const ids = (list: { id: string }[]) => list.map((v) => v.id);
@@ -266,7 +276,7 @@ describe('History', () => {
       status: 'proxy-answered',
       actions: [act('proxy-answer', NOW - 2 * H)],
     });
-    const withdrawn = q('w', { status: 'cancelled', actions: [act('cancel', NOW - 3 * H)] });
+    const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 3 * H)] });
     const expired = q('e', { expiresAt: iso(NOW - 4 * H) });
     const open = q('o');
     const list = [human, review, withdrawn, expired, open];
@@ -278,6 +288,34 @@ describe('History', () => {
     expect(ids(historyEntries(list, 'all', '', NOW).map((e) => e.v))).toEqual(['h', 'm', 'w', 'e']);
     const [, , , exp] = historyEntries(list, 'all', '', NOW);
     expect(exp).toMatchObject({ status: 'expired', at: iso(NOW - 4 * H) });
+  });
+
+  it('files a question the person dismissed as declined, apart from one the agent withdrew', () => {
+    const declined = q('d', { status: 'cancelled', actions: [act('cancel', NOW - H)] });
+    const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 2 * H)] });
+    expect(principalStatus(declined, NOW)).toBe('declined');
+    expect(principalStatus(withdrawn, NOW)).toBe('withdrawn');
+    expect(closedLine('declined')).toBe('Declined by you');
+    expect(closedLine('withdrawn')).toBe('Withdrawn by your agent');
+    const entries = historyEntries([declined, withdrawn], 'decisions', '', NOW);
+    expect(entries.map((e) => [e.v.id, e.status])).toEqual([
+      ['d', 'declined'],
+      ['w', 'withdrawn'],
+    ]);
+    // Nor does an old follow-up whose delivery failed before the question was declined.
+    const stuck = {
+      ...declined,
+      messages: [
+        { side: 'human', verified: true, delivery: { status: 'needs-attention' } },
+      ] as unknown as QuestionView['messages'],
+    };
+    expect(principalStatus(stuck, NOW)).toBe('declined');
+    expect(homeSections([stuck], base, NOW).find((x) => x.kind === 'needs')!.items).toEqual([]);
+    const stuckWithdrawn = { ...stuck, actions: [desktopCancel(NOW - H)] };
+    expect(principalStatus(stuckWithdrawn, NOW)).toBe('delivery');
+    // A refused follow-up never puts a declined question back in Needs you.
+    const sections = homeSections([declined], { ...base, refused: new Set(['d']) }, NOW);
+    expect(sections.find((x) => x.kind === 'needs')!.items).toEqual([]);
   });
 
   it('groups by Today, Yesterday, then dates, in local time', () => {
