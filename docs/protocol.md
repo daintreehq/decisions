@@ -152,8 +152,8 @@ A person who will not answer an open question dismisses it from a phone or table
   like a desktop's. The first committed cancel wins; a retry after it is a no-op, so a decline is never relabelled a
   withdrawal or the other way round. A desktop's cancel keeps its existing rules (`open` or `proxy-answered`).
 - **Relay.** The question becomes `cancelled`, emits `decision.cancelled` (provenance `null`, `deliverable: false`) and
-  cancels every scheduled job for it: no further new-question, reminder, reply or expiry work, and no new push is
-  dispatched after the cancel commits. Its snapshot is cleared and its thread closed, as for any cancelled question.
+  cancels every scheduled job for it: no further new-question, reminder, reply or expiry work is scheduled or run. A
+  notification already being sent when the cancel commits may still arrive. Its snapshot is cleared and its thread closed, as for any cancelled question.
 - **Attribution.** "Declined by the person" versus "withdrawn by the desktop" is derived only from the signed record:
   the signer's owner-certified role (`isPersonDecline` in `state.ts`), never from a relay-supplied field. Receivers
   verify the signature and certificate before classifying it, so a relay cannot forge a decline.

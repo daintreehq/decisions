@@ -231,6 +231,8 @@ export function deliveryNeedsAttention(v: QuestionView): boolean {
 
 /** Which delivery needs the owner: the answer in force (named first), a follow-up, or none. */
 export function deliveryIssue(v: QuestionView): 'answer' | 'follow-up' | null {
+  // The person declined it: nothing about it waits on them, an old delivery failure included.
+  if (declinedByPerson(v)) return null;
   const stuck = (s: string | undefined) => s === 'needs-attention' || s === 'delivery-uncertain';
   const a = currentAnswer(v);
   if (a && stuck(v.deliveries[a.revision]?.status)) return 'answer';

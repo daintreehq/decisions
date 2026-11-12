@@ -302,6 +302,17 @@ describe('History', () => {
       ['d', 'declined'],
       ['w', 'withdrawn'],
     ]);
+    // Nor does an old follow-up whose delivery failed before the question was declined.
+    const stuck = {
+      ...declined,
+      messages: [
+        { side: 'human', verified: true, delivery: { status: 'needs-attention' } },
+      ] as unknown as QuestionView['messages'],
+    };
+    expect(principalStatus(stuck, NOW)).toBe('declined');
+    expect(homeSections([stuck], base, NOW).find((x) => x.kind === 'needs')!.items).toEqual([]);
+    const stuckWithdrawn = { ...stuck, actions: [desktopCancel(NOW - H)] };
+    expect(principalStatus(stuckWithdrawn, NOW)).toBe('delivery');
     // A refused follow-up never puts a declined question back in Needs you.
     const sections = homeSections([declined], { ...base, refused: new Set(['d']) }, NOW);
     expect(sections.find((x) => x.kind === 'needs')!.items).toEqual([]);

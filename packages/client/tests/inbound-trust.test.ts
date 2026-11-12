@@ -130,6 +130,47 @@ describe('A: event type is bound to the signed action', () => {
     expect((await store.listAudit(100)).map((a) => a.event)).not.toContain('delivery.attention');
     expect((await bridge.getDecision(qid)).closedReason).toBe('declined');
   });
+  it('a decline after a reopen is typed once and owes the relay no terminal receipt', async () => {
+    const { bridge, relay, sink, qid, phone, desktop, store } = await asked();
+    await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'cancel' });
+    await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'reopen' });
+    await relay.plainActionEvent({
+      questionId: qid,
+      signer: phone,
+      action: 'cancel',
+      expectedRevision: 1,
+    });
+    await bridge.catchUp();
+    expect(await reasons(store)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    expect(sink.typed[0]!.text).toContain('status: declined');
+    expect(sink.typed[0]!.text).toContain('revision: 1');
+    expect(relay.calls.some((c) => c.path === '/api/v1/deliveries/terminal')).toBe(false);
+    expect(await store.openIntents()).toEqual([]);
+    expect((await bridge.getDecision(qid)).closedReason).toBe('declined');
+  });
+  it('a decline whose agent goes away mid-write is dropped, never resumed or flagged', async () => {
+    const { bridge, relay, sink, qid, phone, store } = await asked();
+    sink.injectBehaviour = { unavailable: 'gone' };
+    sink.resumeTarget = {
+      hostId: 'host-local',
+      paneId: 'pane-9',
+      terminalGeneration: 1,
+      ownershipPrincipal: 'principal-1',
+      agentIncarnation: 'inc-9',
+      agentSessionId: 'sess-9',
+      worktreeId: 'wt-1',
+    };
+    await relay.plainActionEvent({ questionId: qid, signer: phone, action: 'cancel' });
+    await bridge.catchUp();
+    const events = (await store.listAudit(100)).map((a) => a.event);
+    expect(events).not.toContain('delivery.attention');
+    expect(events).not.toContain('agent.resumed');
+    const row = (await store.getQuestion(qid))!;
+    expect(row.delivery_status).not.toBe('needs-attention');
+    expect(parseAnswers(row.answers_json)).toMatchObject([{ kind: 'declined', deliver: false }]);
+    expect(relay.calls.some((c) => c.path === '/api/v1/deliveries/failed')).toBe(false);
+  });
   it('a phone still cannot reopen, and a phone cancel with a relay-claimed provenance is rejected', async () => {
     const { bridge, relay, qid, phone, desktop, store } = await asked();
     await relay.plainActionEvent({ questionId: qid, signer: desktop, action: 'cancel' });

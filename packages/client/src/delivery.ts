@@ -873,6 +873,18 @@ export class DeliveryEngine {
         for (const q of questions) {
           const mine = chunk.filter((i) => i.q.question_id === q.question_id);
           const answers = mine.some((i) => i.kind === 'answer');
+          // The agent went away mid-write: a decline is still only news for an agent that is listening.
+          const declines = mine.flatMap((i) =>
+            i.kind === 'answer' && i.entry.kind === 'declined' ? [i.entry] : [],
+          );
+          if (
+            result.reason !== 'host-offline' &&
+            declines.length > 0 &&
+            declines.length === mine.length
+          ) {
+            await this.dropNotices(q, declines);
+            continue;
+          }
           const routed = await this.unavailable(q, result.reason, answers);
           if ('attention' in routed) {
             const code = result.code ?? routed.attention;
@@ -979,7 +991,12 @@ export class DeliveryEngine {
     }
     const q = await ctx.store.getQuestion(intent.question_id);
     if (!q) return;
-    if (intent.answer_revision < 1) {
+    // A terminal receipt is for an answer the relay is delivering. A notice (an expiry or a decline, typed at the
+    // question's revision after a reopen) has no relay delivery to report, so its intent finishes here.
+    const isAnswer = parseAnswers(q.answers_json).some(
+      (e) => e.kind === 'answer' && e.revision === intent.answer_revision,
+    );
+    if (intent.answer_revision < 1 || !isAnswer) {
       await ctx.store.updateIntent(injectionId, { state: 'acked', updated_at: ctx.now() });
       return;
     }

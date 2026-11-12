@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ActionBody } from '@daintreehq/decisions-protocol';
-import { newId } from '@daintreehq/decisions-crypto';
+import { newId, verifyRecordAndEnvelope } from '@daintreehq/decisions-crypto';
 import {
   assertReviewable,
   buildAnswerRequest,
@@ -278,6 +278,16 @@ describe('signing only what the human reviewed', () => {
       envelope_digest: null,
       signer_device_id: w.phone.id,
     });
+    expect(
+      await verifyRecordAndEnvelope(body.action.record, null, w.phone.keys.signing.publicKey),
+    ).toBe(true);
+    expect(
+      await verifyRecordAndEnvelope(
+        { ...body.action.record, expected_revision: 1 },
+        null,
+        w.phone.keys.signing.publicKey,
+      ),
+    ).toBe(false);
     // A revision the person did not see is refused before anything is signed.
     await expect(
       buildDeclineRequest({
@@ -323,5 +333,46 @@ describe('signing only what the human reviewed', () => {
         expectedRevision: 0,
       }),
     ).rejects.toThrow(StaleQuestionError);
+  });
+
+  it('a reopened question is declined at its new revision, and a repeated cancel never changes who closed it', async () => {
+    const w = await makeWorld();
+    const s = new QuestionStore({
+      installationId: w.installationId,
+      trust: w.trust,
+      epochKeys: () => w.epochs,
+    });
+    const q = await questionEvent(w);
+    const qid = q.question_id!;
+    await s.ingest(q);
+    await s.ingest(await actionEvent(w, { questionId: qid, action: 'cancel' }));
+    await s.ingest(await actionEvent(w, { questionId: qid, action: 'reopen', status: 'open' }));
+    const view = s.get(qid)!;
+    expect(view).toMatchObject({ status: 'open', revision: 1 });
+    const req = await buildDeclineRequest({
+      installationId: w.installationId,
+      deviceId: w.phone.id,
+      signingKey: w.phone.keys.signing.privateKey,
+      view,
+      expectedRevision: 1,
+    });
+    expect(ActionBody.parse(JSON.parse(req.bodyText)).action.record.expected_revision).toBe(1);
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: qid,
+        action: 'cancel',
+        signer: w.phone,
+        expectedRevision: 1,
+      }),
+    );
+    expect(declinedByPerson(s.get(qid)!)).toBe(true);
+    // A second, losing cancel replayed by the relay is ignored: the decline stands.
+    await s.ingest(
+      await actionEvent(w, { questionId: qid, action: 'cancel', expectedRevision: 1 }),
+    );
+    const after = s.get(qid)!;
+    expect(declinedByPerson(after)).toBe(true);
+    expect(after.actions.filter((a) => a.action === 'cancel')).toHaveLength(2);
+    expect(after.integrityIssues.join()).toMatch(/repeats a transition/);
   });
 });

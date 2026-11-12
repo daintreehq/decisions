@@ -1691,15 +1691,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       <Sheet
         open={declineAt !== null}
         title="Dismiss this question?"
-        onClose={() => !declining && setDeclineAt(null)}
+        // Closing never waits on the request (a swipe or Back must not leave a stuck layer); a failure reopens it.
+        onClose={() => setDeclineAt(null)}
         footer={
           <>
-            <button
-              type="button"
-              className="btn"
-              disabled={declining}
-              onClick={() => setDeclineAt(null)}
-            >
+            <button type="button" className="btn" onClick={() => setDeclineAt(null)}>
               Keep it
             </button>
             <button
@@ -1707,23 +1703,25 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               className="btn danger"
               disabled={declining}
               onClick={() => {
-                if (declineAt === null) return;
+                if (declineAt === null || declining) return;
+                const at = declineAt;
                 setDeclining(true);
                 setDeclineError(null);
                 if (dictation.isActive()) void dictation.stop();
                 app
-                  .declineQuestion(view, declineAt)
+                  .declineQuestion(view, at)
                   .then(() => {
                     setDeclineAt(null);
                     announce('Question dismissed.');
                   })
-                  .catch((e: unknown) =>
+                  .catch((e: unknown) => {
                     setDeclineError(
                       e instanceof StaleQuestionError
                         ? e.message
                         : 'Could not dismiss it. Check your connection and try again.',
-                    ),
-                  )
+                    );
+                    setDeclineAt(at);
+                  })
                   .finally(() => setDeclining(false));
               }}
             >
