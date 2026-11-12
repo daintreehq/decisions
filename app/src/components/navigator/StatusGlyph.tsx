@@ -4,7 +4,8 @@ import { STATUS_LABEL } from '../../domain/lists.js';
 /**
  * One glyph per principal status, all drawn on the same 16px ring so a column of them reads as one family
  * (Daintree's agent-state rule): the amber waiting ring for Needs you, the model diamond for review, a ring with a
- * check for answered, a clock for expired, a slashed ring for withdrawn, the warning triangle for delivery
+ * check for answered, a clock for expired, a slashed ring for withdrawn, a ring with a level stroke for declined,
+ * the warning triangle for delivery
  * attention, a ring with a rising arrow for an answer still waiting to leave this device. Colour sits on the glyph only; the words are always available (visible or to screen readers).
  */
 export function StatusGlyph({ status, label = true }: { status: RowStatus; label?: boolean }) {
@@ -41,6 +42,13 @@ export function StatusGlyph({ status, label = true }: { status: RowStatus; label
             <circle cx="8" cy="8" r="5.5" />
             {/* Lucide's ban: the slash falls left to right, so it never reads as the rising stroke of a check. */}
             <path d="m4.2 4.2 7.6 7.6" />
+          </>
+        )}
+        {status === 'declined' && (
+          <>
+            <circle cx="8" cy="8" r="5.5" />
+            {/* A level stroke: set aside by the person, neither answered nor taken back. */}
+            <path d="M5.4 8h5.2" />
           </>
         )}
         {status === 'delivery' && (

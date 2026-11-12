@@ -440,7 +440,7 @@ export function HistoryPage() {
         </p>
         <p>
           {h.mode === 'decisions'
-            ? 'Questions you answer, and ones that expire or are withdrawn, appear here.'
+            ? 'Questions you answer or decline, and ones that expire or are withdrawn, appear here.'
             : 'Everything decided, and model answers still to review, appears here.'}
         </p>
       </div>
