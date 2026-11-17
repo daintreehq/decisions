@@ -151,23 +151,21 @@ export class InvolvementSync {
 
   private async stored(): Promise<Stored> {
     const raw = await this.ctx.store.getMeta(INVOLVEMENT_META);
-    if (raw) {
-      try {
-        const s = JSON.parse(raw) as Stored;
-        const record = s.record ? InvolvementRecord.safeParse(s.record) : null;
-        if (!record || record.success) {
-          return {
-            record: record ? record.data : null,
-            high_water: Number.isSafeInteger(s.high_water) ? s.high_water : 0,
-            synced_at: typeof s.synced_at === 'number' ? s.synced_at : null,
-            ...(s.status ? { status: s.status } : {}),
-          };
-        }
-      } catch {
-        /* unreadable: start over */
-      }
+    let s: Partial<Stored> = {};
+    try {
+      if (raw) s = JSON.parse(raw) as Partial<Stored>;
+    } catch {
+      /* unreadable: start over */
     }
-    return { record: null, high_water: 0, synced_at: null };
+    // A copy that no longer parses is dropped, but its revision still bars older records.
+    const parsed = s.record ? InvolvementRecord.safeParse(s.record) : null;
+    const hw = s.high_water;
+    return {
+      record: parsed?.success ? parsed.data : null,
+      high_water: typeof hw === 'number' && Number.isSafeInteger(hw) && hw > 0 ? hw : 0,
+      synced_at: typeof s.synced_at === 'number' ? s.synced_at : null,
+      ...(s.status === 'unsupported' || s.status === 'signer-revoked' ? { status: s.status } : {}),
+    };
   }
 
   private async readOnce(gen: number): Promise<void> {
