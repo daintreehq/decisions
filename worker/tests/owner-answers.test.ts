@@ -228,12 +228,7 @@ describe('the owner desktop gains no other human action', () => {
   async function world(): Promise<{ w: World; phone: Actor }> {
     const w = await claimRelay();
     const phone = await pairDevice(w);
-    await declare(w.owner, [
-      ACCEPTS,
-      'pane-snapshots-v1',
-      'phone-images-v1',
-      'thread-messages-v1',
-    ]);
+    await declare(w.owner, [ACCEPTS, 'pane-snapshots-v1', 'phone-images-v1', 'thread-messages-v1']);
     return { w, phone };
   }
 

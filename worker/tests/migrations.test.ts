@@ -198,7 +198,9 @@ describe('schema migrations', () => {
       const rows = () => sql.exec(`SELECT rowid AS r, * FROM actions ORDER BY rowid`).toArray();
       const checkSql = () =>
         (
-          sql.exec(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'actions'`).toArray()[0] as {
+          sql
+            .exec(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'actions'`)
+            .toArray()[0] as {
             sql: string;
           }
         ).sql;
@@ -226,7 +228,16 @@ describe('schema migrations', () => {
         invalid = e;
       }
       migrate(sql);
-      return { v4Check, before, after, indexes, version, invalid, again: rows(), check: checkSql() };
+      return {
+        v4Check,
+        before,
+        after,
+        indexes,
+        version,
+        invalid,
+        again: rows(),
+        check: checkSql(),
+      };
     });
     expect(result.v4Check).not.toContain('human-desktop');
     expect(result.check).toContain("'human','human-desktop','proxy'");

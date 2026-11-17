@@ -481,12 +481,16 @@ function actionHandler(kind: ActionKind): Handler {
         provenance === 'human-desktop' &&
         !deviceHasFeature(room.getDevice(q.creator_device_id), 'owner-desktop-answers-v1')
       ) {
-        throw new ApiError('invalid_state', "the question's desktop does not accept desktop answers", {
-          details: {
-            reason: CREATOR_MISSING_FEATURE,
-            required_feature: 'owner-desktop-answers-v1',
+        throw new ApiError(
+          'invalid_state',
+          "the question's desktop does not accept desktop answers",
+          {
+            details: {
+              reason: CREATOR_MISSING_FEATURE,
+              required_feature: 'owner-desktop-answers-v1',
+            },
           },
-        });
+        );
       }
       // Only a phone or tablet attaches phone images, whatever the reservations say.
       if ((record.attachment_ids?.length ?? 0) > 0 && !HUMAN_ROLES.includes(auth.role)) {
