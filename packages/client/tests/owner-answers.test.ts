@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { newId } from '@daintreehq/decisions-crypto';
 import {
   BRIDGE_FEATURES,
   DecisionsBridge,
   MemoryLocalStore,
+  PREFACE,
   PolicyRegistry,
   RelayClient,
   answeredOn,
@@ -16,6 +20,7 @@ import {
   type LearnedDecision,
   type LocalStore,
 } from '../src/index.js';
+import { SqliteLocalStore } from '../src/store-sqlite.js';
 import {
   FakeRelay,
   FakeSink,
@@ -33,6 +38,9 @@ import {
  * accepted by the computer that asked, kept with its signer, and typed and reported as the person's answer made on
  * the computer. Phone answers and proxy answers read exactly as before.
  */
+
+const dir = mkdtempSync(join(tmpdir(), 'decisions-owner-answers-'));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const OPTIONS = [
   { id: 'approve', label: 'Approve' },
@@ -60,11 +68,14 @@ function learner() {
   return { l, seen };
 }
 
-async function asked(extra: Parameters<typeof setupBridge>[0] = {}) {
+async function asked(
+  extra: Parameters<typeof setupBridge>[0] = {},
+  input: Record<string, unknown> = {},
+) {
   const env = await setupBridge(extra);
   const r = await env.bridge.registerQuestion({
     origin: origin(),
-    input: { question: 'Ship it?', options: OPTIONS },
+    input: { question: 'Ship it?', options: OPTIONS, ...input },
   });
   await env.bridge.pump();
   return { ...env, owner: signerOf(env.identity), qid: r.questionId };
@@ -129,14 +140,55 @@ describe('the owner desktop answers its own question', () => {
     expect(seen[0]).toMatchObject({ questionId: qid, selectedOptionIds: ['approve'] });
   });
 
+  it.each(['proxy-ok', 'proxy-first'] as const)(
+    'is accepted on a %s question too, as the person’s answer',
+    async (level) => {
+      const { bridge, relay, sink, store, owner, qid } = await asked(
+        { policy: new PolicyRegistry({ proxyAllowlisted: true }) },
+        { requested_requirement: level },
+      );
+      expect((await store.getQuestion(qid))!.requirement).toBe(level);
+      await relay.answerEvent({
+        questionId: qid,
+        phone: owner,
+        options: ['reject'],
+        provenance: 'human-desktop',
+      });
+      await bridge.catchUp();
+      expect(sink.typed).toHaveLength(1);
+      expect(sink.typed[0]!.text).toContain(COMPUTER_LINES + 'choice: reject\n');
+      expect(await bridge.getDecision(qid)).toMatchObject({
+        status: 'human-answered',
+        provenance: 'human',
+        answeredOn: 'computer',
+      });
+    },
+  );
+
   it('a phone answer reads exactly as before, and keeps its signer too', async () => {
     const { bridge, relay, sink, store, phone, qid } = await asked();
     await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
     await bridge.catchUp();
     expect(sink.typed).toHaveLength(1);
-    expect(sink.typed[0]!.text).toContain('source: human\nchoice: approve\n');
-    expect(sink.typed[0]!.text).not.toContain('answered_on');
-    expect(sink.typed[0]!.text).not.toContain('computer');
+    // The whole typed text, with only the generated ids replaced.
+    const typed = sink.typed[0]!.text.replace(qid, '<qid>').replace(
+      /injection_id: \S+/,
+      'injection_id: <id>',
+    );
+    expect(typed).toBe(
+      [
+        PREFACE,
+        '[DAINTREE DECISION ANSWER]',
+        'question_id: <qid> (q-1)',
+        'revision: 1',
+        'injection_id: <id>',
+        'question: Ship it?',
+        'source: human',
+        'choice: approve',
+        'choice_label: Approve',
+        '[END DAINTREE DECISION ANSWER]',
+      ].join('\n'),
+    );
     const row = (await store.getQuestion(qid))!;
     expect(parseAnswers(row.answers_json)[0]).toMatchObject({
       source: 'human',
@@ -190,6 +242,57 @@ describe('the owner desktop answers its own question', () => {
     const v = await bridge.getDecision(qid);
     expect(v).toMatchObject({ provenance: 'human', answeredOn: 'phone', choice: 'reject' });
     expect(v.answers.map((a) => a.answeredOn)).toEqual(['computer', 'phone']);
+  });
+});
+
+describe('an owner-desktop answer waiting for a busy pane', () => {
+  it('survives a restart with its signer, and is still typed as made on the computer', async () => {
+    const path = join(dir, 'restart.db');
+    const store = new SqliteLocalStore(path);
+    const env = await setupBridge({ store });
+    const owner = signerOf(env.identity);
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Ship it?', options: OPTIONS },
+    });
+    await env.bridge.pump();
+    env.sink.panes.get('pane-1')!.idle = false;
+    await env.relay.answerEvent({
+      questionId: r.questionId,
+      phone: owner,
+      options: ['approve'],
+      provenance: 'human-desktop',
+    });
+    await env.bridge.catchUp();
+    expect(env.sink.typed).toHaveLength(0);
+    await env.bridge.stop();
+    await store.close();
+
+    // "Restart": a fresh store and bridge over the same file, with no help from the relay.
+    const store2 = new SqliteLocalStore(path);
+    expect(parseAnswers((await store2.getQuestion(r.questionId))!.answers_json)[0]).toMatchObject({
+      signer_device_id: owner.deviceId,
+      signer_role: 'owner-desktop',
+      delivered: false,
+    });
+    env.sink.panes.get('pane-1')!.idle = true;
+    const bridge2 = new DecisionsBridge({
+      identity: env.identity,
+      store: store2,
+      sink: env.sink,
+      client: env.client,
+      policy: new PolicyRegistry(),
+      pumpIntervalMs: 0,
+    });
+    const before = env.relay.calls.length;
+    await bridge2.start({ socket: false });
+    await bridge2.pump();
+    expect(env.sink.typed).toHaveLength(1);
+    expect(env.sink.typed[0]!.text).toContain(COMPUTER_LINES + 'choice: approve\n');
+    expect(env.relay.calls.slice(before).some((c) => c.path === '/api/v1/events')).toBe(false);
+    expect(await bridge2.getDecision(r.questionId)).toMatchObject({ answeredOn: 'computer' });
+    await bridge2.stop();
+    await store2.close();
   });
 });
 
@@ -369,19 +472,34 @@ describe('declaring owner-desktop-answers-v1', () => {
     expect(BRIDGE_FEATURES).toContain('owner-desktop-answers-v1');
     expect(bridgeFeatures()).toContain('owner-desktop-answers-v1');
     expect(bridgeFeatures({ followUps: true })).toContain('owner-desktop-answers-v1');
-  });
-
-  it('on its socket ticket, which the relay checks before committing such an answer', async () => {
-    FakeSocket.instances = [];
-    const env = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
-    await env.bridge.start();
-    await tick(10);
-    const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket');
-    expect((ticket!.body as { features?: string[] }).features).toContain(
+    expect(bridgeFeatures({ snapshots: {} })).toContain('owner-desktop-answers-v1');
+    expect(bridgeFeatures({ followUps: true, snapshots: {} })).toContain(
       'owner-desktop-answers-v1',
     );
-    await env.bridge.stop();
   });
+
+  it.each([{}, { followUps: true }])(
+    'on its socket ticket, which the relay checks before committing such an answer, and on catch-up (%o)',
+    async (opts) => {
+      FakeSocket.instances = [];
+      const env = await setupBridge({ ...opts, webSocket: (u) => new FakeSocket(u) });
+      try {
+        await env.bridge.catchUp();
+        const page = env.relay.calls.find((c) => c.path === '/api/v1/events');
+        expect(new URLSearchParams(page!.query).get('features')?.split(',')).toContain(
+          'owner-desktop-answers-v1',
+        );
+        await env.bridge.start();
+        const ticketCall = () => env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket');
+        for (let i = 0; i < 200 && !ticketCall(); i++) await tick(5);
+        expect((ticketCall()!.body as { features?: string[] }).features).toContain(
+          'owner-desktop-answers-v1',
+        );
+      } finally {
+        await env.bridge.stop();
+      }
+    },
+  );
 });
 
 describe('the terminal block and answeredOn', () => {

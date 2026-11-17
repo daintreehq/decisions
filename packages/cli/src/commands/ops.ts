@@ -170,13 +170,15 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
     const client = new RelayClient({ identity, fetch: ctx.fetch, maxRetries: 1 });
     // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
     // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
-    // declared, so running doctor never switches them off.
-    let declared: ProtocolFeature[] = [];
+    // declared, so running doctor never switches them off. Unknown (the list failed, or lacks this device), the
+    // socket check is skipped rather than declaring nothing.
+    let declared: ProtocolFeature[] | null = null;
     try {
       const list = await verifiedDevices(client);
       add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
-      const self = identity.config.deviceId;
-      declared = [...knownFeatures(list.find((d) => d.device_id === self)?.features)];
+      const me = identity.config.deviceId;
+      const self = list.find((d) => d.device_id === me);
+      if (self) declared = [...knownFeatures(self.features)];
     } catch (e) {
       add(
         'signed request',
@@ -184,36 +186,40 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
         e instanceof RelayError ? `${e.code}: ${e.message}` : (e as Error).message,
       );
     }
-    try {
-      const t = await client.socketTicket(declared);
-      const url =
-        origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
-      const ok = await new Promise<boolean>((resolve) => {
-        const WS = ctx.webSocket
-          ? null
-          : (globalThis as { WebSocket?: new (u: string) => WebSocket }).WebSocket;
-        const ws = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
-        const timer = setTimeout(() => (ws.close(), resolve(false)), 8000);
-        (ws as WebSocket).onmessage = (ev: MessageEvent) => {
-          try {
-            if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') {
-              clearTimeout(timer);
-              ws.close(1000);
-              resolve(true);
+    if (declared === null) {
+      add('websocket', false, "skipped: this device's declared features could not be read", true);
+    } else {
+      try {
+        const t = await client.socketTicket(declared);
+        const url =
+          origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
+        const ok = await new Promise<boolean>((resolve) => {
+          const WS = ctx.webSocket
+            ? null
+            : (globalThis as { WebSocket?: new (u: string) => WebSocket }).WebSocket;
+          const ws = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
+          const timer = setTimeout(() => (ws.close(), resolve(false)), 8000);
+          (ws as WebSocket).onmessage = (ev: MessageEvent) => {
+            try {
+              if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') {
+                clearTimeout(timer);
+                ws.close(1000);
+                resolve(true);
+              }
+            } catch {
+              /* ignore non-JSON frames */
             }
-          } catch {
-            /* ignore non-JSON frames */
-          }
-        };
-        (ws as WebSocket).onerror = () => (clearTimeout(timer), resolve(false));
-      });
-      add(
-        'websocket',
-        ok,
-        ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
-      );
-    } catch (e) {
-      add('websocket', false, (e as Error).message);
+          };
+          (ws as WebSocket).onerror = () => (clearTimeout(timer), resolve(false));
+        });
+        add(
+          'websocket',
+          ok,
+          ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
+        );
+      } catch (e) {
+        add('websocket', false, (e as Error).message);
+      }
     }
     try {
       const epoch = await importEpochKey(generateEpochKeyBytes(), 1, false);

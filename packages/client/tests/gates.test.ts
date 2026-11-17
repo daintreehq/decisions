@@ -343,6 +343,25 @@ describe('design review end to end through the phone app', () => {
     expect(env.sink.typed).toHaveLength(1);
   });
 
+  it('an approval on the computer that did not review every image does not match', async () => {
+    const env = await designReview();
+    const r = await env.ask();
+    const digests = (await env.store.getQuestion(r.questionId))!.attachment_digests;
+    await env.relay.answerEvent({
+      questionId: r.questionId,
+      phone: { deviceId: env.identity.config.deviceId, keys: env.identity.keys },
+      options: ['approve'],
+      provenance: 'human-desktop',
+      extra: { reviewed_attachment_digests: digests.slice(0, 1) },
+    });
+    await env.bridge.catchUp();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'human-answered',
+      answeredOn: 'computer',
+      reviewedDigestsMatch: false,
+    });
+  });
+
   it('an approval that did not review every image does not match', async () => {
     const env = await designReview();
     const r = await env.ask();
@@ -567,12 +586,16 @@ describe('proxy answers and confirmations under a bound gate', () => {
 
   it('a proxy answer is reported as proxy and never as reviewing the images', async () => {
     const env = await proxyAnswered();
-    expect(await env.bridge.getDecision(env.qid)).toMatchObject({
+    const v = await env.bridge.getDecision(env.qid);
+    expect(v).toMatchObject({
       status: 'proxy-answered',
       provenance: 'proxy',
+      answeredOn: null,
       choice: 'approve',
       reviewedDigestsMatch: false,
     });
+    // The owner desktop signed it, but as its model's: never as the person's answer on the computer.
+    expect(v.answers).toEqual([expect.objectContaining({ source: 'proxy', answeredOn: null })]);
   });
 
   it('a confirmation counts only for the proxy answer it names, and attests to no images', async () => {
@@ -600,11 +623,18 @@ describe('proxy answers and confirmations under a bound gate', () => {
       confirmsActionId: env.proxyActionId,
     });
     await env.bridge.catchUp();
-    expect(await env.bridge.getDecision(env.qid)).toMatchObject({
+    const v = await env.bridge.getDecision(env.qid);
+    expect(v).toMatchObject({
       status: 'human-answered',
       provenance: 'human',
+      // The person put it in force from their phone.
+      answeredOn: 'phone',
       choice: 'approve',
       reviewedDigestsMatch: false,
     });
+    expect(v.answers.map((a) => [a.source, a.answeredOn])).toEqual([
+      ['proxy', null],
+      ['human', 'phone'],
+    ]);
   });
 });

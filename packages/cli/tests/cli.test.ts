@@ -4,9 +4,16 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
-import { RelayError } from '@daintreehq/decisions-client';
+import { RelayError, loadIdentity } from '@daintreehq/decisions-client';
+import {
+  exportPublicKey,
+  generateDeviceKeys,
+  issueDeviceCert,
+  newId,
+} from '@daintreehq/decisions-crypto';
+import type { DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
-import { CliError, type Ctx } from '../src/runtime.js';
+import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
 import { DemoSink, ask, cliOrigin, mcpAddLines, parseSink } from '../src/commands/daemon.js';
 import {
   deleteData,
@@ -350,38 +357,36 @@ describe('ask / status / devices', () => {
 });
 
 describe('doctor', () => {
-  it("re-declares this device's features on its test ticket, so the relay keeps what it gates on them", async () => {
-    const now = new Date().toISOString();
-    let cert: { device_id: string } | null = null;
-    const tickets: unknown[] = [];
+  const now = new Date().toISOString();
+  const deviceRow = (cert: { device_id: string; role: string }, features: string[]) => ({
+    device_id: cert.device_id,
+    role: cert.role,
+    label: 'Test',
+    created_at: now,
+    revoked_at: null,
+    last_seen_at: now,
+    last_ack_seq: 0,
+    cert,
+    push_enabled: false,
+    features,
+  });
+
+  /** A claimed setup whose relay lists `devices(own cert, a phone cert)` and records socket tickets. */
+  async function doctorWorld(
+    devices: (own: DeviceCert, phone: DeviceCert) => ReturnType<typeof deviceRow>[],
+  ) {
+    let own: DeviceCert | null = null;
+    let phone: DeviceCert | null = null;
+    const tickets: { features?: string[] }[] = [];
     const m = mkCtx({
       routes: {
         'GET /api/v1/devices': () => ({
           key_epoch: 1,
-          owner_device_id: cert!.device_id,
-          devices: [
-            {
-              device_id: cert!.device_id,
-              role: 'owner-desktop',
-              label: 'Test',
-              created_at: now,
-              revoked_at: null,
-              last_seen_at: now,
-              last_ack_seq: 0,
-              cert,
-              push_enabled: false,
-              // What the bridge last declared, plus a token from a newer client, which is never re-sent.
-              features: [
-                'owner-desktop-answers-v1',
-                'phone-images-v1',
-                'thread-messages-v1',
-                'later-v9',
-              ],
-            },
-          ],
+          owner_device_id: own!.device_id,
+          devices: devices(own!, phone!),
         }),
         'POST /api/v1/socket-ticket': (body) => {
-          tickets.push(body);
+          tickets.push(body as { features?: string[] });
           return { ticket: 't', expires_at: now, ws_path: '/api/v1/socket' };
         },
       },
@@ -391,8 +396,21 @@ describe('doctor', () => {
       {},
       { url: 'https://relay.example', claimSecret: 'c'.repeat(32), label: 'Test' },
     );
-    cert = (m.calls.find((c) => c.path === '/api/v1/setup/claim')!.body as { cert: typeof cert })
+    own = (m.calls.find((c) => c.path === '/api/v1/setup/claim')!.body as { cert: DeviceCert })
       .cert;
+    // A phone the owner certified, listed before this device with features of its own.
+    const owner = await loadIdentity(keyStoreFor(m.ctx));
+    const keys = await generateDeviceKeys(false);
+    phone = await issueDeviceCert({
+      issuerDeviceId: owner.config.deviceId,
+      issuerSigningKey: owner.keys.signing.privateKey,
+      installationId: owner.config.installationId,
+      deviceId: newId(),
+      role: 'phone',
+      label: 'Phone',
+      signingPub: await exportPublicKey(keys.signing.publicKey),
+      exchangePub: await exportPublicKey(keys.exchange.publicKey),
+    });
     m.ctx.webSocket = () => {
       const ws = {
         onmessage: null as ((ev: { data: unknown }) => void) | null,
@@ -402,15 +420,39 @@ describe('doctor', () => {
       setTimeout(() => ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) }), 0);
       return ws as never;
     };
-    // Checks this fake relay cannot pass (health, push) fail the run; only the ticket matters here.
-    await doctor(m.ctx, {}, {}).catch(() => undefined);
+    // This fake relay fails checks unrelated to the ticket (health, storage, push), so doctor reports problems.
+    await expect(doctor(m.ctx, {}, {})).rejects.toThrow(CliError);
+    return { ...m, tickets };
+  }
+
+  it("re-declares this device's features on its test ticket, so the relay keeps what it gates on them", async () => {
+    const { tickets, out } = await doctorWorld((own, phone) => [
+      deviceRow(phone, ['pane-snapshots-v1']),
+      // What the bridge last declared, plus a token from a newer client, which is never re-sent.
+      deviceRow(own, [
+        'owner-desktop-answers-v1',
+        'phone-images-v1',
+        'thread-messages-v1',
+        'later-v9',
+      ]),
+    ]);
     expect(tickets).toHaveLength(1);
-    expect((tickets[0] as { features?: string[] }).features).toEqual([
+    expect(tickets[0]!.features).toEqual([
       'owner-desktop-answers-v1',
       'phone-images-v1',
       'thread-messages-v1',
     ]);
-    expect(m.out.join('\n')).toMatch(/signed request.*1 active device/);
+    const text = out.join('\n');
+    expect(text).toMatch(/✓ signed request +2 active device/);
+    expect(text).toMatch(/✓ websocket +upgrade \+ hello received/);
+  });
+
+  it('skips the socket check rather than declaring nothing when this device is not listed', async () => {
+    const { tickets, out } = await doctorWorld((_own, phone) => [
+      deviceRow(phone, ['owner-desktop-answers-v1']),
+    ]);
+    expect(tickets).toEqual([]);
+    expect(out.join('\n')).toMatch(/! websocket +skipped: this device's declared features/);
   });
 });
 
