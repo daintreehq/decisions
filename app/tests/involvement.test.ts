@@ -459,6 +459,15 @@ describe('the involvement store', () => {
     expect(await s.save(draft(), 0)).toEqual({ kind: 'saved' });
   });
 
+  it('this phone’s own record at the revision it asked for, saying something else, is a conflict', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    relay.setCurrent(await sign(w, draft({ consultCount: 4 }), 0)); // an earlier, different save from here
+    expect(await s.save(draft({ consultCount: 5 }), 0)).toEqual({ kind: 'conflict' });
+  });
+
   it('this phone’s own matching record at another revision is a conflict', async () => {
     const w = await makeWorld();
     const relay = fakeRelay(w);
@@ -531,6 +540,18 @@ describe('the involvement store', () => {
     relay.failWith(new RelayError('network', 0, 'Could not reach the relay'));
     await expect(save(s, draft())).rejects.toThrow(/reach the relay/);
     expect(s.get()).toMatchObject({ status: 'ready', revision: 0 });
+  });
+
+  it('a record it cannot verify replaces where the one before it was set', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0, w.owner));
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    expect(s.get().setBy).toMatchObject({ on: 'computer', computer: 'Studio Mac' });
+    relay.setCurrent({ ...(await sign(w, draft(), 1, w.owner)), consult_count: 8 }); // revision 2, tampered
+    await s.load();
+    expect(s.get()).toMatchObject({ status: 'invalid', record: null, revision: 2, setBy: null });
   });
 
   it('shows nothing from a record it cannot verify, but can replace it', async () => {

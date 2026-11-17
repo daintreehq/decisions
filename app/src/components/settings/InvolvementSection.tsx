@@ -249,7 +249,8 @@ export function InvolvementSection() {
           tone="warn"
           role="alert"
           title={
-            // Named only from a record read since the refused save started, never from the one it replaced.
+            // Named only from a verified record newer than the one the edits started from, so the computer did change
+            // it while they were open. A read-back that failed leaves the starting record, which names nobody.
             state.revision > conflict && state.setBy?.on === 'computer'
               ? `Changed on ${state.setBy.computer ?? 'your computer'} while you were editing`
               : 'Another device changed this while you were editing'
