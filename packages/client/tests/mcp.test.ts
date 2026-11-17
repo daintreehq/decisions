@@ -1,7 +1,7 @@
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { decryptEnvelope } from '@daintreehq/decisions-crypto';
+import { buildSignedInvolvement, decryptEnvelope } from '@daintreehq/decisions-crypto';
 import { AgentMessageContentV1, type SignedMessage } from '@daintreehq/decisions-protocol';
 import {
   MCP_BRIDGE_METHODS,
@@ -12,6 +12,7 @@ import {
   askedInstruction,
   createDecisionsMcpHandler,
   followupInstruction,
+  involvementText,
   startDecisionsMcpServer,
   type DecisionsMcpBridge,
   type RunningMcp,
@@ -131,7 +132,7 @@ describe('HTTP MCP: protocol', () => {
     );
     expect(unknown.result.protocolVersion).toBe('2025-06-18');
   });
-  it('tools/list: exactly the four tools, descriptions under 400 bytes', async () => {
+  it('tools/list: exactly the five tools, descriptions under 400 bytes', async () => {
     const { mcp } = await boot();
     const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
     expect(r.result.tools.map((t: { name: string }) => t.name)).toEqual([
@@ -139,6 +140,7 @@ describe('HTTP MCP: protocol', () => {
       'get_decision',
       'cancel_question',
       'send_followup',
+      'get_involvement',
     ]);
     for (const t of TOOLS) expect(new TextEncoder().encode(t.description).length).toBeLessThan(400);
     expect(r.result.tools[0].inputSchema.required).toEqual(['question']);
@@ -172,6 +174,14 @@ describe('HTTP MCP: protocol', () => {
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
+      openWorldHint: false,
+    });
+    // reading the preference changes nothing, so no client needs to ask before it
+    expect(by.get_involvement).toEqual({
+      title: 'Read the involvement preference',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: false,
     });
     // cancelling cannot be undone, so it stays a call a cautious client confirms
@@ -295,6 +305,187 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     });
     expect(r.content[0].text).toContain('the person chose not to answer');
     expect(r.content[0].text).toContain('Nothing was approved');
+  });
+});
+
+describe('HTTP MCP: get_involvement', () => {
+  const read = async (mcp: RunningMcp) => call(mcp, 'get_involvement', {});
+
+  it('says when no preference is available, and what to do then', async () => {
+    const { mcp } = await boot();
+    const res = await read(mcp);
+    expect(res.isError).toBeUndefined();
+    expect(res.structuredContent).toEqual({
+      status: 'unavailable',
+      mode: null,
+      normal_mode: null,
+      consult_count: null,
+      revision: null,
+      override_active: false,
+      until: null,
+      set_at: null,
+      last_synced_at: null,
+      stale: true,
+      reason: 'not-synced',
+    });
+    expect(res.content[0].text).toMatch(/not-synced.*Use your normal configured behaviour/);
+  });
+
+  it('returns the latest preference within one session, and the end of a temporary mode', async () => {
+    const clock = { t: Date.parse('2026-11-17T09:00:00.000Z') };
+    const { mcp, bridge, relay, phone, identity } = await boot({ bridge: { now: () => clock.t } });
+    const until = new Date(clock.t + 3_600_000).toISOString();
+    const sign = (revision: number, normal: 'recommend' | 'involve-early') =>
+      buildSignedInvolvement({
+        installationId: identity.config.installationId,
+        signerDeviceId: phone.deviceId,
+        signingKey: phone.keys.signing.privateKey,
+        revision,
+        normalMode: normal,
+        consultCount: 3,
+        override: revision === 1 ? { mode: 'involve-early', until } : null,
+      });
+    relay.involvement = { preference: await sign(1, 'recommend'), received_at: null };
+    await bridge.start({ socket: false });
+    await bridge.involvement.refresh();
+    const first = await read(mcp);
+    expect(first.structuredContent).toMatchObject({
+      status: 'available',
+      mode: 'involve-early',
+      normal_mode: 'recommend',
+      consult_count: 3,
+      revision: 1,
+      override_active: true,
+      until,
+      stale: false,
+      reason: null,
+    });
+    expect(first.content[0].text).toMatch(/involve the person early/);
+    expect(first.content[0].text).toMatch(/temporary until .*; then it returns to recommend/);
+
+    // The temporary mode ends: same revision, the normal mode, nothing asked of the relay.
+    const reads = relay.calls.length;
+    clock.t += 3_600_000;
+    const ended = await read(mcp);
+    expect(ended.structuredContent).toMatchObject({
+      mode: 'recommend',
+      revision: 1,
+      override_active: false,
+      until: null,
+    });
+    expect(ended.content[0].text).toMatch(/consult 3 other agents first/);
+    expect(relay.calls.length).toBe(reads);
+
+    // The person changes it while the session goes on.
+    relay.involvement = { preference: await sign(2, 'involve-early'), received_at: null };
+    await bridge.involvement.refresh();
+    expect((await read(mcp)).structuredContent).toMatchObject({
+      mode: 'involve-early',
+      revision: 2,
+    });
+    await bridge.stop();
+  });
+
+  it('reading it asks nothing of the relay and creates no question', async () => {
+    const { mcp, relay, store } = await boot();
+    const calls = relay.calls.length;
+    for (let i = 0; i < 3; i++) await read(mcp);
+    expect(relay.calls.length).toBe(calls);
+    expect(await store.listQuestions()).toHaveLength(0);
+  });
+
+  it('keeps the pane credential and host checks of every other tool', async () => {
+    const { mcp } = await boot();
+    const anon = await raw(mcp, {
+      body: rpc('tools/call', { name: 'get_involvement', arguments: {} }),
+      auth: null,
+    });
+    expect(anon.status).toBe(401);
+  });
+
+  it('the result text says when the copy may be out of date', () => {
+    const base = {
+      status: 'available' as const,
+      mode: 'recommend' as const,
+      normalMode: 'recommend' as const,
+      consultCount: 1,
+      revision: 2,
+      overrideActive: false,
+      until: null,
+      setAt: '2026-11-17T09:00:00.000Z',
+      lastSyncedAt: '2026-11-17T09:00:00.000Z',
+    };
+    expect(involvementText({ ...base, stale: false })).toBe(
+      'Involvement (revision 2): bring a recommendation: consult 1 other agent first, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives.',
+    );
+    expect(involvementText({ ...base, stale: true })).toMatch(
+      /out of date: last confirmed with the relay at 2026-11-17T09:00:00.000Z\.$/,
+    );
+  });
+
+  it('the instructions say to read it before preparing and again before asking, and that it grants nothing', () => {
+    expect(SERVER_INSTRUCTIONS).toMatch(
+      /call get_involvement .* and call it again just before ask_human/,
+    );
+    expect(SERVER_INSTRUCTIONS).toMatch(/temporary setting ends without a new revision/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/outcome not-run when you could not consult/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/unavailable or stale, use your normal behaviour/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/still goes to them without delay/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/recommendation, not an answer/);
+  });
+});
+
+describe('HTTP MCP: the preparation report', () => {
+  it('travels encrypted with the question and changes nothing about who must answer', async () => {
+    const { mcp, bridge, relay } = await boot();
+    const preparation = {
+      preference_revision: 3,
+      agents_consulted: 3,
+      outcome: 'agreed',
+      summary: 'All three prefer the smaller migration.',
+    };
+    const res = await call(mcp, 'ask_human', {
+      question: 'Which migration?',
+      options: [
+        { id: 'small', label: 'Small' },
+        { id: 'big', label: 'Big' },
+      ],
+      requested_requirement: 'proxy-ok',
+      preparation,
+    });
+    expect(res.isError).toBeUndefined();
+    // An agreed recommendation is not an answer: with no trusted allowance it stays human-required.
+    expect(res.structuredContent.enforced_requirement).toBe('human-required');
+    await tick();
+    await bridge.pump();
+    const id = res.structuredContent.question_id as string;
+    const signed = relay.questions.get(id)!.signed;
+    expect(signed.record.requirement).toBe('human-required');
+    expect(JSON.stringify(signed.record)).not.toContain('preparation');
+    expect(
+      ((await relay.decryptQuestion(id)) as unknown as { preparation: unknown }).preparation,
+    ).toEqual(preparation);
+    await expect(bridge.runProxy(id)).rejects.toThrow(/human-required/);
+  });
+
+  it('is optional, and a question without one is published as before', async () => {
+    const { mcp, bridge, relay } = await boot();
+    const res = await call(mcp, 'ask_human', { question: 'Plain?' });
+    await tick();
+    await bridge.pump();
+    const content = await relay.decryptQuestion(res.structuredContent.question_id);
+    expect('preparation' in content).toBe(false);
+  });
+
+  it('a malformed report is refused at once, so the agent can fix it', async () => {
+    const { mcp, store } = await boot();
+    const res = await call(mcp, 'ask_human', {
+      question: 'q',
+      preparation: { agents_consulted: 2, outcome: 'unanimous' },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/validation_error: preparation\.outcome/);
+    expect(await store.listQuestions()).toHaveLength(0);
   });
 });
 
@@ -493,6 +684,7 @@ describe('HTTP MCP: send_followup', () => {
     ).toBeUndefined();
     expect((await call(mcp, 'get_decision', { question_id: id })).isError).toBeUndefined();
     expect((await call(mcp, 'cancel_question', { question_id: id })).isError).toBeUndefined();
+    expect((await call(mcp, 'get_involvement', {})).isError).toBeUndefined();
     expect(new Set(forwarded)).toEqual(new Set(MCP_BRIDGE_METHODS));
     await settle(bridge);
     expect(relay.messages).toHaveLength(1);

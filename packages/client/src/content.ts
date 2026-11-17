@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   DEFAULTS,
   LIMITS,
+  PreparationReport,
   Requirement,
   utf8ByteLength,
   type DecisionContentV1,
@@ -40,6 +41,11 @@ export const AskHumanInput = z.object({
   workflow_gate_id: z.string().min(1).max(200).optional(),
   expires_at: z.iso.datetime({ offset: true }).optional(),
   correlation_id: z.string().min(1).max(64).optional(),
+  /**
+   * The agent's own account of how it prepared the question under the person's involvement preference
+   * (protocol section 20.4). Shown to the person as the agent's account; it never changes the requirement.
+   */
+  preparation: PreparationReport.optional(),
 });
 export type AskHumanInput = z.infer<typeof AskHumanInput>;
 

@@ -376,6 +376,15 @@ export class RelayClient {
     });
   }
 
+  /* ---- involvement preference (section 20) ---- */
+  /** The person's latest signed involvement preference (unparsed). Never retried here: the caller owns the timing. */
+  involvement(timeoutMs?: number): Promise<unknown> {
+    return this.request('GET', `${API_PREFIX}/involvement`, {
+      retry: false,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    });
+  }
+
   /* ---- pairing ---- */
   createInvitation(body: {
     pairing_id: string;

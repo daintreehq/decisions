@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
+import type { InvolvementView } from './involvement.js';
 import type { QuestionOrigin } from './types.js';
 
 const SERVER_VERSION = '0.6.0';
@@ -104,6 +105,41 @@ function decisionResult(v: DecisionView) {
   };
 }
 
+/** The `get_involvement` structured result: every field present, null where it does not apply. */
+function involvementResult(v: InvolvementView) {
+  const on = v.status === 'available' ? v : null;
+  return {
+    status: v.status,
+    mode: on?.mode ?? null,
+    normal_mode: on?.normalMode ?? null,
+    consult_count: on?.consultCount ?? null,
+    revision: on?.revision ?? null,
+    override_active: on?.overrideActive ?? false,
+    until: on?.until ?? null,
+    set_at: on?.setAt ?? null,
+    last_synced_at: v.lastSyncedAt,
+    stale: v.stale,
+    reason: v.status === 'unavailable' ? v.reason : null,
+  };
+}
+
+/** The `get_involvement` result text: what the person asked for, in words an agent acts on. */
+export function involvementText(v: InvolvementView): string {
+  if (v.status === 'unavailable')
+    return `No involvement preference is available (${v.reason}). Use your normal configured behaviour.`;
+  const how =
+    v.mode === 'involve-early'
+      ? 'involve the person early: ask while you explore the options, rather than waiting for a finished recommendation'
+      : `bring a recommendation: consult ${v.consultCount} other agent${v.consultCount === 1 ? '' : 's'} first, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives`;
+  const temporary = v.until
+    ? ` This is temporary until ${v.until}; then it returns to ${v.normalMode}.`
+    : '';
+  const stale = v.stale
+    ? ` It may be out of date: last confirmed with the relay ${v.lastSyncedAt ? `at ${v.lastSyncedAt}` : 'never'}.`
+    : '';
+  return `Involvement (revision ${v.revision}): ${how}.${temporary}${stale}`;
+}
+
 /**
  * The `DecisionsBridge` operations the handler calls. A host that forwards them across a process boundary
  * (instead of passing a bridge) forwards exactly these, with the pane identity and any `BridgeError` intact.
@@ -113,14 +149,20 @@ export const MCP_BRIDGE_METHODS = [
   'getDecision',
   'cancelQuestion',
   'postMessage',
+  'getInvolvement',
 ] as const satisfies readonly (keyof DecisionsBridge)[];
 
 /** What `createDecisionsMcpHandler` needs from a bridge: a `DecisionsBridge`, or a host's forwarder. */
 export type DecisionsMcpBridge = Pick<DecisionsBridge, (typeof MCP_BRIDGE_METHODS)[number]>;
 
-/** What agents are told when they connect: questions return at once, and each one is a conversation. */
+/**
+ * What agents are told when they connect: questions return at once, each one is a conversation, and how involved
+ * the person wants to be is read from get_involvement, before preparing and again before asking. Sent once, at
+ * `initialize`, so it points at the tool rather than carrying the preference.
+ */
 export const SERVER_INSTRUCTIONS =
-  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way.';
+  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
+  "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
 /** The `ask_human` result text. */
 export const askedInstruction = (alias: number) =>
@@ -210,6 +252,38 @@ export const TOOLS = [
           type: 'string',
           maxLength: 64,
           description: 'Repeat calls with the same id return the same question.',
+        },
+        preparation: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['agents_consulted', 'outcome'],
+          description:
+            'How you prepared this under get_involvement, in your own words. Shown to the person as your account; it never answers or approves anything.',
+          properties: {
+            preference_revision: {
+              type: ['integer', 'null'],
+              minimum: 1,
+              description:
+                'The get_involvement revision you prepared under; null if none was available.',
+            },
+            agents_consulted: {
+              type: 'integer',
+              minimum: 0,
+              maximum: 64,
+              description: 'Other agents you actually consulted.',
+            },
+            outcome: {
+              type: 'string',
+              enum: ['agreed', 'split', 'not-run'],
+              description:
+                'agreed: they agreed on the recommendation. split: they did not agree, or it was inconclusive. not-run: no consultation happened.',
+            },
+            summary: {
+              type: 'string',
+              maxLength: 2000,
+              description: 'The reasoning, the disagreement, or why the consultation did not run.',
+            },
+          },
         },
       },
     },
@@ -368,6 +442,39 @@ export const TOOLS = [
       openWorldHint: false,
     },
   },
+  {
+    name: 'get_involvement',
+    description:
+      "Read how involved the person wants to be right now: involve-early (ask while exploring options) or recommend (consult consult_count other agents, then bring a recommendation or the disagreement). Read it before preparing a question and again just before ask_human. Reads this desktop's copy only and never asks the person. Unavailable or stale: use your normal behaviour.",
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['available', 'unavailable'] },
+        mode: { type: ['string', 'null'], enum: ['involve-early', 'recommend', null] },
+        normal_mode: { type: ['string', 'null'], enum: ['involve-early', 'recommend', null] },
+        consult_count: { type: ['integer', 'null'] },
+        revision: { type: ['integer', 'null'] },
+        override_active: { type: 'boolean' },
+        until: { type: ['string', 'null'] },
+        set_at: { type: ['string', 'null'] },
+        last_synced_at: { type: ['string', 'null'] },
+        stale: { type: 'boolean' },
+        reason: {
+          type: ['string', 'null'],
+          enum: ['not-synced', 'not-set', 'unsupported', 'signer-revoked', 'device-revoked', null],
+        },
+        error: { type: 'string' },
+      },
+    },
+    annotations: {
+      title: 'Read the involvement preference',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
 ] as const;
 
 export interface McpHandlerOptions {
@@ -521,6 +628,10 @@ export function createDecisionsMcpHandler(
           question_id: args.question_id,
           status: 'cancelling',
         });
+      }
+      if (name === 'get_involvement') {
+        const v = await bridge.getInvolvement();
+        return text(involvementText(v), involvementResult(v));
       }
       if (name === 'send_followup') {
         const r = await bridge.postMessage(args, pane);

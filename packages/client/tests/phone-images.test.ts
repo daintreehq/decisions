@@ -646,8 +646,10 @@ describe('declaring phone-images-v1', () => {
     await client.events(0, 10, BRIDGE_FEATURES);
     await client.socketTicket(BRIDGE_FEATURES);
     await client.events(0, 10);
-    expect(new URL(seen[0]!.url).searchParams.get('features')).toBe('phone-images-v1');
-    expect(JSON.parse(seen[1]!.body!).features).toEqual(['phone-images-v1']);
+    expect(new URL(seen[0]!.url).searchParams.get('features')).toBe(
+      'involvement-v1,phone-images-v1',
+    );
+    expect(JSON.parse(seen[1]!.body!).features).toEqual(['involvement-v1', 'phone-images-v1']);
     expect(new URL(seen[2]!.url).searchParams.has('features')).toBe(false);
   });
 
@@ -656,11 +658,11 @@ describe('declaring phone-images-v1', () => {
     const env = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
     const events = vi.spyOn(env.client, 'events');
     await env.bridge.catchUp();
-    expect(events.mock.calls[0]![2]).toEqual(['phone-images-v1']);
+    expect(events.mock.calls[0]![2]).toContain('phone-images-v1');
     await env.bridge.start();
     await tick(10);
     const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket');
-    expect((ticket!.body as { features?: string[] }).features).toEqual(['phone-images-v1']);
+    expect((ticket!.body as { features?: string[] }).features).toContain('phone-images-v1');
     await env.bridge.stop();
   });
 

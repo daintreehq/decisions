@@ -427,7 +427,9 @@ describe('refresh requests', () => {
     expect((await s.open(1)).content!.terminal_lines).toEqual(['fresh']);
     // The bridge declared the feature, so the relay sends it the refresh events.
     const events = s.relay.calls.filter((c) => c.path === '/api/v1/events');
-    expect(events.every((c) => c.query.includes('features=pane-snapshots-v1'))).toBe(true);
+    const declared = (c: { query: string }) =>
+      new URLSearchParams(c.query).get('features')?.split(',') ?? [];
+    expect(events.every((c) => declared(c).includes('pane-snapshots-v1'))).toBe(true);
   });
 
   it('ignores a refresh aimed at another host, and one replayed long after its deadline', async () => {

@@ -15,6 +15,7 @@ import {
 import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
+import { InvolvementSync, type InvolvementView } from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { sameDigests, type OpenAnswerEntry } from './answers.js';
@@ -104,9 +105,10 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
- * answer from a client that does not declare it, and its words must still arrive.
+ * answer from a client that does not declare it, and its words must still arrive. `involvement-v1` brings the
+ * hint that the person's involvement preference changed (section 20).
  */
-export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1'];
+export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1', 'involvement-v1'];
 
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
@@ -272,6 +274,8 @@ export class DecisionsBridge {
   readonly delivery: DeliveryEngine;
   readonly socket: RelaySocket;
   readonly snapshots: SnapshotPublisher;
+  /** The person's involvement preference, as this desktop last verified it (`getInvolvement`). */
+  readonly involvement: InvolvementSync;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
@@ -312,6 +316,7 @@ export class DecisionsBridge {
     this.publisher = new Publisher(this.ctx);
     this.verifier = new EventVerifier(this.ctx);
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
+    this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -320,6 +325,7 @@ export class DecisionsBridge {
         onRevokedSelf: () => this.markRevoked(),
         onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
+        onInvolvementHint: () => this.involvement.hint(),
       },
       { messages: !!o.followUps },
     );
@@ -337,7 +343,10 @@ export class DecisionsBridge {
       handlers: {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
-        onState: (s, d) => this.listeners.socket.forEach((l) => l(s, d)),
+        onState: (s, d) => {
+          this.involvement.socketState(s);
+          this.listeners.socket.forEach((l) => l(s, d));
+        },
         onRevoked: () => this.markRevoked(),
         onError: (e) => this.emitError(e),
       },
@@ -418,6 +427,7 @@ export class DecisionsBridge {
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
     this.snapshots.start();
+    this.involvement.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -435,6 +445,7 @@ export class DecisionsBridge {
     this.timer = null;
     this.socket.stop();
     this.snapshots.stop();
+    this.involvement.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -446,6 +457,7 @@ export class DecisionsBridge {
     this.delivery.stopped = true;
     this.socket.stop();
     this.snapshots.stop();
+    this.involvement.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -521,6 +533,23 @@ export class DecisionsBridge {
   async clearSnapshots(questionId?: string, pane?: PaneIdentity): Promise<void> {
     const row = questionId === undefined ? undefined : await this.owned(questionId, pane);
     return this.snapshots.clear(row);
+  }
+
+  /**
+   * How involved the person wants to be right now (protocol section 20), from this desktop's verified copy: it
+   * never touches the network and creates nothing. A temporary mode's end is worked out on each call, without a
+   * new revision. Unavailable, stale or unsupported means the agent keeps its normal configured behaviour. It
+   * carries no authority: no requirement, gate or proxy rule reads it.
+   */
+  async getInvolvement(): Promise<InvolvementView> {
+    const v = await this.involvement.view();
+    if (this.state !== 'revoked') return v;
+    return {
+      status: 'unavailable',
+      reason: 'device-revoked',
+      lastSyncedAt: v.lastSyncedAt,
+      stale: true,
+    };
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
@@ -706,6 +735,7 @@ export class DecisionsBridge {
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();
+        this.involvement.retryIfDue();
       } finally {
         this.pumping = null;
       }
@@ -803,6 +833,9 @@ export class DecisionsBridge {
       /* informational */
     }
     if (await this.inbox.processPending()) await this.deliverNow();
+    // Without a socket there is no reconnect to read the preference on: read it after each catch-up.
+    if (this.socket.currentState !== 'live')
+      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
     return cursor;
   }
 

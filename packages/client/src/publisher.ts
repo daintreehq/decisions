@@ -274,6 +274,7 @@ export class Publisher {
       project_label: (origin.project_label?.trim() || origin.project_id).slice(0, 200),
       machine_label: (origin.machine_label?.trim() || origin.host_id).slice(0, 200),
       origin_summary: `${origin.agent_kind} · ${origin.worktree_id}`.slice(0, 500),
+      ...(input.preparation ? { preparation: input.preparation } : {}),
     };
     const envelope = await encryptEnvelope({
       epochKey: epoch,

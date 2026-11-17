@@ -31,6 +31,8 @@ export interface InboxCallbacks {
   onSnapshotRefresh?(row: QuestionRow, refresh: SnapshotRefresh): void;
   /** One of this device's questions expired, was cancelled or was deleted. Must return without waiting. */
   onQuestionClosed?(questionId: string): void;
+  /** The relay says the involvement preference changed (a hint, not the record). Must return without waiting. */
+  onInvolvementHint?(): void;
 }
 
 export interface InboxOptions {
@@ -214,6 +216,10 @@ export class Inbox {
       }
       case 'device.approved':
         this.verifier.invalidate();
+        return false;
+      case 'involvement.updated':
+        // Installation-wide and question-free: read the signed record again, outside the delivery path.
+        this.cb.onInvolvementHint?.();
         return false;
       case 'device.key_rotated': {
         // The owner reloads its key store; a Host fetches the grant the owner sealed to it for the new epoch.

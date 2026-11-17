@@ -15,6 +15,7 @@ import {
   type CryptoEnvelope,
   type DeviceCert,
   type EnvelopePurpose,
+  type InvolvementRecord,
   type LedgerEvent,
   type MessageEntry,
   type Role,
@@ -23,6 +24,7 @@ import {
   decryptEnvelope,
   importSigningPublicKey,
   verifyDeviceCert,
+  verifyObject,
   verifyRecordAndEnvelope,
 } from '@daintreehq/decisions-crypto';
 import type { BridgeContext } from './context.js';
@@ -314,5 +316,26 @@ export class EventVerifier {
       signerRole: role,
       targetHostId: target_host_id,
     };
+  }
+
+  /**
+   * Verify the person's involvement preference (protocol section 20) as it stands now, not as of a ledger
+   * position: this installation's, signed by a phone or tablet the pinned directory knows, and not revoked by the
+   * directory or by any revocation seen in the ledger. A directory that cannot be read throws `TransientError`.
+   */
+  async verifyInvolvement(r: InvolvementRecord): Promise<{ ok: true } | Rejection> {
+    if (r.installation_id !== this.ctx.identity.config.installationId)
+      return { ok: false, reason: 'wrong-installation' };
+    const signer = await this.lookup(r.signer_device_id);
+    if (!signer) return { ok: false, reason: 'unknown-signer' };
+    if (!HUMAN_ROLES.includes(signer.cert.role))
+      return { ok: false, reason: 'set-by-non-human-device' };
+    if (!(await verifyObject(signer.pub, r))) return { ok: false, reason: 'bad-signature' };
+    if (
+      signer.revokedAt !== null ||
+      (await this.ctx.store.getMeta(revokedKey(r.signer_device_id))) !== null
+    )
+      return { ok: false, reason: 'signer-revoked' };
+    return { ok: true };
   }
 }
