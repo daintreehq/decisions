@@ -14,6 +14,7 @@ import {
   endLabel,
   fromLocalInput,
   inForce,
+  setByLine,
   toLocalInput,
   type InvolvementDraft,
 } from '../../domain/involvement.js';
@@ -89,8 +90,10 @@ function ModeChoice({
 
 /**
  * How involved the person wants to be right now: a normal mode and, for a while, a different one. Saved on the relay,
- * signed by this device, and read by agents through the desktop. Like quiet hours it waits for Save and never loses
- * an edit silently; unlike them, a save made on top of another device's change is refused, and the person is told.
+ * signed by this device, and read by agents through the desktop. The person can also set it on the computer, and the
+ * section says where what is in force was set. Like quiet hours it waits for Save and never loses an edit silently;
+ * unlike them, a save made on top of another device's change (the computer's included) is refused, and the person is
+ * told.
  */
 export function InvolvementSection() {
   const { online } = useApp();
@@ -101,7 +104,8 @@ export function InvolvementSection() {
   const [base, setBase] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
+  /** The revision a save was refused over, while the person decides what to do about it; null when none was. */
+  const [conflict, setConflict] = useState<number | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -168,11 +172,11 @@ export function InvolvementSection() {
       if (r.kind === 'conflict') {
         // The edits stay: the person sees what is set now and decides whether to save theirs over it, which a
         // second Save does, now over what they have seen.
-        setConflict(true);
+        setConflict(base);
         setBase(app.involvementState().revision);
         return false;
       }
-      setConflict(false);
+      setConflict(null);
       setJustSaved(true);
       return true;
     } catch {
@@ -190,7 +194,7 @@ export function InvolvementSection() {
     setDraft(baseline);
     setBase(state.revision);
     setSaveError(null);
-    setConflict(false);
+    setConflict(null);
   };
 
   const lead = (
@@ -237,14 +241,19 @@ export function InvolvementSection() {
       {lead}
       {state.status === 'invalid' && (
         <Callout tone="warn" role="alert" title="The preference on your relay couldn’t be verified">
-          It isn’t shown, and agents ignore it. Saving here replaces it with one this device signs.
+          It isn’t shown here. Saving here replaces it with one this device signs.
         </Callout>
       )}
-      {conflict && dirty && (
+      {conflict !== null && dirty && (
         <Callout
           tone="warn"
           role="alert"
-          title="Another device changed this while you were editing"
+          title={
+            // Named only from a record read since the refused save started, never from the one it replaced.
+            state.revision > conflict && state.setBy?.on === 'computer'
+              ? `Changed on ${state.setBy.computer ?? 'your computer'} while you were editing`
+              : 'Another device changed this while you were editing'
+          }
         >
           {effective ? `It’s now set to ${MODE_LABEL[effective.mode]}. ` : 'It’s now cleared. '}
           Your changes weren’t saved. Save again to replace it with yours, or Discard to keep it.
@@ -256,9 +265,11 @@ export function InvolvementSection() {
           label={effective ? MODE_LABEL[effective.mode] : 'Not set'}
           description={
             effective
-              ? effective.until
-                ? `Until ${endLabel(effective.until, now)}, then back to ${MODE_LABEL[effective.normal_mode]}.`
-                : 'Your normal mode.'
+              ? `${
+                  effective.until
+                    ? `Until ${endLabel(effective.until, now)}, then back to ${MODE_LABEL[effective.normal_mode]}.`
+                    : 'Your normal mode.'
+                }${state.setBy ? ` ${setByLine(state.setBy)}` : ''}`
               : 'Agents follow their own instructions until you choose.'
           }
         />

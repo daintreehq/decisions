@@ -5,6 +5,7 @@ import {
 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
 import { sanitizeText } from '../lib/safe-text.js';
+import { computerName } from './computer-name.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
@@ -202,12 +203,7 @@ export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): Ans
     return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
   if (a.provenance !== 'human-desktop')
     return { model: false, computer: null, author: 'You', subject: 'Your answer' };
-  // The owner chose the name and its key signed it, but it is still shown as text: drop control and escape
-  // characters and fold line breaks, as for the asking computer's name.
-  const name = sanitizeText(a.signerLabel ?? '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const computer = name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
+  const computer = computerName(a.signerLabel);
   return {
     model: false,
     computer,

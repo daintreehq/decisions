@@ -42,7 +42,10 @@ async function withPreference(c: AppController) {
   const s = new InvolvementStore({
     fetch: async () => ({ preference: record, received_at: new Date().toISOString() }),
     put: async () => ({}),
-    verify: async () => ({ ok: true, value: { record, receivedAt: null } }),
+    verify: async () => ({
+      ok: true,
+      value: { record, receivedAt: null, setBy: { on: 'phone', computer: null, here: false } },
+    }),
     sign: async () => record,
   });
   s.subscribe(() => inside(c).emitInvolvement());
