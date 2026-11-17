@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
-import { PolicyRegistry, parseAnswers } from '../src/index.js';
+import { BRIDGE_FEATURES, PolicyRegistry, bridgeFeatures, parseAnswers } from '../src/index.js';
 import { makePhone, origin, setupBridge, tick } from './helpers.js';
 
 async function asked(
@@ -68,6 +68,18 @@ describe('A: event type is bound to the signed action', () => {
     expect(sink.typed).toHaveLength(0);
     expect(await reasons(store)).toContain('provenance-mismatch');
   });
+  it('every bridge declares person-declines-v1, which the relay requires before it commits a decline', () => {
+    expect(BRIDGE_FEATURES).toContain('person-declines-v1');
+    for (const o of [
+      {},
+      { followUps: true },
+      { snapshots: {} },
+      { followUps: true, snapshots: {} },
+    ]) {
+      expect(bridgeFeatures(o)).toContain('person-declines-v1');
+    }
+  });
+
   it('a cancel signed by a phone is the person declining: the agent is told plainly, never as an answer', async () => {
     const { bridge, relay, sink, qid, phone, store } = await asked();
     await relay.plainActionEvent({

@@ -354,6 +354,44 @@ describe.skipIf(!chromiumPath)(
       expect(sink.typed.some((t) => t.text.includes(id))).toBe(false);
     });
 
+    it('the person dismisses an open question on the phone, and the agent hears it was declined', async () => {
+      const typedBefore = sink.typed.length;
+      const asked = await call(paneA, 'ask_human', {
+        question: 'Bump the lint rules to the strict preset?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      });
+      const id = String(asked.structuredContent!.question_id);
+      await bridge.pump();
+      await openFromInbox('Bump the lint rules to the strict preset?');
+      // This bridge declares person-declines-v1, so the phone offers Dismiss.
+      await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+      await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
+      await page.getByRole('button', { name: 'Dismiss question' }).click();
+
+      await until(
+        async () => (await relayClient.getQuestion(id)).status === 'cancelled',
+        30_000,
+        'declined on the relay',
+      );
+      const view = await until(
+        async () => {
+          const r = await call(paneA, 'get_decision', { question_id: id });
+          return r.structuredContent?.status === 'cancelled' ? r : null;
+        },
+        30_000,
+        'declined locally',
+      );
+      expect(view.structuredContent).toMatchObject({ closed_reason: 'declined', provenance: null });
+      await until(async () => sink.typed.length > typedBefore, 30_000, 'the decline notice');
+      const notice = sink.typed.at(-1)!;
+      expect(notice.pane).toBe('pane-a');
+      expect(notice.text).toContain('status: declined');
+      expect(notice.text).toContain('authorised: no');
+    });
+
     it('keeps panes apart: the same correlation id is a new question, answered into that pane only', async () => {
       const typedBefore = sink.typed.length;
       const asked = await call(paneB, 'ask_human', {

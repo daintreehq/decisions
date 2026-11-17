@@ -8,6 +8,7 @@ import {
   LIMITS,
   applyAction,
   canonicalize,
+  isPersonDecline,
   provenanceForSigner,
   type ActionKind,
   type ActionRecord,
@@ -491,6 +492,21 @@ function actionHandler(kind: ActionKind): Handler {
             },
           },
         );
+      }
+      // A person's decline is filed by the question's desktop, and one that predates declines rejects it (section 6.1).
+      // A revoked desktop is sent nothing, so its leftover questions can always be declined.
+      const creator = room.getDevice(q.creator_device_id);
+      if (
+        isPersonDecline(kind, auth.role) &&
+        creator?.revoked_at === null &&
+        !deviceHasFeature(creator, 'person-declines-v1')
+      ) {
+        throw new ApiError('invalid_state', "the question's desktop does not accept declines", {
+          details: {
+            reason: CREATOR_MISSING_FEATURE,
+            required_feature: 'person-declines-v1',
+          },
+        });
       }
       // Only a phone or tablet attaches phone images, whatever the reservations say.
       if ((record.attachment_ids?.length ?? 0) > 0 && !HUMAN_ROLES.includes(auth.role)) {
