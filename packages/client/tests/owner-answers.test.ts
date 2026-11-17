@@ -117,7 +117,9 @@ describe('the owner desktop answers its own question', () => {
       choice: 'approve',
       text: 'Fine by me',
     });
-    expect(v.answers).toEqual([expect.objectContaining({ source: 'human', answeredOn: 'computer' })]);
+    expect(v.answers).toEqual([
+      expect.objectContaining({ source: 'human', answeredOn: 'computer' }),
+    ]);
     expect(v.thread).toEqual([
       expect.objectContaining({ kind: 'answer', source: 'human', answeredOn: 'computer' }),
     ]);

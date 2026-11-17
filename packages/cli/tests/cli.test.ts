@@ -371,7 +371,12 @@ describe('doctor', () => {
               cert,
               push_enabled: false,
               // What the bridge last declared, plus a token from a newer client, which is never re-sent.
-              features: ['owner-desktop-answers-v1', 'phone-images-v1', 'thread-messages-v1', 'later-v9'],
+              features: [
+                'owner-desktop-answers-v1',
+                'phone-images-v1',
+                'thread-messages-v1',
+                'later-v9',
+              ],
             },
           ],
         }),
