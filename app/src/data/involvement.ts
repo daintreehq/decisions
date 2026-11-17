@@ -3,6 +3,7 @@ import {
   recordMatches,
   servedRevision,
   type InvolvementDraft,
+  type InvolvementSetBy,
   type InvolvementState,
 } from '../domain/involvement.js';
 import type { Verified } from '../domain/verify.js';
@@ -19,6 +20,8 @@ export interface InvolvementSnapshot {
   status: 'idle' | 'loading' | 'ready' | 'invalid' | 'error';
   record: InvolvementRecord | null;
   receivedAt: string | null;
+  /** Where `record` was set, from the certificate that verified it; null with no record. */
+  setBy: InvolvementSetBy | null;
   /** The revision the relay holds, verified or not: the next save replaces it. */
   revision: number;
   problem: string | null;
@@ -27,7 +30,7 @@ export interface InvolvementSnapshot {
 export type InvolvementSaveResult =
   /** The relay took it. */
   | { kind: 'saved' }
-  /** Another device changed the preference first: `current` is what is set now, and nothing was saved. */
+  /** Another device (a phone, a tablet or the computer) changed the preference first, and nothing was saved. */
   | { kind: 'conflict' };
 
 export interface InvolvementDeps {
@@ -40,10 +43,14 @@ export interface InvolvementDeps {
   sign(draft: InvolvementDraft, currentRevision: number): Promise<InvolvementRecord>;
 }
 
+/** What this device saved was set here, on a phone or tablet: the app never runs on the computer. */
+const SET_HERE: InvolvementSetBy = { on: 'phone', computer: null, here: true };
+
 const EMPTY: InvolvementSnapshot = {
   status: 'idle',
   record: null,
   receivedAt: null,
+  setBy: null,
   revision: 0,
   problem: null,
 };
@@ -128,13 +135,21 @@ export class InvolvementStore {
         status: 'ready',
         record: v.value.record,
         receivedAt: v.value.receivedAt,
+        setBy: v.value.setBy,
         revision,
         problem: null,
       });
     } else {
       const revision = servedRevision(raw);
       if (!this.newerThanShown(revision)) return;
-      this.set({ status: 'invalid', record: null, receivedAt: null, revision, problem: v.reason });
+      this.set({
+        status: 'invalid',
+        record: null,
+        receivedAt: null,
+        setBy: null,
+        revision,
+        problem: v.reason,
+      });
     }
   }
 
@@ -219,6 +234,7 @@ export class InvolvementStore {
         status: 'ready',
         record,
         receivedAt: new Date().toISOString(),
+        setBy: SET_HERE,
         revision: record.revision,
         problem: null,
       });

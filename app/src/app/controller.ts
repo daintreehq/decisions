@@ -361,6 +361,7 @@ export class AppController {
           verifyInvolvementResponse(raw, {
             installationId: config.installationId,
             trust: this.trust!,
+            deviceId: config.deviceId,
           });
         const r = await check();
         if (r.ok || r.reason !== 'unknown signer') return r;
@@ -629,6 +630,7 @@ export class AppController {
         status: 'idle',
         record: null,
         receivedAt: null,
+        setBy: null,
         revision: 0,
         problem: null,
       }
