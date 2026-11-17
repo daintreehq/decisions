@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DecisionContentV1,
   EventData,
+  INVOLVEMENT_SETTER_ROLES,
   InvolvementBody,
   InvolvementRecord,
   InvolvementResponse,
@@ -9,11 +10,13 @@ import {
   PreparationReport,
   ROUTE_MANIFEST,
   effectiveInvolvement,
+  involvementSetOn,
   involvementWriteIssue,
   isEventVisible,
   requiredFeaturesForEvent,
   type InvolvementRecord as Rec,
   type LedgerEvent,
+  type Role,
 } from '../src/index.js';
 
 const SIG = 's'.repeat(86);
@@ -81,11 +84,31 @@ describe('the involvement record', () => {
     );
   });
 
-  it('is served at /involvement: read by any device, written only by phones and tablets', () => {
+  it('is served at /involvement: read by any device, written by the owner desktop, phones and tablets', () => {
     const get = ROUTE_MANIFEST.find((r) => r.method === 'GET' && r.path === '/involvement');
     const put = ROUTE_MANIFEST.find((r) => r.method === 'PUT' && r.path === '/involvement');
     expect(get?.roles).toBe('any');
-    expect(put?.roles).toEqual(['phone', 'tablet']);
+    expect([...(put?.roles as Role[])].sort()).toEqual(['owner-desktop', 'phone', 'tablet']);
+    expect(put?.roles).not.toContain('desktop-host');
+  });
+});
+
+describe('where the preference was set', () => {
+  it('is the computer for the owner desktop and the phone for a phone or tablet', () => {
+    expect(involvementSetOn('owner-desktop')).toBe('computer');
+    expect(involvementSetOn('phone')).toBe('phone');
+    expect(involvementSetOn('tablet')).toBe('phone');
+  });
+
+  it('is nothing for a Daintree Host, which never sets it', () => {
+    expect(involvementSetOn('desktop-host')).toBeNull();
+    expect(INVOLVEMENT_SETTER_ROLES).not.toContain('desktop-host');
+  });
+
+  it('changes nothing about the preference in force', () => {
+    const fromPhone = record({ signer_device_id: 'dev_phone0001' });
+    const fromComputer = record({ signer_device_id: 'dev_desktop01' });
+    expect(effectiveInvolvement(fromComputer, T0)).toEqual(effectiveInvolvement(fromPhone, T0));
   });
 });
 

@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { LIMITS } from './limits.js';
-import { Id, IsoTime, SigB64 } from './schema.js';
+import { INVOLVEMENT_SETTER_ROLES, Id, IsoTime, SigB64, type Role } from './schema.js';
 import { PROTOCOL_VERSION } from './version.js';
 
 /*
  * The involvement preference (docs/protocol.md section 20): how involved the person wants to be right now, set on
- * a phone or tablet and read by agents through their desktop. One per installation. The relay keeps only the
+ * a phone, a tablet or the owner desktop and read by agents through their desktop. One per installation. The relay keeps only the
  * latest signed record and compare-and-swaps on its revision; the record is signed, not encrypted, so the relay
  * sees the modes, the consult count and when a temporary mode ends. It describes how the person wants to take
  * part, never what an agent may do: no requirement, gate or approval reads it.
@@ -41,13 +41,16 @@ export const InvolvementRecord = z.looseObject({
   override: InvolvementOverride.nullable(),
   /** The signer's clock; shown, never used to order records. */
   created_at: IsoTime,
-  /** A phone or tablet: only the person sets their involvement. */
+  /**
+   * A phone, a tablet or the owner desktop (`INVOLVEMENT_SETTER_ROLES`), never a `desktop-host`. Its certified role
+   * says where the person set it (`involvementSetOn`).
+   */
   signer_device_id: Id,
   signature: SigB64,
 });
 export type InvolvementRecord = z.infer<typeof InvolvementRecord>;
 
-/** `PUT /involvement` (phone, tablet). */
+/** `PUT /involvement` (phone, tablet, owner desktop). */
 export const InvolvementBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
   idempotency_key: Id,
@@ -72,6 +75,22 @@ export const InvolvementResponse = z.object({
 export type InvolvementResponse = z.infer<typeof InvolvementResponse>;
 
 /* ---------- rules ---------- */
+
+/**
+ * Where the person set a preference: `computer` for the owner desktop, `phone` for a phone or tablet. It is for
+ * display only: a preference steers agents the same way wherever it was set.
+ */
+export type InvolvementSetOn = 'computer' | 'phone';
+
+/**
+ * Where a record was set, from its signer's certified role, as `provenanceForSigner` reads an answer's. The caller
+ * passes the role of a certificate it has already verified; this checks nothing. Null for a role that never sets
+ * one (`desktop-host`): a reader refuses such a record rather than showing it.
+ */
+export function involvementSetOn(role: Role): InvolvementSetOn | null {
+  if (!INVOLVEMENT_SETTER_ROLES.includes(role)) return null;
+  return role === 'owner-desktop' ? 'computer' : 'phone';
+}
 
 export interface EffectiveInvolvement {
   /** The mode in force at `now`: the temporary one until it ends, then the normal one. */

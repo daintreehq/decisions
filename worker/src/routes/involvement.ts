@@ -12,9 +12,10 @@ import { iso, json, nowMs, type ApiResponse } from '../util.js';
 import { priorReceipt, storeReceipt } from './receipts.js';
 
 /*
- * The involvement preference (docs/protocol.md section 20): a phone or tablet replaces it, every paired device
- * reads it. The relay keeps the latest signed record and nothing older, and tells declaring clients with a
- * content-free hint that replaces the previous one. Reading it creates nothing.
+ * The involvement preference (docs/protocol.md section 20): a phone, a tablet or the owner desktop replaces it
+ * (never a `desktop-host`), every paired device reads it. The relay keeps the latest signed record and nothing
+ * older, and tells declaring clients with a content-free hint that replaces the previous one. Reading it creates
+ * nothing.
  */
 
 /** The `meta` key holding `{ record, received_at }`. */
