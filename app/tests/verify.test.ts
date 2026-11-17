@@ -9,7 +9,7 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
 import { NO_EPOCH_KEY, verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
-import { actionEvent, makeWorld, questionEvent, type World } from './helpers.js';
+import { actionEvent, makeWorld, otherDesktop, questionEvent, type World } from './helpers.js';
 
 const ctx = (w: World) => ({
   installationId: w.installationId,
@@ -143,31 +143,79 @@ describe('action verification and provenance', () => {
     expect(pr.ok && pr.value.provenance).toBe('proxy');
   });
 
-  it('rejects a desktop forging a HUMAN answer', async () => {
-    const w = await makeWorld();
+  it("accepts the owner desktop's answer as the person's, made on the computer", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
     const q = await questionEvent(w);
-    const forged = await actionEvent(w, {
+    const ev = await actionEvent(w, {
       questionId: q.question_id!,
       action: 'answer',
       signer: w.desktop,
     });
-    const r = await verifyActionEvent(forged.data, NOW, ctx(w), forged.question_id!);
-    expect(r).toEqual({ ok: false, reason: 'a owner-desktop cannot sign answer' });
+    const r = await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.provenance).toBe('human-desktop');
+      expect(r.value.signerRole).toBe('owner-desktop');
+      // The computer's name comes from the owner's own signed certificate, not from the question that was asked.
+      expect(r.value.signerLabel).toBe('Studio Mac');
+      expect(r.value.content).toMatchObject({ selected_option_ids: ['yes'], text: 'go ahead' });
+    }
   });
 
-  it("refuses the owner desktop's answer whatever provenance the relay claims, until it can label one", async () => {
+  it('rejects a relay relabelling who made a human answer', async () => {
     const w = await makeWorld();
     const q = await questionEvent(w);
-    for (const provenance of ['human', 'human-desktop'] as const) {
+    const cases = [
+      { signer: w.desktop, provenance: 'human' },
+      { signer: w.desktop, provenance: 'proxy' },
+      { signer: w.phone, provenance: 'human-desktop' },
+    ] as const;
+    for (const { signer, provenance } of cases) {
       const ev = await actionEvent(w, {
         questionId: q.question_id!,
         action: 'answer',
-        signer: w.desktop,
+        signer,
         provenance,
       });
       expect(await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!), provenance).toEqual({
         ok: false,
-        reason: 'a owner-desktop cannot sign answer',
+        reason: 'relay provenance disagrees with the signed action',
+      });
+    }
+  });
+
+  it('rejects a desktop-host answering for the person, whatever provenance the relay claims', async () => {
+    const w = await makeWorld();
+    const host = await otherDesktop(w);
+    const q = await questionEvent(w, { signer: host });
+    for (const provenance of ['human', 'human-desktop'] as const) {
+      const ev = await actionEvent(w, {
+        questionId: q.question_id!,
+        action: 'answer',
+        signer: host,
+        provenance,
+      });
+      expect(await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!), provenance).toEqual({
+        ok: false,
+        reason: 'a desktop-host cannot sign answer',
+      });
+    }
+  });
+
+  it('keeps overruling and confirming to a phone or tablet, even for the owner desktop', async () => {
+    const w = await makeWorld();
+    const q = await questionEvent(w, { requirement: 'proxy-ok' });
+    for (const action of ['override', 'confirm-proxy'] as const) {
+      const ev = await actionEvent(w, {
+        questionId: q.question_id!,
+        action,
+        signer: w.desktop,
+        provenance: action === 'override' ? 'human-desktop' : 'human',
+        confirms: action === 'confirm-proxy' ? newId() : null,
+      });
+      expect(await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!), action).toEqual({
+        ok: false,
+        reason: `a owner-desktop cannot sign ${action}`,
       });
     }
   });

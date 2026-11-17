@@ -33,6 +33,8 @@ export interface ActionView {
   seq: number;
   signerDeviceId: string;
   signerRole: Role | null;
+  /** The signer's certified name, once verified: names the computer an answer made there (`human-desktop`) came from. */
+  signerLabel?: string;
   content: AnswerContent | null;
   verified: boolean;
   error?: string;
@@ -386,6 +388,7 @@ export class QuestionStore {
           revision: tr.revision,
           provenance: v.value.provenance,
           signerRole: v.value.signerRole,
+          signerLabel: v.value.signerLabel,
           content: v.value.content,
           verified: true,
           imagesOk: v.value.imagesOk,

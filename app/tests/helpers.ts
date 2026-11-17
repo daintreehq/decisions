@@ -41,6 +41,7 @@ async function actor(
   role: DeviceCert['role'],
   issuer: Actor | null,
   extractable = true,
+  label: string = role,
 ): Promise<Actor> {
   const keys = await generateDeviceKeys(extractable);
   const id = newId();
@@ -52,7 +53,7 @@ async function actor(
     installationId,
     deviceId: id,
     role,
-    label: role,
+    label,
     signingPub,
     exchangePub,
   });
@@ -73,9 +74,9 @@ export async function otherHuman(w: World, role: 'phone' | 'tablet' = 'tablet'):
   return d;
 }
 
-export async function makeWorld(): Promise<World> {
+export async function makeWorld(o: { ownerLabel?: string } = {}): Promise<World> {
   const installationId = newId();
-  const owner = await actor(installationId, 'owner-desktop', null);
+  const owner = await actor(installationId, 'owner-desktop', null, true, o.ownerLabel);
   const desktop = owner; // the owner desktop is the asking machine
   const phone = await actor(installationId, 'phone', owner, false);
   const epochRaw = generateEpochKeyBytes();
@@ -258,7 +259,9 @@ export async function actionEvent(
     o.provenance !== undefined
       ? o.provenance
       : human
-        ? 'human'
+        ? o.action === 'answer' && signer.cert.role === 'owner-desktop'
+          ? 'human-desktop'
+          : 'human'
         : o.action === 'proxy-answer'
           ? 'proxy'
           : null;

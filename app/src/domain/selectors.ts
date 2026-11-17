@@ -182,6 +182,40 @@ export function withdrawnLabel(v: QuestionView): string {
     : `Withdrawn on ${machine}`;
 }
 
+/**
+ * Who made an answer, in the words every surface uses: the decision model, the person on a phone or tablet, or the
+ * person on the computer (the owner desktop signed it, `human-desktop` provenance), named from its certificate. Decide
+ * by `model` and `computer`, never by the words.
+ */
+export interface AnswerBy {
+  model: boolean;
+  /** The computer the person answered on, or null when they answered on a phone or tablet (or the model did). */
+  computer: string | null;
+  /** Short, for rows and the header: "Model", "You", "You on Studio Mac". */
+  author: string;
+  /** As a sentence's subject: "The model answer", "Your answer", "Your answer on Studio Mac". */
+  subject: string;
+}
+
+export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): AnswerBy {
+  if (a.provenance === 'proxy')
+    return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
+  if (a.provenance !== 'human-desktop')
+    return { model: false, computer: null, author: 'You', subject: 'Your answer' };
+  // The owner chose the name and its key signed it, but it is still shown as text: drop control and escape
+  // characters and fold line breaks, as for the asking computer's name.
+  const name = sanitizeText(a.signerLabel ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const computer = name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
+  return {
+    model: false,
+    computer,
+    author: `You on ${computer}`,
+    subject: `Your answer on ${computer}`,
+  };
+}
+
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
   if (effectiveStatus(v, now) !== 'proxy-answered') return false;
   return !v.actions.some(

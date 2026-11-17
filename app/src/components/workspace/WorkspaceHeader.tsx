@@ -8,9 +8,11 @@ export interface MenuItem {
   onSelect: () => void;
 }
 
-/** The answer in force, as Home's rows say it: who decided ("You", "Model") and what. */
+/** The answer in force, as Home's rows say it: who decided ("You", "You on Studio Mac", "Model") and what. */
 export interface HeaderAnswer {
-  author: 'You' | 'Model';
+  author: string;
+  /** The decision model's answer: it carries the model's mark. */
+  model: boolean;
   text: string;
 }
 
@@ -137,8 +139,8 @@ export function WorkspaceHeader({
                 {answer ? (
                   <>
                     <span className="sr-only">. </span>
-                    <span className="ws-sub-answer" data-author={answer.author}>
-                      {answer.author === 'Model' && (
+                    <span className="ws-sub-answer" data-author={answer.model ? 'Model' : 'You'}>
+                      {answer.model && (
                         <svg
                           className="ws-model-mark"
                           viewBox="0 0 16 16"

@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState, type FocusEvent } from 'react';
+import type { ActionView } from '../../domain/model.js';
 import {
+  answerBy,
   DELIVERY_LABELS,
   type DeliveryProgress,
   type DeliveryStep,
@@ -8,7 +10,10 @@ import { CheckIcon, ChevronDown, ClockIcon, WarningIcon } from '../Icons.js';
 
 /** A step from the phone: queued here, sent, saved on the relay, received by the computer, typed into the terminal. */
 const PHONE_ORDER: DeliveryStep[] = ['queued', 'sending', 'confirmed', 'desktop', 'terminal'];
-/** An answer made on the computer (the decision model's) never passed through this phone. */
+/**
+ * An answer made on the computer never passed through a phone: the decision model's, or the person's answer signed on
+ * the owner desktop. Its steps start at the relay.
+ */
 const RELAY_ORDER: DeliveryStep[] = ['confirmed', 'desktop', 'terminal'];
 const DONE_LABEL: Partial<Record<DeliveryStep, string>> = {
   queued: 'Queued on this device',
@@ -68,8 +73,11 @@ export function Receipt({
   /** A quiet extra after the label, e.g. that a queued answer sends once back online. */
   note?: string;
   steps?: boolean;
-  /** What is being delivered, for the words of a problem: "Your answer" (default), "Your follow-up". */
-  subject?: string;
+  /**
+   * What is being delivered, for its spoken milestones and the words of a problem: "Your answer", "Your answer on
+   * Studio Mac", "The model answer", "Your follow-up". Named by the caller: where it came from says nothing of who.
+   */
+  subject: string;
   /** Words for a stage the steps don't name, such as photos still uploading before the answer can go. */
   label?: string;
 }) {
@@ -93,9 +101,7 @@ export function Receipt({
   // The receipt itself stays quiet; this one status says the milestones that matter (saved, typed, a problem) when
   // they change, never the steps in between. It is mounted with the receipt, so an old reply announces nothing.
   const milestone =
-    tone !== 'progress' || progress.step === 'confirmed'
-      ? `${subject ?? (fromPhone ? 'Your answer' : 'The model answer')}: ${label}`
-      : '';
+    tone !== 'progress' || progress.step === 'confirmed' ? `${subject}: ${label}` : '';
   const spoken = (
     <span className="sr-only" role="status">
       {milestone}
@@ -162,23 +168,31 @@ export function Receipt({
 }
 
 /**
+ * The receipt under the answer in force, said as who made it: the person's from a phone or tablet starts on the
+ * phone, while the model's and the person's made on the computer never passed through one and start at the relay.
+ */
+export function AnswerReceipt({ a, progress }: { a: ActionView; progress: DeliveryProgress }) {
+  const by = answerBy(a);
+  return <Receipt progress={progress} fromPhone={!by.model && !by.computer} subject={by.subject} />;
+}
+
+/**
  * The full stepper. Reached steps carry a check and their words, the step being waited on a clock, steps not
  * reached an empty ring. It never claims the agent finished or acted, only where the answer has reached.
  */
 export function DeliveryStepper({
   progress,
   fromPhone,
-  subject: named,
+  subject,
   untitled,
 }: {
   progress: DeliveryProgress;
   fromPhone: boolean;
-  subject?: string;
+  subject: string;
   /** The problem's label is already on the receipt line above: the callout carries only the explanation. */
   untitled?: boolean;
 }) {
   if (progress.step === 'attention') {
-    const subject = named ?? (fromPhone ? 'Your answer' : 'The model answer');
     const uncertain = progress.detail === undefined && progress.label !== DELIVERY_LABELS.attention;
     const cause = progress.detail ? CAUSES[progress.detail] : undefined;
     return (

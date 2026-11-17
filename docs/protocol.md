@@ -45,9 +45,10 @@ the signer (`provenanceForSigner` in `state.ts`):
 
 `cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question, signed by a phone or
 tablet it records that the person **declined** to answer (section 6.1). `roleMaySign` in `state.ts` is the one role
-table the relay and every client check signers against. Until they can label an answer made on the computer, the
-desktop library and the phone app also refuse an owner-desktop `answer`, whatever provenance the relay claims; a
-desktop declares `owner-desktop-answers-v1` only once it accepts one.
+table the relay and every client check signers against. The phone app accepts an owner-desktop `answer` only with
+`human-desktop` provenance, shows it as the person's and names the computer from the owner certificate's signed
+`label`. Until it can label one, the desktop library refuses an owner-desktop `answer`, whatever provenance the relay
+claims; a desktop declares `owner-desktop-answers-v1` only once it accepts one.
 
 The question's publishing desktop types the answer, and a desktop that predates owner-desktop answers rejects one. So
 the relay commits an owner-desktop `answer` only when the publishing desktop (its `originating_device_id`) declared

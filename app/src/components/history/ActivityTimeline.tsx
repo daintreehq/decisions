@@ -5,6 +5,7 @@ import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model
 import { answerSummary, correctionCount, decidedAt, optionLabels } from '../../domain/lists.js';
 import {
   agentName,
+  answerBy,
   currentAnswer,
   declinedByPerson,
   effectiveStatus,
@@ -268,12 +269,13 @@ function entries(v: QuestionView, now: number): Entry[] {
       } else {
         const model = a.action === 'proxy-answer';
         const conf = model && a.content && 'confidence' in a.content ? a.content.confidence : null;
+        const computer = answerBy(a).computer;
         out.push({
           key: a.actionId,
           kind: model ? 'model' : 'answer',
           at: a.createdAt,
           revision,
-          title: model ? 'Model answer' : 'You answered',
+          title: model ? 'Model answer' : computer ? `You answered on ${computer}` : 'You answered',
           body: (
             <>
               <Answer v={v} a={a} />
@@ -361,9 +363,9 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
       </div>
     );
   }
-  const model = sum.author !== 'You';
+  const model = sum.model;
   const author = !model
-    ? 'Your answer'
+    ? answerBy(a).subject
     : sum.confirmed
       ? 'Model answer, confirmed by you'
       : 'Model answer, not yet reviewed';

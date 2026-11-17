@@ -14,7 +14,7 @@ import {
   stableOrder,
   type ListQuery,
 } from '../src/domain/lists.js';
-import { withdrawnLabel } from '../src/domain/selectors.js';
+import { answerBy, withdrawnLabel } from '../src/domain/selectors.js';
 
 const NOW = Date.parse('2026-11-03T15:00:00Z');
 const H = 3_600_000;
@@ -187,7 +187,11 @@ describe('Home sections, sorting and filtering', () => {
     ]);
     expect(principalStatus(model, now)).toBe('review');
     expect(principalStatus(confirmed, now)).toBe('answered');
-    expect(answerSummary(confirmed)).toMatchObject({ author: 'Model', confirmed: true });
+    expect(answerSummary(confirmed)).toMatchObject({
+      author: 'Model',
+      model: true,
+      confirmed: true,
+    });
   });
 
   it('filters by project and computer separately, and searches every section', () => {
@@ -356,6 +360,59 @@ describe('withdrawn questions', () => {
   it('reads a computer with no usable name as what it is', () => {
     expect(withdrawnLabel(withdrawn(''))).toBe('Withdrawn on the computer');
     expect(withdrawnLabel(withdrawn('host_01JC8Z4MQ7'))).toBe('Withdrawn on an unnamed computer');
+  });
+});
+
+describe('answers made on the computer', () => {
+  /** The person's answer, signed on the owner desktop and named from its certificate. */
+  const onComputer = (at: number, label = 'Studio Mac', s?: number): ActionView => ({
+    ...act('answer', at, { selected_option_ids: ['a'], text: 'ship it' }, s),
+    provenance: 'human-desktop',
+    signerDeviceId: 'desktop',
+    signerRole: 'owner-desktop',
+    signerLabel: label,
+  });
+
+  it("lists it as the person's decision, named with the computer, never the model's", () => {
+    const answered = q('c', {
+      status: 'human-answered',
+      revision: 1,
+      lastEventAt: iso(NOW - H),
+      actions: [onComputer(NOW - H)],
+    });
+    expect(needs([answered])).toEqual([]);
+    expect(principalStatus(answered, NOW)).toBe('answered');
+    expect(answerSummary(answered)).toEqual({
+      author: 'You on Studio Mac',
+      model: false,
+      text: 'Keep Canopy — ship it',
+      confirmed: false,
+    });
+    expect(historyEntries([answered], 'decisions', '', NOW).map((e) => [e.v.id, e.status])).toEqual(
+      [['c', 'answered']],
+    );
+    // The computer filter still means the computer that asked.
+    expect(every([answered], { ...base, computer: 'MacBook' })).toEqual(['c']);
+  });
+
+  it('shows the computer name as plain text, and an unusable one as "your computer"', () => {
+    const by = (label: string) => answerBy(onComputer(NOW, label));
+    expect(by('Studio\u001b[31m\nMac\u202e')).toMatchObject({ author: 'You on Studio Mac' });
+    expect(by('  \n ')).toMatchObject({ computer: 'your computer' });
+    expect(by('host_8f3k2j9q')).toMatchObject({ subject: 'Your answer on your computer' });
+    expect(answerBy({ provenance: 'human-desktop' })).toMatchObject({
+      subject: 'Your answer on your computer',
+    });
+    // A name that reads like the model is still the person's answer: callers decide by the flag, not the words.
+    expect(by('Model')).toEqual({
+      model: false,
+      computer: 'Model',
+      author: 'You on Model',
+      subject: 'Your answer on Model',
+    });
+    // An answer from a phone or tablet, and the model's, are as before.
+    expect(answerBy(act('answer', NOW))).toMatchObject({ author: 'You', computer: null });
+    expect(answerBy(act('proxy-answer', NOW))).toMatchObject({ author: 'Model', model: true });
   });
 });
 
