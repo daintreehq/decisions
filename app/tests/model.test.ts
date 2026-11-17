@@ -171,7 +171,13 @@ describe('question store', () => {
     ]);
     await s.ingestAll([declined, withdrawn, proxied]);
     const cancel = (questionId: string, decline?: true, expectedRevision = 0) =>
-      actionEvent(w, { questionId, action: 'cancel', signer: w.desktop, decline, expectedRevision });
+      actionEvent(w, {
+        questionId,
+        action: 'cancel',
+        signer: w.desktop,
+        decline,
+        expectedRevision,
+      });
     // A decline then a withdrawal, and a withdrawal then a decline: the later cancel changes nothing.
     await s.ingest(await cancel(declined.question_id!, true));
     await s.ingest(await cancel(declined.question_id!));
@@ -182,7 +188,9 @@ describe('question store', () => {
     for (const id of [declined.question_id!, withdrawn.question_id!])
       expect(s.get(id)!.integrityIssues.join()).toMatch(/repeats a transition/);
     // A model answer is confirmed or overruled, never declined; the desktop may still withdraw it.
-    await s.ingest(await actionEvent(w, { questionId: proxied.question_id!, action: 'proxy-answer' }));
+    await s.ingest(
+      await actionEvent(w, { questionId: proxied.question_id!, action: 'proxy-answer' }),
+    );
     await s.ingest(await cancel(proxied.question_id!, true, 1));
     const v = s.get(proxied.question_id!)!;
     expect(v.status).toBe('proxy-answered');

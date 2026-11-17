@@ -13,6 +13,7 @@ import {
   claimRelay,
   createPairingInvite,
   type DecisionView,
+  type Identity,
   type InjectResult,
   type LocateResult,
   type ProxyEngine,
@@ -20,11 +21,13 @@ import {
   type TerminalSink,
   type TerminalTarget,
 } from '@daintreehq/decisions-client';
+import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
 /**
  * Captures History (the day-grouped list, its modes and search, the record pane or sheet, and the activity timeline
- * with revisions, corrections and delivery) in every state that carries design weight, for design review:
+ * with revisions, corrections and delivery, and declines made on the phone and on the computer beside a withdrawal) in
+ * every state that carries design weight, for design review:
  *   pnpm build && DESIGN_CAPTURE_DIR=/some/dir pnpm --filter @daintreehq/decisions-e2e exec vitest run tests/history-capture.test.ts
  * Skipped unless DESIGN_CAPTURE_DIR is set. Everything goes through the real seams: a real relay, the real desktop
  * client publishing encrypted questions, and the PWA paired and answering through its own UI. The desktop client
@@ -117,6 +120,8 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
   let context: BrowserContext;
   let page: Page;
   let bridge: DecisionsBridge;
+  let identity: Identity;
+  let client: RelayClient;
   const local = new MemoryLocalStore();
   const written: string[] = [];
   const ids: Record<string, string> = {};
@@ -214,14 +219,14 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
   it('pairs, then captures History with nothing in it', async () => {
     const home = mkdtempSync(join(tmpdir(), 'decisions-history-'));
     const keyStore = new FileKeyStore(home);
-    const { identity } = await claimRelay({
+    ({ identity } = await claimRelay({
       origin: relay.origin,
       claimSecret: CLAIM_SECRET,
       label: 'Greg’s MacBook Pro',
       store: keyStore,
-    });
+    }));
     // Requests keep real time (the relay checks it); the records this client signs follow Date (see backdated).
-    const client = new RelayClient({ identity, now: realNow });
+    client = new RelayClient({ identity, now: realNow });
     bridge = new DecisionsBridge({
       identity,
       keyStore,
@@ -567,6 +572,139 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
     await shot('w-offline-light');
     await context.setOffline(false);
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  });
+
+  it('captures a decline made on the phone and one made on the computer beside a withdrawal', async () => {
+    const origin: QuestionOrigin = {
+      machine_label: 'Greg’s MacBook Pro',
+      host_id: 'host_01JC8Z4MQ7',
+      pane_id: 'p11',
+      terminal_generation: 1,
+      ownership_principal: 'principal-p11',
+      agent_incarnation: '1',
+      agent_kind: 'claude-code',
+      agent_session_id: 's-p11',
+      project_id: 'infra',
+      worktree_id: 'wt-p11',
+      worktree_root: '/work/infra',
+      workflow_gate_id: null,
+    };
+    const asks = {
+      phone: 'Rotate the staging database password tonight?',
+      computer: 'Archive the staging feature flags nobody has touched in 90 days?',
+      withdrawn: 'Pin the staging Node version to 22 before the upgrade?',
+    };
+    for (const [key, question] of Object.entries(asks)) {
+      const r = await bridge.registerQuestion({
+        origin,
+        input: {
+          question,
+          kind: 'approval',
+          options: [
+            { id: 'yes', label: 'Yes' },
+            { id: 'no', label: 'No' },
+          ],
+        },
+      });
+      ids[key] = r.questionId;
+    }
+    await bridge.pump();
+
+    // On the phone: More, Dismiss question, confirmed.
+    await size(PHONE);
+    await go(`/q/${ids.phone}`);
+    await page.locator('.ws .dock').waitFor({ timeout: 30_000 });
+    await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+    await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
+    await page.getByRole('button', { name: 'Dismiss question' }).click();
+    await page
+      .getByRole('dialog', { name: 'Dismiss this question?' })
+      .waitFor({ state: 'hidden', timeout: 30_000 });
+
+    // The agent's computer withdraws one.
+    await bridge.cancelQuestion(ids.withdrawn!);
+    await bridge.pump();
+
+    // On the computer: the owner desktop signs a cancel with `decline: true`. The desktop library cannot publish one
+    // yet, so this signs the record itself with the owner desktop's key and declares the feature its relay requires
+    // of the asking desktop. The bridge stops first, so no reconnect replaces that declaration before the decline.
+    await bridge.stop();
+    await client.socketTicket([...bridge.features, 'owner-desktop-declines-v1']);
+    const signed = await buildSignedAction({
+      installationId: identity.config.installationId,
+      questionId: ids.computer!,
+      action: 'cancel',
+      signerDeviceId: identity.config.deviceId,
+      signingKey: identity.keys.signing.privateKey,
+      expectedRevision: 0,
+      envelope: null,
+      decline: true,
+    });
+    const receipt = await client.postAction('cancel', ids.computer!, newId(), signed);
+    expect(receipt).toMatchObject({ status: 'cancelled' });
+
+    // History, framed on the three: two declines with the declined glyph, named where they were made, and the withdrawal.
+    await go('/history');
+    await search('staging');
+    const closed = async (text: string) => {
+      const r = row(text);
+      await r.waitFor({ timeout: 30_000 });
+      return [
+        await r.getAttribute('data-status'),
+        await r.locator('.sglyph').getAttribute('class'),
+        await r.locator('.qrow-a.closed').textContent(),
+      ];
+    };
+    const expected = [
+      [asks.phone, 'declined', 'Declined by you'],
+      [asks.computer, 'declined', 'Declined by you on Greg’s MacBook Pro'],
+      [asks.withdrawn, 'withdrawn', 'Withdrawn on Greg’s MacBook Pro'],
+    ] as const;
+    const check = async () => {
+      await until(
+        async () => (await page.locator('.hrow').count()) === 3,
+        30_000,
+        'the three staging questions in History',
+      );
+      for (const [text, status, line] of expected)
+        expect(await closed(text)).toEqual([status, `sglyph ${status}`, line]);
+    };
+    await check();
+    await shot('p-declines-light');
+    await mode('All activity');
+    await check();
+    await mode('Decisions');
+    await openRecord(asks.computer, false);
+    const sheet = page.locator('dialog.record-sheet[open]');
+    expect(await sheet.locator('.summary-closed').textContent()).toBe(
+      'Declined by you on Greg’s MacBook Pro',
+    );
+    expect(await sheet.locator('.tl-item[data-kind="declined"]').count()).toBe(1);
+    expect(await sheet.locator('.tl-item[data-kind="withdrawn"]').count()).toBe(0);
+    await shot('p-record-declined-computer-light');
+    await closeSheet();
+    await theme('dark');
+    await settle();
+    await shot('p-declines-dark');
+    await theme('light');
+
+    // On the question itself, the thread says who declined it, and where.
+    await go(`/q/${ids.computer}`);
+    await sees('Declined by you on Greg’s MacBook Pro', '.ws');
+    expect(
+      await page
+        .locator('.ws')
+        .getByText(/Withdrawn on/)
+        .count(),
+    ).toBe(0);
+
+    await size(WIDE);
+    await go('/history');
+    await search('staging');
+    await check();
+    await openRecord(asks.computer, true);
+    await shot('w-declines-light');
+    await size(PHONE);
     expect(written).toEqual(expect.arrayContaining(EXPECTED));
   });
 });
@@ -597,4 +735,8 @@ const EXPECTED = [
   'w-record-correction-dark',
   'w-record-expired-dark',
   'w-offline-light',
+  'p-declines-light',
+  'p-record-declined-computer-light',
+  'p-declines-dark',
+  'w-declines-light',
 ];

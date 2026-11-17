@@ -377,7 +377,10 @@ describe('History', () => {
     // The flag counts only on a verified owner-desktop cancel.
     const unverified = { ...computer, actions: [{ ...computerDecline(NOW - H), verified: false }] };
     expect(principalStatus(unverified, NOW)).toBe('withdrawn');
-    const byHost = { ...computer, actions: [{ ...computerDecline(NOW - H), signerRole: 'desktop-host' as const }] };
+    const byHost = {
+      ...computer,
+      actions: [{ ...computerDecline(NOW - H), signerRole: 'desktop-host' as const }],
+    };
     expect(principalStatus(byHost, NOW)).toBe('withdrawn');
   });
 
