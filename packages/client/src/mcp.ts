@@ -304,7 +304,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision, whether answered_on is phone or computer; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,

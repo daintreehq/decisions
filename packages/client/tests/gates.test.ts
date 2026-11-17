@@ -320,6 +320,29 @@ describe('design review end to end through the phone app', () => {
     expect(env.sink.typed[0]!.text).toContain('choice: approve');
   });
 
+  it('the same approval made on the computer: human, answered on the computer, digests match', async () => {
+    const env = await designReview();
+    const r = await env.ask();
+    const digests = (await env.store.getQuestion(r.questionId))!.attachment_digests;
+    expect(digests).toHaveLength(2);
+    await env.relay.answerEvent({
+      questionId: r.questionId,
+      phone: { deviceId: env.identity.config.deviceId, keys: env.identity.keys },
+      options: ['approve'],
+      provenance: 'human-desktop',
+      extra: { reviewed_attachment_digests: digests },
+    });
+    await env.bridge.catchUp();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      answeredOn: 'computer',
+      choice: 'approve',
+      reviewedDigestsMatch: true,
+    });
+    expect(env.sink.typed).toHaveLength(1);
+  });
+
   it('an approval that did not review every image does not match', async () => {
     const env = await designReview();
     const r = await env.ask();

@@ -647,9 +647,13 @@ describe('declaring phone-images-v1', () => {
     await client.socketTicket(BRIDGE_FEATURES);
     await client.events(0, 10);
     expect(new URL(seen[0]!.url).searchParams.get('features')).toBe(
-      'involvement-v1,phone-images-v1',
+      'involvement-v1,owner-desktop-answers-v1,phone-images-v1',
     );
-    expect(JSON.parse(seen[1]!.body!).features).toEqual(['involvement-v1', 'phone-images-v1']);
+    expect(JSON.parse(seen[1]!.body!).features).toEqual([
+      'involvement-v1',
+      'owner-desktop-answers-v1',
+      'phone-images-v1',
+    ]);
     expect(new URL(seen[2]!.url).searchParams.has('features')).toBe(false);
   });
 
