@@ -155,6 +155,23 @@ describe('action verification and provenance', () => {
     expect(r).toEqual({ ok: false, reason: 'a owner-desktop cannot sign answer' });
   });
 
+  it("refuses the owner desktop's answer whatever provenance the relay claims, until it can label one", async () => {
+    const w = await makeWorld();
+    const q = await questionEvent(w);
+    for (const provenance of ['human', 'human-desktop'] as const) {
+      const ev = await actionEvent(w, {
+        questionId: q.question_id!,
+        action: 'answer',
+        signer: w.desktop,
+        provenance,
+      });
+      expect(await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!), provenance).toEqual({
+        ok: false,
+        reason: 'a owner-desktop cannot sign answer',
+      });
+    }
+  });
+
   it('rejects a phone signing a PROXY answer', async () => {
     const w = await makeWorld();
     const q = await questionEvent(w);

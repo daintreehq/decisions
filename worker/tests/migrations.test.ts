@@ -194,6 +194,8 @@ describe('schema migrations', () => {
     const result = await inRoom((_room, state) => {
       const sql = state.storage.sql;
       restoreV4Actions(sql);
+      // Sparse rowids, so only copying them explicitly keeps them.
+      sql.exec(`UPDATE actions SET rowid = rowid * 7 + 100`);
       sql.exec(`UPDATE meta SET value = '4' WHERE key = 'schema_version'`);
       const rows = () => sql.exec(`SELECT rowid AS r, * FROM actions ORDER BY rowid`).toArray();
       const checkSql = () =>

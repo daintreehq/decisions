@@ -137,6 +137,7 @@ describe('the owner desktop answers for the person', () => {
     const w = await claimRelay();
     await pairDevice(w);
     const { questionId } = await ask(w);
+    const later = await ask(w);
 
     // No declaration, then every other feature but this one.
     const key = newId();
@@ -164,6 +165,9 @@ describe('the owner desktop answers for the person', () => {
     expect(sameAction.status).toBe(200);
     expect(sameAction.json).toMatchObject({ revision: 1, status: 'human-answered' });
     expect((await state(questionId)).answerEvents).toBe(1);
+    // A new answer reads the latest declaration, never one the desktop has withdrawn.
+    expectCreatorRefusal((await act(w, w.owner, 'answer', later.questionId, 0)).res);
+    await expectUntouched(later.questionId);
   });
 
   it("answers a Host's question once the Host declares support; the owner's own declaration never counts", async () => {
@@ -177,6 +181,8 @@ describe('the owner desktop answers for the person', () => {
     expectCreatorRefusal((await act(w, w.owner, 'answer', questionId, 0)).res);
     await expectUntouched(questionId);
 
+    // Only the asking desktop's declaration counts: the answering owner needs none.
+    await declare(w.owner, []);
     await declare(host, ['thread-messages-v1', ACCEPTS]);
     const { res } = await act(w, w.owner, 'answer', questionId, 0);
     expect(res.status).toBe(201);
@@ -188,6 +194,49 @@ describe('the owner desktop answers for the person', () => {
     expect(detail.json.deliveries).toEqual([
       expect.objectContaining({ target_host_id: 'host_bbbbbbbb', status: 'relay-queued' }),
     ]);
+  });
+
+  it('keeps the usual state errors ahead of the support check', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    // The asking desktop declares nothing, so only an earlier check can produce anything but the refusal.
+    const answered = await ask(w);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+    const stale = await act(w, w.owner, 'answer', answered.questionId, 0);
+    expect(stale.res.status).toBe(409);
+    expect(stale.res.json.code).toBe('revision_conflict');
+
+    const cancelled = await ask(w);
+    expect((await act(w, w.owner, 'cancel', cancelled.questionId, 0)).res.status).toBe(201);
+    const late = await act(w, w.owner, 'answer', cancelled.questionId, 0);
+    expect(late.res.status).toBe(409);
+    expect(late.res.json.code).toBe('invalid_state');
+    expect(late.res.json.details).toBeUndefined();
+
+    const due = await ask(w);
+    await inRoom((room) =>
+      room.run(
+        `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
+        Date.now() - 1,
+        due.questionId,
+      ),
+    );
+    const expired = await act(w, w.owner, 'answer', due.questionId, 0);
+    expect(expired.res.status).toBe(410);
+    expect(expired.res.json.code).toBe('expired');
+  });
+
+  it('refuses once the asking desktop is revoked, whatever it declared', async () => {
+    const w = await claimRelay();
+    await pairDevice(w);
+    const { host, world: hostWorld } = await enrollHost(w);
+    await declare(host, [ACCEPTS]);
+    const { questionId } = await ask(hostWorld);
+    await inRoom((room) =>
+      room.run(`UPDATE devices SET revoked_at = ? WHERE device_id = ?`, Date.now(), host.id),
+    );
+    expectCreatorRefusal((await act(w, w.owner, 'answer', questionId, 0)).res);
+    await expectUntouched(questionId);
   });
 
   it('never lets a Host answer as the person, on its own question or the owner’s', async () => {
@@ -300,5 +349,26 @@ describe('the owner desktop gains no other human action', () => {
         })
       ).status,
     ).toBe(403);
+    // Voice correction is served by the outer Worker, with its own role check.
+    const { exports } = await import('cloudflare:workers');
+    const body = JSON.stringify({
+      protocol_version: 1,
+      provider: 'anthropic',
+      consent: true,
+      raw_transcript: 'yes ship it',
+      question: 'Ship?',
+      option_labels: [],
+      keyterms: [],
+    });
+    const correct = await exports.default.fetch(
+      new Request('https://relay.test/api/v1/voice/correct', {
+        method: 'POST',
+        body,
+        headers: {
+          authorization: await w.owner.authHeader('POST', '/api/v1/voice/correct', '', body),
+        },
+      }),
+    );
+    expect(correct.status).toBe(403);
   });
 });

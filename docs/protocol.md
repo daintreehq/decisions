@@ -45,7 +45,9 @@ the signer (`provenanceForSigner` in `state.ts`):
 
 `cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question, signed by a phone or
 tablet it records that the person **declined** to answer (section 6.1). `roleMaySign` in `state.ts` is the one role
-table the relay and every client check signers against.
+table the relay and every client check signers against. Until they can label an answer made on the computer, the
+desktop library and the phone app also refuse an owner-desktop `answer`, whatever provenance the relay claims; a
+desktop declares `owner-desktop-answers-v1` only once it accepts one.
 
 The question's publishing desktop types the answer, and a desktop that predates owner-desktop answers rejects one. So
 the relay commits an owner-desktop `answer` only when the publishing desktop (its `originating_device_id`) declared
@@ -659,14 +661,17 @@ A client that turns a feature on later (after an upgrade) backfills from that fe
 (`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`): its cursor may already be past events it was not
 sent.
 
-**Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive and opt-in, and a client that declares nothing
-sees exactly the 0.3.0 protocol. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
+**Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive, and a client that declares nothing sees the
+0.3.0 protocol but for one new value, below. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
 `HumanAnswerContentV1.images`, `InfoResponse.features`, `DeviceInfo.features`, `SocketTicketBody.features`) parse
 under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0 client is never sent (an empty
-list is harmless). The one new value in an existing field is `human-desktop` provenance: a client from before it
-rejects that one action event as malformed and goes on with the rest of the page, and cannot parse a question detail
-that lists it. The relay commits one only for a question whose publishing desktop declared `owner-desktop-answers-v1`,
-so a desktop that cannot read it never has one of its own to deliver.
+list is harmless). The one new value in an existing field is `human-desktop` provenance, on the action events and
+question details of an owner-desktop answer, which every client is sent. An events page still parses under 0.3.0
+schemas, since they leave event data unchecked. A client that verifies the event (its `EventData.action` schema, or
+the signer's role) rejects that one event and goes on with the rest of the page, and one that validates a question
+detail against its old `QuestionDetail` schema fails on a detail that lists it. The relay commits one only for a
+question whose publishing desktop declared `owner-desktop-answers-v1`, so a desktop that cannot read it never has one
+of its own to deliver.
 
 **Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
 desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and
