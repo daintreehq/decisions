@@ -79,6 +79,16 @@ export const LIMITS = {
    */
   snapshotCiphertextChars: 96 * 1024,
 
+  /* ---- involvement preference (section 20) ---- */
+  /** The most other agents a person can ask to be consulted before a recommendation reaches them. */
+  involvementConsultMax: 8,
+  /** A temporary involvement mode ends at most this long after the relay accepts it. */
+  involvementOverrideMaxMs: 30 * 24 * 60 * 60 * 1000,
+  /** Agents a preparation report can say were consulted. */
+  preparationAgentsMax: 64,
+  /** The agent's own account of how it prepared a question, in characters. */
+  preparationSummaryChars: 2_000,
+
   /* ---- feature negotiation (section 19) ---- */
   /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */
   featuresPerDeclaration: 16,

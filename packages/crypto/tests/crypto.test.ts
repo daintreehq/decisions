@@ -3,6 +3,7 @@ import {
   CryptoEnvelope as EnvelopeSchema,
   DeviceCert as CertSchema,
   EpochGrant as GrantSchema,
+  InvolvementRecord,
   QuestionRecord as QuestionSchema,
   SignedAction,
   SignedMessage,
@@ -12,9 +13,11 @@ import {
 } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
+  buildSignedInvolvement,
   buildSignedMessage,
   buildSignedQuestion,
   buildSignedSnapshot,
+  verifyObject,
   createEpochGrant,
   decodeInvite,
   decryptAttachment,
@@ -418,6 +421,60 @@ describe('envelopes', () => {
     expect(off.record).toMatchObject({ sharing: 'off', envelope_digest: null });
     expect(await verifyRecordAndEnvelope(off.record, null, pub)).toBe(true);
     expect(await verifyRecordAndEnvelope(off.record, env, pub)).toBe(false);
+  });
+});
+
+describe('involvement records', () => {
+  it('a phone signs the whole preference; changing any field breaks the signature', async () => {
+    const w = await world();
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const r = await buildSignedInvolvement({
+      installationId: INST,
+      signerDeviceId: w.phoneId,
+      signingKey: w.phoneKeys.signing.privateKey,
+      revision: 2,
+      normalMode: 'recommend',
+      consultCount: 3,
+      override: { mode: 'involve-early', until },
+    });
+    expect(InvolvementRecord.safeParse(r).success).toBe(true);
+    expect(r).toMatchObject({
+      type: 'involvement.preference',
+      revision: 2,
+      normal_mode: 'recommend',
+      consult_count: 3,
+      override: { mode: 'involve-early', until },
+      signer_device_id: w.phoneId,
+    });
+    const pub = w.phoneKeys.signing.publicKey;
+    expect(await verifyObject(pub, r)).toBe(true);
+    expect(await verifyObject(w.ownerKeys.signing.publicKey, r)).toBe(false);
+    for (const tampered of [
+      { ...r, revision: 3 },
+      { ...r, normal_mode: 'involve-early' },
+      { ...r, consult_count: 4 },
+      { ...r, installation_id: 'other_inst01' },
+      { ...r, signer_device_id: w.ownerId },
+      {
+        ...r,
+        override: { mode: 'involve-early', until: new Date(Date.now() + 7_200_000).toISOString() },
+      },
+      { ...r, override: { mode: 'recommend', until } },
+      { ...r, override: null },
+    ]) {
+      expect(await verifyObject(pub, tampered), JSON.stringify(tampered)).toBe(false);
+    }
+    const plain = await buildSignedInvolvement({
+      installationId: INST,
+      signerDeviceId: w.phoneId,
+      signingKey: w.phoneKeys.signing.privateKey,
+      revision: 1,
+      normalMode: 'involve-early',
+      consultCount: 1,
+      override: null,
+    });
+    expect(plain.override).toBeNull();
+    expect(await verifyObject(pub, plain)).toBe(true);
   });
 });
 

@@ -54,6 +54,7 @@ import {
   SnapshotRefresh,
   SnapshotRefreshBody,
 } from './snapshot.js';
+import { InvolvementBody, InvolvementReceipt, InvolvementResponse } from './involvement.js';
 import { API_PREFIX, PROTOCOL_VERSION } from './version.js';
 
 export interface RouteSpec {
@@ -507,6 +508,24 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     response: SettingsResponse,
   },
   {
+    method: 'GET',
+    path: '/involvement',
+    auth: 'signed',
+    roles: 'any',
+    summary:
+      "The person's latest signed involvement preference, or null; reading it creates nothing",
+    response: InvolvementResponse,
+  },
+  {
+    method: 'PUT',
+    path: '/involvement',
+    auth: 'signed',
+    roles: HUMANS,
+    summary: 'Replace the involvement preference (compare-and-swap on its revision)',
+    request: InvolvementBody,
+    response: InvolvementReceipt,
+  },
+  {
     method: 'POST',
     path: '/voice/session',
     auth: 'signed',
@@ -659,6 +678,7 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
   const api = await import('./api.js');
   const thread = await import('./thread.js');
   const snap = await import('./snapshot.js');
+  const inv = await import('./involvement.js');
   const pick = {
     DeviceCert: s.DeviceCert,
     EpochGrant: s.EpochGrant,
@@ -691,6 +711,11 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
     PaneSnapshotBody: snap.PaneSnapshotBody,
     SnapshotRefreshBody: snap.SnapshotRefreshBody,
     PaneSnapshotResponse: snap.PaneSnapshotResponse,
+    PreparationReport: s.PreparationReport,
+    InvolvementRecord: inv.InvolvementRecord,
+    InvolvementBody: inv.InvolvementBody,
+    InvolvementReceipt: inv.InvolvementReceipt,
+    InvolvementResponse: inv.InvolvementResponse,
   };
   return Object.fromEntries(Object.entries(pick).map(([k, v]) => [k, jsonSchema(v as z.ZodType)]));
 }
