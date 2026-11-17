@@ -135,7 +135,11 @@ const FEATURES_TTL_MS = 60_000;
 /** Agent messages committed for one question, ever: the local share of `LIMITS.messagesPerQuestion`. */
 const messageCountKey = (questionId: string) => `thread-messages:${questionId}`;
 const messageSeq = (o: OutboxItem) => (o.payload as MessagePayload).seq;
-const ownerMessageSeq = (o: OutboxItem) => (o.payload as OwnerMessagePayload).seq;
+/** The person's follow-ups, answers and declines on the owner desktop: sent in the order they were made. */
+const isPersonItem = (o: OutboxItem) =>
+  o.kind === 'owner-answer' || o.kind === 'owner-decline' || o.kind === 'owner-message';
+/** A person item's place on its question; an answer queued before the order was kept counts as first. */
+const personSeq = (o: OutboxItem) => (o.payload as { seq?: number }).seq ?? 0;
 /** A relay takes the owner desktop's follow-ups when it advertises threads and the feature itself. */
 const takesOwnerMessages = (set: ReadonlySet<ProtocolFeature>) =>
   set.has(THREAD_FEATURE) && set.has(OWNER_MESSAGE_FEATURE);
@@ -627,7 +631,7 @@ export class Publisher {
         result: null,
       };
       await ctx.store.setMeta(key, JSON.stringify(reserved));
-      const payload: OwnerAnswerPayload = { signed };
+      const payload: OwnerAnswerPayload = { signed, seq: await this.nextPersonSeq(qid) };
       await ctx.store.putOutbox({
         id: itemId,
         kind: 'owner-answer',
@@ -743,7 +747,7 @@ export class Publisher {
         result: null,
       };
       await ctx.store.setMeta(key, JSON.stringify(reserved));
-      const payload: OwnerDeclinePayload = { signed };
+      const payload: OwnerDeclinePayload = { signed, seq: await this.nextPersonSeq(qid) };
       await ctx.store.putOutbox({
         id: itemId,
         kind: 'owner-decline',
@@ -854,10 +858,7 @@ export class Publisher {
         envelope,
         createdAt: nowIso(now),
       });
-      // The person's follow-ups on one question go out in the order they were written, whatever the clock says.
-      const countKey = ownerMessageCountKey(qid);
-      const seq = (Number(await ctx.store.getMeta(countKey)) || 0) + 1;
-      await ctx.store.setMeta(countKey, String(seq));
+      const seq = await this.nextPersonSeq(qid);
       // The id is reserved with its signed message before the item exists: a crash in between queues that message.
       const reserved: OwnerMessageRecord = { question_id: qid, signed, seq, result: null };
       await ctx.store.setMeta(key, JSON.stringify(reserved));
@@ -1052,6 +1053,17 @@ export class Publisher {
     return this.featuresRead;
   }
 
+  /**
+   * The next place among the person's follow-ups, answers and declines from this computer on a question, whatever
+   * the clock says. Call under `ctx.lock`.
+   */
+  private async nextPersonSeq(questionId: string): Promise<number> {
+    const key = ownerMessageCountKey(questionId);
+    const seq = (Number(await this.ctx.store.getMeta(key)) || 0) + 1;
+    await this.ctx.store.setMeta(key, String(seq));
+    return seq;
+  }
+
   private async dropSpool(p: CreatePayload): Promise<void> {
     for (const a of p.attachments) await this.ctx.spool.delete(a.attachment_id);
   }
@@ -1203,25 +1215,18 @@ export class Publisher {
       if (item.kind !== 'create') {
         // Per-question ordering: an action must never overtake its own (possibly backed-off) create, a message
         // never overtakes an earlier message in its thread, or a later "no reply needed" could land before the
-        // question it settles, and the person's answer, decline or follow-up never overtakes a withdrawal already queued.
+        // question it settles, and the person's answer, decline or follow-up never overtakes a withdrawal already queued
+        // or one of their own made before it (a clarification queued offline reaches the agent before the approval).
         const pending = await pendingOf(item.question_id);
         if (!pending.some((o) => o.id === item.id)) continue; // dropped earlier in this flush
-        const person =
-          item.kind === 'owner-answer' ||
-          item.kind === 'owner-decline' ||
-          item.kind === 'owner-message';
+        const person = isPersonItem(item);
         if (pending.some((o) => o.kind === 'create' || (person && o.kind === 'cancel'))) continue;
         if (
           item.kind === 'message' &&
           pending.some((o) => o.kind === 'message' && messageSeq(o) < messageSeq(item))
         )
           continue;
-        if (
-          item.kind === 'owner-message' &&
-          pending.some(
-            (o) => o.kind === 'owner-message' && ownerMessageSeq(o) < ownerMessageSeq(item),
-          )
-        )
+        if (person && pending.some((o) => isPersonItem(o) && personSeq(o) < personSeq(item)))
           continue;
       }
       attempted++;
@@ -1276,6 +1281,7 @@ export class Publisher {
           item,
           () => (features ??= this.relayFeatures()),
           remove,
+          proceed,
         );
         if (step === 'declined') sent++;
         else failed++;
@@ -1500,6 +1506,7 @@ export class Publisher {
     item: OutboxItem,
     features: () => Promise<ReadonlySet<ProtocolFeature>>,
     remove: (it: OutboxItem) => Promise<void>,
+    proceed?: () => boolean,
   ): Promise<'declined' | 'settled' | 'retry' | 'stop'> {
     const { ctx } = this;
     const payload = item.payload as OwnerDeclinePayload;
@@ -1583,10 +1590,13 @@ export class Publisher {
         if (!wasSent) return settle({ status: 'unsupported', by: 'relay' });
         unsupported = true;
       } else {
+        // A bridge stopped while this flush read the relay's features sends nothing more, as for every other item.
+        if (proceed && !proceed()) return 'stop';
         if (!wasSent) {
           // Marked before the first post, so a send whose answer is lost is never taken for one that never went.
           payload.sent = true;
           await ctx.store.putOutbox({ ...item, payload });
+          if (proceed && !proceed()) return 'stop';
         }
         try {
           await ctx.client.postAction('cancel', item.question_id, declineId, signed, {
@@ -1626,6 +1636,7 @@ export class Publisher {
       }
     }
 
+    if (proceed && !proceed()) return 'stop';
     let detail: unknown;
     try {
       detail = await ctx.client.getQuestion(item.question_id, {

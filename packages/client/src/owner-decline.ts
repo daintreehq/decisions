@@ -42,8 +42,8 @@ export type DeclineQuestionRequest = z.output<typeof DeclineQuestionInput>;
 /**
  * Where a decline stands, for a UI to show:
  * - `queued`: committed locally and not settled yet: the relay could not be reached, the decline waits behind its
- *   question's unsent create or withdrawal, the relay took it and it is being confirmed, or the bridge is stopped. The
- *   outbox keeps sending the same signed decline.
+ *   question's unsent create or withdrawal or the person's earlier follow-up or answer on it, the relay took it and it
+ *   is being confirmed, or the bridge is stopped. The outbox keeps sending the same signed decline.
  * - `declined`: the relay committed this decline. The asking desktop tells its agent, as it would a phone's decline.
  * - `already-answered`: the question was answered first (by the person, or by the decision model).
  * - `changed`: the question is open at another revision than the one the person saw (it was reopened).
@@ -79,6 +79,8 @@ export type OwnerDeclineResult = {
  */
 export interface OwnerDeclinePayload {
   signed: SignedAction;
+  /** Its place among the person's follow-ups, answers and declines on its question, as `OwnerAnswerPayload.seq`. */
+  seq?: number;
   sent?: true;
   confirming?: true;
 }
