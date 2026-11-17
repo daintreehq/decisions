@@ -170,7 +170,7 @@ export class FakeRelay {
   snapshots: { questionId: string; body: unknown }[] = [];
   /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
   snapshotReplies: { status: number; body: Record<string, unknown> }[] = [];
-  /** What `GET /involvement` serves; null makes the route unknown (404), like a relay from before it. */
+  /** What `GET /involvement` serves; null makes both routes unknown (404), like a relay from before them. */
   involvement: { preference: unknown; received_at: string | null } | null = {
     preference: null,
     received_at: null,
@@ -514,7 +514,7 @@ export class FakeRelay {
       if (this.holdInvolvement) await this.holdInvolvement;
       return json(200, served);
     }
-    if (method === 'PUT' && p === '/api/v1/involvement') {
+    if (method === 'PUT' && p === '/api/v1/involvement' && this.involvement) {
       const b = body as { idempotency_key: string; preference: InvolvementRecord };
       this.involvementPuts.push({ idem: b.idempotency_key, preference: b.preference });
       await this.onInvolvementPut?.();

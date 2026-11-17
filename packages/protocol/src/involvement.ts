@@ -65,6 +65,12 @@ export const InvolvementReceipt = z.object({
 });
 export type InvolvementReceipt = z.infer<typeof InvolvementReceipt>;
 
+/** `409 revision_conflict` details from `PUT /involvement`: the revision the relay holds (0 when none). */
+export const InvolvementConflictDetails = z.object({
+  latest_revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type InvolvementConflictDetails = z.infer<typeof InvolvementConflictDetails>;
+
 /** `GET /involvement`. Reading it creates nothing: no question, event or notification. */
 export const InvolvementResponse = z.object({
   /** The latest signed record, or null when nobody has set one. */

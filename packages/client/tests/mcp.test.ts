@@ -246,6 +246,30 @@ describe('HTTP MCP: protocol', () => {
       ),
     ).toEqual([]);
   });
+  it("a pane's bearer token cannot read or set the whole involvement preference, as a tool or as a method", async () => {
+    const { mcp, relay, bridge } = await boot();
+    await bridge.start({ socket: false });
+    const args = { expectedRevision: 0, normalMode: 'recommend', consultCount: 3, override: null };
+    for (const name of [
+      'set_involvement',
+      'set_involvement_preference',
+      'setInvolvementPreference',
+      'get_involvement_preference',
+    ]) {
+      const r = await raw(mcp, { body: rpc('tools/call', { name, arguments: args }) });
+      expect(JSON.parse(r.body).error.code).toBe(-32602);
+    }
+    for (const method of ['setInvolvementPreference', 'getInvolvementPreference']) {
+      expect(JSON.parse((await raw(mcp, { body: rpc(method, args) })).body).error.code).toBe(
+        -32601,
+      );
+    }
+    // A host's forwarder forwards only these, so neither reaches the bridge through a pane.
+    expect([...MCP_BRIDGE_METHODS]).not.toContain('setInvolvementPreference');
+    expect([...MCP_BRIDGE_METHODS]).not.toContain('getInvolvementPreference');
+    expect(relay.calls.filter((c) => c.method === 'PUT')).toEqual([]);
+    await bridge.stop();
+  });
   it('GET/DELETE/OPTIONS are 405 without CORS headers', async () => {
     const { mcp } = await boot();
     for (const method of ['GET', 'DELETE', 'OPTIONS']) {
@@ -443,6 +467,47 @@ describe('HTTP MCP: get_involvement', () => {
       mode: 'involve-early',
       revision: 2,
     });
+    await bridge.stop();
+  });
+
+  it('reads a preference set on the computer exactly as one set on a phone', async () => {
+    const clock = { t: Date.parse('2026-11-17T09:00:00.000Z') };
+    const { mcp, bridge, relay, phone, identity } = await boot({ bridge: { now: () => clock.t } });
+    relay.involvement = {
+      preference: await buildSignedInvolvement({
+        installationId: identity.config.installationId,
+        signerDeviceId: phone.deviceId,
+        signingKey: phone.keys.signing.privateKey,
+        revision: 1,
+        normalMode: 'recommend',
+        consultCount: 3,
+        override: null,
+        createdAt: new Date(clock.t).toISOString(),
+      }),
+      received_at: null,
+    };
+    await bridge.start({ socket: false });
+    await bridge.involvement.refresh();
+    const fromPhone = await read(mcp);
+    expect(fromPhone.structuredContent).toMatchObject({ status: 'available', revision: 1 });
+
+    expect(
+      await bridge.setInvolvementPreference({
+        expectedRevision: 1,
+        normalMode: 'recommend',
+        consultCount: 3,
+        override: null,
+      }),
+    ).toEqual({ status: 'saved', revision: 2 });
+    await bridge.involvement.refresh();
+    const fromComputer = await read(mcp);
+    expect(fromComputer.structuredContent).toEqual({
+      ...fromPhone.structuredContent,
+      revision: 2,
+    });
+    expect(fromComputer.content[0].text).toBe(
+      fromPhone.content[0].text.replace('revision 1', 'revision 2'),
+    );
     await bridge.stop();
   });
 

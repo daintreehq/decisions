@@ -346,7 +346,7 @@ export class EventVerifier {
     const signer = await this.lookup(r.signer_device_id);
     if (!signer) return { ok: false, reason: 'unknown-signer' };
     const setOn = involvementSetOn(signer.cert.role);
-    if (!setOn) return { ok: false, reason: 'set-by-desktop-host' };
+    if (!setOn) return { ok: false, reason: 'set-by-disallowed-device' };
     if (!(await verifyObject(signer.pub, r))) return { ok: false, reason: 'bad-signature' };
     if (
       signer.revokedAt !== null ||
