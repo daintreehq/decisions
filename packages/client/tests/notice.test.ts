@@ -296,6 +296,22 @@ describe('formatFollowupNotice', () => {
     expect(noticeChunk([block])).toBe(fixture('followup-notice.txt'));
   });
 
+  it('names a follow-up sent from the computer, and only that one (fixtures/owner-followup-notice.txt)', () => {
+    const fromComputer = {
+      ...base,
+      answered: false,
+      messageId: 'msg_owner00001',
+      injectionId: 'inj_msgowner01',
+      text: 'Check the reporting job before you answer.\nIt still reads that column.',
+    };
+    const block = formatFollowupNotice({ ...fromComputer, onComputer: true });
+    expect(noticeChunk([block])).toBe(fixture('owner-followup-notice.txt'));
+    // The same message from a phone is the same block without the line.
+    expect(formatFollowupNotice(fromComputer)).toBe(
+      block.replace('source: human\nsent_from: computer\n', 'source: human\n'),
+    );
+  });
+
   it('types an answer between follow-ups in thread order under one preface (fixtures/thread-notice.txt)', () => {
     const before = formatFollowupNotice({
       ...base,
