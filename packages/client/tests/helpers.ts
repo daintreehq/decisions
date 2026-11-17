@@ -786,6 +786,8 @@ export class FakeRelay {
     revision?: number;
     eventType?: LedgerEvent['event_type'];
     provenance?: 'human' | 'proxy' | null;
+    /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
+    decline?: true;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -796,6 +798,7 @@ export class FakeRelay {
       signerDeviceId: opts.signer.deviceId,
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
+      ...(opts.decline ? { decline: true as const } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

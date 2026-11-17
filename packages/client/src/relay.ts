@@ -294,6 +294,7 @@ export class RelayClient {
     }
     const send = () => this.sendAction(kind, questionId, idempotencyKey, action, opts);
     if (kind === 'answer') return this.ownerOnly('answering for the person', send);
+    if (action.record.decline === true) return this.ownerOnly('declining for the person', send);
     return kind === 'reopen' ? this.ownerOnly('reopening a question', send) : send();
   }
   private sendAction(

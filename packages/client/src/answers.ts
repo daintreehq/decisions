@@ -9,7 +9,10 @@ import type { PhoneImageReference, Role } from '@daintreehq/decisions-protocol';
  */
 export interface AnswerEntry {
   entry_id: string;
-  /** `declined`: the person dismissed the question from a phone or tablet (a human-signed cancel); no content. */
+  /**
+   * `declined`: the person dismissed the question, from a phone or tablet (a human-signed cancel) or on the owner
+   * desktop (its cancel with the signed `decline` flag); no content.
+   */
   kind: 'answer' | 'expired' | 'declined';
   action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;

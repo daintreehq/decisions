@@ -221,19 +221,22 @@ export class EventVerifier {
 
     const role = signer.cert.role;
     // The shared role table: a phone or tablet signs the person's actions, and the pinned owner desktop may also
-    // sign the person's first `answer` (never an override or a confirmation); a `desktop-host` never signs one.
-    if (!roleMaySign(action, role)) {
+    // sign the person's first `answer` (never an override or a confirmation) and a `cancel` that declines for the
+    // person with the signed `decline` flag; a `desktop-host` never signs one.
+    if (!roleMaySign(action, role, record.decline)) {
       const kind = provenanceForAction(action);
       return {
         ok: false,
         reason:
-          kind === 'human'
-            ? 'human-action-by-non-human-device'
-            : kind === 'proxy'
-              ? 'proxy-action-by-non-desktop-device'
-              : action === 'reopen' && DESKTOP_ROLES.includes(role)
-                ? 'reopen-by-non-owner'
-                : 'desktop-action-by-non-desktop-device',
+          record.decline === true
+            ? 'decline-by-non-owner-desktop'
+            : kind === 'human'
+              ? 'human-action-by-non-human-device'
+              : kind === 'proxy'
+                ? 'proxy-action-by-non-desktop-device'
+                : action === 'reopen' && DESKTOP_ROLES.includes(role)
+                  ? 'reopen-by-non-owner'
+                  : 'desktop-action-by-non-desktop-device',
       };
     }
     const prov = provenanceForSigner(action, role);
