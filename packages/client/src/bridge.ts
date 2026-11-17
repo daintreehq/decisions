@@ -825,12 +825,10 @@ export class DecisionsBridge {
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
-        // A pump waiting its turn behind another flush sends nothing once the bridge has stopped.
-        const live = () => this.state !== 'stopped' && this.state !== 'revoked';
-        const flushed = await this.publisher.flush({ proceed: live });
+        const flushed = await this.publisher.flush();
         if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
-        if (flushed.created.length > 0) await this.publisher.flush({ proceed: live });
+        if (flushed.created.length > 0) await this.publisher.flush();
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();

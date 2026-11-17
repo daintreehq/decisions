@@ -708,11 +708,8 @@ describe('answerQuestion results a UI can show', () => {
       selectedOptionIds: ['reject'],
     });
     while ((await ownerAnswers(store)).length < 2) await tick(1);
-    // A pump waiting behind the same flush is called off too.
-    const pumped = bridge.pump();
     await bridge.stop();
     release();
-    await pumped;
     expect(await first).toMatchObject({ status: 'sent' });
     expect(await second).toMatchObject({ status: 'queued' });
     expect(answerPosts(relay)).toHaveLength(1);
