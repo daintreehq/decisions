@@ -44,6 +44,7 @@ import {
   type DictationDeps,
 } from '../src/features/voice/dictation.js';
 import type { CorrectionOutcome } from '../src/features/voice/correction.js';
+import { MicUnavailableError } from '../src/features/voice/capture.js';
 import { composeShape, verdict } from '../src/domain/compose.js';
 import { DictateButton, HOLD_MS } from '../src/components/workspace/Composer.js';
 
@@ -101,6 +102,7 @@ function rig(over: Partial<DictationDeps> = {}) {
     },
     prefs: () => h.prefs as never,
     info: () => ({ xai: true, openai: false, anthropic: true }),
+    ensureInfo: async () => undefined,
     relayOrigin: () => 'https://relay.example',
     relay: () => ({ json: async () => ({}) as never, raw: async () => new Response('{}') }),
     online: () => true,
@@ -437,6 +439,177 @@ describe('first use', () => {
     act(() => u.d.request(bindingFor()));
     expect(u.d.getState().message?.text).toBe(MESSAGES.offline);
     expect(t.mic.calls + u.mic.calls).toBe(0);
+  });
+});
+
+describe('before the relay has said whether dictation is set up', () => {
+  const XAI = { xai: true, openai: false, anthropic: false };
+  /** A relay whose `/info` is still on the way: `answer` settles the app's request with what it said, if anything. */
+  function late(over: Partial<DictationDeps> = {}) {
+    const box = { info: null as typeof XAI | null, asks: 0 };
+    let answered = deferred<void>();
+    const t = rig({
+      info: () => box.info,
+      ensureInfo: () => {
+        box.asks++;
+        return answered.promise;
+      },
+      correct: undefined,
+      ...over,
+    });
+    return {
+      ...t,
+      box,
+      async answer(info: typeof XAI | null) {
+        box.info = info;
+        answered.resolve();
+        answered = deferred<void>();
+        await flush();
+        await flush();
+      },
+    };
+  }
+
+  it('a tap shows the microphone starting while the app asks, then starts it once', async () => {
+    const t = late();
+    act(() => t.d.request(bindingFor()));
+    expect(t.d.getState()).toMatchObject({ phase: 'starting', message: null });
+    expect(t.box.asks).toBe(1);
+    expect(t.mic.calls + t.clients.length).toBe(0);
+    await t.answer(XAI);
+    expect(t.mic.calls).toBe(1);
+    await t.listen();
+    expect(t.d.getState().phase).toBe('recording');
+  });
+
+  it('a denied microphone, tapped before the answer, still says access is blocked', async () => {
+    const t = late({
+      startMic: async () => {
+        throw new MicUnavailableError('Denied', 'denied');
+      },
+    });
+    act(() => t.d.request(bindingFor()));
+    await t.answer(XAI);
+    expect(t.d.getState()).toMatchObject({
+      phase: 'idle',
+      message: { text: MESSAGES.denied, tone: 'error' },
+    });
+  });
+
+  it('first use still asks before the microphone once the answer is in', async () => {
+    h.prefs.voice.consent = false;
+    const t = late();
+    act(() => t.d.request(bindingFor()));
+    await t.answer(XAI);
+    expect(t.d.getState().phase).toBe('consent');
+    expect(t.mic.calls).toBe(0);
+    expect(h.prefs.voice.consent).toBe(false);
+  });
+
+  it('letting go, cancelling, hiding, leaving or unpairing while it asks starts nothing later', async () => {
+    const cancels: [string, (t: ReturnType<typeof late>, b: Binding) => unknown][] = [
+      ['stop', (t) => t.d.stop()],
+      ['hidden', (t) => t.d.onHidden()],
+      ['release', (t, b) => t.d.release(b.key)],
+      ['rebind', (t, b) => t.d.rebind(b.key, 1)],
+      ['teardown', (t) => t.d.teardown()],
+    ];
+    for (const consent of [true, false])
+      for (const [name, cancel] of cancels) {
+        h.prefs.voice.consent = consent;
+        const t = late();
+        const b = bindingFor();
+        act(() => t.d.request(b));
+        expect(t.d.getState().phase).toBe('starting');
+        await act(async () => void (await cancel(t, b)));
+        expect(t.d.getState().phase, name).toBe('idle');
+        await t.answer(XAI);
+        expect(t.d.getState().phase, `${name}, consent ${consent}`).toBe('idle');
+        expect(t.mic.calls + t.clients.length, name).toBe(0);
+      }
+  });
+
+  it('an earlier cancelled ask cannot touch the recording that follows it', async () => {
+    const t = late();
+    const b = bindingFor();
+    act(() => t.d.request(b));
+    await act(() => t.d.stop());
+    t.box.info = XAI;
+    act(() => t.d.request(b));
+    expect(t.mic.calls).toBe(1);
+    await t.listen();
+    await t.answer(XAI);
+    expect(t.mic.calls).toBe(1);
+    expect(t.d.getState().phase).toBe('recording');
+  });
+
+  it('Escape twice while it asks leaves the words already there', async () => {
+    const t = late();
+    t.box.info = XAI;
+    const b = bindingFor('Already here.');
+    const started = t.d.start(b);
+    await t.listen();
+    await started;
+    await t.say('first passage');
+    await act(() => t.d.stop());
+    expect(text(b)).toBe('Already here. first passage');
+    t.box.info = null;
+    act(() => t.d.request(b));
+    expect(t.d.getState().phase).toBe('starting');
+    act(() => void t.d.escape());
+    act(() => void t.d.escape());
+    expect(t.d.getState().phase).toBe('idle');
+    expect(text(b)).toBe('Already here. first passage');
+  });
+
+  it('a relay that never answered says so with Try again, and asks again on the retry', async () => {
+    const t = late();
+    const b = bindingFor();
+    act(() => t.d.request(b));
+    await t.answer(null);
+    expect(t.d.getState()).toMatchObject({
+      phase: 'idle',
+      message: { text: MESSAGES.service, tone: 'error', retry: true },
+    });
+    expect(t.mic.calls).toBe(0);
+    act(() => t.d.request(b));
+    expect(t.box.asks).toBe(2);
+    await t.answer(XAI);
+    expect(t.mic.calls).toBe(1);
+  });
+
+  it('an answer without dictation keys, or a connection lost while asking, says so and starts nothing', async () => {
+    for (const consent of [true, false]) {
+      h.prefs.voice.consent = consent;
+      const unset = late();
+      act(() => unset.d.request(bindingFor()));
+      await unset.answer({ xai: false, openai: false, anthropic: false });
+      expect(unset.d.getState()).toMatchObject({
+        phase: 'idle',
+        message: { text: MESSAGES.unconfigured },
+      });
+      let online = true;
+      const lost = late({ online: () => online });
+      act(() => lost.d.request(bindingFor()));
+      online = false;
+      await lost.answer(XAI);
+      expect(lost.d.getState()).toMatchObject({
+        phase: 'idle',
+        message: { text: MESSAGES.offline },
+      });
+      expect(unset.mic.calls + unset.clients.length + lost.mic.calls + lost.clients.length).toBe(0);
+    }
+  });
+
+  it('offline, or a relay without dictation keys, is said at once without waiting', () => {
+    const offline = late({ online: () => false });
+    act(() => offline.d.request(bindingFor()));
+    expect(offline.d.getState().message?.text).toBe(MESSAGES.offline);
+    const unset = late();
+    unset.box.info = { xai: false, openai: false, anthropic: false };
+    act(() => unset.d.request(bindingFor()));
+    expect(unset.d.getState().message?.text).toBe(MESSAGES.unconfigured);
+    expect(offline.box.asks + unset.box.asks).toBe(0);
   });
 });
 

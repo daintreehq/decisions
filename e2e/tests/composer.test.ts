@@ -2,7 +2,13 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Page,
+  type Route,
+} from 'playwright-core';
 import {
   DecisionsBridge,
   FileKeyStore,
@@ -312,8 +318,9 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
     await openId('voice');
     // Restoring the preceding dictation adds Send and moves the mic; wait before measuring its position.
     await fieldHas('Tell the client to slow down.');
-    // The relay's voice configuration loads separately from the cached question and draft.
-    await page.locator('.dock textarea[placeholder="Type an answer"]').waitFor();
+    // Holding is push-to-talk only once the microphone grant is known (read as the composer mounts); a press before
+    // then is a tap by design. The relay's voice configuration may still be on its way: the app waits for it.
+    await page.locator('.dock .dictate-btn[title^="Tap to dictate, or hold to talk"]').waitFor();
     voice = { words: [{ afterMs: 150, text: 'Include a retry after header.', final: true }] };
     await hold('.dock .dictate-btn', async () => {
       await stop().waitFor({ timeout: 20_000 });
@@ -404,14 +411,31 @@ describe.skipIf(!chromiumPath)('the answer composer', () => {
   });
 
   it('shows microphone permission failures visibly above the compact empty input', async () => {
-    await openId('draft');
-    await field().fill('');
-    await page.evaluate(() => {
-      navigator.mediaDevices.getUserMedia = async () => {
-        throw new DOMException('Denied for this check', 'NotAllowedError');
-      };
-    });
-    await mic().click();
+    // The question opens from this device's copy before the relay's `/info` answers; a tap in that moment waits for
+    // the answer instead of saying dictation isn't set up. Hold `/info` back to make that moment certain.
+    let answerInfo!: () => void;
+    const infoHeld = new Promise<void>((r) => (answerInfo = r));
+    await page.route(
+      '**/api/v1/info',
+      async (route: Route) => {
+        await infoHeld;
+        await route.fallback();
+      },
+      { times: 1 },
+    );
+    try {
+      await openId('draft');
+      await field().fill('');
+      await page.evaluate(() => {
+        navigator.mediaDevices.getUserMedia = async () => {
+          throw new DOMException('Denied for this check', 'NotAllowedError');
+        };
+      });
+      await mic().click();
+      await page.locator('.dock').getByRole('button', { name: 'Cancel dictation' }).waitFor();
+    } finally {
+      answerInfo();
+    }
     const error = page.locator('.dock .lane[role="alert"]');
     await error.getByText('Microphone access is blocked.').waitFor();
     const errorBox = (await error.boundingBox())!;
