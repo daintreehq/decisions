@@ -30,6 +30,7 @@ import {
   ownerDeclineItemId,
   type OwnerDeclineResult,
 } from './owner-decline.js';
+import { OWNER_MESSAGE_FEATURE } from './owner-message.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -37,7 +38,7 @@ import {
   openQuestionContent,
   sealStoredContent,
 } from './at-rest.js';
-import { parseMessages, type LocalMessageStatus } from './messages.js';
+import { messageSentOn, parseMessages, type LocalMessageStatus } from './messages.js';
 import { RelayError } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
@@ -133,14 +134,15 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
 ];
 
 /**
- * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
- * `pane-snapshots-v1` when snapshots are on.
+ * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
+ * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
+ * `sent_from: computer`), and `pane-snapshots-v1` when snapshots are on.
  */
 export function bridgeFeatures(
   o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
 ): readonly ProtocolFeature[] {
   const extra: ProtocolFeature[] = [
-    ...(o.followUps ? (['thread-messages-v1'] as const) : []),
+    ...(o.followUps ? (['thread-messages-v1', OWNER_MESSAGE_FEATURE] as const) : []),
     ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
   ];
   return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
@@ -165,8 +167,13 @@ export type ThreadEntryView =
       messageId: string;
       /** The relay's order of the question's messages, from 1. */
       messageSeq: number;
-      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up from their phone. */
+      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up. */
       side: 'agent' | 'human';
+      /**
+       * Where the person sent a human follow-up from: `computer` (the owner desktop signed it; still the person's
+       * own message) or `phone` (a phone or tablet). Null for the agent's own.
+       */
+      sentFrom: 'computer' | 'phone' | null;
       expectsReply: boolean;
       /** The whole text ('' for a message of images only, or one whose content can't be opened now). */
       text: string;
@@ -371,7 +378,7 @@ export class DecisionsBridge {
         }
       },
     });
-    this.verifier = new EventVerifier(this.ctx);
+    this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
@@ -931,6 +938,7 @@ export class DecisionsBridge {
           messageId: m.message_id,
           messageSeq: m.message_seq,
           side: m.side,
+          sentFrom: messageSentOn(m),
           expectsReply: m.expects_reply,
           text,
           images: images.map((i) => ({

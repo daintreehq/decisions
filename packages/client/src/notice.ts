@@ -223,6 +223,8 @@ export interface FollowupNoticeInput {
   question?: string;
   /** What the person wrote ('' for a message of images only). */
   text: string;
+  /** True when the person sent it from their computer (the owner desktop signed it), not a phone. */
+  onComputer?: boolean;
   /** True when the question had an answer (a human's or a model's) before this message, in thread order. */
   answered: boolean;
   /** The phone images attached to the message, each stored by the host or unavailable. */
@@ -242,14 +244,16 @@ export interface FollowupNoticeInput {
  *     injection_id: <id>
  *     question: <one-line excerpt>
  *     source: human
+ *     sent_from: computer
  *     note: <FOLLOWUP_NOTE_ANSWERED or FOLLOWUP_NOTE_UNANSWERED, without the "note: ">
  *     text: <first line>
  *       <continuation lines, indented two spaces>
  *     image_1: <path>  (and image_N_alt / image_N_unavailable, as in an answer block)
  *     [END DAINTREE DECISION FOLLOW-UP]
  *
- * `question` is left out when the question can't be read now, `text` when the message is images only, and the
- * image lines when it has none. Only free text is ever cut to fit: the question excerpt first, then the text,
+ * `sent_from: computer` is there only when the person wrote the message on their computer (the owner desktop), so a
+ * phone's block is unchanged. `question` is left out when the question can't be read now, `text` when the message is
+ * images only, and the image lines when it has none. Only free text is ever cut to fit: the question excerpt first, then the text,
  * and last the images' alt lines, whole.
  */
 export function formatFollowupNotice(n: FollowupNoticeInput): string {
@@ -264,6 +268,7 @@ export function formatFollowupNotice(n: FollowupNoticeInput): string {
     lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
     if (question) lines.push(`question: ${question}`);
     lines.push('source: human');
+    if (n.onComputer) lines.push('sent_from: computer');
     lines.push(n.answered ? FOLLOWUP_NOTE_ANSWERED : FOLLOWUP_NOTE_UNANSWERED);
     if (text) {
       const [first, ...rest] = text.split('\n');

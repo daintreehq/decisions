@@ -926,7 +926,11 @@ describe('only verified messages are taken', () => {
     expect(env.sink.typed).toHaveLength(0);
     expect(receipts(env)).toHaveLength(0);
     const on = await asked();
-    expect(on.bridge.features).toEqual([...BRIDGE_FEATURES, 'thread-messages-v1']);
+    expect(on.bridge.features).toEqual([
+      ...BRIDGE_FEATURES,
+      'thread-messages-v1',
+      'owner-desktop-messages-v1',
+    ]);
   });
 });
 
