@@ -92,11 +92,18 @@ export interface QuestionRow {
 
 /**
  * `message` is an agent message for a question's thread (`MessagePayload`); it never touches the answer.
- * `owner-answer` is the person's answer given on the owner desktop (`OwnerAnswerPayload`), for any question, the
- * owner's or a Remote Host's.
+ * `owner-answer` is the person's answer given on the owner desktop (`OwnerAnswerPayload`), and `owner-decline` their
+ * decline (`OwnerDeclinePayload`), for any question, the owner's or a Remote Host's. A `cancel` is the desktop
+ * withdrawing its own question.
  */
 export type OutboxKind =
-  'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain' | 'message' | 'owner-answer';
+  | 'create'
+  | 'cancel'
+  | 'proxy-answer'
+  | 'proxy-abstain'
+  | 'message'
+  | 'owner-answer'
+  | 'owner-decline';
 
 export interface OutboxItem {
   /** Also the relay idempotency key. */

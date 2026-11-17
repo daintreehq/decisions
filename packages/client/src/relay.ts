@@ -267,8 +267,11 @@ export class RelayClient {
       body: { protocol_version: PROTOCOL_VERSION, idempotency_key: idempotencyKey, question },
     });
   }
-  getQuestion(id: string): Promise<QuestionDetail> {
-    return this.request('GET', `${API_PREFIX}/questions/${id}`);
+  getQuestion(
+    id: string,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
+  ): Promise<QuestionDetail> {
+    return this.request('GET', `${API_PREFIX}/questions/${id}`, opts);
   }
   listQuestions(q: { status?: string; cursor?: string; limit?: number } = {}) {
     return this.request<{ questions: unknown[]; next_cursor: string | null }>(

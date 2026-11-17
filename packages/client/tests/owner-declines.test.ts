@@ -115,7 +115,15 @@ describe('a desktop classifies the owner desktop’s decline', () => {
     const row = (await store.getQuestion(qid))!;
     expect(row.local_status).toBe('cancelled');
     expect(parseAnswers(row.answers_json)).toMatchObject([
-      { kind: 'declined', action: 'cancel', source: 'human', sealed: null },
+      {
+        kind: 'declined',
+        action: 'cancel',
+        source: 'human',
+        sealed: null,
+        // Kept with who signed it: the owner desktop, so a UI can say it was declined on the computer.
+        signer_device_id: owner.deviceId,
+        signer_role: 'owner-desktop',
+      },
     ]);
     expect(sink.typed).toHaveLength(1);
     const notice = sink.typed[0]!.text;

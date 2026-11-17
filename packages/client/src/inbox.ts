@@ -393,6 +393,8 @@ export class Inbox {
             action: 'cancel',
             revision: row.question_revision,
             source: 'human',
+            signer_device_id: v.signerDeviceId,
+            signer_role: v.signerRole,
             correction: false,
             created_at: v.record.created_at,
             event_seq: ev.seq,
