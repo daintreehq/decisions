@@ -330,7 +330,7 @@ describe('sendFollowUp results a UI can show', () => {
       name: 'a bare invalid_state whose question cannot be read now',
       arrange: (e) => {
         e.relay.answerState.set(e.qid, { status: 'cancelled', revision: 0 });
-        e.relay.failQuestionReads = 1;
+        e.relay.failDetail = 1;
       },
       expected: { status: 'rejected', code: 'invalid_state' },
     },

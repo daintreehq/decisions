@@ -158,8 +158,6 @@ export class FakeRelay {
    * message from the owner desktop, as the relay does.
    */
   undeclaredMessages = new Set<string>();
-  /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
-  failQuestionReads = 0;
   /** Number of upcoming message POSTs the relay COMMITS but whose reply is lost. */
   dropMessageReply = 0;
   /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
@@ -537,16 +535,6 @@ export class FakeRelay {
         status: 'open',
         event_seq: null,
       });
-    }
-    if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
-      if (this.failQuestionReads > 0) {
-        this.failQuestionReads--;
-        throw new TypeError('fetch failed');
-      }
-      const q = this.questions.get(m[1]!);
-      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
-      const state = this.answerState.get(m[1]!) ?? { status: 'open', revision: 0 };
-      return json(200, { question_id: m[1], status: state.status, revision: state.revision });
     }
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;
