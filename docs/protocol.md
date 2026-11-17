@@ -363,10 +363,10 @@ the hold never sends its held push. A push whose sending has begun cannot be rec
 
 The hold covers the `decision-new` push of a new question, of a proxy abstaining and of a reopen. It leaves out the
 `decision-proxy` notice of a proxy answer and the proxy-review reminder (only a phone or tablet confirms or overrides a
-proxy answer), reply pushes (`decision-reply`: the person replies to an agent message from a phone or tablet),
-reminders (never held; the first comes hours later unless the person set it sooner) and test pushes. Quiet hours
-apply after the hold as before, and can defer a push past it. A relay that does not advertise `presence-v1` has no
-`/presence` route and pushes as it always has; a client MUST NOT send presence to it.
+proxy answer), reply pushes (`decision-reply`, for a later agent message once the person already knows of the
+question), reminders (never held; the first comes hours later unless the person set it sooner) and test pushes. Quiet
+hours apply after the hold as before, and can defer a push past it. A relay that does not advertise `presence-v1` has
+no `/presence` route and pushes as it always has; a client MUST NOT send presence to it.
 
 ## 12. Deliveries
 
