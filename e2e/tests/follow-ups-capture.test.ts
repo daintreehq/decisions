@@ -624,11 +624,12 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     // The activity names where each follow-up came from.
     await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
     await page.getByRole('menuitem', { name: 'View activity' }).click();
-    await page
-      .getByText('You sent a follow-up on Greg’s MacBook Pro')
-      .first()
-      .waitFor({ timeout: 15_000 });
+    const fromComputer = page.getByText('You sent a follow-up on Greg’s MacBook Pro').first();
+    await fromComputer.waitFor({ timeout: 15_000 });
     await page.getByText('You sent a follow-up', { exact: true }).first().waitFor();
+    // From the phone's follow-up and the agent's question down to the reply from the computer.
+    await page.getByText('You sent a follow-up', { exact: true }).first().scrollIntoViewIfNeeded();
+    await fromComputer.scrollIntoViewIfNeeded();
     await shot('f-mixed-activity-light');
     await page.keyboard.press('Escape');
     await settle(300);
