@@ -10,6 +10,7 @@ import { CliError, type Ctx } from '../src/runtime.js';
 import { DemoSink, ask, cliOrigin, mcpAddLines, parseSink } from '../src/commands/daemon.js';
 import {
   deleteData,
+  doctor,
   exportCmd,
   importCmd,
   recoveryExport,
@@ -345,6 +346,66 @@ describe('ask / status / devices', () => {
   it('devices requires setup', async () => {
     const { ctx } = mkCtx();
     await expect(devices(ctx, {})).rejects.toThrow(/not set up/);
+  });
+});
+
+describe('doctor', () => {
+  it("re-declares this device's features on its test ticket, so the relay keeps what it gates on them", async () => {
+    const now = new Date().toISOString();
+    let cert: { device_id: string } | null = null;
+    const tickets: unknown[] = [];
+    const m = mkCtx({
+      routes: {
+        'GET /api/v1/devices': () => ({
+          key_epoch: 1,
+          owner_device_id: cert!.device_id,
+          devices: [
+            {
+              device_id: cert!.device_id,
+              role: 'owner-desktop',
+              label: 'Test',
+              created_at: now,
+              revoked_at: null,
+              last_seen_at: now,
+              last_ack_seq: 0,
+              cert,
+              push_enabled: false,
+              // What the bridge last declared, plus a token from a newer client, which is never re-sent.
+              features: ['owner-desktop-answers-v1', 'phone-images-v1', 'thread-messages-v1', 'later-v9'],
+            },
+          ],
+        }),
+        'POST /api/v1/socket-ticket': (body) => {
+          tickets.push(body);
+          return { ticket: 't', expires_at: now, ws_path: '/api/v1/socket' };
+        },
+      },
+    });
+    await setup(
+      m.ctx,
+      {},
+      { url: 'https://relay.example', claimSecret: 'c'.repeat(32), label: 'Test' },
+    );
+    cert = (m.calls.find((c) => c.path === '/api/v1/setup/claim')!.body as { cert: typeof cert })
+      .cert;
+    m.ctx.webSocket = () => {
+      const ws = {
+        onmessage: null as ((ev: { data: unknown }) => void) | null,
+        onerror: null,
+        close: () => {},
+      };
+      setTimeout(() => ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) }), 0);
+      return ws as never;
+    };
+    // Checks this fake relay cannot pass (health, push) fail the run; only the ticket matters here.
+    await doctor(m.ctx, {}, {}).catch(() => undefined);
+    expect(tickets).toHaveLength(1);
+    expect((tickets[0] as { features?: string[] }).features).toEqual([
+      'owner-desktop-answers-v1',
+      'phone-images-v1',
+      'thread-messages-v1',
+    ]);
+    expect(m.out.join('\n')).toMatch(/signed request.*1 active device/);
   });
 });
 

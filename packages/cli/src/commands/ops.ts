@@ -1,5 +1,10 @@
 import { chmod, readFile, writeFile } from 'node:fs/promises';
-import { PROTOCOL_VERSION, type InfoResponse } from '@daintreehq/decisions-protocol';
+import {
+  PROTOCOL_VERSION,
+  knownFeatures,
+  type InfoResponse,
+  type ProtocolFeature,
+} from '@daintreehq/decisions-protocol';
 import {
   RelayClient,
   RelayError,
@@ -163,9 +168,15 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
 
   if (identity && info?.claimed && identity.config.relayOrigin === origin) {
     const client = new RelayClient({ identity, fetch: ctx.fetch, maxRetries: 1 });
+    // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
+    // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
+    // declared, so running doctor never switches them off.
+    let declared: ProtocolFeature[] = [];
     try {
       const list = await verifiedDevices(client);
       add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
+      const self = identity.config.deviceId;
+      declared = [...knownFeatures(list.find((d) => d.device_id === self)?.features)];
     } catch (e) {
       add(
         'signed request',
@@ -174,7 +185,7 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
       );
     }
     try {
-      const t = await client.socketTicket();
+      const t = await client.socketTicket(declared);
       const url =
         origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
       const ok = await new Promise<boolean>((resolve) => {
