@@ -14,6 +14,8 @@ import {
   type Diagnostics,
   type EpochGrant,
   type InfoResponse,
+  type InvolvementBody,
+  type InvolvementRecord,
   type MessageBody,
   type MessageReceipt,
   type PaneSnapshotBody,
@@ -392,6 +394,29 @@ export class RelayClient {
       retry: false,
       ...(timeoutMs ? { timeoutMs } : {}),
     });
+  }
+
+  /**
+   * Replace the person's involvement preference with `preference`, signed by this owner desktop. The relay
+   * compare-and-swaps on its revision (`409 revision_conflict` with `details.latest_revision`), and a retry with the
+   * same key and body returns the original receipt, so a reply lost in transit is safe to resend unchanged. A Host
+   * never sets it: refused before anything is sent.
+   */
+  putInvolvement(
+    idempotencyKey: string,
+    preference: InvolvementRecord,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
+  ): Promise<unknown> {
+    return this.ownerOnly('setting the involvement preference', () =>
+      this.request('PUT', `${API_PREFIX}/involvement`, {
+        body: {
+          protocol_version: PROTOCOL_VERSION,
+          idempotency_key: idempotencyKey,
+          preference,
+        } satisfies InvolvementBody,
+        ...opts,
+      }),
+    );
   }
 
   /* ---- pairing ---- */

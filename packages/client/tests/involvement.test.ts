@@ -4,11 +4,13 @@ import type { InvolvementMode, InvolvementRecord } from '@daintreehq/decisions-p
 import {
   DecisionsBridge,
   INVOLVEMENT_META,
+  MemoryLocalStore,
   PolicyRegistry,
+  RelayClient,
   revokedKey,
   type InvolvementView,
 } from '../src/index.js';
-import { FakeSink, makePhone, setupBridge, tick, type Phone } from './helpers.js';
+import { FakeSink, makeHost, makePhone, setupBridge, tick, type Phone } from './helpers.js';
 
 /*
  * The desktop's copy of the person's involvement preference (docs/protocol.md section 20): verified against the
@@ -45,6 +47,12 @@ async function setup() {
       createdAt: iso(clock.t),
     });
   };
+  /** The owner desktop running the bridge, as a signer. */
+  const owner: Phone = {
+    deviceId: env.identity.config.deviceId,
+    keys: env.identity.keys,
+    cert: env.relay.ownerCert(),
+  };
   const serve = (preference: InvolvementRecord | null) => {
     env.relay.involvement = { preference, received_at: preference ? iso(clock.t) : null };
   };
@@ -59,7 +67,7 @@ async function setup() {
     await env.bridge.start({ socket: false });
     await env.bridge.involvement.refresh();
   };
-  return { ...env, clock, sign, serve, reads, view, refusals, start };
+  return { ...env, clock, owner, sign, serve, reads, view, refusals, start };
 }
 
 const available = (v: InvolvementView) => {
@@ -413,5 +421,58 @@ describe('when the relay cannot say', () => {
     });
     await s.bridge.catchUp();
     expect(await s.view()).toMatchObject({ status: 'unavailable', reason: 'device-revoked' });
+  });
+});
+
+describe('a preference the owner desktop set', () => {
+  it('is verified and reported exactly as a phone’s, with who set it kept for the host', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 4, normal: 'recommend', consult: 2, by: s.owner }));
+    await s.start();
+    expect(await s.view()).toEqual({
+      status: 'available',
+      mode: 'recommend',
+      normalMode: 'recommend',
+      consultCount: 2,
+      revision: 4,
+      overrideActive: false,
+      until: null,
+      setAt: iso(T0),
+      lastSyncedAt: iso(T0),
+      stale: false,
+    });
+    expect(await s.refusals()).toEqual([]);
+    await s.bridge.stop();
+  });
+
+  it('is verified on an enrolled Host against the pinned owner', async () => {
+    const s = await setup();
+    const host = await makeHost(s.identity, s.relay);
+    const store = new MemoryLocalStore();
+    const bridge = new DecisionsBridge({
+      identity: host.identity,
+      keyStore: host.keyStore,
+      store,
+      sink: new FakeSink(),
+      client: new RelayClient({
+        identity: host.identity,
+        fetch: s.relay.fetch,
+        sleep: async () => {},
+        maxRetries: 0,
+      }),
+      policy: new PolicyRegistry(),
+      pumpIntervalMs: 0,
+      now: () => s.clock.t,
+    });
+    s.serve(await s.sign({ revision: 2, normal: 'involve-early', by: s.owner }));
+    await bridge.start({ socket: false });
+    await bridge.involvement.refresh();
+    expect(await bridge.getInvolvement()).toMatchObject({
+      status: 'available',
+      mode: 'involve-early',
+      revision: 2,
+      stale: false,
+    });
+    await bridge.stop();
   });
 });

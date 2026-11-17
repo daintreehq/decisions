@@ -7,6 +7,7 @@ import {
   MessageContentV1,
   ProxyAnswerContentV1,
   imagesMatchRecord,
+  involvementSetOn,
   messageEnvelopeIssues,
   provenanceForAction,
   provenanceForSigner,
@@ -17,6 +18,7 @@ import {
   type DeviceCert,
   type EnvelopePurpose,
   type InvolvementRecord,
+  type InvolvementSetOn,
   type LedgerEvent,
   type MessageEntry,
   type Provenance,
@@ -331,22 +333,26 @@ export class EventVerifier {
 
   /**
    * Verify the person's involvement preference (protocol section 20) as it stands now, not as of a ledger
-   * position: this installation's, signed by a phone or tablet the pinned directory knows, and not revoked by the
-   * directory or by any revocation seen in the ledger. A directory that cannot be read throws `TransientError`.
+   * position: this installation's, signed by a phone, a tablet or the owner desktop the pinned directory knows
+   * (`INVOLVEMENT_SETTER_ROLES`, never a `desktop-host`), and not revoked by the directory or by any revocation seen in
+   * the ledger. Where it was set comes from the signer's certified role, never from the relay. A directory that cannot
+   * be read throws `TransientError`.
    */
-  async verifyInvolvement(r: InvolvementRecord): Promise<{ ok: true } | Rejection> {
+  async verifyInvolvement(
+    r: InvolvementRecord,
+  ): Promise<{ ok: true; setOn: InvolvementSetOn } | Rejection> {
     if (r.installation_id !== this.ctx.identity.config.installationId)
       return { ok: false, reason: 'wrong-installation' };
     const signer = await this.lookup(r.signer_device_id);
     if (!signer) return { ok: false, reason: 'unknown-signer' };
-    if (!HUMAN_ROLES.includes(signer.cert.role))
-      return { ok: false, reason: 'set-by-non-human-device' };
+    const setOn = involvementSetOn(signer.cert.role);
+    if (!setOn) return { ok: false, reason: 'set-by-desktop-host' };
     if (!(await verifyObject(signer.pub, r))) return { ok: false, reason: 'bad-signature' };
     if (
       signer.revokedAt !== null ||
       (await this.ctx.store.getMeta(revokedKey(r.signer_device_id))) !== null
     )
       return { ok: false, reason: 'signer-revoked' };
-    return { ok: true };
+    return { ok: true, setOn };
   }
 }
