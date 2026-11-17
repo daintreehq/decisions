@@ -161,6 +161,7 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     expect(info.json.features).toEqual([
       'involvement-v1',
       'owner-desktop-answers-v1',
+      'owner-desktop-declines-v1',
       'owner-desktop-messages-v1',
       'pane-snapshots-v1',
       'person-declines-v1',

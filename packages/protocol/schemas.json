@@ -460,6 +460,10 @@
           "pattern": "^[A-Za-z0-9_-]{8,64}$"
         }
       },
+      "decline": {
+        "type": "boolean",
+        "const": true
+      },
       "signer_device_id": {
         "type": "string",
         "pattern": "^[A-Za-z0-9_-]{8,64}$"
@@ -1326,7 +1330,8 @@
       "owner-desktop-answers-v1",
       "involvement-v1",
       "person-declines-v1",
-      "owner-desktop-messages-v1"
+      "owner-desktop-messages-v1",
+      "owner-desktop-declines-v1"
     ]
   },
   "PhoneImageReference": {

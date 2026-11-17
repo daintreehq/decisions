@@ -340,6 +340,8 @@ export async function act(
     epoch?: EpochKey;
     /** Phone images the signed record lists (`ActionRecord.attachment_ids`, answer and override only). */
     attachmentIds?: string[];
+    /** The signed `ActionRecord.decline` flag (the owner desktop's cancel only). */
+    decline?: true;
   } = {},
 ) {
   const bumps = ['answer', 'override', 'proxy-answer', 'confirm-proxy', 'reopen'].includes(kind);
@@ -375,6 +377,7 @@ export async function act(
     expiresAt: opts.expiresAt ?? null,
     ...(opts.actionId ? { actionId: opts.actionId } : {}),
     ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
+    ...(opts.decline ? { decline: opts.decline } : {}),
   });
   const res = await actor.call('POST', `/api/v1/questions/${questionId}/${kind}`, {
     protocol_version: PROTOCOL_VERSION,

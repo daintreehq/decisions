@@ -546,6 +546,189 @@ describe('cancel, expiry and reopen', () => {
     expect((await act(w, phone, 'cancel', b.questionId, 0)).res.status).toBe(201);
   });
 
+  it('the owner desktop declines an open question for the person: signed, closed, and no answer', async () => {
+    const { world: w, phone } = await setup();
+    await declare(w.owner, ['owner-desktop-declines-v1']);
+    const a = await ask(w);
+    const pending = () =>
+      inRoom((room) =>
+        room.q<{ kind: string }>(
+          `SELECT kind FROM scheduled_jobs WHERE question_id = ? AND status = 'pending' AND kind != 'delete_attachments'`,
+          a.questionId,
+        ),
+      );
+    expect((await pending()).length).toBeGreaterThan(0);
+    const r = await act(w, w.owner, 'cancel', a.questionId, 0, { decline: true });
+    expect(r.res.status).toBe(201);
+    expect(r.res.json).toMatchObject({ status: 'cancelled', revision: 0 });
+    expect(await pending()).toEqual([]);
+    const ev = (await events(phone)).filter((e) => e.event_type === 'decision.cancelled');
+    expect(ev).toHaveLength(1);
+    // What makes it a decline is in the signed record, not in anything the relay adds.
+    expect(ev[0]!.data).toMatchObject({
+      action: 'cancel',
+      provenance: null,
+      deliverable: false,
+      status: 'cancelled',
+      record: { signer_device_id: w.owner.id, action: 'cancel', decline: true },
+    });
+    expect(ev[0]!.data.record.signature).toBe(r.signed.record.signature);
+    const detail = (await phone.call('GET', `/api/v1/questions/${a.questionId}`)).json;
+    expect(detail.status).toBe('cancelled');
+    expect(detail.actions).toHaveLength(1);
+    expect(detail.actions[0]).toMatchObject({ provenance: null, record: { decline: true } });
+    expect((await act(w, phone, 'answer', a.questionId, 0)).res.status).toBe(409);
+
+    // The owner desktop's plain cancel is still a withdrawal, and needs no feature.
+    await declare(w.owner, []);
+    const b = await ask(w);
+    const withdrawn = await act(w, w.owner, 'cancel', b.questionId, 0);
+    expect(withdrawn.res.status).toBe(201);
+    const bEv = (await events(phone)).filter(
+      (e) => e.event_type === 'decision.cancelled' && e.question_id === b.questionId,
+    );
+    expect(bEv).toHaveLength(1);
+    expect('decline' in bEv[0]!.data.record).toBe(false);
+  });
+
+  it('first close wins: a decline is never relabelled a withdrawal, nor the other way round', async () => {
+    const { world: w, phone } = await setup();
+    await declare(w.owner, ['owner-desktop-declines-v1', 'person-declines-v1']);
+    const stored = (qid: string) =>
+      inRoom((room) =>
+        room
+          .q<{ record_json: string }>(`SELECT record_json FROM actions WHERE question_id = ?`, qid)
+          .map((r) => JSON.parse(r.record_json) as { decline?: true; signer_device_id: string }),
+      );
+    const cancelled = async (qid: string) =>
+      (await events(w.owner)).filter(
+        (e) => e.event_type === 'decision.cancelled' && e.question_id === qid,
+      );
+
+    const declined = await ask(w);
+    expect(
+      (await act(w, w.owner, 'cancel', declined.questionId, 0, { decline: true })).res.status,
+    ).toBe(201);
+    expect((await act(w, w.owner, 'cancel', declined.questionId, 0)).res.status).toBe(200);
+    expect((await act(w, phone, 'cancel', declined.questionId, 0)).res.status).toBe(200);
+    expect(await stored(declined.questionId)).toEqual([
+      expect.objectContaining({ decline: true, signer_device_id: w.owner.id }),
+    ]);
+    expect(await cancelled(declined.questionId)).toHaveLength(1);
+
+    const withdrawn = await ask(w);
+    expect((await act(w, w.owner, 'cancel', withdrawn.questionId, 0)).res.status).toBe(201);
+    expect(
+      (await act(w, w.owner, 'cancel', withdrawn.questionId, 0, { decline: true })).res.status,
+    ).toBe(200);
+    const kept = await stored(withdrawn.questionId);
+    expect(kept).toHaveLength(1);
+    expect('decline' in kept[0]!).toBe(false);
+    expect(await cancelled(withdrawn.questionId)).toHaveLength(1);
+  });
+
+  it('only the owner desktop signs a decline, and only from open at the revision it saw', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const { host, world: hostWorld } = await enrollHost(w);
+    await declare(w.owner, ['owner-desktop-declines-v1', 'person-declines-v1']);
+    await declare(host, ['owner-desktop-declines-v1', 'person-declines-v1']);
+    // A Host never declines for the person: its flagged cancel is refused, and its plain one withdraws.
+    const h = await ask(hostWorld);
+    const byHost = await act(hostWorld, host, 'cancel', h.questionId, 0, { decline: true });
+    expect(byHost.res.status).toBe(403);
+    expect(byHost.res.json.code).toBe('forbidden');
+    // A phone or tablet declines by its role alone, so the flag is the owner desktop's only.
+    const byPhone = await act(w, phone, 'cancel', h.questionId, 0, { decline: true });
+    expect(byPhone.res.status).toBe(403);
+    expect((await phone.call('GET', `/api/v1/questions/${h.questionId}`)).json.status).toBe('open');
+    expect((await act(hostWorld, host, 'cancel', h.questionId, 0)).res.status).toBe(201);
+
+    // The transition and revision checks come first: a proxy answer is withdrawn, never declined.
+    const p = await ask(w, { requirement: 'proxy-ok' });
+    expect((await act(w, w.owner, 'proxy-answer', p.questionId, 0)).res.status).toBe(201);
+    const late = await act(w, w.owner, 'cancel', p.questionId, 1, { decline: true });
+    expect(late.res.status).toBe(409);
+    expect(late.res.json.code).toBe('invalid_state');
+    expect(late.res.json.details?.reason).toBeUndefined();
+    const o = await ask(w);
+    const stale = await act(w, w.owner, 'cancel', o.questionId, 3, { decline: true });
+    expect(stale.res.json.code).toBe('revision_conflict');
+    const answered = await ask(w);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+    expect(
+      (await act(w, w.owner, 'cancel', answered.questionId, 1, { decline: true })).res.status,
+    ).toBe(409);
+  });
+
+  it('refuses an owner decline until the asking desktop declares owner-desktop-declines-v1, and stores nothing', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const { host, world: hostWorld } = await enrollHost(w);
+    const expectRefused = (res: { status: number; json: any }) => {
+      expect(res.status).toBe(409);
+      expect(res.json).toMatchObject({
+        code: 'invalid_state',
+        details: {
+          reason: CREATOR_MISSING_FEATURE,
+          required_feature: 'owner-desktop-declines-v1',
+        },
+      });
+    };
+    // A desktop that only knows the phone's decline would file the owner's as a withdrawal.
+    await declare(w.owner, ['owner-desktop-declines-v1']);
+    await declare(host, ['person-declines-v1', 'owner-desktop-answers-v1']);
+    const a = await ask(hostWorld);
+    const key = newId();
+    const first = await act(w, w.owner, 'cancel', a.questionId, 0, {
+      decline: true,
+      idempotencyKey: key,
+    });
+    expectRefused(first.res);
+    // A GET /events declaration is not recorded and does not count.
+    await host.call(
+      'GET',
+      '/api/v1/events',
+      undefined,
+      'after=0&features=owner-desktop-declines-v1&limit=100',
+    );
+    const repost = (idempotencyKey: string) =>
+      w.owner.call('POST', `/api/v1/questions/${a.questionId}/cancel`, {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        action: first.signed,
+      });
+    expectRefused(await repost(key));
+    expect((await phone.call('GET', `/api/v1/questions/${a.questionId}`)).json.status).toBe('open');
+    const nothing = await inRoom((room) => ({
+      receipts: room.q(`SELECT 1 FROM command_receipts WHERE idempotency_key = ?`, key).length,
+      actions: room.q(`SELECT 1 FROM actions WHERE question_id = ?`, a.questionId).length,
+      pendingJobs: room.q(
+        `SELECT 1 FROM scheduled_jobs WHERE question_id = ? AND status = 'pending' AND kind != 'delete_attachments'`,
+        a.questionId,
+      ).length,
+    }));
+    expect(nothing).toMatchObject({ receipts: 0, actions: 0 });
+    expect(nothing.pendingJobs).toBeGreaterThan(0);
+    expect(
+      (await events(w.owner)).filter((e) => e.event_type === 'decision.cancelled'),
+    ).toHaveLength(0);
+
+    // Once the Host that asked declares it, the very same signed command commits.
+    await declare(host, ['owner-desktop-declines-v1']);
+    const ok = await repost(key);
+    expect(ok.status).toBe(201);
+    expect(ok.json).toMatchObject({ status: 'cancelled', revision: 0 });
+
+    // A revoked desktop declares nothing: its questions can be withdrawn, not declined.
+    const b = await ask(hostWorld);
+    await inRoom((room) =>
+      room.run(`UPDATE devices SET revoked_at = ? WHERE device_id = ?`, Date.now(), host.id),
+    );
+    expectRefused((await act(w, w.owner, 'cancel', b.questionId, 0, { decline: true })).res);
+    expect((await act(w, w.owner, 'cancel', b.questionId, 0)).res.status).toBe(201);
+  });
+
   it('a due question is expired lazily and an answer after the deadline is refused (410)', async () => {
     const { world: w, phone } = await setup();
     const a = await ask(w, { expiresAt: new Date(Date.now() + 60_000).toISOString() });
