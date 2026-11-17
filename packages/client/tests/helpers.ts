@@ -3,6 +3,7 @@ import {
   CREATOR_MISSING_FEATURE,
   EventData,
   applyAction,
+  applyMessage,
   type QuestionStatus,
   PROTOCOL_VERSION,
   type ActionKind,
@@ -150,8 +151,15 @@ export class FakeRelay {
   failInfo = 0;
   /** Thread messages the relay committed, in commit order. */
   messages: { idem: string; message: SignedMessage }[] = [];
-  /** The status and code every upcoming message POST is refused with, until cleared. */
-  rejectMessage: { status: number; code: string } | null = null;
+  /** The status, code and details every upcoming message POST is refused with, until cleared. */
+  rejectMessage: { status: number; code: string; details?: Record<string, unknown> } | null = null;
+  /**
+   * Publishing desktops that have not declared `owner-desktop-messages-v1`: their questions refuse the person's
+   * message from the owner desktop, as the relay does.
+   */
+  undeclaredMessages = new Set<string>();
+  /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
+  failQuestionReads = 0;
   /** Number of upcoming message POSTs the relay COMMITS but whose reply is lost. */
   dropMessageReply = 0;
   /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
@@ -293,9 +301,64 @@ export class FakeRelay {
     if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/messages$/))) {
       if (this.holdMessages) await this.holdMessages;
       if (this.rejectMessage)
-        return json(this.rejectMessage.status, { code: this.rejectMessage.code, message: 'no' });
+        return json(this.rejectMessage.status, {
+          code: this.rejectMessage.code,
+          message: 'no',
+          ...(this.rejectMessage.details ? { details: this.rejectMessage.details } : {}),
+        });
       const b = body as { idempotency_key: string; message: SignedMessage };
       const id = b.message.record.message_id;
+      // The person's message is held to the question's state and its desktop's features, as the relay does, in the
+      // relay's order; a retry of a committed one is recognised first, and a refusal commits nothing.
+      if (b.message.record.side === 'human' && !this.messageReceipts.has(id)) {
+        const qid = m[1]!;
+        const q = this.questions.get(qid);
+        if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+        const signer = b.message.record.signer_device_id;
+        const role =
+          signer === this.owner.config.deviceId
+            ? ('owner-desktop' as const)
+            : (this.devices.find((d) => d.device_id === signer)?.role ?? 'phone');
+        try {
+          applyMessage(
+            {
+              ...(this.answerState.get(qid) ?? { status: 'open' as const, revision: 0 }),
+              requirement: q.signed.record.requirement,
+              proxyAbstained: false,
+            },
+            {
+              side: 'human',
+              role,
+              signerIsPublisher: signer === q.signed.record.originating_device_id,
+              messageCount: this.messages.filter((x) => x.message.record.question_id === qid)
+                .length,
+            },
+          );
+          if (
+            role === 'owner-desktop' &&
+            this.undeclaredMessages.has(q.signed.record.originating_device_id)
+          )
+            throw new ApiError(
+              'invalid_state',
+              "the question's desktop does not accept messages from the computer",
+              {
+                details: {
+                  reason: CREATOR_MISSING_FEATURE,
+                  required_feature: 'owner-desktop-messages-v1',
+                },
+              },
+            );
+          if (role === 'owner-desktop' && b.message.record.attachment_ids.length > 0)
+            throw new ApiError('forbidden', `role ${role} may not attach phone images`);
+        } catch (e) {
+          const err = e as ApiError;
+          return json(err.status, {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          });
+        }
+      }
       let i = this.messages.findIndex((x) => x.message.record.message_id === id);
       if (i >= 0 && JSON.stringify(this.messages[i]!.message) !== JSON.stringify(b.message))
         return json(409, { code: 'idempotency_collision', message: 'different message' });
@@ -474,6 +537,16 @@ export class FakeRelay {
         status: 'open',
         event_seq: null,
       });
+    }
+    if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
+      if (this.failQuestionReads > 0) {
+        this.failQuestionReads--;
+        throw new TypeError('fetch failed');
+      }
+      const q = this.questions.get(m[1]!);
+      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+      const state = this.answerState.get(m[1]!) ?? { status: 'open', revision: 0 };
+      return json(200, { question_id: m[1], status: state.status, revision: state.revision });
     }
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;

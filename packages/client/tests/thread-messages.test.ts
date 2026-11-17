@@ -19,7 +19,15 @@ import {
   type OutboxItem,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
-import { FakeRelay, FakeSink, makeIdentity, origin, setupBridge, tick } from './helpers.js';
+import {
+  FakeRelay,
+  FakeSink,
+  makeHost,
+  makeIdentity,
+  origin,
+  setupBridge,
+  tick,
+} from './helpers.js';
 
 const tmp = mkdtempSync(join(tmpdir(), 'decisions-thread-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -541,11 +549,19 @@ describe('thread messages: relay features', () => {
     expect(env.relay.messages).toHaveLength(1);
   });
 
-  it('postMessage on the relay client refuses a human-side message', async () => {
+  it('postMessage on a Remote Host’s relay client refuses a human-side message before sending it', async () => {
     const env = await setupBridge();
+    const host = await makeHost(env.identity, env.relay);
+    const client = new RelayClient({
+      identity: host.identity,
+      fetch: env.relay.fetch,
+      sleep: async () => {},
+      maxRetries: 0,
+    });
     const fake = { record: { side: 'human' } } as unknown as SignedMessageT;
-    await expect(env.client.postMessage('q', 'idem', fake)).rejects.toMatchObject({
+    await expect(client.postMessage('q', 'idem', fake)).rejects.toMatchObject({
       code: 'forbidden',
+      status: 403,
     });
     expect(messagePosts(env)).toHaveLength(0);
   });
