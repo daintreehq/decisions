@@ -633,18 +633,24 @@ export class Publisher {
     }
   }
 
-  /** Where an owner-desktop answer stands, by its id; null for an id never submitted on this store. */
-  async ownerAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
-    const r = parseOwnerAnswerRecord(await this.ctx.store.getMeta(ownerAnswerKey(answerId)));
-    if (!r) return null;
-    return (
-      r.result ?? {
+  /** Where an owner-desktop answer stands, by its id; null for an id never submitted (or never queued) on this store. */
+  ownerAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
+    // Under `ctx.lock`, so it never sees an answer between its reservation and its item, or its outcome and removal.
+    return this.ctx.lock.run(async () => {
+      const r = parseOwnerAnswerRecord(await this.ctx.store.getMeta(ownerAnswerKey(answerId)));
+      if (!r) return null;
+      if (r.result) return r.result;
+      // Reserved but never queued (a crash in between): nothing was sent, and a repeat of the id signs it again.
+      const itemId = ownerAnswerItemId(answerId);
+      if (!(await this.ctx.store.outboxFor(r.question_id)).some((o) => o.id === itemId))
+        return null;
+      return {
         answerId,
         questionId: r.question_id,
         expectedRevision: r.expected_revision,
         status: 'queued',
-      }
-    );
+      };
+    });
   }
 
   /**

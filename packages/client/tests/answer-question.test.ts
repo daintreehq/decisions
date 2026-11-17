@@ -673,6 +673,25 @@ describe('answerQuestion results a UI can show', () => {
     expect(seen).toEqual([settled]);
   });
 
+  it('an id reserved but never queued (a crash in between) has no result, and repeating it sends the answer', async () => {
+    let t = Date.now();
+    const { bridge, relay, store, qid } = await ownQuestion({ now: () => t });
+    relay.rejectAnswer = [{ status: 503, code: 'temporarily_unavailable' }];
+    const answerId = newId();
+    const input = {
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+      answerId,
+    };
+    expect((await bridge.answerQuestion(input)).status).toBe('queued');
+    // The crash: the reservation was written, the item never was.
+    for (const o of await ownerAnswers(store)) await store.deleteOutbox(o.id);
+    expect(await bridge.getAnswerResult(answerId)).toBeNull();
+    t += 10 * 60_000;
+    expect(await bridge.answerQuestion(input)).toMatchObject({ answerId, status: 'sent' });
+  });
+
   it('an answer waiting its turn when the bridge stops is not sent', async () => {
     const { bridge, relay, store, qid } = await ownQuestion();
     let release!: () => void;
@@ -689,8 +708,11 @@ describe('answerQuestion results a UI can show', () => {
       selectedOptionIds: ['reject'],
     });
     while ((await ownerAnswers(store)).length < 2) await tick(1);
+    // A pump waiting behind the same flush is called off too.
+    const pumped = bridge.pump();
     await bridge.stop();
     release();
+    await pumped;
     expect(await first).toMatchObject({ status: 'sent' });
     expect(await second).toMatchObject({ status: 'queued' });
     expect(answerPosts(relay)).toHaveLength(1);

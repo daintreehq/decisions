@@ -568,7 +568,10 @@ export class DecisionsBridge {
     );
   }
 
-  /** Where an answer from `answerQuestion` stands, by its id; null for an id this store never took. */
+  /**
+   * Where an answer from `answerQuestion` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
   getAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
     return this.publisher.ownerAnswerResult(answerId);
   }
@@ -822,10 +825,12 @@ export class DecisionsBridge {
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
-        const flushed = await this.publisher.flush();
+        // A pump waiting its turn behind another flush sends nothing once the bridge has stopped.
+        const live = () => this.state !== 'stopped' && this.state !== 'revoked';
+        const flushed = await this.publisher.flush({ proceed: live });
         if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
-        if (flushed.created.length > 0) await this.publisher.flush();
+        if (flushed.created.length > 0) await this.publisher.flush({ proceed: live });
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();
