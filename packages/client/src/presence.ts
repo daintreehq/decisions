@@ -23,7 +23,7 @@ export const PRESENCE_REPORT_MS = 120_000;
 const RENEW_MS = LIMITS.presenceLeaseMs / 3;
 /** A presence request (or the feature check) that has not answered by then is retried. */
 const REQUEST_TIMEOUT_MS = 15_000;
-/** How long a relay found without `presence-v1` is believed before `GET /info` is asked again. */
+/** How long the relay's answer about `presence-v1`, either way, is believed before `GET /info` is asked again. */
 const RECHECK_MS = 10 * 60_000;
 /** Backoff for a failed renewal: never sooner than this, never later than one renewal period. */
 const RETRY_MIN_MS = 1_000;
@@ -47,6 +47,10 @@ export class PresenceReporter {
   private support: { value: boolean; at: number } | null = null;
   private inflight = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** The latest `ctx.now()` read, to notice the wall clock stepping back. */
+  private seen = -Infinity;
+  /** How far every stored time has been moved back so far, for a time held across an await (`clock`). */
+  private shifted = 0;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -60,8 +64,9 @@ export class PresenceReporter {
 
   /** The host's latest observation. Before `start()` it is only kept, and starting acts on it if it is still fresh. */
   report(present: boolean): void {
+    const now = this.clock();
     if (present) {
-      this.presentAt = this.ctx.now();
+      this.presentAt = now;
       this.awayReported = false;
     } else {
       this.presentAt = null;
@@ -96,16 +101,39 @@ export class PresenceReporter {
     this.attempts = 0;
   }
 
+  /**
+   * `ctx.now()`, wall-clock time. When the clock stepped back since the last read, every stored time moves back by the
+   * same amount, so report freshness, the renewal cadence, backoff and the feature check keep counting elapsed time.
+   * A step forward (a machine waking from sleep) only makes them come due sooner: a report goes stale, a renewal or
+   * retry is due at once.
+   */
+  private clock(): number {
+    const now = this.ctx.now();
+    const back = this.seen - now;
+    if (back > 0) {
+      if (this.presentAt !== null) this.presentAt -= back;
+      if (this.renewedAt !== null) this.renewedAt -= back;
+      if (this.retryAt > 0) this.retryAt -= back;
+      if (this.support) this.support = { ...this.support, at: this.support.at - back };
+      this.shifted += back;
+    }
+    this.seen = now;
+    return now;
+  }
+
   /** The host's latest report says the person is present, and it is recent enough to act on at `now`. */
   private fresh(now: number): boolean {
-    const at = this.presentAt;
-    // A clock that moved backwards past the report makes it stale, so it can never count for longer than meant.
-    return at !== null && now >= at && now - at < PRESENCE_REPORT_MS;
+    return this.presentAt !== null && now - this.presentAt < PRESENCE_REPORT_MS;
   }
 
   private knownUnsupported(now: number): boolean {
     const s = this.support;
     return s !== null && !s.value && now - s.at < RECHECK_MS;
+  }
+
+  private knownSupported(now: number): boolean {
+    const s = this.support;
+    return s !== null && s.value && now - s.at < RECHECK_MS;
   }
 
   /** What to send next and when, or null when nothing is owed. */
@@ -126,7 +154,7 @@ export class PresenceReporter {
     if (!this.running || this.inflight) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    const now = this.ctx.now();
+    const now = this.clock();
     const next = this.next(now);
     if (!next) return;
     if (next.at <= now) {
@@ -172,8 +200,10 @@ export class PresenceReporter {
       return;
     }
     // Stopped, told away, or the report went stale while the relay was asked: send nothing.
-    if (!supported || !live() || !this.fresh(this.ctx.now())) return;
-    const sentAt = this.ctx.now();
+    if (!supported || !live() || !this.fresh(this.clock())) return;
+    const sentAt = this.clock();
+    const shifted = this.shifted;
+    const hadLease = this.leaseMaybe;
     this.leaseMaybe = true;
     try {
       await this.ctx.client.putPresence(true, REQUEST_TIMEOUT_MS);
@@ -186,15 +216,17 @@ export class PresenceReporter {
         if (current()) this.retryLater(err);
         return;
       }
-      // Refused, so no lease was started. A 404 is a relay that lists the feature without the route.
-      this.leaseMaybe = false;
-      this.support = { value: false, at: this.ctx.now() };
+      // Refused, so this request started no lease, though an earlier one may still be current and is ended on away. A
+      // 404 is a relay that lists the feature without the route: nothing there to end.
+      this.leaseMaybe = err.status === 404 ? false : hadLease;
+      this.support = { value: false, at: this.clock() };
       if (err.status !== 404) this.onError(err);
       return;
     }
     // An away reported meanwhile is sent next, and a later return to present must not wait on this renewal.
     if (!current()) return;
-    this.renewedAt = sentAt;
+    this.clock();
+    this.renewedAt = sentAt - (this.shifted - shifted);
     this.retryAt = 0;
     this.attempts = 0;
   }
@@ -206,17 +238,19 @@ export class PresenceReporter {
       RETRY_MIN_MS,
       backoffMs(this.attempts, RETRY_MIN_MS, RENEW_MS),
     );
-    this.retryAt = this.ctx.now() + wait;
+    this.retryAt = this.clock() + wait;
   }
 
   /**
-   * Whether the relay advertises `presence-v1` in `GET /info`. A relay without it is never sent presence, and is
-   * asked again after `RECHECK_MS` only if the host is still reporting. A relay whose `/info` does not parse, or
-   * answers with a client error, advertises nothing; a network failure or 5xx throws, so the caller retries.
+   * Whether the relay advertises `presence-v1` in `GET /info`. A relay without it is never sent presence. The answer
+   * is believed for `RECHECK_MS` either way, then asked again only if the host is still reporting, so an upgraded
+   * relay is picked up and one that stopped listing the feature is no longer sent it. A relay whose `/info` does not
+   * parse, or answers with a client error, advertises nothing; a network failure or 5xx throws, so the caller retries.
    */
   private async supported(): Promise<boolean> {
-    const s = this.support;
-    if (s && (s.value || this.ctx.now() - s.at < RECHECK_MS)) return s.value;
+    const now = this.clock();
+    if (this.knownSupported(now)) return true;
+    if (this.knownUnsupported(now)) return false;
     let value: boolean;
     try {
       const info = InfoResponse.safeParse(await this.ctx.client.info(REQUEST_TIMEOUT_MS));
@@ -225,7 +259,7 @@ export class PresenceReporter {
       if (!(e instanceof RelayError) || e.retryable) throw e;
       value = false;
     }
-    this.support = { value, at: this.ctx.now() };
+    this.support = { value, at: this.clock() };
     return value;
   }
 }

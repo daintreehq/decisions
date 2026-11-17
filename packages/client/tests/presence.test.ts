@@ -31,7 +31,9 @@ async function world(o: { features?: string[] | undefined } = {}) {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   const env = await setupBridge();
   env.relay.features = 'features' in o ? o.features : ['thread-messages-v1', 'presence-v1'];
-  env.relay.presenceNow = () => Date.now();
+  // The relay keeps its own time, moved on with the desktop's by `pass`, so the desktop's clock can be set apart.
+  let relayNow = Date.now();
+  env.relay.presenceNow = () => relayNow;
   const errors: Error[] = [];
   env.bridge.on('error', (e) => errors.push(e));
   const presenceCalls = () => env.relay.calls.filter((c) => c.path === PRESENCE_PATH);
@@ -52,15 +54,18 @@ async function world(o: { features?: string[] | undefined } = {}) {
   /** Move fake time on a second at a time, letting the reporter settle after each, and check each second. */
   const pass = async (ms: number, each?: () => void) => {
     for (let t = 0; t < ms; t += SECOND) {
+      relayNow += SECOND;
       vi.advanceTimersByTime(SECOND);
       await idle();
       each?.();
     }
   };
-  const leaseCurrent = () =>
-    env.relay.presenceUntil !== null && env.relay.presenceUntil > Date.now();
+  const leaseCurrent = () => env.relay.presenceUntil !== null && env.relay.presenceUntil > relayNow;
+  /** Starts without a socket and lets the bridge's own start-up reads finish, so only presence talks after it. */
   const start = async () => {
     await env.bridge.start({ socket: false });
+    await env.bridge.involvement.refresh();
+    await env.bridge.pump();
     await idle();
   };
   return { ...env, errors, presenceCalls, puts, infos, idle, pass, leaseCurrent, start };
@@ -136,6 +141,90 @@ describe('while the person is present', () => {
     }
     expect(w.puts()).toHaveLength(3);
     expect(w.errors.map((e) => (e as { code?: string }).code)).toEqual(['validation_error']);
+  });
+
+  it('waits as long as the relay asks before retrying', async () => {
+    const w = await world();
+    await w.start();
+    w.relay.presenceReplies.push({
+      status: 429,
+      body: { code: 'rate_limited', message: 'slow down', retry_after_ms: 30_000 },
+    });
+    w.bridge.reportPresence(true);
+    await w.idle();
+    await w.pass(29 * SECOND);
+    expect(w.puts()).toEqual([true]);
+    await w.pass(SECOND);
+    expect(w.puts()).toEqual([true, true]);
+    expect(w.leaseCurrent()).toBe(true);
+  });
+
+  it('backs off from one second, and never longer than a renewal period', async () => {
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const w = await world();
+      await w.start();
+      w.relay.presenceReplies.push({
+        status: 503,
+        body: { code: 'temporarily_unavailable', message: 'down' },
+      });
+      w.bridge.reportPresence(true);
+      await w.idle();
+      vi.advanceTimersByTime(SECOND - 1);
+      await w.idle();
+      expect(w.puts()).toHaveLength(1);
+      await w.pass(SECOND);
+      expect(w.puts()).toHaveLength(2);
+
+      // The longest waits: 2, 4, 8, 16, then 20 and 20 seconds (not 32 and 64), so it still lands inside the report.
+      random.mockReturnValue(0.999);
+      const failures = 6;
+      for (let i = 0; i < failures; i++)
+        w.relay.presenceReplies.push({
+          status: 503,
+          body: { code: 'temporarily_unavailable', message: 'down' },
+        });
+      w.bridge.reportPresence(false);
+      await w.idle();
+      const before = w.puts().length;
+      w.bridge.reportPresence(true);
+      for (let s = 0; s < 72; s += 30) {
+        await w.pass(Math.min(30, 72 - s) * SECOND);
+        w.bridge.reportPresence(true);
+      }
+      expect(w.puts().length - before).toBe(failures + 1);
+      expect(w.leaseCurrent()).toBe(true);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('retries the feature check when the relay cannot be reached', async () => {
+    const w = await world();
+    await w.start();
+    w.relay.failInfo = 1;
+    w.bridge.reportPresence(true);
+    await w.idle();
+    expect(w.puts()).toEqual([]);
+    await w.pass(3 * SECOND);
+    expect(w.infos()).toBe(2);
+    expect(w.puts()).toEqual([true]);
+    expect(w.errors).toEqual([]);
+  });
+
+  it('keeps renewing when the desktop clock steps back', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([true, true]);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    for (let s = 0; s < 180; s += 30) {
+      w.bridge.reportPresence(true);
+      await w.pass(30 * SECOND, () => expect(w.leaseCurrent()).toBe(true));
+    }
+    // Still every 20 seconds: no stall, and no burst either.
+    expect(w.puts()).toHaveLength(11);
   });
 });
 
@@ -261,6 +350,65 @@ describe('the lease lapses', () => {
     expect(() => w.bridge.reportPresence(true)).toThrow(BridgeError);
     expect(w.puts()).toEqual([true]);
   });
+
+  it('when the relay refuses a renewal and the person then leaves: the earlier lease is still ended', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.idle();
+    w.relay.presenceReplies.push({ status: 403, body: { code: 'forbidden', message: 'no' } });
+    await w.pass(20 * SECOND);
+    expect(w.puts()).toEqual([true, true]);
+    expect(w.leaseCurrent()).toBe(true);
+    w.bridge.reportPresence(false);
+    await w.idle();
+    expect(w.puts()).toEqual([true, true, false]);
+    expect(w.relay.presenceUntil).toBeNull();
+    expect(w.errors.map((e) => (e as { code?: string }).code)).toEqual(['forbidden']);
+  });
+
+  it('when the person leaves after a renewal whose reply was lost: it may have started a lease, so it is ended', async () => {
+    const w = await world();
+    await w.start();
+    w.relay.dropPresenceReply = 1;
+    w.bridge.reportPresence(true);
+    await w.idle();
+    expect(w.puts()).toEqual([true]);
+    expect(w.leaseCurrent()).toBe(true);
+    w.bridge.reportPresence(false);
+    await w.idle();
+    expect(w.puts()).toEqual([true, false]);
+    expect(w.relay.presenceUntil).toBeNull();
+  });
+
+  it('when the bridge restarts with a renewal on the wire: its late reply never delays the new run', async () => {
+    const w = await world();
+    await w.start();
+    let release!: () => void;
+    w.relay.holdPresence = new Promise<void>((r) => (release = r));
+    w.bridge.reportPresence(true);
+    for (let i = 0; i < 500 && w.puts().length === 0; i++) await realWait(2);
+    await w.bridge.stop();
+    await w.bridge.start({ socket: false });
+    w.bridge.reportPresence(true);
+    w.relay.holdPresence = null;
+    release();
+    await w.idle();
+    // The new run sends its own as soon as the old request is done, instead of counting from the old one.
+    expect(w.puts()).toEqual([true, true]);
+  });
+
+  it('when the bridge stops while still starting up: nothing starts sending afterwards', async () => {
+    const w = await world();
+    const starting = w.bridge.start({ socket: false });
+    await w.bridge.stop();
+    w.bridge.reportPresence(true);
+    await starting;
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([]);
+    expect(w.infos()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('before the bridge starts', () => {
@@ -280,6 +428,15 @@ describe('before the bridge starts', () => {
     const w = await world();
     w.bridge.reportPresence(true);
     await w.pass(PRESENCE_REPORT_MS);
+    await w.start();
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([]);
+  });
+
+  it('forgets a report when the bridge is stopped before it ever started', async () => {
+    const w = await world();
+    w.bridge.reportPresence(true);
+    await w.bridge.stop();
     await w.start();
     await w.pass(30 * SECOND);
     expect(w.puts()).toEqual([]);
@@ -342,6 +499,28 @@ describe('a relay without presence', () => {
     expect(w.puts().length).toBeGreaterThan(0);
     expect(w.leaseCurrent()).toBe(true);
   });
+
+  it('that stops listing the feature is no longer sent presence', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.idle();
+    w.relay.features = ['thread-messages-v1'];
+    for (let s = 0; s < 11 * 60; s += 30) {
+      w.bridge.reportPresence(true);
+      await w.pass(30 * SECOND);
+    }
+    const sent = w.puts().length;
+    // Believed for ten minutes, then asked again: renewals stop.
+    expect(sent).toBeLessThanOrEqual(31);
+    expect(w.infos()).toBe(2);
+    for (let s = 0; s < 120; s += 30) {
+      w.bridge.reportPresence(true);
+      await w.pass(30 * SECOND);
+    }
+    expect(w.puts()).toHaveLength(sent);
+    expect(w.errors).toEqual([]);
+  });
 });
 
 describe('who may report', () => {
@@ -384,5 +563,16 @@ describe('who may report', () => {
       expect.objectContaining({ code: 'validation_error' }),
     );
     expect(MCP_BRIDGE_METHODS).not.toContain('reportPresence');
+  });
+
+  it('its relay client never retries a presence request on its own: the reporter owns the timing', async () => {
+    const env = await setupBridge();
+    const fetch = vi.fn(env.relay.fetch);
+    const sleep = vi.fn(async () => {});
+    const client = new RelayClient({ identity: env.identity, fetch, sleep });
+    env.relay.status5xx = 1;
+    await expect(client.putPresence(true)).rejects.toMatchObject({ status: 503 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

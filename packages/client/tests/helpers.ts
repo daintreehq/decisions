@@ -216,6 +216,8 @@ export class FakeRelay {
   presenceReplies: { status: number; body: Record<string, unknown> }[] = [];
   /** While set, presence PUTs wait for it before the relay looks at them (a slow relay). */
   holdPresence: Promise<void> | null = null;
+  /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
+  dropPresenceReply = 0;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -640,6 +642,10 @@ export class FakeRelay {
       const present = (body as { present?: unknown } | undefined)?.present === true;
       const now = this.presenceNow();
       this.presenceUntil = present ? now + LIMITS.presenceLeaseMs : null;
+      if (this.dropPresenceReply > 0) {
+        this.dropPresenceReply--;
+        throw new TypeError('connection reset after the relay committed');
+      }
       return json(200, {
         present,
         until: present ? new Date(this.presenceUntil!).toISOString() : null,

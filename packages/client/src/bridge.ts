@@ -332,6 +332,8 @@ export class DecisionsBridge {
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
+  /** Bumped by every start, stop and revocation: a start still recovering when one comes starts nothing more. */
+  private lifecycle = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
@@ -494,6 +496,7 @@ export class DecisionsBridge {
   /** Reconcile interrupted injections, connect the socket, start the retry timer. */
   async start(opts: { socket?: boolean } = {}): Promise<void> {
     if (this.state === 'running') return;
+    const run = ++this.lifecycle;
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
@@ -501,6 +504,8 @@ export class DecisionsBridge {
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
+    // Stopped or revoked while recovering: nothing may start sending in the background now.
+    if (run !== this.lifecycle) return;
     this.snapshots.start();
     this.involvement.start();
     this.presence.start();
@@ -517,6 +522,7 @@ export class DecisionsBridge {
   }
 
   async stop(): Promise<void> {
+    this.lifecycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.socket.stop();
@@ -530,6 +536,7 @@ export class DecisionsBridge {
 
   private markRevoked(): void {
     if (this.state === 'revoked') return;
+    this.lifecycle++;
     this.state = 'revoked';
     this.delivery.stopped = true;
     this.socket.stop();
@@ -878,9 +885,10 @@ export class DecisionsBridge {
    * Say whether the person is at the owner desktop (protocol section 11), so the relay holds a new question's phone
    * push briefly while they are. The host reports `true` when the person is active (again every 30 s or so while they
    * stay, and at once when they come back) and `false` when they leave, lock the screen or the computer sleeps. Each
-   * `true` counts for `PRESENCE_REPORT_MS` (two minutes): while one does, the bridge keeps the relay's lease current
-   * in the background; `false` ends the lease, and a report left to go stale or a stopped bridge lets it lapse within a
-   * minute. Returns at once and never touches the network itself.
+   * `true` counts for `PRESENCE_REPORT_MS` (two minutes): while one does, the bridge keeps the relay's 60-second lease
+   * current in the background; `false` ends it. Once reports stop, renewal stops when the last one goes stale, and when
+   * the bridge stops it stops at once: either way the lease lapses 60 seconds after its last renewal. Returns at once,
+   * without waiting for the relay.
    *
    * Only the flag is sent: nothing about questions, panes or content. A relay that does not advertise `presence-v1` is
    * never sent it, and reporting to one does nothing, without an error. Before `start()` the latest report is kept and
