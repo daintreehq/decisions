@@ -227,6 +227,8 @@ export class FakeRelay {
   dropDeclineReply = 0;
   /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
   failDetail = 0;
+  /** The signature each committed answer or decline carried, by action id. */
+  committedSignatures = new Map<string, string>();
   /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
   cancelLog = new Map<string, { action_id: string; action: 'cancel'; record: unknown }[]>();
 
@@ -424,6 +426,7 @@ export class FakeRelay {
       });
       const receipt = { question_id: qid, revision, status: 'human-answered', event_seq: ev.seq };
       this.answerReceipts.set(b.action.record.action_id, receipt);
+      this.committedSignatures.set(b.action.record.action_id, b.action.record.signature);
       if (this.dropAnswerReply > 0) {
         this.dropAnswerReply--;
         throw new TypeError('connection reset after the relay committed the answer');
@@ -649,11 +652,12 @@ export class FakeRelay {
   private decline(qid: string, b: { idempotency_key: string; action: SignedAction }): Response {
     this.declines.push({ idem: b.idempotency_key, action: b.action });
     const record = b.action.record;
+    // The very same signed command again gets the receipt it was first given (its `201`); an action id an answer or
+    // another decline committed under any other signature is a collision.
     const prior = this.answerReceipts.get(record.action_id);
     if (prior) {
-      const first = this.declines.find((a) => a.action.record.action_id === record.action_id)!;
-      return first.action.record.signature === record.signature
-        ? json(200, prior)
+      return this.committedSignatures.get(record.action_id) === record.signature
+        ? json(201, prior)
         : json(409, { code: 'idempotency_collision', message: 'different command' });
     }
     const reject = this.rejectDecline.shift();
@@ -722,6 +726,7 @@ export class FakeRelay {
       event_seq: ev.seq,
     };
     this.answerReceipts.set(record.action_id, receipt);
+    this.committedSignatures.set(record.action_id, record.signature);
     if (this.dropDeclineReply > 0) {
       this.dropDeclineReply--;
       throw new TypeError('connection reset after the relay committed the decline');

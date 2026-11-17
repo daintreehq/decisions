@@ -72,12 +72,14 @@ export type OwnerDeclineResult = {
 
 /**
  * The outbox payload of an `owner-decline` item: signed once, replayed byte for byte on every retry. The signed action
- * id is the decline id, and also the relay idempotency key. `confirming` is set once the relay has answered the send
- * (taken, or refused for a state it does not name): from then on the decline is settled by reading its question, and
- * never sent again.
+ * id is the decline id, and also the relay idempotency key. `sent` is set before the first post: a decline whose
+ * answer was lost may have been taken, so it is never reported `unsupported` without first looking for it on its
+ * question. `confirming` is set once the relay has answered the send (taken, or refused for a state it does not name):
+ * from then on the decline is settled by reading its question, and never sent again.
  */
 export interface OwnerDeclinePayload {
   signed: SignedAction;
+  sent?: true;
   confirming?: true;
 }
 

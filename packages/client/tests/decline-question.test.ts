@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import {
   BridgeError,
@@ -12,7 +15,11 @@ import {
   type LocalStore,
   type OwnerDeclineResult,
 } from '../src/index.js';
+import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { FakeRelay, FakeSink, makeHost, makeIdentity, origin, setupBridge } from './helpers.js';
+
+const dir = mkdtempSync(join(tmpdir(), 'decisions-decline-question-'));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 /*
  * Issue #121: a host app declines a question for the person from the owner desktop (`declineQuestion`), for the owner's
@@ -63,6 +70,7 @@ function bridgeFor(
   identity: Identity,
   relay: FakeRelay,
   store: LocalStore = new MemoryLocalStore(),
+  now?: () => number,
 ) {
   const sink = new FakeSink();
   sink.addPane('pane-1');
@@ -73,6 +81,7 @@ function bridgeFor(
     client: new RelayClient({ identity, fetch: relay.fetch, sleep: async () => {}, maxRetries: 0 }),
     policy: new PolicyRegistry(),
     pumpIntervalMs: 0,
+    ...(now ? { now } : {}),
   });
   return { bridge, sink, store };
 }
@@ -436,6 +445,124 @@ describe('a decline is sent once and settled once', () => {
     expect(relay.declines).toHaveLength(1);
     expect(seen).toEqual([stored]);
     expect(await ownerDeclines(store)).toEqual([]);
+  });
+});
+
+describe('a decline across ordering, collisions and restarts', () => {
+  it('waits behind a queued withdrawal, which wins: closed, never declined', async () => {
+    const { bridge, relay, store, sink, qid } = await ownQuestion();
+    relay.down = 1;
+    await bridge.cancelQuestion(qid);
+    await bridge.pump();
+    expect((await store.dueOutbox(Number.MAX_SAFE_INTEGER, 100)).map((o) => o.kind)).toEqual([
+      'cancel',
+    ]);
+
+    const r = await bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    expect(r.status).toBe('queued');
+    expect(declinePosts(relay)).toEqual([]);
+
+    for (const o of await store.dueOutbox(Number.MAX_SAFE_INTEGER, 100))
+      await store.putOutbox({ ...o, next_attempt_at: 0 });
+    await bridge.pump();
+    const cancels = relay.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/cancel'));
+    expect(
+      cancels.map(
+        (c) => (c.body as { action: { record: { decline?: true } } }).action.record.decline,
+      ),
+    ).toEqual([undefined, true]);
+    expect(await bridge.getDeclineResult(r.declineId)).toMatchObject({
+      status: 'closed',
+      reason: 'cancelled',
+    });
+    expect(sink.typed).toEqual([]);
+  });
+
+  it('a decline id an answer already used is refused by the relay, never read as that answer', async () => {
+    const { bridge, relay, qid } = await ownQuestion();
+    relay.features = [...FEATURES, 'owner-desktop-answers-v1'];
+    const answered = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+    });
+    expect(answered.status).toBe('sent');
+    expect(
+      await bridge.declineQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        declineId: answered.answerId,
+      }),
+    ).toMatchObject({ status: 'rejected', code: 'idempotency_collision' });
+  });
+
+  it('a decline being confirmed is settled by the next process from the question alone', async () => {
+    const path = join(dir, 'confirming.db');
+    let t = Date.now();
+    const store = new SqliteLocalStore(path);
+    const { bridge, relay, qid, identity } = await ownQuestion({ store, now: () => t });
+    relay.failDetail = 1;
+    const r = await bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    expect(r.status).toBe('queued');
+    await bridge.stop();
+    store.close();
+
+    // The relay has stopped advertising declines since; the new process has never read what it advertises.
+    relay.features = ['thread-messages-v1'];
+    const store2 = new SqliteLocalStore(path);
+    const next = bridgeFor(identity, relay, store2, () => t);
+    const seen = results(next.bridge);
+    t += 10 * 60_000;
+    await next.bridge.publisher.flush();
+    expect(relay.declines).toHaveLength(1);
+    expect(seen).toEqual([{ ...r, status: 'declined' }]);
+    store2.close();
+
+    const store3 = new SqliteLocalStore(path);
+    const third = bridgeFor(identity, relay, store3, () => t);
+    expect(await third.bridge.getDeclineResult(r.declineId)).toEqual({ ...r, status: 'declined' });
+    store3.close();
+  });
+
+  it('a decline whose answer was lost is looked for before it is called unsupported', async () => {
+    const path = join(dir, 'lost.db');
+    let t = Date.now();
+    const store = new SqliteLocalStore(path);
+    const { bridge, relay, qid, identity } = await ownQuestion({ store, now: () => t });
+    relay.dropDeclineReply = 1;
+    const taken = await bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    expect(taken.status).toBe('queued');
+
+    // A second decline that never reached the relay at all.
+    const other = await bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'And this?', options: OPTIONS },
+    });
+    await bridge.pump();
+    relay.down = 1;
+    const lost = await bridge.declineQuestion({
+      questionId: other.questionId,
+      expectedRevision: 0,
+    });
+    expect(lost.status).toBe('queued');
+    await bridge.stop();
+    store.close();
+
+    relay.features = ['thread-messages-v1'];
+    const store2 = new SqliteLocalStore(path);
+    const next = bridgeFor(identity, relay, store2, () => t);
+    t += 10 * 60_000;
+    await next.bridge.publisher.flush();
+    // Neither is posted again: the one the relay took is found on its question, the other one is unsupported.
+    expect(relay.declines).toHaveLength(1);
+    expect(await next.bridge.getDeclineResult(taken.declineId)).toMatchObject({
+      status: 'declined',
+    });
+    expect(await next.bridge.getDeclineResult(lost.declineId)).toMatchObject({
+      status: 'unsupported',
+      by: 'relay',
+    });
+    store2.close();
   });
 });
 

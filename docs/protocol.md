@@ -226,10 +226,10 @@ withdrawal, as before, and the flag gives the owner desktop no other human actio
   above. The owner desktop's decline needs only this feature, not `person-declines-v1`. A revoked publishing desktop
   declares nothing, so the owner desktop can withdraw its questions but not decline them. A client that predates the
   flag still verifies the record and shows the question as withdrawn. The desktop library declares the feature on every
-  bridge, and signs the owner desktop's decline only from the host app (`declineQuestion`, never an MCP tool). A retry of a
-  decline the relay took and a cancel of a question another cancel closed first both answer `200` with the same receipt,
-  so the library confirms a decline by finding its signed record in the question's action log (`GET /questions/{id}`)
-  before reporting it declined.
+  bridge, and signs the owner desktop's decline only from the host app (`declineQuestion`, never an MCP tool). A cancel of a
+  question another cancel closed first answers `200` with a receipt shaped like a committed one's, and a retry of a
+  decline gets back the receipt it was first given, so the library confirms a decline by finding its signed record in
+  the question's action log (`GET /questions/{id}`) before reporting it declined.
 
 ## 7. Event ledger and sync
 

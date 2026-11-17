@@ -1304,7 +1304,11 @@ export class Publisher {
       return stored.result.status === 'declined' ? 'declined' : 'settled';
     }
 
+    // Set when the relay no longer takes declines but this one was sent before and may have been taken then (its answer
+    // lost): only the question can say, and anything but finding it there is `unsupported`.
+    let unsupported = false;
     if (!payload.confirming) {
+      const wasSent = payload.sent === true;
       // A relay that does not advertise owner-desktop declines would refuse the flag: it is never sent one.
       let set: ReadonlySet<ProtocolFeature>;
       try {
@@ -1313,33 +1317,46 @@ export class Publisher {
         await backOff(e);
         return 'retry';
       }
-      if (!set.has(OWNER_DECLINE_FEATURE)) return settle({ status: 'unsupported', by: 'relay' });
-      try {
-        await ctx.client.postAction('cancel', item.question_id, declineId, signed, {
-          retry: false,
-          timeoutMs: OWNER_DECLINE_TIMEOUT_MS,
-        });
-      } catch (e) {
-        const err =
-          e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
-        if (err.retryable) {
-          await backOff(err);
-          return 'stop';
+      if (!set.has(OWNER_DECLINE_FEATURE)) {
+        if (!wasSent) return settle({ status: 'unsupported', by: 'relay' });
+        unsupported = true;
+      } else {
+        if (!wasSent) {
+          // Marked before the first post, so a send whose answer is lost is never taken for one that never went.
+          payload.sent = true;
+          await ctx.store.putOutbox({ ...item, payload });
         }
-        let outcome = ownerDeclineRefusal(err);
-        if (err.status === 403) {
-          // The flag refused: a relay that stopped advertising owner-desktop declines no longer takes them.
-          this.features = null;
-          const now = await this.relayFeatures().catch(() => null);
-          if (now && !now.has(OWNER_DECLINE_FEATURE))
-            outcome = { status: 'unsupported', by: 'relay' };
+        try {
+          await ctx.client.postAction('cancel', item.question_id, declineId, signed, {
+            retry: false,
+            timeoutMs: OWNER_DECLINE_TIMEOUT_MS,
+          });
+        } catch (e) {
+          const err =
+            e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
+          if (err.retryable) {
+            await backOff(err);
+            return 'stop';
+          }
+          let outcome = ownerDeclineRefusal(err);
+          if (err.status === 403) {
+            // The flag refused: a relay that stopped advertising owner-desktop declines no longer takes them.
+            this.features = null;
+            const now = await this.relayFeatures().catch(() => null);
+            if (now && !now.has(OWNER_DECLINE_FEATURE))
+              outcome = { status: 'unsupported', by: 'relay' };
+          }
+          if (outcome?.status === 'unsupported' && outcome.by === 'relay' && wasSent)
+            unsupported = true;
+          else if (outcome) return settle(outcome);
+          // Otherwise refused for a state the error does not name: the question says which.
         }
-        if (outcome) return settle(outcome);
-        // Refused for a state the error does not name: the question says which.
+        if (!unsupported) {
+          // From here on it is settled from the question alone, and never posted again.
+          payload.confirming = true;
+          await ctx.store.putOutbox({ ...item, payload });
+        }
       }
-      // From here on it is settled from the question alone, and never posted again.
-      payload.confirming = true;
-      await ctx.store.putOutbox({ ...item, payload });
     }
 
     let detail: unknown;
@@ -1361,8 +1378,12 @@ export class Publisher {
           : { status: 'rejected', code: err.code },
       );
     }
+    const found = ownerDeclineFromDetail(detail, signed) ?? {
+      status: 'rejected' as const,
+      code: 'malformed_question',
+    };
     return settle(
-      ownerDeclineFromDetail(detail, signed) ?? { status: 'rejected', code: 'malformed_question' },
+      unsupported && found.status !== 'declined' ? { status: 'unsupported', by: 'relay' } : found,
     );
   }
 
