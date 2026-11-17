@@ -70,17 +70,30 @@ export const LEGACY_DESKTOP_INVOLVEMENT_START: LegacyDesktopInvolvement = {
 
 /**
  * One 0.7.0 desktop read of a `GET /involvement` body: the copy it keeps afterwards, and why it refused the body,
- * or null when it took it. A refusal leaves the copy exactly as it was.
+ * or null when it took it. A refusal leaves the copy exactly as it was. The directory lookup here cannot fail for a
+ * while, so 0.7.0's `directory-unavailable` refusal has no counterpart: any throw is `unverifiable`.
  */
 export async function legacyDesktopInvolvementRead(
   prev: LegacyDesktopInvolvement,
   raw: unknown,
   ctx: LegacyInvolvementContext,
 ): Promise<{ copy: LegacyDesktopInvolvement; refused: string | null }> {
-  const refuse = (refused: string) => ({ copy: prev, refused });
   const parsed = Response070.safeParse(raw);
-  if (!parsed.success) return refuse('malformed');
-  const r = parsed.data.preference;
+  if (!parsed.success) return { copy: prev, refused: 'malformed' };
+  try {
+    return await desktopAccept(prev, parsed.data.preference, ctx);
+  } catch {
+    // A hostile record can make canonicalising or verifying throw: refused like any other bad record.
+    return { copy: prev, refused: 'unverifiable' };
+  }
+}
+
+async function desktopAccept(
+  prev: LegacyDesktopInvolvement,
+  r: LegacyInvolvementRecord | null,
+  ctx: LegacyInvolvementContext,
+): Promise<{ copy: LegacyDesktopInvolvement; refused: string | null }> {
+  const refuse = (refused: string) => ({ copy: prev, refused });
   if (!r) {
     if (prev.high_water > 0) return refuse('withheld');
     return { copy: { record: null, high_water: 0 }, refused: null };
@@ -92,12 +105,7 @@ export async function legacyDesktopInvolvementRead(
     canonicalize(r) !== canonicalize(prev.record)
   )
     return refuse('equivocation');
-  let why: string | null;
-  try {
-    why = await desktopRejection(r, ctx);
-  } catch {
-    return refuse('unverifiable');
-  }
+  const why = await desktopRejection(r, ctx);
   if (why === 'signer-revoked')
     return { copy: { record: r, high_water: r.revision, status: 'signer-revoked' }, refused: why };
   if (why) return refuse(why);
@@ -117,11 +125,16 @@ async function desktopRejection(
   return null;
 }
 
-/** The record a 0.7.0 desktop hands its agents from its copy, or null when none steers them. */
+/**
+ * The record a 0.7.0 desktop hands its agents from its copy, or null when none steers them: none was kept, or its
+ * signer has been removed (stored with the copy, or seen in the ledger since, which applies before the next read).
+ */
 export function legacyDesktopInvolvementSteering(
   copy: LegacyDesktopInvolvement,
+  ctx: LegacyInvolvementContext,
 ): LegacyInvolvementRecord | null {
-  return copy.status === 'signer-revoked' ? null : copy.record;
+  if (copy.status === 'signer-revoked' || !copy.record) return null;
+  return ctx.signer(copy.record.signer_device_id)?.revoked ? null : copy.record;
 }
 
 /* ---------------- the phone ---------------- */
@@ -132,7 +145,10 @@ export interface LegacyPhoneInvolvement {
   status: 'idle' | 'ready' | 'invalid';
   /** Verified, or null. */
   record: LegacyInvolvementRecord | null;
-  /** The revision the relay holds, verified or not: the phone's next save signs one more. */
+  /**
+   * The revision the relay holds, verified or not. A form opened on it saves one more; a form opened earlier saves
+   * its own base, is refused as a conflict, and the person's next save starts from here.
+   */
   revision: number;
   problem: string | null;
 }

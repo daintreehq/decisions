@@ -477,7 +477,7 @@ describe('involvement readers from 0.7.0 (issue #117)', () => {
     const desktop2 = await legacyDesktopInvolvementRead(desktop1.copy, await served(w.owner), ctx);
     expect(desktop2.refused).toBe('set-by-non-human-device');
     expect(desktop2.copy).toEqual(desktop1.copy);
-    expect(legacyDesktopInvolvementSteering(desktop2.copy)).toEqual(r1);
+    expect(legacyDesktopInvolvementSteering(desktop2.copy, ctx)).toEqual(r1);
     const handset2 = await legacyPhoneInvolvementRead(handset1, await served(phone), ctx);
     expect(handset2).toMatchObject({ status: 'invalid', record: null, revision: 2 });
 
@@ -485,7 +485,7 @@ describe('involvement readers from 0.7.0 (issue #117)', () => {
     const r3 = await set(w, phone, handset2.revision + 1);
     const desktop3 = await legacyDesktopInvolvementRead(desktop2.copy, await served(w.owner), ctx);
     expect(desktop3.refused).toBeNull();
-    expect(legacyDesktopInvolvementSteering(desktop3.copy)).toEqual(r3);
+    expect(legacyDesktopInvolvementSteering(desktop3.copy, ctx)).toEqual(r3);
     const handset3 = await legacyPhoneInvolvementRead(handset2, await served(phone), ctx);
     expect(handset3).toMatchObject({ status: 'ready', record: r3, revision: 3 });
   });
@@ -504,11 +504,11 @@ describe('involvement readers from 0.7.0 (issue #117)', () => {
     );
     expect(before.refused).toBe('set-by-non-human-device');
     expect(before.copy).toEqual(LEGACY_DESKTOP_INVOLVEMENT_START);
-    expect(legacyDesktopInvolvementSteering(before.copy)).toBeNull();
+    expect(legacyDesktopInvolvementSteering(before.copy, ctx)).toBeNull();
 
     const r2 = await set(w, tablet, 2);
     const after = await legacyDesktopInvolvementRead(before.copy, await served(host), ctx);
     expect(after.refused).toBeNull();
-    expect(legacyDesktopInvolvementSteering(after.copy)).toEqual(r2);
+    expect(legacyDesktopInvolvementSteering(after.copy, ctx)).toEqual(r2);
   });
 });

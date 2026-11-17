@@ -129,6 +129,12 @@ describe('setting the involvement preference', () => {
     const phone = await pairDevice(w);
     expect((await put(w.owner, await sign(w, phone))).status).toBe(400);
     expect((await put(phone, await sign(w, w.owner))).status).toBe(400);
+    // Signed with the owner's own key, so it verifies, but naming the phone as its signer.
+    expect((await put(w.owner, await sign(w, w.owner, { signerId: phone.id }))).status).toBe(400);
+    const elsewhere = await sign(w, w.owner, { installationId: newId() });
+    expect((await put(w.owner, elsewhere)).status).toBe(400);
+    const forged = { ...(await sign(w, w.owner)), consult_count: 5 };
+    expect((await put(w.owner, forged)).status).toBe(400);
     expect((await get(phone)).preference).toBeNull();
   });
 
@@ -231,7 +237,14 @@ describe('compare-and-swap on the revision', () => {
     const w = await claimRelay();
     const phone = await pairDevice(w);
 
+    // The owner desktop cannot skip a revision either.
+    const skipped = await put(w.owner, await sign(w, w.owner, { revision: 2 }));
+    expect(skipped.status).toBe(409);
+    expect(skipped.json.details).toEqual({ latest_revision: 0 });
     expect((await put(phone, await sign(w, phone, { revision: 1 }))).status).toBe(200);
+    const ahead = await put(w.owner, await sign(w, w.owner, { revision: 3 }));
+    expect(ahead.status).toBe(409);
+    expect(ahead.json.details).toEqual({ latest_revision: 1 });
     // The owner desktop still holds nothing and signs revision 1: refused, with what is current.
     const stale = await put(w.owner, await sign(w, w.owner, { revision: 1 }));
     expect(stale.status).toBe(409);
@@ -254,10 +267,10 @@ describe('compare-and-swap on the revision', () => {
   it('the owner desktop and a phone racing for the same revision: exactly one wins', async () => {
     const w = await claimRelay();
     const phone = await pairDevice(w);
-    const [a, b] = await Promise.all([
-      put(w.owner, await sign(w, w.owner, { normal: 'recommend' })),
-      put(phone, await sign(w, phone, { normal: 'involve-early' })),
-    ]);
+    // Both signed first, so the two writes are in flight together.
+    const fromOwner = await sign(w, w.owner, { normal: 'recommend' });
+    const fromPhone = await sign(w, phone, { normal: 'involve-early' });
+    const [a, b] = await Promise.all([put(w.owner, fromOwner), put(phone, fromPhone)]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const winner = a.status === 200 ? w.owner : phone;
     expect((await get(phone)).preference!.signer_device_id).toBe(winner.id);

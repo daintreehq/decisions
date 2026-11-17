@@ -18,6 +18,14 @@ import {
   type LedgerEvent,
   type Role,
 } from '../src/index.js';
+import {
+  LEGACY_DESKTOP_INVOLVEMENT_START,
+  LEGACY_PHONE_INVOLVEMENT_START,
+  legacyDesktopInvolvementRead,
+  legacyDesktopInvolvementSteering,
+  legacyPhoneInvolvementRead,
+  type LegacyInvolvementContext,
+} from '../src/fixtures.js';
 
 const SIG = 's'.repeat(86);
 const T0 = Date.parse('2026-11-17T09:00:00.000Z');
@@ -241,5 +249,77 @@ describe('the preparation report', () => {
         outcome: 'not-run',
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('the frozen 0.7.0 readers', () => {
+  const PHONE = 'phone_000001';
+  const OWNER = 'desk_0000001';
+  const context = (revoked = false): LegacyInvolvementContext => ({
+    installationId: 'inst_00000001',
+    signer: (id) =>
+      id === PHONE
+        ? { role: 'phone', revoked, verify: async () => true }
+        : id === OWNER
+          ? { role: 'owner-desktop', revoked: false, verify: async () => true }
+          : null,
+  });
+  const served = (r: Rec | null) => ({ preference: r, received_at: r ? iso(T0) : null });
+
+  it('a refused owner record sets no revision floor: a lower phone record after it is still taken', async () => {
+    const ctx = context();
+    const r1 = record({ revision: 1 });
+    const desktop = await legacyDesktopInvolvementRead(
+      LEGACY_DESKTOP_INVOLVEMENT_START,
+      served(r1),
+      ctx,
+    );
+    const owner = await legacyDesktopInvolvementRead(
+      desktop.copy,
+      served(record({ revision: 5, signer_device_id: OWNER })),
+      ctx,
+    );
+    expect(owner).toEqual({ copy: desktop.copy, refused: 'set-by-non-human-device' });
+    const r3 = record({ revision: 3 });
+    expect(await legacyDesktopInvolvementRead(owner.copy, served(r3), ctx)).toEqual({
+      copy: { record: r3, high_water: 3 },
+      refused: null,
+    });
+
+    const handset = await legacyPhoneInvolvementRead(
+      await legacyPhoneInvolvementRead(LEGACY_PHONE_INVOLVEMENT_START, served(r1), ctx),
+      served(record({ revision: 5, signer_device_id: OWNER })),
+      ctx,
+    );
+    expect(handset).toMatchObject({ status: 'invalid', record: null, revision: 5 });
+    expect(await legacyPhoneInvolvementRead(handset, served(r3), ctx)).toMatchObject({
+      status: 'ready',
+      record: r3,
+      revision: 3,
+    });
+  });
+
+  it('the desktop refuses a record it cannot canonicalise and keeps its copy', async () => {
+    const ctx = context();
+    const { copy } = await legacyDesktopInvolvementRead(
+      LEGACY_DESKTOP_INVOLVEMENT_START,
+      served(record({ revision: 1 })),
+      ctx,
+    );
+    const hostile = { ...record({ revision: 1 }), note: '\ud800' };
+    expect(await legacyDesktopInvolvementRead(copy, served(hostile), ctx)).toEqual({
+      copy,
+      refused: 'unverifiable',
+    });
+  });
+
+  it('the desktop stops steering by a record whose signer was removed since, before reading again', async () => {
+    const { copy } = await legacyDesktopInvolvementRead(
+      LEGACY_DESKTOP_INVOLVEMENT_START,
+      served(record({ revision: 1 })),
+      context(),
+    );
+    expect(legacyDesktopInvolvementSteering(copy, context())).toEqual(record({ revision: 1 }));
+    expect(legacyDesktopInvolvementSteering(copy, context(true))).toBeNull();
   });
 });
