@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  CREATOR_MISSING_FEATURE,
-  EventData,
-  MessageReceipt,
-} from '@daintreehq/decisions-protocol';
+import { CREATOR_MISSING_FEATURE, EventData, MessageReceipt } from '@daintreehq/decisions-protocol';
 import { newId } from '@daintreehq/decisions-crypto';
 import {
   act,
@@ -71,7 +67,9 @@ const repost = (actor: Actor, questionId: string, body: unknown) =>
 const postedEvents = (a: Actor) =>
   a
     .call('GET', '/api/v1/events', undefined, `after=0&features=${THREADS}&limit=100`)
-    .then((r) => (r.json.events as any[]).filter((e) => e.event_type === 'decision.message.posted'));
+    .then((r) =>
+      (r.json.events as any[]).filter((e) => e.event_type === 'decision.message.posted'),
+    );
 
 describe("the owner desktop sends the person's messages", () => {
   it('commits one before and after an answer, delivered to the pane like a phone message', async () => {
@@ -178,7 +176,10 @@ describe("the owner desktop sends the person's messages", () => {
     const replay = await repost(w.owner, questionId, first.body);
     expect(replay.status).toBe(201);
     expect(replay.json).toEqual(ok.json);
-    const sameMessage = await repost(w.owner, questionId, { ...first.body, idempotency_key: newId() });
+    const sameMessage = await repost(w.owner, questionId, {
+      ...first.body,
+      idempotency_key: newId(),
+    });
     expect(sameMessage.status).toBe(200);
     expect(sameMessage.json).toEqual(ok.json);
     expect((await state(questionId)).postedEvents).toBe(1);
@@ -295,8 +296,8 @@ describe("the owner desktop sends the person's messages", () => {
     expect(withImages.res.json.code).toBe('forbidden');
     await expectNoMessages(questionId);
     // An empty list is no image at all.
-    expect((await say(w, w.owner, questionId, { side: 'human', attachmentIds: [] })).res.status).toBe(
-      201,
-    );
+    expect(
+      (await say(w, w.owner, questionId, { side: 'human', attachmentIds: [] })).res.status,
+    ).toBe(201);
   });
 });
