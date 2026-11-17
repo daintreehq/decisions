@@ -570,7 +570,11 @@ describe('setting it on the owner desktop', () => {
     await s.start();
     const until = iso(T0 + HOUR);
     const result = await s.bridge.setInvolvementPreference(
-      choice(1, { normalMode: 'recommend', consultCount: 4, override: { mode: 'involve-early', until } }),
+      choice(1, {
+        normalMode: 'recommend',
+        consultCount: 4,
+        override: { mode: 'involve-early', until },
+      }),
     );
     expect(result).toEqual({ status: 'saved', revision: 2 });
 

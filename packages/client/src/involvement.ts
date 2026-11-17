@@ -392,7 +392,12 @@ export class InvolvementSync {
     }
     if (r.revision > prev.high_water)
       await this.ctx.audit.log({ event: 'involvement.updated', result: `revision-${r.revision}` });
-    return settle({ record: r, high_water: r.revision, synced_at: this.ctx.now(), set_on: v.setOn });
+    return settle({
+      record: r,
+      high_water: r.revision,
+      synced_at: this.ctx.now(),
+      set_on: v.setOn,
+    });
   }
 
   /**
@@ -418,7 +423,9 @@ export class InvolvementSync {
       throw new BridgeError('validation_error', 'the preference does not make a valid record');
     let raw: unknown;
     try {
-      raw = await this.ctx.client.putInvolvement(newId(), record, { timeoutMs: REQUEST_TIMEOUT_MS });
+      raw = await this.ctx.client.putInvolvement(newId(), record, {
+        timeoutMs: REQUEST_TIMEOUT_MS,
+      });
     } catch (e) {
       if (!(e instanceof RelayError)) throw e;
       if (e.code === 'revision_conflict') {
@@ -439,7 +446,10 @@ export class InvolvementSync {
     if (!receipt.success || receipt.data.revision !== record.revision) {
       this.invalidate();
       this.kick();
-      return { status: 'unconfirmed', message: 'the relay’s reply did not confirm this preference' };
+      return {
+        status: 'unconfirmed',
+        message: 'the relay’s reply did not confirm this preference',
+      };
     }
     await this.adopt(record);
     await this.ctx.audit.log({ event: 'involvement.set', result: `revision-${record.revision}` });
