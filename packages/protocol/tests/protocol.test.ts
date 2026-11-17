@@ -250,6 +250,88 @@ describe('state machine', () => {
       conflict(() => applyAction({ ...open, status: 'cancelled' }, 'answer', 'phone', 0)),
     ).toBe('invalid_state');
   });
+  it('the owner desktop declines with a signed decline flag; its plain cancel stays a withdrawal', () => {
+    for (const requirement of ['human-required', 'proxy-ok', 'proxy-first'] as const) {
+      expect(applyAction({ ...open, requirement }, 'cancel', 'owner-desktop', 0, true)).toEqual({
+        status: 'cancelled',
+        revision: 0,
+        proxyAbstained: false,
+        deliverable: false,
+        noop: false,
+        eventType: 'decision.cancelled',
+      });
+    }
+    expect(isPersonDecline('cancel', 'owner-desktop', true)).toBe(true);
+    expect(isPersonDecline('cancel', 'owner-desktop')).toBe(false);
+    expect(isPersonDecline('cancel', 'desktop-host')).toBe(false);
+    expect(isPersonDecline('reopen', 'owner-desktop', true)).toBe(false);
+    // A phone or tablet declines by its role; the flag changes nothing for its classification.
+    expect(isPersonDecline('cancel', 'phone')).toBe(true);
+    expect(roleMaySign('cancel', 'owner-desktop', true)).toBe(true);
+    expect(roleMaySign('cancel', 'owner-desktop')).toBe(true);
+    expect(provenanceForSigner('cancel', 'owner-desktop')).toBe('none');
+  });
+  it('only the owner desktop signs a decline flag, and only on a cancel', () => {
+    const code = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        return (e as ApiError).code;
+      }
+      return null;
+    };
+    // A Host never declines for the person: it withdraws, or it is refused.
+    expect(roleMaySign('cancel', 'desktop-host', true)).toBe(false);
+    expect(code(() => applyAction(open, 'cancel', 'desktop-host', 0, true))).toBe('forbidden');
+    expect(applyAction(open, 'cancel', 'desktop-host', 0).status).toBe('cancelled');
+    // A phone or tablet declines by its role alone, so the flag has one meaning: the owner desktop's decline.
+    for (const role of ['phone', 'tablet'] as const) {
+      expect(roleMaySign('cancel', role, true)).toBe(false);
+      expect(code(() => applyAction(open, 'cancel', role, 0, true))).toBe('forbidden');
+    }
+    // The flag widens nothing else: the owner desktop gains no other human-only action.
+    for (const action of [
+      'answer',
+      'override',
+      'confirm-proxy',
+      'proxy-answer',
+      'reopen',
+    ] as const) {
+      expect(roleMaySign(action, 'owner-desktop', true), action).toBe(false);
+    }
+    expect(roleMaySign('override', 'owner-desktop')).toBe(false);
+    expect(roleMaySign('confirm-proxy', 'owner-desktop')).toBe(false);
+  });
+  it('an owner-desktop decline follows the person: open only, at the revision seen, first close wins', () => {
+    const code = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        return (e as ApiError).code;
+      }
+      return null;
+    };
+    const decline = (state: Parameters<typeof applyAction>[0], expected: number) =>
+      applyAction(state, 'cancel', 'owner-desktop', expected, true);
+    expect(code(() => decline({ ...open, revision: 2 }, 1))).toBe('revision_conflict');
+    const proxied = {
+      ...open,
+      requirement: 'proxy-ok',
+      status: 'proxy-answered',
+      revision: 1,
+    } as const;
+    expect(code(() => decline(proxied, 1))).toBe('invalid_state');
+    // Its plain cancel still withdraws a proxy-answered question.
+    expect(applyAction(proxied, 'cancel', 'owner-desktop', 1).status).toBe('cancelled');
+    for (const status of ['human-answered', 'expired'] as const) {
+      expect(code(() => decline({ ...open, status }, 0))).toBe('invalid_state');
+    }
+    // A closed question stays closed by whoever closed it: a decline after a withdrawal, or a withdrawal after a
+    // decline, is a no-op that relabels nothing.
+    const cancelled = { ...open, status: 'cancelled' } as const;
+    expect(decline(cancelled, 0).noop).toBe(true);
+    expect(applyAction(cancelled, 'cancel', 'owner-desktop', 0).noop).toBe(true);
+  });
 });
 
 import {
@@ -320,6 +402,29 @@ describe('hardening from review', () => {
     signer_device_id: 'dev_aaaaaaaa',
     signature: 's'.repeat(86),
   };
+  it('decline is literal true on a cancel, and absent everywhere else', () => {
+    const cancel = { ...base, action: 'cancel' };
+    const parsed = ActionRecord.parse({ ...cancel, decline: true });
+    expect(parsed.decline).toBe(true);
+    // Absent stays absent, so a record signed without it canonicalises exactly as before.
+    expect('decline' in ActionRecord.parse(cancel)).toBe(false);
+    expect(signingString(ActionRecord.parse(cancel))).toBe(signingString(cancel));
+    expect(signingString(parsed)).toContain('"decline":true');
+    for (const decline of [false, null, 'true', 1]) {
+      expect(ActionRecord.safeParse({ ...cancel, decline }).success, String(decline)).toBe(false);
+    }
+    expect(ActionRecord.safeParse({ ...base, action: 'reopen', decline: true }).success).toBe(
+      false,
+    );
+    expect(
+      ActionRecord.safeParse({
+        ...base,
+        action: 'answer',
+        envelope_digest: 'a'.repeat(64),
+        decline: true,
+      }).success,
+    ).toBe(false);
+  });
   it('answer actions need an envelope; confirm needs a target', () => {
     expect(ActionRecord.safeParse({ ...base, action: 'answer' }).success).toBe(false);
     expect(ActionRecord.safeParse({ ...base, action: 'cancel' }).success).toBe(true);

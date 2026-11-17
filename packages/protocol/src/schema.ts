@@ -19,8 +19,9 @@ export const DESKTOP_ROLES: readonly Role[] = ['owner-desktop', 'desktop-host'];
 export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
 /**
  * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
- * device. Never a `desktop-host`. Every other human action stays with `HUMAN_ROLES`; human thread messages have
- * their own list, `HUMAN_MESSAGE_ROLES`.
+ * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`, but for thread messages,
+ * which have their own list, `HUMAN_MESSAGE_ROLES`, and a decline: the owner desktop signs one as a `cancel` that
+ * carries `decline: true` (`isPersonDecline` in `state.ts`).
  */
 export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 /**
@@ -69,6 +70,7 @@ export const ProtocolFeature = z.enum([
   'involvement-v1',
   'person-declines-v1',
   'owner-desktop-messages-v1',
+  'owner-desktop-declines-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -208,10 +210,22 @@ export const ActionRecord = z
      * default, so a record signed without it parses, canonicalises and verifies exactly as before.
      */
     attachment_ids: z.array(Id).max(LIMITS.phoneImagesPerContent).optional(),
+    /**
+     * cancel by the owner desktop only: the person declined the question on the computer, rather than the desktop
+     * withdrawing it (section 6.1). Optional with no default, so every other record signs exactly as before.
+     */
+    decline: z.literal(true).optional(),
     signer_device_id: Id,
     signature: SigB64,
   })
   .superRefine((r, ctx) => {
+    if (r.decline !== undefined && r.action !== 'cancel') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['decline'],
+        message: 'only a cancel can be a decline',
+      });
+    }
     if (r.attachment_ids !== undefined) {
       if (r.action !== 'answer' && r.action !== 'override') {
         ctx.addIssue({

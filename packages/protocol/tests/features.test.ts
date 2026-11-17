@@ -250,6 +250,19 @@ describe('a client pinned to 0.3.0', () => {
     expect(accepted.at(-1)).toEqual({ t: 'caught_up', high_water: ledger.length, has_more: false });
   });
 
+  it("is sent the owner desktop's decline like any cancel, with its signed flag intact", async () => {
+    const decline = event(1, 'decision.cancelled', {
+      action: 'cancel',
+      record: { action: 'cancel', decline: true },
+    });
+    expect(requiredFeaturesForEvent(decline)).toEqual([]);
+    for (const catchUp of [legacyDesktopCatchUp, legacyPhoneCatchUp]) {
+      const { events } = await catchUp(relay([decline], NONE, 100));
+      expect(events).toHaveLength(1);
+      expect((events[0]!.data as { record: { decline?: true } }).record.decline).toBe(true);
+    }
+  });
+
   it('never sees an answer that carries images, so it cannot deliver it without them', async () => {
     const { events } = await legacyDesktopCatchUp(relay(mixedLedger(), NONE, 100));
     expect(events.some((e) => (e.data as typeof withImages).record?.attachment_ids?.length)).toBe(

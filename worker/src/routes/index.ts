@@ -66,7 +66,8 @@ export const ROUTES: Route[] = [
   r('POST', `/questions/${ID}/confirm-proxy`, 'signed', questions.confirmProxy, HUMAN_ROLES),
   r('POST', `/questions/${ID}/proxy-answer`, 'signed', questions.proxyAnswer, DESKTOP_ROLES),
   r('POST', `/questions/${ID}/proxy-abstain`, 'signed', questions.proxyAbstain, DESKTOP_ROLES),
-  // A desktop withdraws its question; a phone or tablet declines an open one (state.ts checks which).
+  // A desktop withdraws its question; a phone or tablet, or the owner desktop with a signed `decline`, declines an
+  // open one (state.ts checks which).
   r('POST', `/questions/${ID}/cancel`, 'signed', questions.cancel, ANY),
   r('POST', `/questions/${ID}/reopen`, 'signed', questions.reopen, OWNER),
   // Human messages need a phone, a tablet or the owner desktop and agent messages the publishing desktop; the

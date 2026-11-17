@@ -445,6 +445,7 @@ function actionHandler(kind: ActionKind): Handler {
         kind,
         auth.role,
         record.expected_revision,
+        record.decline,
       );
 
       if (tr.noop) {
@@ -494,8 +495,24 @@ function actionHandler(kind: ActionKind): Handler {
         );
       }
       // A person's decline is filed by the question's desktop, and one that predates declines rejects it (section 6.1).
-      // A revoked desktop is sent nothing, so its leftover questions can always be declined.
       const creator = room.getDevice(q.creator_device_id);
+      // The owner desktop's decline (`decline: true`, which applyAction admits on its cancel alone) reads as a
+      // withdrawal to a desktop that predates it, so the question's desktop must have declared it. A revoked desktop
+      // declares nothing: its questions can still be withdrawn.
+      if (record.decline === true && !deviceHasFeature(creator, 'owner-desktop-declines-v1')) {
+        throw new ApiError(
+          'invalid_state',
+          "the question's desktop does not accept the owner desktop's declines",
+          {
+            details: {
+              reason: CREATOR_MISSING_FEATURE,
+              required_feature: 'owner-desktop-declines-v1',
+            },
+          },
+        );
+      }
+      // A phone's or tablet's decline (by its role alone) needs `person-declines-v1`. A revoked desktop is sent
+      // nothing, so its leftover questions can always be declined from a phone or tablet.
       if (
         isPersonDecline(kind, auth.role) &&
         creator?.revoked_at === null &&

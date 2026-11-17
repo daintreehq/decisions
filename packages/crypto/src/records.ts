@@ -73,6 +73,8 @@ export interface BuildActionInput {
   createdAt?: string;
   /** `answer` / `override` only: the phone images the encrypted content references (protocol section 17). */
   attachmentIds?: string[];
+  /** `cancel` by the owner desktop only: the person declined the question (protocol section 6.1). */
+  decline?: true;
 }
 
 export async function buildSignedAction(i: BuildActionInput): Promise<{
@@ -94,6 +96,8 @@ export async function buildSignedAction(i: BuildActionInput): Promise<{
     expires_at: i.expiresAt ?? null,
     // Left out when absent, so records signed without images stay byte-identical to 0.3.0 ones.
     ...(i.attachmentIds !== undefined ? { attachment_ids: i.attachmentIds } : {}),
+    // Left out unless set, so every other action signs exactly as before.
+    ...(i.decline === true ? { decline: true as const } : {}),
     signer_device_id: i.signerDeviceId,
   })) as ActionRecord;
   return { record, envelope };
