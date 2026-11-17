@@ -255,11 +255,14 @@ describe('the preparation report', () => {
 describe('the frozen 0.7.0 readers', () => {
   const PHONE = 'phone_000001';
   const OWNER = 'desk_0000001';
-  const context = (revoked = false): LegacyInvolvementContext => ({
+  const context = (
+    o: { inDirectory?: boolean; inLedger?: boolean } = {},
+  ): LegacyInvolvementContext => ({
     installationId: 'inst_00000001',
+    revokedInLedger: (id) => id === PHONE && !!o.inLedger,
     signer: (id) =>
       id === PHONE
-        ? { role: 'phone', revoked, verify: async () => true }
+        ? { role: 'phone', revoked: !!o.inDirectory, verify: async () => true }
         : id === OWNER
           ? { role: 'owner-desktop', revoked: false, verify: async () => true }
           : null,
@@ -320,6 +323,10 @@ describe('the frozen 0.7.0 readers', () => {
       context(),
     );
     expect(legacyDesktopInvolvementSteering(copy, context())).toEqual(record({ revision: 1 }));
-    expect(legacyDesktopInvolvementSteering(copy, context(true))).toBeNull();
+    expect(legacyDesktopInvolvementSteering(copy, context({ inLedger: true }))).toBeNull();
+    // A removal only the directory knows of waits for the next read, as in 0.7.0.
+    expect(legacyDesktopInvolvementSteering(copy, context({ inDirectory: true }))).toEqual(
+      record({ revision: 1 }),
+    );
   });
 });

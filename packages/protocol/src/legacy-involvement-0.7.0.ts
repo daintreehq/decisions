@@ -45,8 +45,10 @@ export interface LegacyInvolvementSigner {
 
 export interface LegacyInvolvementContext {
   installationId: string;
-  /** The certified signer, or null for a device the reader does not know. */
+  /** The certified signer, or null for a device the reader does not know. `revoked`: in the device directory. */
   signer(deviceId: string): LegacyInvolvementSigner | null;
+  /** Whether the reader has seen a `device.revoked` for the device in the ledger. */
+  revokedInLedger?(deviceId: string): boolean;
 }
 
 const HUMAN: readonly string[] = ['phone', 'tablet'];
@@ -121,20 +123,21 @@ async function desktopRejection(
   if (!signer) return 'unknown-signer';
   if (!HUMAN.includes(signer.role)) return 'set-by-non-human-device';
   if (!(await signer.verify(r))) return 'bad-signature';
-  if (signer.revoked) return 'signer-revoked';
+  if (signer.revoked || ctx.revokedInLedger?.(r.signer_device_id)) return 'signer-revoked';
   return null;
 }
 
 /**
  * The record a 0.7.0 desktop hands its agents from its copy, or null when none steers them: none was kept, or its
- * signer has been removed (stored with the copy, or seen in the ledger since, which applies before the next read).
+ * signer has been removed (stored with the copy, or seen in the ledger since, which applies before the next read;
+ * the directory alone is not consulted until then).
  */
 export function legacyDesktopInvolvementSteering(
   copy: LegacyDesktopInvolvement,
   ctx: LegacyInvolvementContext,
 ): LegacyInvolvementRecord | null {
   if (copy.status === 'signer-revoked' || !copy.record) return null;
-  return ctx.signer(copy.record.signer_device_id)?.revoked ? null : copy.record;
+  return ctx.revokedInLedger?.(copy.record.signer_device_id) ? null : copy.record;
 }
 
 /* ---------------- the phone ---------------- */
@@ -192,7 +195,8 @@ async function phoneRejection(
   const signer = ctx.signer(r.signer_device_id);
   if (!signer) return 'unknown signer';
   if (!HUMAN.includes(signer.role)) return 'only a phone or tablet sets the involvement preference';
-  if (signer.revoked) return 'preference signer was revoked';
+  if (signer.revoked || ctx.revokedInLedger?.(r.signer_device_id))
+    return 'preference signer was revoked';
   if (!(await signer.verify(r))) return 'preference signature does not match';
   return null;
 }
