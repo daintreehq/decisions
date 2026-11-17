@@ -61,16 +61,42 @@ describe('thread message verification', () => {
     expect(a).toMatchObject({ ok: true, value: { record: { expects_reply: true } } });
   });
 
-  it('refuses a human message signed by a desktop, and an agent message signed by a phone', async () => {
-    const w = await makeWorld();
+  it("opens a follow-up the owner desktop signed as the person's, named by its certificate", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
     const id = (await questionEvent(w)).question_id!;
-    const fromDesktop = await messageEvent(w, { questionId: id, side: 'human', signer: w.desktop });
-    const fromPhone = await messageEvent(w, { questionId: id, side: 'agent', signer: w.phone });
-    expect(await verifyMessageEvent(fromDesktop.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject(
+    const fromComputer = await messageEvent(w, {
+      questionId: id,
+      side: 'human',
+      signer: w.owner,
+      text: 'Use the staging branch.',
+    });
+    const fromPhone = await messageEvent(w, { questionId: id, side: 'human' });
+    expect(await verifyMessageEvent(fromComputer.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject(
       {
-        ok: false,
+        ok: true,
+        value: {
+          signerRole: 'owner-desktop',
+          signerLabel: 'Studio Mac',
+          content: { side: 'human', text: 'Use the staging branch.' },
+        },
       },
     );
+    expect(await verifyMessageEvent(fromPhone.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject({
+      ok: true,
+      value: { signerRole: 'phone' },
+    });
+  });
+
+  it('refuses a human message signed by a Host, and an agent message signed by a phone', async () => {
+    const w = await makeWorld();
+    const id = (await questionEvent(w)).question_id!;
+    const host = await otherDesktop(w);
+    const fromDesktop = await messageEvent(w, { questionId: id, side: 'human', signer: host });
+    const fromPhone = await messageEvent(w, { questionId: id, side: 'agent', signer: w.phone });
+    expect(await verifyMessageEvent(fromDesktop.data, NOW, ctx(w), id, w.desktop.id)).toEqual({
+      ok: false,
+      reason: 'a desktop-host cannot sign a human message',
+    });
     expect(await verifyMessageEvent(fromPhone.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject({
       ok: false,
     });
@@ -149,6 +175,41 @@ describe('a thread in the question store', () => {
     await s.ingest(await messageEvent(w, { questionId: id, side: 'human', text: 'v3.' }));
     expect(awaitingReply(s.get(id)!)).toBe(false);
     expect(needsYou(s.get(id)!)).toBe(false);
+  });
+
+  it('stops needing the person when they reply from the computer, as from a phone', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const { s, id } = await answered(w);
+    await s.ingest(await messageEvent(w, { questionId: id, side: 'agent', expectsReply: true }));
+    expect(needsYou(s.get(id)!)).toBe(true);
+    await s.ingest(
+      await messageEvent(w, { questionId: id, side: 'human', signer: w.owner, text: 'v3.' }),
+    );
+    const v = s.get(id)!;
+    expect(v.messages.at(-1)).toMatchObject({
+      side: 'human',
+      verified: true,
+      text: 'v3.',
+      signerRole: 'owner-desktop',
+      signerLabel: 'Studio Mac',
+    });
+    expect(awaitingReply(v)).toBe(false);
+    expect(pendingAsk(v)).toBeNull();
+    expect(needsYou(v)).toBe(false);
+  });
+
+  it('keeps needing the person when a Host signs a reply for them, and never shows it as theirs', async () => {
+    const w = await makeWorld();
+    const { s, id } = await answered(w);
+    const host = await otherDesktop(w);
+    await s.ingest(await messageEvent(w, { questionId: id, side: 'agent', expectsReply: true }));
+    await s.ingest(
+      await messageEvent(w, { questionId: id, side: 'human', signer: host, text: 'v3.' }),
+    );
+    const v = s.get(id)!;
+    expect(v.messages.at(-1)).toMatchObject({ side: 'human', verified: false, text: '' });
+    expect(awaitingReply(v)).toBe(true);
+    expect(needsYou(v)).toBe(true);
   });
 
   it('stops waiting when the agent says something that asks nothing, or the question is withdrawn', async () => {

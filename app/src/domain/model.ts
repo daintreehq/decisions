@@ -69,6 +69,13 @@ export interface ThreadMessage {
   createdAt: string;
   committedAt: string;
   signerDeviceId: string;
+  /**
+   * The signer's certified role, once verified (null until then): a human message from the `owner-desktop` was sent
+   * on the computer, one from a `phone` or `tablet` on a phone (`humanMessageSentOn`).
+   */
+  signerRole: Role | null;
+  /** The signer's certified name, once verified: names the computer a follow-up sent there came from. */
+  signerLabel?: string;
   /** Verified, decrypted text; empty when it could not be verified. */
   text: string;
   /** Human only: the photos it carries, verified against its signed record (their bytes are checked when shown). */
@@ -423,6 +430,7 @@ export class QuestionStore {
           createdAt: entry.record.created_at,
           committedAt: entry.committed_at,
           signerDeviceId: entry.record.signer_device_id,
+          signerRole: null,
           delivery: null,
         };
         const v = view.verification.ok
@@ -438,6 +446,8 @@ export class QuestionStore {
           const c = v.value.content;
           view.messages.push({
             ...base,
+            signerRole: v.value.signerRole,
+            signerLabel: v.value.signerLabel,
             text: c.text,
             images: c.side === 'human' ? c.images : [],
             verified: true,
