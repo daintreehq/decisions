@@ -106,7 +106,8 @@ export class PresenceReporter {
    * monotonic clock's step since the last reading, and never back. A wall clock set back cannot make a report seem
    * younger or stall a renewal (the monotonic clock still counts), and a machine that slept cannot either (the wall
    * clock counts the sleep, which a monotonic clock may not). Either way things only come due sooner: a report goes
-   * stale, a renewal or retry is due.
+   * stale, a renewal or retry is due. Only a step back and a sleep inside one gap between readings (at most `RENEW_MS`
+   * while renewing) can hide the sleep, which is why the host reports away when the machine sleeps.
    */
   private elapsed(): number {
     const wall = this.ctx.now();
