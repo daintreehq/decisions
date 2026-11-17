@@ -51,11 +51,15 @@ async function world(o: { features?: string[] | undefined } = {}) {
     }
     throw new Error('the presence reporter never settled');
   };
-  /** Move fake time on a second at a time, letting the reporter settle after each, and check each second. */
-  const pass = async (ms: number, each?: () => void) => {
-    for (let t = 0; t < ms; t += SECOND) {
-      relayNow += SECOND;
-      vi.advanceTimersByTime(SECOND);
+  /**
+   * Move fake time on a `step` (a second) at a time, letting the reporter settle after each, and check each step. A
+   * request is stamped at the end of the step its timer fired in, so longer steps suit only tests that need no exact
+   * cadence.
+   */
+  const pass = async (ms: number, each?: () => void, step = SECOND) => {
+    for (let t = 0; t < ms; t += step) {
+      relayNow += step;
+      vi.advanceTimersByTime(step);
       await idle();
       each?.();
     }
@@ -178,21 +182,27 @@ describe('while the person is present', () => {
 
       // The longest waits: 2, 4, 8, 16, then 20 and 20 seconds (not 32 and 64), so it still lands inside the report.
       random.mockReturnValue(0.999);
-      const failures = 6;
-      for (let i = 0; i < failures; i++)
+      w.bridge.reportPresence(false);
+      await w.idle();
+      for (let i = 0; i < 6; i++)
         w.relay.presenceReplies.push({
           status: 503,
           body: { code: 'temporarily_unavailable', message: 'down' },
         });
-      w.bridge.reportPresence(false);
-      await w.idle();
-      const before = w.puts().length;
       w.bridge.reportPresence(true);
-      for (let s = 0; s < 72; s += 30) {
-        await w.pass(Math.min(30, 72 - s) * SECOND);
-        w.bridge.reportPresence(true);
+      await w.idle();
+      let seen = w.puts().length;
+      const retriedAt: number[] = [];
+      for (let s = 1; s <= 72; s++) {
+        if (s % 30 === 0) w.bridge.reportPresence(true);
+        await w.pass(SECOND);
+        if (w.puts().length > seen) {
+          seen = w.puts().length;
+          retriedAt.push(s);
+        }
       }
-      expect(w.puts().length - before).toBe(failures + 1);
+      // 1.998, +3.996, +7.992, +15.984, +19.98, +19.98 seconds, seen at the end of each second.
+      expect(retriedAt).toEqual([2, 6, 14, 30, 50, 70]);
       expect(w.leaseCurrent()).toBe(true);
     } finally {
       random.mockRestore();
@@ -212,7 +222,7 @@ describe('while the person is present', () => {
     expect(w.errors).toEqual([]);
   });
 
-  it('keeps renewing when the desktop clock steps back', async () => {
+  it('keeps renewing when the desktop clock steps back and the host keeps reporting', async () => {
     const w = await world();
     await w.start();
     w.bridge.reportPresence(true);
@@ -221,10 +231,51 @@ describe('while the person is present', () => {
     vi.setSystemTime(Date.now() - 3_600_000);
     for (let s = 0; s < 180; s += 30) {
       w.bridge.reportPresence(true);
+      await w.idle();
       await w.pass(30 * SECOND, () => expect(w.leaseCurrent()).toBe(true));
     }
-    // Still every 20 seconds: no stall, and no burst either.
-    expect(w.puts()).toHaveLength(11);
+    // The first report after the step renews at once (30 s), then every 20 seconds: no stall, and no burst.
+    expect(w.puts()).toHaveLength(12);
+    expect(w.infos()).toBe(2);
+  });
+
+  it('never times a renewal from a send made before the clock stepped back', async () => {
+    const w = await world();
+    await w.start();
+    let release!: () => void;
+    w.relay.holdPresence = new Promise<void>((r) => (release = r));
+    w.bridge.reportPresence(true);
+    for (let i = 0; i < 500 && w.puts().length === 0; i++) await realWait(2);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    w.bridge.reportPresence(true);
+    w.relay.holdPresence = null;
+    release();
+    await w.idle();
+    // Its send time is an hour ahead of the clock now: the report renews at once instead of waiting on it.
+    expect(w.puts()).toEqual([true, true]);
+    await w.pass(20 * SECOND);
+    expect(w.puts()).toEqual([true, true, true]);
+  });
+
+  it('never stretches a report when the desktop clock steps back', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.pass(30 * SECOND);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    // No report since the step: renewal stops, and the lease lapses a minute after the last one.
+    await w.pass(2 * LIMITS.presenceLeaseMs);
+    expect(w.puts()).toEqual([true, true]);
+    expect(w.leaseCurrent()).toBe(false);
+
+    // Nor one kept before the bridge started.
+    const v = await world();
+    v.bridge.reportPresence(true);
+    await v.pass(10 * 60 * SECOND, undefined, 60 * SECOND);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    await v.start();
+    await v.pass(30 * SECOND);
+    expect(v.puts()).toEqual([]);
   });
 });
 
@@ -488,12 +539,12 @@ describe('a relay without presence', () => {
     // Believed for ten minutes, then asked again on the next report.
     for (let s = 0; s < 9 * 60; s += 30) {
       w.bridge.reportPresence(true);
-      await w.pass(30 * SECOND);
+      await w.pass(30 * SECOND, undefined, 5 * SECOND);
     }
     expect(w.puts()).toEqual([]);
     for (let s = 0; s < 90; s += 30) {
       w.bridge.reportPresence(true);
-      await w.pass(30 * SECOND);
+      await w.pass(30 * SECOND, undefined, 5 * SECOND);
     }
     expect(w.infos()).toBe(2);
     expect(w.puts().length).toBeGreaterThan(0);
@@ -508,7 +559,7 @@ describe('a relay without presence', () => {
     w.relay.features = ['thread-messages-v1'];
     for (let s = 0; s < 11 * 60; s += 30) {
       w.bridge.reportPresence(true);
-      await w.pass(30 * SECOND);
+      await w.pass(30 * SECOND, undefined, 5 * SECOND);
     }
     const sent = w.puts().length;
     // Believed for ten minutes, then asked again: renewals stop.
@@ -516,9 +567,13 @@ describe('a relay without presence', () => {
     expect(w.infos()).toBe(2);
     for (let s = 0; s < 120; s += 30) {
       w.bridge.reportPresence(true);
-      await w.pass(30 * SECOND);
+      await w.pass(30 * SECOND, undefined, 5 * SECOND);
     }
+    // Not even an away goes to it: the lease it may hold lapses.
+    w.bridge.reportPresence(false);
+    await w.idle();
     expect(w.puts()).toHaveLength(sent);
+    expect(w.puts()).not.toContain(false);
     expect(w.errors).toEqual([]);
   });
 });
