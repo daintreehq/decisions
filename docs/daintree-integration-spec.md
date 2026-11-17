@@ -317,7 +317,7 @@ The person can also write a follow-up in Daintree's own UI ([protocol](./protoco
 - **Following a follow-up.** Every outcome other than `queued` is reported once on `bridge.on("followUp", result)`, including the outcome the call itself returned, from the process that settles it. Every outcome is also kept by message id, so `bridge.getFollowUpResult(messageId)` reads it, after a restart too. Pass your own `messageId` to make a double click, or a retry after a crash, the same follow-up. Reusing an id for different text or another question throws `validation_error`.
 - **Who may call it.** Only the owner desktop. A Remote Host's bridge throws `forbidden` before anything is signed, and its relay client refuses to post a human message. `sendFollowUp` is a host API for Daintree's UI: it isn't an MCP tool and isn't in `MCP_BRIDGE_METHODS`, so a pane's bearer token can never reach it, and `QuestionBridge` must not forward it.
 
-### 6.8 Holding phone pushes while the person is at the computer
+### 6.10 Holding phone pushes while the person is at the computer
 
 While the owner desktop says the person is at the computer, the relay holds a new question's phone push for up to two minutes, so a question answered in Daintree within that time never buzzes the phone ([protocol](./protocol.md) section 11, `presence-v1`). Daintree decides when the person is present; the library keeps the relay's lease current.
 
