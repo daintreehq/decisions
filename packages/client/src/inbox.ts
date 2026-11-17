@@ -21,7 +21,7 @@ import {
 } from './inbound.js';
 import { parseMessages, serializeMessages, type StoredMessage } from './messages.js';
 import { Mutex, TransientError } from './mutex.js';
-import { gateAllowsText } from './policy.js';
+import { answerRuleViolation } from './policy.js';
 import type { QuestionRow } from './types.js';
 
 export interface InboxCallbacks {
@@ -445,30 +445,16 @@ export class Inbox {
     const question = await this.content(row);
     if (!question) return this.reject(row, 'question-content-unreadable');
     const opts = question.options ?? [];
-    const allow_text = question.allow_text !== false;
     const chosen = v.content?.selected_option_ids ?? [];
-    const text = v.content?.text ?? '';
-    const gate = ctx.policy.get(row.origin.workflow_gate_id);
-    const bad = chosen.find(
-      (id) =>
-        (opts.length > 0 && !opts.some((o) => o.id === id)) ||
-        (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)) ||
-        (gate?.choices && !gate.choices.some((c) => c.id === id)),
-    );
     // The answer rules the question was published with (and the gate's, should it have tightened since).
     // confirm-proxy carries no content of its own: it affirms an answer that was already checked.
-    const ruled = v.action !== 'confirm-proxy';
-    const textAllowed = allow_text && gateAllowsText(gate);
-    const invalid =
-      bad !== undefined
-        ? 'unknown_option'
-        : ruled && gate?.choices && chosen.length > 1
-          ? 'too_many_choices'
-          : ruled && text.trim() !== '' && !textAllowed
-            ? 'text_not_allowed'
-            : ruled && !textAllowed && chosen.length === 0
-              ? 'choice_required'
-              : null;
+    const invalid = answerRuleViolation(
+      question,
+      ctx.policy.get(row.origin.workflow_gate_id),
+      chosen,
+      v.content?.text ?? '',
+      v.action !== 'confirm-proxy',
+    );
     if (invalid) {
       await ctx.store.updateQuestion(row.question_id, {
         delivery_status: 'needs-attention',

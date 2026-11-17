@@ -174,6 +174,16 @@ export class FakeRelay {
   holdInvolvement: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
+  /** Every `POST /questions/{id}/answer` body, retries included, in order. */
+  answers: { idem: string; action: SignedAction }[] = [];
+  /** Refusals for upcoming answer POSTs, in order; when empty the relay commits the answer. */
+  rejectAnswer: { status: number; code: string; details?: Record<string, unknown> }[] = [];
+  /** Number of upcoming answer POSTs the relay COMMITS but whose reply is lost. */
+  dropAnswerReply = 0;
+  /** While set, answer POSTs wait for it before the relay looks at them (a slow relay). */
+  holdAnswers: Promise<void> | null = null;
+  /** Each committed answer's receipt, by action id, returned unchanged for a retry. */
+  answerReceipts = new Map<string, unknown>();
 
   constructor(private readonly owner: Identity) {}
 
@@ -301,6 +311,44 @@ export class FakeRelay {
       if (this.dropCreateReply > 0) {
         this.dropCreateReply--;
         throw new TypeError('connection reset after the relay committed the question');
+      }
+      return json(201, receipt);
+    }
+    if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/answer$/))) {
+      if (this.holdAnswers) await this.holdAnswers;
+      const b = body as { idempotency_key: string; action: SignedAction };
+      const qid = m[1]!;
+      this.answers.push({ idem: b.idempotency_key, action: b.action });
+      // A retry of the very same signed answer gets the receipt it was given, as the relay does.
+      const prior = this.answerReceipts.get(b.action.record.action_id);
+      if (prior) return json(200, prior);
+      const reject = this.rejectAnswer.shift();
+      if (reject)
+        return json(reject.status, {
+          code: reject.code,
+          message: 'no',
+          ...(reject.details ? { details: reject.details } : {}),
+        });
+      const q = this.questions.get(qid);
+      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+      const revision = b.action.record.expected_revision + 1;
+      const ev = this.push('decision.answer.committed', qid, revision, {
+        ...EventData.action.parse({
+          action: 'answer',
+          record: b.action.record,
+          envelope: b.action.envelope,
+          provenance: 'human-desktop',
+          status: 'human-answered',
+          revision,
+          target_host_id: q.signed.record.target_host_id,
+          deliverable: true,
+        }),
+      });
+      const receipt = { question_id: qid, revision, status: 'human-answered', event_seq: ev.seq };
+      this.answerReceipts.set(b.action.record.action_id, receipt);
+      if (this.dropAnswerReply > 0) {
+        this.dropAnswerReply--;
+        throw new TypeError('connection reset after the relay committed the answer');
       }
       return json(201, receipt);
     }

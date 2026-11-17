@@ -18,6 +18,7 @@ import { Inbox } from './inbox.js';
 import { InvolvementSync, type InvolvementView } from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
+import { AnswerQuestionInput, type OwnerAnswerResult } from './owner-answer.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -276,6 +277,8 @@ type Listener = {
   socket: (s: SocketState, detail?: string) => void;
   delivered: (questionId: string) => void;
   error: (e: Error) => void;
+  /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
+  answer: (result: OwnerAnswerResult) => void;
 };
 
 /**
@@ -302,6 +305,7 @@ export class DecisionsBridge {
     socket: [],
     delivered: [],
     error: [],
+    answer: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -329,7 +333,17 @@ export class DecisionsBridge {
       ...(o.learner ? { learner: o.learner } : {}),
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
-    this.publisher = new Publisher(this.ctx);
+    this.publisher = new Publisher(this.ctx, {
+      onOwnerAnswer: (r) => {
+        for (const l of [...this.listeners.answer]) {
+          try {
+            l(r);
+          } catch (e) {
+            this.emitError(e as Error);
+          }
+        }
+      },
+    });
     this.verifier = new EventVerifier(this.ctx);
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
@@ -497,6 +511,60 @@ export class DecisionsBridge {
     await this.owned(questionId, pane);
     await this.publisher.enqueueCancel(questionId);
     void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  /**
+   * Publish the person's answer to an open question, given in the host app's own UI on the owner desktop and signed
+   * with its key (protocol section 2: `human-desktop` provenance, typed and reported as the person's answer made on the
+   * computer). It answers the owner's own questions and a Remote Host's alike, and needs no local copy of the
+   * question: the host passes the revision the person reviewed, and the answer is signed against it and never moved
+   * to a later one. The owner's own question is checked against its options, text rule and gate first.
+   *
+   * The answer is committed to the outbox, then sent once at once. The result says where it stands: `sent`;
+   * `already-answered` (another answer won); `changed` (the question moved past the reviewed revision); `closed`
+   * (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer that asked
+   * (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when the relay could not be reached,
+   * in which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
+   * outcome is reported on `answer`, this one included. Pass `answerId` to make a repeated submission the same answer.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is
+   * not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async answerQuestion(input: AnswerQuestionInput): Promise<OwnerAnswerResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop answers for the person; a Remote Host never signs the person's answer",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = AnswerQuestionInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { answerId, settled } = await this.publisher.enqueueOwnerAnswer(parsed.data);
+    if (settled) return settled;
+    if (this.state !== 'stopped') {
+      // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create.
+      await this.publisher.flush({ only: answerId }).catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerAnswerResult(answerId)) ?? {
+        answerId,
+        questionId: parsed.data.questionId,
+        expectedRevision: parsed.data.expectedRevision,
+        status: 'queued',
+      }
+    );
+  }
+
+  /** Where an answer from `answerQuestion` stands, by its id; null for an id this store never took. */
+  getAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
+    return this.publisher.ownerAnswerResult(answerId);
   }
 
   /**
