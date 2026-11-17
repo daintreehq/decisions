@@ -1345,6 +1345,11 @@ export class Publisher {
             const now = await this.relayFeatures().catch(() => null);
             if (now && !now.has(OWNER_DECLINE_FEATURE))
               outcome = { status: 'unsupported', by: 'relay' };
+            else if (!now && wasSent) {
+              // Whether it took this decline before it stopped taking them can wait until it can be asked.
+              await backOff(err);
+              return 'retry';
+            }
           }
           if (outcome?.status === 'unsupported' && outcome.by === 'relay' && wasSent)
             unsupported = true;

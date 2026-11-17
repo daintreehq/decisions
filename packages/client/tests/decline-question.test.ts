@@ -507,8 +507,7 @@ describe('a decline across ordering, collisions and restarts', () => {
     await bridge.stop();
     store.close();
 
-    // The relay has stopped advertising declines since; the new process has never read what it advertises.
-    relay.features = ['thread-messages-v1'];
+    // The new process only reads the question: the decline was answered, so it is never posted again.
     const store2 = new SqliteLocalStore(path);
     const next = bridgeFor(identity, relay, store2, () => t);
     const seen = results(next.bridge);
@@ -522,6 +521,28 @@ describe('a decline across ordering, collisions and restarts', () => {
     const third = bridgeFor(identity, relay, store3, () => t);
     expect(await third.bridge.getDeclineResult(r.declineId)).toEqual({ ...r, status: 'declined' });
     store3.close();
+  });
+
+  it('a sent decline refused while what the relay advertises cannot be read waits, never settles', async () => {
+    const { bridge, relay, store, qid, seen } = await ownQuestion();
+    // Sent, and turned away for now without being taken.
+    relay.rejectDecline.push({ status: 503, code: 'temporarily_unavailable' });
+    const r = await bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    expect(r.status).toBe('queued');
+    expect(relay.declines).toHaveLength(1);
+
+    relay.rejectDecline.push({ status: 403, code: 'forbidden' });
+    relay.failInfo = 1;
+    for (const o of await ownerDeclines(store)) await store.putOutbox({ ...o, next_attempt_at: 0 });
+    await bridge.pump();
+    expect(relay.declines).toHaveLength(2);
+    expect(await bridge.getDeclineResult(r.declineId)).toMatchObject({ status: 'queued' });
+    expect(seen).toEqual([]);
+
+    for (const o of await ownerDeclines(store)) await store.putOutbox({ ...o, next_attempt_at: 0 });
+    await bridge.pump();
+    expect(relay.declines).toHaveLength(3);
+    expect(await bridge.getDeclineResult(r.declineId)).toMatchObject({ status: 'declined' });
   });
 
   it('a decline whose answer was lost is looked for before it is called unsupported', async () => {
