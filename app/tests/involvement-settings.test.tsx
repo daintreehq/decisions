@@ -220,7 +220,11 @@ describe('the involvement section', () => {
     expect(radio(0, 'recommend').checked).toBe(true);
     await act(async () => button('Save').click());
     await flush();
-    expect(relay.puts[0]).toMatchObject({ revision: 4, normal_mode: 'recommend', consult_count: 3 });
+    expect(relay.puts[0]).toMatchObject({
+      revision: 4,
+      normal_mode: 'recommend',
+      consult_count: 3,
+    });
     expect(text()).not.toContain('while you were editing');
     expect(text()).toContain('Set on this device.');
   });
