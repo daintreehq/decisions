@@ -6,7 +6,7 @@ import type {
 } from '@daintreehq/decisions-protocol';
 import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
-import { agentName, originParts } from '../../domain/selectors.js';
+import { agentName, answerBy, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
@@ -255,7 +255,10 @@ export function OutgoingMessage({
   return (
     <div className={`msg out${tone ? ` ${tone}` : ''}${flagged ? ' flagged' : ''}`} id={id}>
       <div className="bubble">
-        <span className="sr-only">You{label ? `, ${label.toLowerCase()}` : ''}: </span>
+        {/* Only the label's first letter drops to lower case: a computer's name in it keeps its own. */}
+        <span className="sr-only">
+          You{label ? `, ${label[0]!.toLowerCase()}${label.slice(1)}` : ''}:{' '}
+        </span>
         {label && (
           <p className="bubble-label" aria-hidden="true">
             {label}
@@ -285,8 +288,9 @@ export function OutgoingMessage({
 }
 
 /**
- * A human answer, as the person's reply, named as the answer so it stays distinct from the follow-ups after it. An
- * older app's correction of an answer reads "Changed answer".
+ * A human answer, as the person's reply, named as the answer so it stays distinct from the follow-ups after it. One
+ * made on the computer names it ("Your answer on Studio Mac"). An older app's correction of an answer reads "Changed
+ * answer".
  */
 export function HumanAnswer({
   view,
@@ -315,7 +319,7 @@ export function HumanAnswer({
 }) {
   return (
     <OutgoingMessage
-      label={changed ? 'Changed answer' : 'Your answer'}
+      label={changed ? 'Changed answer' : answerBy(a).subject}
       at={a.createdAt}
       now={now}
       receipt={receipt}

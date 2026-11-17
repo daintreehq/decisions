@@ -26,6 +26,7 @@ import { choiceLine } from '../../domain/lists.js';
 import { ThreadClosedError } from '../../domain/message.js';
 import {
   agentName,
+  answerBy,
   canOverrule,
   currentAnswer,
   DELIVERY_LABELS,
@@ -68,7 +69,7 @@ import { AnswerDock } from './AnswerDock.js';
 import { Composer } from './Composer.js';
 import { ConsentSheet } from './ConsentSheet.js';
 import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
-import { Receipt } from './DeliveryStatus.js';
+import { AnswerReceipt, Receipt } from './DeliveryStatus.js';
 import { DraftPhotoStrip, PhotoGrid, type PhotoUpload } from './Photos.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
@@ -365,12 +366,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     if (pendingEntry && pendingEntry.kind !== 'confirm-proxy')
       return {
         author: 'You',
+        model: false,
         text: short(pendingEntry.selected, pendingEntry.text, pendingEntry.images?.length),
       };
     if (!answer) return null;
     const c = answer.content as HumanAnswerContentV1 | null;
+    const { author, model } = answerBy(answer);
     return {
-      author: answer.provenance === 'proxy' ? 'Model' : 'You',
+      author,
+      model,
       text: short(c?.selected_option_ids ?? [], c?.text ?? '', c?.images?.length),
     };
   })();
@@ -1081,7 +1085,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // answer reads as a changed one.
             changed={a.action === 'override' && replaced?.provenance !== 'proxy'}
             now={now}
-            receipt={isCurrent && progress ? <Receipt progress={progress} fromPhone /> : undefined}
+            receipt={isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined}
             flagged={isCurrent && progress?.step === 'attention'}
           />,
         );
@@ -1101,9 +1105,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             error={confirmError}
             onConfirm={() => void confirmModel()}
             onOverrule={canCorrect ? startCorrection : undefined}
-            receipt={
-              isCurrent && progress ? <Receipt progress={progress} fromPhone={false} /> : undefined
-            }
+            receipt={isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined}
           />,
         );
       } else if (a.action === 'proxy-abstain') {
@@ -1165,6 +1167,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         <Receipt
           progress={pendingProgress}
           fromPhone
+          subject="Your answer"
           steps={pendingEntry.kind !== 'confirm-proxy'}
           label={uploadLabel(pendingEntry)}
           note={queuedOffline ? 'Sends when you’re back online' : undefined}
@@ -1538,8 +1541,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const prev = lastOutcome.current;
     lastOutcome.current = outcomeKey;
     if (!outcomeKey || outcomeKey === prev || !answer || !progress) return;
-    const subject = answer.provenance === 'proxy' ? 'The model answer' : 'Your answer';
-    if (progress.step === 'terminal') announce(`${subject} was typed into the terminal.`);
+    if (progress.step === 'terminal')
+      announce(`${answerBy(answer).subject} was typed into the terminal.`);
     else if (progress.step === 'attention')
       announce(`${progress.label}. Open Daintree on your computer to see what happened.`);
   }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps

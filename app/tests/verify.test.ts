@@ -144,7 +144,7 @@ describe('action verification and provenance', () => {
   });
 
   it("accepts the owner desktop's answer as the person's, made on the computer", async () => {
-    const w = await makeWorld();
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
     const q = await questionEvent(w);
     const ev = await actionEvent(w, {
       questionId: q.question_id!,
@@ -156,6 +156,8 @@ describe('action verification and provenance', () => {
     if (r.ok) {
       expect(r.value.provenance).toBe('human-desktop');
       expect(r.value.signerRole).toBe('owner-desktop');
+      // The computer's name comes from the owner's own signed certificate, not from the question that was asked.
+      expect(r.value.signerLabel).toBe('Studio Mac');
       expect(r.value.content).toMatchObject({ selected_option_ids: ['yes'], text: 'go ahead' });
     }
   });

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { QuestionStore } from '../src/domain/model.js';
 import { TrustStore } from '../src/domain/trust.js';
 import {
+  answerBy,
+  canOverrule,
   currentAnswer,
   deliveryProgress,
   effectiveStatus,
@@ -82,9 +84,11 @@ describe('question store', () => {
   });
 
   it("takes the owner desktop's answer as the person's decision, made on the computer", async () => {
-    const w = await makeWorld();
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
     const s = store(w);
-    const q = await questionEvent(w);
+    // A Remote Host asked; the owner desktop answered for the person.
+    const host = await otherDesktop(w);
+    const q = await questionEvent(w, { signer: host });
     await s.ingest(q);
     await s.ingest(
       await actionEvent(w, { questionId: q.question_id!, action: 'answer', signer: w.desktop }),
@@ -97,6 +101,15 @@ describe('question store', () => {
       provenance: 'human-desktop',
       signerRole: 'owner-desktop',
       signerDeviceId: w.desktop.id,
+      signerLabel: 'Studio Mac',
+    });
+    expect(proxyNeedsReview(v)).toBe(false);
+    expect(canOverrule(v)).toBe(false);
+    expect(answerBy(currentAnswer(v)!)).toEqual({
+      model: false,
+      computer: 'Studio Mac',
+      author: 'You on Studio Mac',
+      subject: 'Your answer on Studio Mac',
     });
   });
 

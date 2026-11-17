@@ -161,7 +161,7 @@ function HistoryRow({
     );
   const match = searchMatch(e, query);
   const closed = closedLine(e.status, v);
-  const model = answer && answer.author !== 'You';
+  const model = answer?.model;
   return (
     <li className="qrow-item">
       <button
@@ -188,7 +188,12 @@ function HistoryRow({
         {answer ? (
           <span className="qrow-a">
             <span className={model ? 'who model' : 'who'}>
-              {!model ? 'You' : answer.confirmed ? 'Model answer, confirmed' : 'Model answer'}:
+              {!model
+                ? answer.author
+                : answer.confirmed
+                  ? 'Model answer, confirmed'
+                  : 'Model answer'}
+              :
             </span>{' '}
             {answer.text || 'No note'}
           </span>

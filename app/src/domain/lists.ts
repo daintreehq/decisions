@@ -1,6 +1,7 @@
 import type { ActionView, QuestionView } from './model.js';
 import {
   agentName,
+  answerBy,
   answerable,
   awaitingReply,
   currentAnswer,
@@ -275,6 +276,8 @@ export function stableOrder(
 
 export interface AnswerSummary {
   author: string;
+  /** The decision model's answer, not the person's: styled as the model's, whatever the author says. */
+  model: boolean;
   /** The agent is asking the person something: this line is what needs them. */
   ask?: boolean;
   /** Option labels and the note, as one plain line. */
@@ -305,6 +308,7 @@ export function rowSummary(v: QuestionView, now: number): AnswerSummary | null {
   if (ask)
     return {
       author: agentName(v),
+      model: false,
       text: ask.text.replace(/\s+/g, ' ').trim(),
       confirmed: false,
       ask: true,
@@ -325,10 +329,10 @@ export function answerSummary(v: QuestionView): AnswerSummary | null {
     .join(' · ');
   const note = (a.content?.text ?? '').replace(/\s+/g, ' ').trim();
   const text = [head, note].filter(Boolean).join(' — ');
+  const { model, author } = answerBy(a);
   const confirmed =
-    a.provenance === 'proxy' &&
-    v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);
-  return { author: a.provenance === 'proxy' ? 'Model' : 'You', text, confirmed };
+    model && v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);
+  return { author, model, text, confirmed };
 }
 
 export const correctionCount = (v: QuestionView): number =>

@@ -171,6 +171,8 @@ export interface VerifiedAction {
   record: ActionRecord;
   provenance: Provenance | null;
   signerRole: Role;
+  /** The signer's name, from its certificate (signed by the owner key): the computer an answer made there was made on. */
+  signerLabel: string;
   content: AnswerContent | null;
   /**
    * A human answer's photos are exactly the ones its signed record lists (docs/protocol.md section 17). When they
@@ -246,6 +248,7 @@ export async function verifyActionEvent(
       record,
       provenance: provenance === 'none' ? null : provenance,
       signerRole: signer.role,
+      signerLabel: signer.cert.label,
       content,
       imagesOk,
     },
