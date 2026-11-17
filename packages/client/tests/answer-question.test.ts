@@ -166,7 +166,11 @@ describe('answerQuestion on the owner’s own question', () => {
       bridge.answerQuestion({ questionId: qid, expectedRevision: 0, text: '  ' }),
     ).rejects.toMatchObject({ code: 'validation_error' });
     await expect(
-      bridge.answerQuestion({ questionId: qid, expectedRevision: -1, selectedOptionIds: ['approve'] }),
+      bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: -1,
+        selectedOptionIds: ['approve'],
+      }),
     ).rejects.toBeInstanceOf(BridgeError);
     await expect(
       bridge.answerQuestion({
@@ -252,12 +256,14 @@ describe('answerQuestion on a Remote Host’s question', () => {
     await expect(asking.bridge.answerQuestion({} as never)).rejects.toMatchObject({
       code: 'forbidden',
     });
-    await expect(asking.bridge.publisher.enqueueOwnerAnswer({
-      questionId: qid,
-      expectedRevision: 0,
-      selectedOptionIds: ['approve'],
-      reviewedAttachmentDigests: [],
-    })).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      asking.bridge.publisher.enqueueOwnerAnswer({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['approve'],
+        reviewedAttachmentDigests: [],
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
     expect(await ownerAnswers(asking.store)).toEqual([]);
     expect(relay.calls.length).toBe(before);
   });
@@ -274,7 +280,10 @@ describe('answerQuestion results a UI can show', () => {
       reply: {
         status: 409,
         code: 'invalid_state',
-        details: { reason: 'creator-missing-feature', required_feature: 'owner-desktop-answers-v1' },
+        details: {
+          reason: 'creator-missing-feature',
+          required_feature: 'owner-desktop-answers-v1',
+        },
       },
       expected: { status: 'unsupported', by: 'asking-desktop' },
     },
@@ -335,7 +344,12 @@ describe('answerQuestion results a UI can show', () => {
         expectedRevision: 0,
         selectedOptionIds: ['approve'],
       });
-      expect(r).toEqual({ answerId: expect.any(String), questionId: qid, expectedRevision: 0, ...c.expected });
+      expect(r).toEqual({
+        answerId: expect.any(String),
+        questionId: qid,
+        expectedRevision: 0,
+        ...c.expected,
+      });
       expect(seen).toEqual([r]);
       expect(await bridge.getAnswerResult(r.answerId)).toEqual(r);
       expect(await ownerAnswers(store)).toEqual([]);
@@ -416,13 +430,20 @@ describe('answerQuestion results a UI can show', () => {
     t += 10 * 60_000;
     await bridge.pump();
     expect(seen).toEqual([{ ...r, status: 'sent' }]);
-    expect(relay.events.filter((e) => e.event_type === 'decision.answer.committed')).toHaveLength(1);
+    expect(relay.events.filter((e) => e.event_type === 'decision.answer.committed')).toHaveLength(
+      1,
+    );
   });
 
   it('the same answer id is the same answer: never signed or sent twice, and never reused for another', async () => {
     const { bridge, relay, qid, seen } = await ownQuestion();
     const answerId = newId();
-    const input = { questionId: qid, expectedRevision: 0, selectedOptionIds: ['approve'], answerId };
+    const input = {
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+      answerId,
+    };
     const [a, b] = await Promise.all([bridge.answerQuestion(input), bridge.answerQuestion(input)]);
     expect(a).toEqual({ answerId, questionId: qid, expectedRevision: 0, status: 'sent' });
     expect(b).toEqual(a);
@@ -432,9 +453,10 @@ describe('answerQuestion results a UI can show', () => {
     await expect(
       bridge.answerQuestion({ ...input, selectedOptionIds: ['reject'] }),
     ).rejects.toMatchObject({ code: 'validation_error', message: /already used/ });
-    await expect(
-      bridge.answerQuestion({ ...input, expectedRevision: 1 }),
-    ).rejects.toMatchObject({ code: 'validation_error', message: /already used/ });
+    await expect(bridge.answerQuestion({ ...input, expectedRevision: 1 })).rejects.toMatchObject({
+      code: 'validation_error',
+      message: /already used/,
+    });
   });
 
   it('a queued answer survives a restart and is sent by the next bridge on the same store', async () => {
@@ -469,7 +491,11 @@ describe('answerQuestion results a UI can show', () => {
     expect(await bridge.getAnswerResult(newId())).toBeNull();
     bridge.state = 'revoked';
     await expect(
-      bridge.answerQuestion({ questionId: qid, expectedRevision: 0, selectedOptionIds: ['approve'] }),
+      bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['approve'],
+      }),
     ).rejects.toMatchObject({ code: 'forbidden' });
   });
 });

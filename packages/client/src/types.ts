@@ -96,12 +96,7 @@ export interface QuestionRow {
  * owner's or a Remote Host's.
  */
 export type OutboxKind =
-  | 'create'
-  | 'cancel'
-  | 'proxy-answer'
-  | 'proxy-abstain'
-  | 'message'
-  | 'owner-answer';
+  'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain' | 'message' | 'owner-answer';
 
 export interface OutboxItem {
   /** Also the relay idempotency key. */

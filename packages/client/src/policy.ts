@@ -106,10 +106,7 @@ export function gateAllowsText(gate: WorkflowGate | undefined): boolean {
 
 /** Why an answer breaks its question's rules, as `answerRuleViolation` reports it. */
 export type AnswerRuleViolation =
-  | 'unknown_option'
-  | 'too_many_choices'
-  | 'text_not_allowed'
-  | 'choice_required';
+  'unknown_option' | 'too_many_choices' | 'text_not_allowed' | 'choice_required';
 
 /**
  * The first rule an answer breaks, or null: options the question does not list (any id when it lists none), ids

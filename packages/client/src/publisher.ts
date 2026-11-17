@@ -770,7 +770,9 @@ export class Publisher {
    * Send everything that is due, or with `only` that one item if it is due and nothing it must wait for is pending.
    * Stops at the first transient failure so ordering is preserved. One flush runs at a time.
    */
-  flush(opts: { only?: string } = {}): Promise<{ sent: number; failed: number; created: string[] }> {
+  flush(
+    opts: { only?: string } = {},
+  ): Promise<{ sent: number; failed: number; created: string[] }> {
     return this.flushing.run(() => this.flushDue(opts.only));
   }
 
