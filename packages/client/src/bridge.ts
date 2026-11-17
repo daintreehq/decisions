@@ -15,7 +15,13 @@ import {
 import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
-import { InvolvementSync, type InvolvementView } from './involvement.js';
+import {
+  InvolvementSync,
+  SetInvolvementInput,
+  type InvolvementPreference,
+  type InvolvementView,
+  type SetInvolvementResult,
+} from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
@@ -645,6 +651,61 @@ export class DecisionsBridge {
       lastSyncedAt: v.lastSyncedAt,
       stale: true,
     };
+  }
+
+  /**
+   * The whole involvement preference, for the host app's own settings screen: the normal mode, the consult count, the
+   * temporary mode and its end, the revision a save replaces, and where the person set it (`computer` or `phone`, from
+   * the signer's certificate). From the same verified copy as `getInvolvement`, so it never touches the network.
+   * Agents never see where it was set. This is a host API: it is not an MCP tool, and a pane's bearer token never
+   * reaches it.
+   */
+  async getInvolvementPreference(): Promise<InvolvementPreference> {
+    const p = await this.involvement.preference();
+    if (this.state !== 'revoked') return p;
+    return {
+      status: 'unavailable',
+      reason: 'device-revoked',
+      revision: p.revision,
+      lastSyncedAt: p.lastSyncedAt,
+      stale: true,
+    };
+  }
+
+  /**
+   * Set the person's involvement preference from the host app's own UI on the owner desktop, signed with its key
+   * (protocol section 20). `expectedRevision` is the revision the person reviewed (`getInvolvementPreference`): the
+   * relay compare-and-swaps on it, so a phone's save made meanwhile comes back as a `conflict` to show, never
+   * overwritten. A saved preference reaches this desktop's agents at once, and every other device on the relay's hint.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed, as is a revoked desktop, and
+   * the bridge must be started (`invalid_state`). Input the relay would refuse is a `validation_error`. This is a host
+   * API: it is not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async setInvolvementPreference(input: SetInvolvementInput): Promise<SetInvolvementResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop sets the person's involvement preference; a Remote Host never signs it",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (this.state !== 'running')
+      throw new BridgeError(
+        'invalid_state',
+        'start the bridge before setting the involvement preference',
+      );
+    const parsed = SetInvolvementInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const issue = this.involvement.inputIssue(parsed.data);
+    if (issue) throw new BridgeError('validation_error', issue);
+    return this.involvement.save(parsed.data);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
