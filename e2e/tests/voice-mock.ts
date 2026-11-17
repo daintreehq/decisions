@@ -1,4 +1,4 @@
-import type { BrowserContext, Page } from 'playwright-core';
+import type { BrowserContext, Page, Route } from 'playwright-core';
 
 /**
  * A stand-in for the relay's dictation provider, for driving the PWA's voice input in Chromium without a speech
@@ -29,6 +29,30 @@ export const FAKE_MIC_ARGS = [
   '--use-fake-device-for-media-stream',
 ];
 
+/**
+ * What Playwright says when a routed request outlives its browser context: the response `route.fetch` read, or the
+ * request context behind it, was disposed, the target closed, or teardown already settled the route.
+ */
+const OUTLIVED =
+  /Response has been disposed|Request context disposed|Target page, context or browser has been closed|Route is already handled/;
+
+/**
+ * A route handler that may outlive its page. Playwright runs route handlers outside every test's promise chain, so a
+ * rejection there has nowhere to go and Vitest counts it as an error that fails the run, however the tests did. A
+ * handler whose page or context has gone (a suite closing its browser while the PWA still asks) stops quietly; any
+ * other failure, such as the relay's `/info` failing for real, still throws.
+ */
+function whileOpen(page: Page, handler: (route: Route) => Promise<void>) {
+  return async (route: Route) => {
+    try {
+      await handler(route);
+    } catch (e) {
+      if (page.isClosed() || OUTLIVED.test(e instanceof Error ? e.message : String(e))) return;
+      throw e;
+    }
+  };
+}
+
 export async function mockVoice(
   context: BrowserContext,
   page: Page,
@@ -37,41 +61,50 @@ export async function mockVoice(
   cleanup?: () => CleanupScript | null,
 ): Promise<void> {
   await context.grantPermissions(['microphone']);
-  await page.route('**/api/v1/info', async (route) => {
-    const res = await route.fetch();
-    const body = (await res.json()) as { voice?: Record<string, boolean> };
-    body.voice = { ...(body.voice ?? {}), xai: true, ...(cleanup ? { anthropic: true } : {}) };
-    await route.fulfill({ response: res, json: body });
-  });
-  await page.route('**/voice/session', (route) =>
-    route.fulfill({
-      json: {
-        ticket: 'ZTJlLXZvaWNlLXRpY2tldA',
-        ws_path: '/api/v1/voice/stream',
-        provider: 'xai',
-        sample_rate: 16000,
-        max_session_ms: 300_000,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-      },
+  await page.route(
+    '**/api/v1/info',
+    whileOpen(page, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { voice?: Record<string, boolean> };
+      body.voice = { ...(body.voice ?? {}), xai: true, ...(cleanup ? { anthropic: true } : {}) };
+      await route.fulfill({ response: res, json: body });
     }),
   );
-  if (cleanup)
-    await page.route('**/voice/correct', async (route) => {
-      const raw = (route.request().postDataJSON() as { raw_transcript: string }).raw_transcript;
-      const c = cleanup();
-      await new Promise((r) => setTimeout(r, c?.afterMs ?? 300));
-      await route.fulfill({
+  await page.route(
+    '**/voice/session',
+    whileOpen(page, (route) =>
+      route.fulfill({
         json: {
-          model: 'claude-haiku-5-5',
-          result: {
-            corrected_text: c?.corrected ?? raw,
-            uncertain_spans: c?.spans ?? [],
-            applied_commands: [],
-            warnings: [],
-          },
+          ticket: 'ZTJlLXZvaWNlLXRpY2tldA',
+          ws_path: '/api/v1/voice/stream',
+          provider: 'xai',
+          sample_rate: 16000,
+          max_session_ms: 300_000,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
         },
-      });
-    });
+      }),
+    ),
+  );
+  if (cleanup)
+    await page.route(
+      '**/voice/correct',
+      whileOpen(page, async (route) => {
+        const raw = (route.request().postDataJSON() as { raw_transcript: string }).raw_transcript;
+        const c = cleanup();
+        await new Promise((r) => setTimeout(r, c?.afterMs ?? 300));
+        await route.fulfill({
+          json: {
+            model: 'claude-haiku-5-5',
+            result: {
+              corrected_text: c?.corrected ?? raw,
+              uncertain_spans: c?.spans ?? [],
+              applied_commands: [],
+              warnings: [],
+            },
+          },
+        });
+      }),
+    );
   await page.routeWebSocket(/\/voice\/stream/, (ws) => {
     const s = script();
     const timers: ReturnType<typeof setTimeout>[] = [];

@@ -20,6 +20,53 @@ import { mockVoice } from './voice-mock.js';
 const chromiumPath = findChromium();
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+describe('the voice mock’s /info route', () => {
+  /**
+   * The mock's `/info` handler, installed on a stand-in page that stays open, so what it does with a failure can be
+   * awaited here instead of escaping as an unhandled rejection.
+   */
+  const infoRoute = async () => {
+    let onInfo: ((route: Route) => Promise<void>) | undefined;
+    const page = {
+      isClosed: () => false,
+      route: async (url: string, handler: (route: Route) => Promise<void>) => {
+        if (url === '**/api/v1/info') onInfo = handler;
+      },
+      routeWebSocket: async () => {},
+    };
+    const context = { grantPermissions: async () => {} };
+    await mockVoice(context as unknown as BrowserContext, page as unknown as Page, () => ({
+      words: [],
+    }));
+    return onInfo!;
+  };
+  const failing = (fetch: () => Promise<unknown>) =>
+    ({ fetch, fulfill: async () => {} }) as unknown as Route;
+
+  it('still fails when the relay’s /info genuinely fails', async () => {
+    const onInfo = await infoRoute();
+    const unreachable = new Error('route.fetch: connect ECONNREFUSED 127.0.0.1:8845');
+    await expect(onInfo(failing(() => Promise.reject(unreachable)))).rejects.toBe(unreachable);
+    const notJson = new SyntaxError('Unexpected token \'<\', "<!doctype "... is not valid JSON');
+    await expect(
+      onInfo(failing(async () => ({ json: () => Promise.reject(notJson) }))),
+    ).rejects.toBe(notJson);
+  });
+
+  it('stops quietly when Playwright says the request outlived its context', async () => {
+    const onInfo = await infoRoute();
+    for (const message of [
+      'apiResponse.json: Response has been disposed',
+      'route.fetch: Request context disposed.',
+      'route.fetch: Target page, context or browser has been closed',
+      'route.fulfill: Route is already handled!',
+    ]) {
+      const gone = new Error(message);
+      await expect(onInfo(failing(() => Promise.reject(gone)))).resolves.toBeUndefined();
+    }
+  });
+});
+
 describe.skipIf(!chromiumPath)('the voice mock in Chromium', () => {
   let browser: Browser;
   let server: Server;
