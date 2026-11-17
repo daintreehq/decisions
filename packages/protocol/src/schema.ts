@@ -19,9 +19,15 @@ export const DESKTOP_ROLES: readonly Role[] = ['owner-desktop', 'desktop-host'];
 export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
 /**
  * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
- * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`.
+ * device. Never a `desktop-host`. Every other human action stays with `HUMAN_ROLES`; human thread messages have
+ * their own list, `HUMAN_MESSAGE_ROLES`.
  */
 export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
+/**
+ * Who may sign the person's thread message (docs/protocol.md section 16): a phone or tablet, or the owner desktop,
+ * which certifies every other device. Never a `desktop-host`. Phone images, voice and push stay with `HUMAN_ROLES`.
+ */
+export const HUMAN_MESSAGE_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 
 export const QuestionStatus = z.enum([
   'open',
@@ -62,6 +68,7 @@ export const ProtocolFeature = z.enum([
   'owner-desktop-answers-v1',
   'involvement-v1',
   'person-declines-v1',
+  'owner-desktop-messages-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');

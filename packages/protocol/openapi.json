@@ -5867,7 +5867,7 @@
     },
     "/api/v1/questions/{id}/messages": {
       "post": {
-        "summary": "Post a thread message: human from a phone or tablet, agent from the publishing desktop (thread-messages-v1)",
+        "summary": "Post a thread message: human from a phone, a tablet or the owner desktop, agent from the publishing desktop (thread-messages-v1; an owner-desktop human message needs the question's desktop to declare owner-desktop-messages-v1)",
         "operationId": "post_questions_id_messages",
         "security": [
           {

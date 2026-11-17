@@ -87,6 +87,7 @@ describe('declaring features', () => {
     expect((await raw('GET', '/api/v1/info')).json.features).toEqual([
       'involvement-v1',
       'owner-desktop-answers-v1',
+      'owner-desktop-messages-v1',
       'pane-snapshots-v1',
       'person-declines-v1',
       'phone-images-v1',
@@ -248,6 +249,7 @@ describe('feature negotiation with pane snapshots (docs/protocol.md section 19)'
     expect(InfoResponse.parse(info.json).features).toEqual([
       'involvement-v1',
       'owner-desktop-answers-v1',
+      'owner-desktop-messages-v1',
       'pane-snapshots-v1',
       'person-declines-v1',
       'phone-images-v1',
