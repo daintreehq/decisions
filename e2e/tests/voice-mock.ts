@@ -30,24 +30,24 @@ export const FAKE_MIC_ARGS = [
 ];
 
 /**
- * What Playwright says when a routed request outlives its browser context: the response `route.fetch` read, or the
- * request context behind it, was disposed, the target closed, or teardown already settled the route.
+ * What Playwright says when a routed request outlives its browser context: the request context behind `route.fetch`,
+ * or the response it fetched, was disposed, or the call reached a target that had already closed.
  */
 const OUTLIVED =
-  /Response has been disposed|Request context disposed|Target page, context or browser has been closed|Route is already handled/;
+  /Response has been disposed|Request context disposed|Target page, context or browser has been closed/;
 
 /**
- * A route handler that may outlive its page. Playwright runs route handlers outside every test's promise chain, so a
- * rejection there has nowhere to go and Vitest counts it as an error that fails the run, however the tests did. A
- * handler whose page or context has gone (a suite closing its browser while the PWA still asks) stops quietly; any
- * other failure, such as the relay's `/info` failing for real, still throws.
+ * A route handler that may outlive its context. Playwright runs route handlers outside every test's promise chain, so
+ * a rejection there has nowhere to go and Vitest counts it as an error that fails the run, however the tests did. A
+ * handler whose context has gone (a suite closing its browser while the PWA still asks) stops quietly; any other
+ * failure, such as the relay's `/info` failing for real, still rejects.
  */
-function whileOpen(page: Page, handler: (route: Route) => Promise<void>) {
+function whileOpen(handler: (route: Route) => Promise<void>) {
   return async (route: Route) => {
     try {
       await handler(route);
     } catch (e) {
-      if (page.isClosed() || OUTLIVED.test(e instanceof Error ? e.message : String(e))) return;
+      if (OUTLIVED.test(e instanceof Error ? e.message : String(e))) return;
       throw e;
     }
   };
@@ -63,8 +63,9 @@ export async function mockVoice(
   await context.grantPermissions(['microphone']);
   await page.route(
     '**/api/v1/info',
-    whileOpen(page, async (route) => {
+    whileOpen(async (route) => {
       const res = await route.fetch();
+      if (!res.ok()) throw new Error(`the relay's /info answered ${res.status()}`);
       const body = (await res.json()) as { voice?: Record<string, boolean> };
       body.voice = { ...(body.voice ?? {}), xai: true, ...(cleanup ? { anthropic: true } : {}) };
       await route.fulfill({ response: res, json: body });
@@ -72,7 +73,7 @@ export async function mockVoice(
   );
   await page.route(
     '**/voice/session',
-    whileOpen(page, (route) =>
+    whileOpen((route) =>
       route.fulfill({
         json: {
           ticket: 'ZTJlLXZvaWNlLXRpY2tldA',
@@ -88,7 +89,7 @@ export async function mockVoice(
   if (cleanup)
     await page.route(
       '**/voice/correct',
-      whileOpen(page, async (route) => {
+      whileOpen(async (route) => {
         const raw = (route.request().postDataJSON() as { raw_transcript: string }).raw_transcript;
         const c = cleanup();
         await new Promise((r) => setTimeout(r, c?.afterMs ?? 300));
