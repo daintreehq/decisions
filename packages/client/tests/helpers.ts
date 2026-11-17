@@ -2,6 +2,7 @@ import {
   ApiError,
   CREATOR_MISSING_FEATURE,
   EventData,
+  LIMITS,
   applyAction,
   applyMessage,
   type QuestionStatus,
@@ -202,6 +203,21 @@ export class FakeRelay {
   onInvolvementPut: (() => void | Promise<void>) | null = null;
   /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
   holdDevices: Promise<void> | null = null;
+  /**
+   * Whether `PUT /presence` exists; false makes it unknown (404), like a relay from before `presence-v1`. Advertising
+   * the feature is `features`' job, so a test can make the two disagree.
+   */
+  presenceRoute = true;
+  /** When the presence lease ends (relay epoch ms), or null when none was started or it was ended. */
+  presenceUntil: number | null = null;
+  /** The relay's clock for presence leases. */
+  presenceNow: () => number = Date.now;
+  /** Replies for upcoming presence PUTs, in order; when empty the relay accepts. */
+  presenceReplies: { status: number; body: Record<string, unknown> }[] = [];
+  /** While set, presence PUTs wait for it before the relay looks at them (a slow relay). */
+  holdPresence: Promise<void> | null = null;
+  /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
+  dropPresenceReply = 0;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -618,6 +634,22 @@ export class FakeRelay {
       if (reply) return json(reply.status, reply.body);
       this.snapshots.push({ questionId: m[1]!, body });
       return json(200, { ok: true });
+    }
+    if (method === 'PUT' && p === '/api/v1/presence' && this.presenceRoute) {
+      if (this.holdPresence) await this.holdPresence;
+      const reply = this.presenceReplies.shift();
+      if (reply) return json(reply.status, reply.body);
+      const present = (body as { present?: unknown } | undefined)?.present === true;
+      const now = this.presenceNow();
+      this.presenceUntil = present ? now + LIMITS.presenceLeaseMs : null;
+      if (this.dropPresenceReply > 0) {
+        this.dropPresenceReply--;
+        throw new TypeError('connection reset after the relay committed');
+      }
+      return json(200, {
+        present,
+        until: present ? new Date(this.presenceUntil!).toISOString() : null,
+      });
     }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
       const served = this.involvement;

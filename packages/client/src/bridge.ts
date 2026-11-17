@@ -22,6 +22,7 @@ import {
   type InvolvementView,
   type SetInvolvementResult,
 } from './involvement.js';
+import { PresenceReporter } from './presence.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
@@ -326,9 +327,13 @@ export class DecisionsBridge {
   readonly snapshots: SnapshotPublisher;
   /** The person's involvement preference, as this desktop last verified it (`getInvolvement`). */
   readonly involvement: InvolvementSync;
+  /** Keeps the relay's presence lease current while the host reports the person is here (`reportPresence`). */
+  readonly presence: PresenceReporter;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
+  /** Bumped by every start, stop and revocation: a start still recovering when one comes starts nothing more. */
+  private lifecycle = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
@@ -374,6 +379,7 @@ export class DecisionsBridge {
     this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
+    this.presence = new PresenceReporter(this.ctx, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -490,6 +496,7 @@ export class DecisionsBridge {
   /** Reconcile interrupted injections, connect the socket, start the retry timer. */
   async start(opts: { socket?: boolean } = {}): Promise<void> {
     if (this.state === 'running') return;
+    const run = ++this.lifecycle;
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
@@ -497,8 +504,11 @@ export class DecisionsBridge {
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
+    // Stopped or revoked while recovering: nothing may start sending in the background now.
+    if (run !== this.lifecycle) return;
     this.snapshots.start();
     this.involvement.start();
+    this.presence.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -512,11 +522,13 @@ export class DecisionsBridge {
   }
 
   async stop(): Promise<void> {
+    this.lifecycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -524,11 +536,13 @@ export class DecisionsBridge {
 
   private markRevoked(): void {
     if (this.state === 'revoked') return;
+    this.lifecycle++;
     this.state = 'revoked';
     this.delivery.stopped = true;
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -865,6 +879,36 @@ export class DecisionsBridge {
     const issue = this.involvement.inputIssue(parsed.data);
     if (issue) throw new BridgeError('validation_error', issue);
     return this.involvement.save(parsed.data);
+  }
+
+  /**
+   * Say whether the person is at the owner desktop (protocol section 11), so the relay holds a new question's phone
+   * push briefly while they are. The host reports `true` when the person is active (again every 30 s or so while they
+   * stay, and at once when they come back) and `false` when they leave, lock the screen or the computer sleeps. Each
+   * `true` counts for `PRESENCE_REPORT_MS` (two minutes): while one does, the bridge keeps the relay's 60-second lease
+   * current in the background; `false` ends it. Once reports stop, renewal stops when the last one goes stale, and when
+   * the bridge stops it stops at once: either way the lease lapses 60 seconds after its last renewal. Returns at once,
+   * without waiting for the relay.
+   *
+   * Only the flag is sent: nothing about questions, panes or content. A relay that does not advertise `presence-v1` is
+   * never sent it, and reporting to one does nothing, without an error. Before `start()` the latest report is kept and
+   * acted on when the bridge starts, if still fresh; `stop()` forgets it.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`). This is a host API: it is not an MCP tool, and a
+   * pane's bearer token never reaches it.
+   */
+  reportPresence(present: boolean): void {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        'only the owner desktop reports that the person is at the computer; a Remote Host never does',
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (typeof present !== 'boolean')
+      throw new BridgeError('validation_error', 'present must be true or false');
+    this.presence.report(present);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {

@@ -370,6 +370,8 @@ describe('a desktop-host never attempts owner-only operations', () => {
       () => client.deleteQuestion(newId()),
       () => client.diagnostics(),
       () => client.deleteData('questions'),
+      () => client.putPresence(true),
+      () => client.putPresence(false),
     ];
     for (const call of refused) {
       await expect(Promise.resolve().then(call)).rejects.toThrow(/owner desktop/);
