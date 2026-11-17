@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { buildSignedInvolvement, verifyObject } from '@daintreehq/decisions-crypto';
-import type { InvolvementMode, InvolvementRecord } from '@daintreehq/decisions-protocol';
+import { describe, expect, it, vi } from 'vitest';
+import { buildSignedInvolvement, signObject, verifyObject } from '@daintreehq/decisions-crypto';
+import {
+  INVOLVEMENT_RECORD_TYPE,
+  PROTOCOL_VERSION,
+  type InvolvementMode,
+  type InvolvementRecord,
+} from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
   INVOLVEMENT_META,
@@ -538,6 +543,45 @@ describe('a preference the owner desktop set', () => {
     await s.bridge.stop();
   });
 
+  it('where it was set comes from the signer’s certificate, never from the record or the relay', async () => {
+    const s = await setup();
+    const unsigned = {
+      v: PROTOCOL_VERSION,
+      type: INVOLVEMENT_RECORD_TYPE,
+      installation_id: s.identity.config.installationId,
+      revision: 1,
+      normal_mode: 'recommend',
+      consult_count: 3,
+      override: null,
+      created_at: iso(T0),
+      signer_device_id: s.phone.deviceId,
+      set_on: 'computer', // signed, so only the provenance check can refuse to believe it
+    };
+    const served = {
+      preference: await signObject(s.phone.keys.signing.privateKey, unsigned),
+      received_at: iso(T0),
+      set_on: 'computer',
+    };
+    s.relay.involvement = served;
+    await s.start();
+    expect(await preferenceOf(s.bridge)).toMatchObject({ revision: 1, setOn: 'phone' });
+
+    const fromOwner = {
+      preference: await signObject(s.identity.keys.signing.privateKey, {
+        ...unsigned,
+        revision: 2,
+        signer_device_id: s.identity.config.deviceId,
+        set_on: 'phone',
+      }),
+      received_at: iso(T0),
+      set_on: 'phone',
+    };
+    s.relay.involvement = fromOwner;
+    await s.bridge.involvement.refresh();
+    expect(await preferenceOf(s.bridge)).toMatchObject({ revision: 2, setOn: 'computer' });
+    await s.bridge.stop();
+  });
+
   it('a copy kept before the owner desktop could set it reads as set on a phone', async () => {
     const s = await setup();
     const r = await s.sign({ revision: 5 });
@@ -568,6 +612,9 @@ describe('setting it on the owner desktop', () => {
     const s = await setup();
     s.serve(await s.sign({ revision: 1 }));
     await s.start();
+    // Every read from here waits: what the copy says next comes from the save alone.
+    let release!: () => void;
+    s.relay.holdInvolvement = new Promise<void>((r) => (release = r));
     const until = iso(T0 + HOUR);
     const result = await s.bridge.setInvolvementPreference(
       choice(1, {
@@ -604,6 +651,9 @@ describe('setting it on the owner desktop', () => {
       setAt: iso(T0),
     });
     expect(available(await s.view())).toMatchObject({ mode: 'involve-early', until, revision: 2 });
+    s.relay.holdInvolvement = null;
+    release();
+    await s.bridge.involvement.refresh();
 
     // A relay serving the older record again is a rollback.
     s.serve(await s.sign({ revision: 1 }));
@@ -680,19 +730,34 @@ describe('setting it on the owner desktop', () => {
       code: 'invalid_state',
     });
     await s.start();
-    const bad: unknown[] = [
-      choice(0, { consultCount: 0 }),
-      choice(0, { consultCount: 9 }),
-      choice(-1),
-      choice(0, { override: { mode: 'recommend', until: iso(T0) } }),
-      choice(0, { override: { mode: 'recommend', until: iso(T0 + 30 * 24 * HOUR + 1) } }),
-      choice(0, { override: { mode: 'recommend', until: '2026-11-17T10:00:00Z' } }),
-      { ...choice(0), signer_device_id: 'someone_else' },
+    // Each is refused by the input check, before anything is signed, and says which field.
+    const bad: [unknown, RegExp][] = [
+      [choice(0, { consultCount: 0 }), /^consultCount: /],
+      [choice(0, { consultCount: 9 }), /^consultCount: /],
+      [choice(-1), /^expectedRevision: /],
+      [
+        choice(0, { override: { mode: 'recommend', until: iso(T0) } }),
+        /^override\.until: the temporary mode must end in the future$/,
+      ],
+      [
+        choice(0, { override: { mode: 'recommend', until: iso(T0 + 30 * 24 * HOUR + 1) } }),
+        /^override\.until: a temporary mode can last at most 30 days$/,
+      ],
+      [
+        choice(0, { override: { mode: 'recommend', until: '2026-11-17T10:00:00Z' } }),
+        /^override\.until: /,
+      ],
+      [{ ...choice(0), signer_device_id: 'someone_else' }, /signer_device_id/],
     ];
-    for (const input of bad) {
-      await expect(
-        s.bridge.setInvolvementPreference(input as SetInvolvementInput),
-      ).rejects.toMatchObject({ code: 'validation_error' });
+    for (const [input, message] of bad) {
+      const refused = await s.bridge.setInvolvementPreference(input as SetInvolvementInput).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(refused).toMatchObject({
+        code: 'validation_error',
+        message: expect.stringMatching(message),
+      });
     }
     // Exactly thirty days is the longest a temporary mode may last.
     expect(
@@ -716,16 +781,167 @@ describe('setting it on the owner desktop', () => {
   it('a lost reply is unconfirmed, and the copy picks the save up when the relay answers', async () => {
     const s = await setup();
     await s.start();
+    let release!: () => void;
+    s.relay.holdInvolvement = new Promise<void>((r) => (release = r));
     s.relay.dropInvolvementReply = 1;
     const result = await s.bridge.setInvolvementPreference(choice(0));
     expect(result).toMatchObject({ status: 'unconfirmed' });
-    await s.bridge.involvement.refresh();
+    // Not confirmed, so not fresh, and the bridge reads the relay again by itself.
+    expect(await s.view()).toMatchObject({ status: 'unavailable', reason: 'not-set', stale: true });
+    s.relay.holdInvolvement = null;
+    release();
+    await vi.waitFor(async () =>
+      expect(await s.bridge.getInvolvementPreference()).toMatchObject({
+        status: 'available',
+        revision: 1,
+        setOn: 'computer',
+        stale: false,
+      }),
+    );
+    await s.bridge.stop();
+  });
+
+  it('a reply that does not confirm the save is unconfirmed, never an error or a save', async () => {
+    const s = await setup();
+    await s.start();
+    s.relay.involvementReplyBodies.push(
+      'not json{',
+      JSON.stringify({ revision: 'two', event_seq: 1 }),
+      JSON.stringify({ revision: 99, event_seq: 1 }),
+    );
+    for (const expectedRevision of [0, 1, 2]) {
+      expect(await s.bridge.setInvolvementPreference(choice(expectedRevision))).toMatchObject({
+        status: 'unconfirmed',
+      });
+      // Each was committed by the relay, so reading it again finds it.
+      await vi.waitFor(async () =>
+        expect(available(await s.view())).toMatchObject({
+          revision: expectedRevision + 1,
+          stale: false,
+        }),
+      );
+    }
+    await s.bridge.stop();
+  });
+
+  it('a lost reply is sent again unchanged, and the relay takes it once', async () => {
+    const s = await setup();
+    const bridge = new DecisionsBridge({
+      identity: s.identity,
+      store: new MemoryLocalStore(),
+      sink: new FakeSink(),
+      client: new RelayClient({
+        identity: s.identity,
+        fetch: s.relay.fetch,
+        sleep: async () => {},
+        maxRetries: 1,
+      }),
+      policy: new PolicyRegistry(),
+      pumpIntervalMs: 0,
+      now: () => s.clock.t,
+    });
+    await bridge.start({ socket: false });
+    await bridge.involvement.refresh();
+    s.relay.dropInvolvementReply = 1;
+    expect(await bridge.setInvolvementPreference(choice(0))).toEqual({
+      status: 'saved',
+      revision: 1,
+    });
+    expect(s.relay.involvementPuts).toHaveLength(2);
+    expect(s.relay.involvementPuts[1]).toEqual(s.relay.involvementPuts[0]);
+    expect(s.relay.events.filter((e) => e.event_type === 'involvement.updated')).toHaveLength(1);
+    await bridge.stop();
+  });
+
+  it('a conflict is reported when the relay names no usable revision, or the read after it fails', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    for (const details of [
+      undefined,
+      {},
+      { latest_revision: -1 },
+      { latest_revision: 1.5 },
+      { latest_revision: '2' },
+      { latest_revision: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      s.relay.rejectInvolvement.push({
+        status: 409,
+        code: 'revision_conflict',
+        ...(details ? { details } : {}),
+      });
+      expect(await s.bridge.setInvolvementPreference(choice(1))).toEqual({
+        status: 'conflict',
+        latestRevision: null,
+      });
+    }
+    // A phone saved meanwhile, and the read after the conflict fails: the result stands, and the copy says it is stale.
+    s.serve(await s.sign({ revision: 2, normal: 'recommend' }));
+    s.relay.onInvolvementPut = () => {
+      s.relay.down = 1;
+      s.relay.onInvolvementPut = null;
+    };
+    expect(await s.bridge.setInvolvementPreference(choice(1))).toEqual({
+      status: 'conflict',
+      latestRevision: 2,
+    });
     expect(await s.bridge.getInvolvementPreference()).toMatchObject({
       status: 'available',
       revision: 1,
-      setOn: 'computer',
-      stale: false,
+      stale: true,
     });
+    expect(s.relay.involvement?.preference).toMatchObject({
+      revision: 2,
+      normal_mode: 'recommend',
+    });
+    await s.bridge.stop();
+  });
+
+  it('a newer preference verified while the save’s reply was on its way is kept', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    let reply!: () => void;
+    s.relay.holdInvolvementReply = new Promise<void>((r) => (reply = r));
+    const saving = s.bridge.setInvolvementPreference(choice(1));
+    while (s.relay.involvementReceipts.size === 0) await tick();
+    // The relay took revision 2; a phone saves revision 3 before the reply arrives, and this desktop reads it.
+    s.serve(await s.sign({ revision: 3, normal: 'recommend' }));
+    await s.bridge.involvement.refresh();
+    expect(available(await s.view()).revision).toBe(3);
+    // Reads wait from here, so only the save can change the copy.
+    let read!: () => void;
+    s.relay.holdInvolvement = new Promise<void>((r) => (read = r));
+    s.relay.holdInvolvementReply = null;
+    reply();
+    expect(await saving).toEqual({ status: 'saved', revision: 2 });
+    expect(await preferenceOf(s.bridge)).toMatchObject({
+      revision: 3,
+      normalMode: 'recommend',
+      setOn: 'phone',
+    });
+    s.relay.holdInvolvement = null;
+    read();
+    await s.bridge.stop();
+  });
+
+  it('a save the relay took while the bridge stopped still bars older records after a restart', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    let reply!: () => void;
+    s.relay.holdInvolvementReply = new Promise<void>((r) => (reply = r));
+    const saving = s.bridge.setInvolvementPreference(choice(1));
+    while (s.relay.involvementReceipts.size === 0) await tick();
+    await s.bridge.stop();
+    s.relay.holdInvolvementReply = null;
+    reply();
+    expect(await saving).toEqual({ status: 'saved', revision: 2 });
+    // The relay serves the older record again after the restart: a rollback.
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    expect(available(await s.view())).toMatchObject({ revision: 2, stale: true });
+    expect(new Set(await s.refusals())).toEqual(new Set(['rollback']));
     await s.bridge.stop();
   });
 

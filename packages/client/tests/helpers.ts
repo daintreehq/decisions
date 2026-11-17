@@ -179,8 +179,15 @@ export class FakeRelay {
   holdInvolvement: Promise<void> | null = null;
   /** Every `PUT /involvement` body, retries included, in order. */
   involvementPuts: { idem: string; preference: InvolvementRecord }[] = [];
-  /** Each committed `PUT /involvement` receipt, by idempotency key, returned unchanged for a retry. */
-  involvementReceipts = new Map<string, unknown>();
+  /**
+   * Each committed `PUT /involvement` receipt and the record it took, by idempotency key: returned unchanged for a
+   * retry of the same record, and a collision for a different one, as the relay does.
+   */
+  involvementReceipts = new Map<string, { record: string; receipt: unknown }>();
+  /** While set, a committed `PUT /involvement` waits for it before replying (a slow reply). */
+  holdInvolvementReply: Promise<void> | null = null;
+  /** Bodies sent with HTTP 200 in place of the receipt for upcoming committed `PUT /involvement` (raw text as given). */
+  involvementReplyBodies: string[] = [];
   /** Number of upcoming `PUT /involvement` the relay COMMITS but whose reply is lost. */
   dropInvolvementReply = 0;
   /** Refusals for upcoming `PUT /involvement`, in order; when empty the relay compare-and-swaps as it does. */
@@ -519,7 +526,11 @@ export class FakeRelay {
       this.involvementPuts.push({ idem: b.idempotency_key, preference: b.preference });
       await this.onInvolvementPut?.();
       const prior = this.involvementReceipts.get(b.idempotency_key);
-      if (prior) return json(200, prior);
+      if (prior) {
+        if (prior.record !== JSON.stringify(b.preference))
+          return json(409, { code: 'idempotency_collision', message: 'key reused' });
+        return json(200, prior.receipt);
+      }
       const reject = this.rejectInvolvement.shift();
       if (reject)
         return json(reject.status, {
@@ -538,11 +549,21 @@ export class FakeRelay {
       this.involvement = { preference: b.preference, received_at: new Date().toISOString() };
       const ev = this.push('involvement.updated', null, null, { revision: b.preference.revision });
       const receipt = { revision: b.preference.revision, event_seq: ev.seq };
-      this.involvementReceipts.set(b.idempotency_key, receipt);
+      this.involvementReceipts.set(b.idempotency_key, {
+        record: JSON.stringify(b.preference),
+        receipt,
+      });
+      if (this.holdInvolvementReply) await this.holdInvolvementReply;
       if (this.dropInvolvementReply > 0) {
         this.dropInvolvementReply--;
         throw new TypeError('connection reset after the relay committed');
       }
+      const replaced = this.involvementReplyBodies.shift();
+      if (replaced !== undefined)
+        return new Response(replaced, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       return json(200, receipt);
     }
     if (method === 'POST' && p === '/api/v1/socket-ticket') {

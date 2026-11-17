@@ -184,6 +184,9 @@ function overrideIssue(o: SetInvolvementInput['override'], now: number): string 
   return null;
 }
 
+/** What `EventVerifier.verifyInvolvement` said about a record. */
+type Verdict = Awaited<ReturnType<EventVerifier['verifyInvolvement']>>;
+
 /** Coalesced, generation-guarded reads of the relay's preference into a verified local copy. */
 export class InvolvementSync {
   private generation = 0;
@@ -347,7 +350,11 @@ export class InvolvementSync {
     }
     if (!live()) return;
     try {
-      await decide(() => this.accept(body.preference, settle, failed, live));
+      // The signer is looked up before the commit section, so a slow directory never holds up a save.
+      const r = body.preference;
+      const verdict = r ? await this.verifier.verifyInvolvement(r) : null;
+      if (!live()) return;
+      await decide(() => this.accept(r, verdict, settle, failed, live));
     } catch (e) {
       if (e instanceof TransientError) return failed('directory-unavailable');
       // A hostile record can make canonicalising or verifying throw: refused like any other bad record.
@@ -357,6 +364,7 @@ export class InvolvementSync {
 
   private async accept(
     r: InvolvementRecord | null,
+    v: Verdict | null,
     settle: (s: Stored) => Promise<void>,
     failed: (result: string) => Promise<void>,
     live: () => boolean,
@@ -376,8 +384,7 @@ export class InvolvementSync {
     )
       return failed('equivocation');
     // Verified on every read, not only when the revision moves: its signer may have been removed since.
-    const v = await this.verifier.verifyInvolvement(r);
-    if (!live()) return;
+    if (!v) return failed('unverifiable');
     if (!v.ok) {
       if (v.reason !== 'signer-revoked') return failed(v.reason);
       // Authentic but from a removed device: kept to bar older and different records, and steers nothing.
@@ -427,6 +434,8 @@ export class InvolvementSync {
         timeoutMs: REQUEST_TIMEOUT_MS,
       });
     } catch (e) {
+      // A reply whose body is not JSON: the relay may have taken it.
+      if (e instanceof SyntaxError) return this.unconfirmed('the relay’s reply was unreadable');
       if (!(e instanceof RelayError)) throw e;
       if (e.code === 'revision_conflict') {
         const d = InvolvementConflictDetails.safeParse(e.details);
@@ -435,36 +444,33 @@ export class InvolvementSync {
         return { status: 'conflict', latestRevision: d.success ? d.data.latest_revision : null };
       }
       if (e.status === 404) return { status: 'unsupported' };
-      if (e.retryable) {
-        this.invalidate();
-        this.kick();
-        return { status: 'unconfirmed', message: e.message };
-      }
+      if (e.retryable) return this.unconfirmed(e.message);
       return { status: 'refused', code: e.code, message: e.message };
     }
     const receipt = InvolvementReceipt.safeParse(raw);
-    if (!receipt.success || receipt.data.revision !== record.revision) {
-      this.invalidate();
-      this.kick();
-      return {
-        status: 'unconfirmed',
-        message: 'the relay’s reply did not confirm this preference',
-      };
-    }
+    if (!receipt.success || receipt.data.revision !== record.revision)
+      return this.unconfirmed('the relay’s reply did not confirm this preference');
     await this.adopt(record);
     await this.ctx.audit.log({ event: 'involvement.set', result: `revision-${record.revision}` });
     this.kick();
     return { status: 'saved', revision: record.revision };
   }
 
+  /** A save that may or may not have reached the relay: the copy is stale until the relay is read again. */
+  private unconfirmed(message: string): SetInvolvementResult {
+    this.invalidate();
+    this.kick();
+    return { status: 'unconfirmed', message };
+  }
+
   /**
    * Take this desktop's own record, which the relay just accepted, as verified: it signed it, so it is authentic and
-   * set on the computer. A newer record verified meanwhile is kept, and a read that began before it reads again.
+   * set on the computer. A newer record verified meanwhile is kept, and a read that began before it reads again. It
+   * is written even when the bridge has stopped since the save was sent: it bars older records after a restart.
    */
   private adopt(r: InvolvementRecord): Promise<void> {
     return this.commit.run(async () => {
       this.saves++;
-      if (!this.running) return;
       const prev = await this.stored();
       if (r.revision <= prev.high_water) return;
       await this.ctx.store.setMeta(
