@@ -159,7 +159,10 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     expect(info.status).toBe(200);
     expect(info.json.name).toBe('daintree-decisions');
     expect(info.json.features).toEqual([
+      'involvement-v1',
+      'owner-desktop-answers-v1',
       'pane-snapshots-v1',
+      'person-declines-v1',
       'phone-images-v1',
       'thread-messages-v1',
     ]);

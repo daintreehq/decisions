@@ -1,7 +1,12 @@
 import { forwardRef, type ReactNode, type Ref } from 'react';
-import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type {
+  HumanAnswerContentV1,
+  PreparationReport,
+  ProxyAnswerContentV1,
+} from '@daintreehq/decisions-protocol';
+import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
-import { agentName, originParts } from '../../domain/selectors.js';
+import { agentName, answerBy, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
@@ -44,8 +49,25 @@ function Time({ iso, now }: { iso: string; now: number }) {
 }
 
 /**
+ * How the agent says it prepared the question (docs/protocol.md section 20.1): whether it consulted other agents and
+ * whether they agreed, with its own summary. It is the agent's account, labelled as such: nothing checked it, and it
+ * is never an answer.
+ */
+export function PreparationNote({ report }: { report: PreparationReport }) {
+  return (
+    <div className="msg-prep" role="note" aria-label="The agent’s account of how it prepared">
+      <p className="msg-prep-head">
+        <span className="msg-prep-label">The agent’s account</span> {preparationLine(report)}
+      </p>
+      {report.summary && <SafeText text={report.summary} className="msg-prep-summary" />}
+    </div>
+  );
+}
+
+/**
  * The agent's question: who asked (agent kind and project), then one message holding the question, its files, its
- * context (collapsed) and its choices. `meta` sits under the message (the deadline).
+ * context (collapsed), the agent's account of how it prepared (when it gave one) and its choices. `meta` sits under
+ * the message (the deadline).
  */
 export function AgentMessage({
   view,
@@ -81,6 +103,7 @@ export function AgentMessage({
         </div>
         {files}
         {context}
+        {c.preparation && <PreparationNote report={c.preparation} />}
         {choices}
       </div>
       {meta && <p className="msg-meta">{meta}</p>}
@@ -232,7 +255,10 @@ export function OutgoingMessage({
   return (
     <div className={`msg out${tone ? ` ${tone}` : ''}${flagged ? ' flagged' : ''}`} id={id}>
       <div className="bubble">
-        <span className="sr-only">You{label ? `, ${label.toLowerCase()}` : ''}: </span>
+        {/* Only the label's first letter drops to lower case: a computer's name in it keeps its own. */}
+        <span className="sr-only">
+          You{label ? `, ${label[0]!.toLowerCase()}${label.slice(1)}` : ''}:{' '}
+        </span>
         {label && (
           <p className="bubble-label" aria-hidden="true">
             {label}
@@ -262,8 +288,9 @@ export function OutgoingMessage({
 }
 
 /**
- * A human answer, as the person's reply, named as the answer so it stays distinct from the follow-ups after it. An
- * older app's correction of an answer reads "Changed answer".
+ * A human answer, as the person's reply, named as the answer so it stays distinct from the follow-ups after it. One
+ * made on the computer names it ("Your answer on Studio Mac"). An older app's correction of an answer reads "Changed
+ * answer".
  */
 export function HumanAnswer({
   view,
@@ -292,7 +319,7 @@ export function HumanAnswer({
 }) {
   return (
     <OutgoingMessage
-      label={changed ? 'Changed answer' : 'Your answer'}
+      label={changed ? 'Changed answer' : answerBy(a).subject}
       at={a.createdAt}
       now={now}
       receipt={receipt}

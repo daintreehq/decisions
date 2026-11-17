@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActionView, QuestionView } from '../src/domain/model.js';
 import {
   answerSummary,
+  closedLine,
   dayLabel,
   dueLabel,
   filterOptions,
@@ -13,6 +14,7 @@ import {
   stableOrder,
   type ListQuery,
 } from '../src/domain/lists.js';
+import { answerBy, withdrawnLabel } from '../src/domain/selectors.js';
 
 const NOW = Date.parse('2026-11-03T15:00:00Z');
 const H = 3_600_000;
@@ -85,6 +87,15 @@ function act(
     verified: true,
   };
 }
+
+/** A cancel signed by the asking desktop: a withdrawal. */
+const desktopCancel = (at: number): ActionView => ({
+  ...act('cancel', at),
+  provenance: null,
+  content: null,
+  signerDeviceId: 'desktop',
+  signerRole: 'owner-desktop',
+});
 
 const base: ListQuery = { sort: 'due', query: '', project: null, computer: null };
 const ids = (list: { id: string }[]) => list.map((v) => v.id);
@@ -176,7 +187,11 @@ describe('Home sections, sorting and filtering', () => {
     ]);
     expect(principalStatus(model, now)).toBe('review');
     expect(principalStatus(confirmed, now)).toBe('answered');
-    expect(answerSummary(confirmed)).toMatchObject({ author: 'Model', confirmed: true });
+    expect(answerSummary(confirmed)).toMatchObject({
+      author: 'Model',
+      model: true,
+      confirmed: true,
+    });
   });
 
   it('filters by project and computer separately, and searches every section', () => {
@@ -266,7 +281,7 @@ describe('History', () => {
       status: 'proxy-answered',
       actions: [act('proxy-answer', NOW - 2 * H)],
     });
-    const withdrawn = q('w', { status: 'cancelled', actions: [act('cancel', NOW - 3 * H)] });
+    const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 3 * H)] });
     const expired = q('e', { expiresAt: iso(NOW - 4 * H) });
     const open = q('o');
     const list = [human, review, withdrawn, expired, open];
@@ -278,6 +293,34 @@ describe('History', () => {
     expect(ids(historyEntries(list, 'all', '', NOW).map((e) => e.v))).toEqual(['h', 'm', 'w', 'e']);
     const [, , , exp] = historyEntries(list, 'all', '', NOW);
     expect(exp).toMatchObject({ status: 'expired', at: iso(NOW - 4 * H) });
+  });
+
+  it('files a question the person dismissed as declined, apart from one the agent withdrew', () => {
+    const declined = q('d', { status: 'cancelled', actions: [act('cancel', NOW - H)] });
+    const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 2 * H)] });
+    expect(principalStatus(declined, NOW)).toBe('declined');
+    expect(principalStatus(withdrawn, NOW)).toBe('withdrawn');
+    expect(closedLine('declined', declined)).toBe('Declined by you');
+    expect(closedLine('withdrawn', withdrawn)).toBe('Withdrawn on MacBook');
+    const entries = historyEntries([declined, withdrawn], 'decisions', '', NOW);
+    expect(entries.map((e) => [e.v.id, e.status])).toEqual([
+      ['d', 'declined'],
+      ['w', 'withdrawn'],
+    ]);
+    // Nor does an old follow-up whose delivery failed before the question was declined.
+    const stuck = {
+      ...declined,
+      messages: [
+        { side: 'human', verified: true, delivery: { status: 'needs-attention' } },
+      ] as unknown as QuestionView['messages'],
+    };
+    expect(principalStatus(stuck, NOW)).toBe('declined');
+    expect(homeSections([stuck], base, NOW).find((x) => x.kind === 'needs')!.items).toEqual([]);
+    const stuckWithdrawn = { ...stuck, actions: [desktopCancel(NOW - H)] };
+    expect(principalStatus(stuckWithdrawn, NOW)).toBe('delivery');
+    // A refused follow-up never puts a declined question back in Needs you.
+    const sections = homeSections([declined], { ...base, refused: new Set(['d']) }, NOW);
+    expect(sections.find((x) => x.kind === 'needs')!.items).toEqual([]);
   });
 
   it('groups by Today, Yesterday, then dates, in local time', () => {
@@ -294,6 +337,82 @@ describe('History', () => {
     expect(dayLabel(new Date(2025, 0, 5, 12).toISOString(), now, 'en-GB')).toMatch(
       /^Sun,? 5 Jan 2025$/,
     );
+  });
+});
+
+describe('withdrawn questions', () => {
+  const withdrawn = (machine: string) =>
+    q('w', { machine, status: 'cancelled', actions: [desktopCancel(NOW - 3 * H)] });
+
+  it('says where the question was withdrawn, never who withdrew it', () => {
+    const v = withdrawn('studio-mac');
+    expect(closedLine('withdrawn', v)).toBe('Withdrawn on studio-mac');
+    expect(withdrawnLabel(v)).not.toMatch(/agent/i);
+  });
+
+  it('strips control characters and line breaks from the computer name', () => {
+    expect(withdrawnLabel(withdrawn('Studio\u001b[31m\u202e\nMac'))).toBe(
+      'Withdrawn on Studio Mac',
+    );
+    expect(withdrawnLabel(withdrawn('\u001b[0m\n '))).toBe('Withdrawn on the computer');
+  });
+
+  it('reads a computer with no usable name as what it is', () => {
+    expect(withdrawnLabel(withdrawn(''))).toBe('Withdrawn on the computer');
+    expect(withdrawnLabel(withdrawn('host_01JC8Z4MQ7'))).toBe('Withdrawn on an unnamed computer');
+  });
+});
+
+describe('answers made on the computer', () => {
+  /** The person's answer, signed on the owner desktop and named from its certificate. */
+  const onComputer = (at: number, label = 'Studio Mac', s?: number): ActionView => ({
+    ...act('answer', at, { selected_option_ids: ['a'], text: 'ship it' }, s),
+    provenance: 'human-desktop',
+    signerDeviceId: 'desktop',
+    signerRole: 'owner-desktop',
+    signerLabel: label,
+  });
+
+  it("lists it as the person's decision, named with the computer, never the model's", () => {
+    const answered = q('c', {
+      status: 'human-answered',
+      revision: 1,
+      lastEventAt: iso(NOW - H),
+      actions: [onComputer(NOW - H)],
+    });
+    expect(needs([answered])).toEqual([]);
+    expect(principalStatus(answered, NOW)).toBe('answered');
+    expect(answerSummary(answered)).toEqual({
+      author: 'You on Studio Mac',
+      model: false,
+      text: 'Keep Canopy — ship it',
+      confirmed: false,
+    });
+    expect(historyEntries([answered], 'decisions', '', NOW).map((e) => [e.v.id, e.status])).toEqual(
+      [['c', 'answered']],
+    );
+    // The computer filter still means the computer that asked.
+    expect(every([answered], { ...base, computer: 'MacBook' })).toEqual(['c']);
+  });
+
+  it('shows the computer name as plain text, and an unusable one as "your computer"', () => {
+    const by = (label: string) => answerBy(onComputer(NOW, label));
+    expect(by('Studio\u001b[31m\nMac\u202e')).toMatchObject({ author: 'You on Studio Mac' });
+    expect(by('  \n ')).toMatchObject({ computer: 'your computer' });
+    expect(by('host_8f3k2j9q')).toMatchObject({ subject: 'Your answer on your computer' });
+    expect(answerBy({ provenance: 'human-desktop' })).toMatchObject({
+      subject: 'Your answer on your computer',
+    });
+    // A name that reads like the model is still the person's answer: callers decide by the flag, not the words.
+    expect(by('Model')).toEqual({
+      model: false,
+      computer: 'Model',
+      author: 'You on Model',
+      subject: 'Your answer on Model',
+    });
+    // An answer from a phone or tablet, and the model's, are as before.
+    expect(answerBy(act('answer', NOW))).toMatchObject({ author: 'You', computer: null });
+    expect(answerBy(act('proxy-answer', NOW))).toMatchObject({ author: 'Model', model: true });
   });
 });
 

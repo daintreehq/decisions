@@ -128,7 +128,7 @@ function searchMatch(e: HistoryEntry, query: string): Match | null {
   return { label: best.label, excerpt: emphasise(text, terms) };
 }
 
-function HistoryRow({
+export function HistoryRow({
   e,
   query,
   selected,
@@ -160,8 +160,8 @@ function HistoryRow({
       </span>,
     );
   const match = searchMatch(e, query);
-  const closed = closedLine(e.status);
-  const model = answer && answer.author !== 'You';
+  const closed = closedLine(e.status, v);
+  const model = answer?.model;
   return (
     <li className="qrow-item">
       <button
@@ -188,7 +188,12 @@ function HistoryRow({
         {answer ? (
           <span className="qrow-a">
             <span className={model ? 'who model' : 'who'}>
-              {!model ? 'You' : answer.confirmed ? 'Model answer, confirmed' : 'Model answer'}:
+              {!model
+                ? answer.author
+                : answer.confirmed
+                  ? 'Model answer, confirmed'
+                  : 'Model answer'}
+              :
             </span>{' '}
             {answer.text || 'No note'}
           </span>
@@ -440,7 +445,7 @@ export function HistoryPage() {
         </p>
         <p>
           {h.mode === 'decisions'
-            ? 'Questions you answer, and ones that expire or are withdrawn, appear here.'
+            ? 'Questions you answer or decline, and ones that expire or are withdrawn, appear here.'
             : 'Everything decided, and model answers still to review, appears here.'}
         </p>
       </div>

@@ -468,6 +468,7 @@
     [data-status='answered'],
     [data-status='expired'],
     [data-status='withdrawn'],
+    [data-status='declined'],
     [data-status='unverified'],
     [data-status='unreadable']
   )

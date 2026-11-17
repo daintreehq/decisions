@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionView } from '../../domain/model.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
+import { answerBy } from '../../domain/selectors.js';
 import { momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
 import { CopyIcon, RefreshIcon, WarningIcon } from '../Icons.js';
@@ -186,9 +187,14 @@ export function ConflictCard({
     opened.current = confirming;
   }, [confirming]);
   const expired = entry.state === 'expired';
+  const by = current ? answerBy(current) : null;
   const inForce = current
     ? [
-        current.provenance === 'proxy' ? 'The model’s answer' : 'Your answer from another device',
+        by?.model
+          ? 'The model’s answer'
+          : by?.computer
+            ? by.subject
+            : 'Your answer from another device',
         (current.content as Content)?.selected_option_ids
           ?.map((id) => `“${optionLabel(view, id)}”`)
           .join(', '),

@@ -1,4 +1,4 @@
-import type { PhoneImageReference } from '@daintreehq/decisions-protocol';
+import type { PhoneImageReference, Role } from '@daintreehq/decisions-protocol';
 
 /**
  * One locally stored answer for a question: delivery bookkeeping in clear, content sealed.
@@ -9,10 +9,22 @@ import type { PhoneImageReference } from '@daintreehq/decisions-protocol';
  */
 export interface AnswerEntry {
   entry_id: string;
-  kind: 'answer' | 'expired';
-  action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire';
+  /** `declined`: the person dismissed the question from a phone or tablet (a human-signed cancel); no content. */
+  kind: 'answer' | 'expired' | 'declined';
+  action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;
+  /**
+   * Who the answer is from: `human` for the person (from a phone, a tablet or the owner desktop; `signer_role` tells
+   * them apart), `proxy` for a desktop's decision model, `system` for an expiry.
+   */
   source: 'human' | 'proxy' | 'system';
+  /**
+   * The device that signed the action, and its certified role when it was verified. Absent on entries that no
+   * device signed (an expiry or decline notice) and on answers stored before signers were kept, which were all a
+   * phone's or tablet's when human: an earlier library refused every other signer.
+   */
+  signer_device_id?: string;
+  signer_role?: Role;
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;
@@ -25,7 +37,7 @@ export interface AnswerEntry {
   deliver: boolean;
   delivered: boolean;
   injection_id?: string;
-  /** The sealed `AnswerContent`, or null for an entry that carries none (an expiry notice). */
+  /** The sealed `AnswerContent`, or null for an entry that carries none (an expiry or decline notice). */
   sealed: string | null;
   /**
    * Phone images the host already stored for this answer, by attachment id: the path its `PhoneImageStore`
@@ -105,6 +117,17 @@ export function parseAnswers(json: string): AnswerEntry[] {
   }
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
+
+/**
+ * Where the person gave a human answer: `computer` when the owner desktop signed it (the person's own answer, made
+ * on the computer, never a proxy's), `phone` for a phone or tablet. Null for a proxy answer and an expiry.
+ */
+export function answeredOn(
+  e: Pick<AnswerEntry, 'source' | 'signer_role'>,
+): 'computer' | 'phone' | null {
+  if (e.source !== 'human') return null;
+  return e.signer_role === 'owner-desktop' ? 'computer' : 'phone';
+}
 
 /** True when two digest lists hold the same digests the same number of times, in any order. */
 export function sameDigests(a: readonly string[], b: readonly string[]): boolean {

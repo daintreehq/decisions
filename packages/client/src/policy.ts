@@ -104,6 +104,39 @@ export function gateAllowsText(gate: WorkflowGate | undefined): boolean {
   return gate.allowText ?? !gate.choices;
 }
 
+/** Why an answer breaks its question's rules, as `answerRuleViolation` reports it. */
+export type AnswerRuleViolation =
+  'unknown_option' | 'too_many_choices' | 'text_not_allowed' | 'choice_required';
+
+/**
+ * The first rule an answer breaks, or null: options the question does not list (any id when it lists none), ids
+ * outside the gate's choices or allowed options, more than one choice under a gate with choices, free text where
+ * the question or the gate forbids it, and no choice where text is not an answer. `ruled: false` (a confirmation,
+ * which carries no content of its own) checks the option ids only.
+ */
+export function answerRuleViolation(
+  question: { options?: readonly { id: string }[]; allow_text?: boolean },
+  gate: WorkflowGate | undefined,
+  chosen: readonly string[],
+  text: string,
+  ruled = true,
+): AnswerRuleViolation | null {
+  const opts = question.options ?? [];
+  const bad = chosen.find(
+    (id) =>
+      (opts.length > 0 && !opts.some((o) => o.id === id)) ||
+      (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)) ||
+      (gate?.choices && !gate.choices.some((c) => c.id === id)),
+  );
+  if (bad !== undefined) return 'unknown_option';
+  if (!ruled) return null;
+  const textAllowed = question.allow_text !== false && gateAllowsText(gate);
+  if (gate?.choices && chosen.length > 1) return 'too_many_choices';
+  if (text.trim() !== '' && !textAllowed) return 'text_not_allowed';
+  if (!textAllowed && chosen.length === 0) return 'choice_required';
+  return null;
+}
+
 function validateGate(gate: WorkflowGate): void {
   const bad = (why: string) => new Error(`workflow gate "${gate.gateId}": ${why}`);
   if (!gate.gateId) throw new Error('workflow gate: gateId is required');

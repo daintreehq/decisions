@@ -54,6 +54,7 @@ import {
   SnapshotRefresh,
   SnapshotRefreshBody,
 } from './snapshot.js';
+import { InvolvementBody, InvolvementReceipt, InvolvementResponse } from './involvement.js';
 import { API_PREFIX, PROTOCOL_VERSION } from './version.js';
 
 export interface RouteSpec {
@@ -74,6 +75,7 @@ export interface RouteSpec {
 
 const DESKTOPS = ['owner-desktop', 'desktop-host'] as const;
 const HUMANS = ['phone', 'tablet'] as const;
+const HUMAN_ANSWERERS = ['owner-desktop', 'phone', 'tablet'] as const;
 const OWNER = ['owner-desktop'] as const;
 const ok = z.object({ ok: z.literal(true) });
 
@@ -209,8 +211,9 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'POST',
     path: '/questions/{id}/answer',
     auth: 'signed',
-    roles: HUMANS,
-    summary: 'First human answer (compare-and-swap on revision)',
+    roles: HUMAN_ANSWERERS,
+    summary:
+      "First human answer, from a phone, a tablet or the owner desktop (compare-and-swap on revision; an owner-desktop answer needs the question's desktop to declare owner-desktop-answers-v1)",
     request: ActionBody,
     response: CommandReceipt,
     status: 201,
@@ -259,8 +262,9 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'POST',
     path: '/questions/{id}/cancel',
     auth: 'signed',
-    roles: DESKTOPS,
-    summary: 'Cancel an unanswered question (idempotent)',
+    roles: 'any',
+    summary:
+      "Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one (the question's desktop must declare person-declines-v1)",
     request: ActionBody,
     response: CommandReceipt,
     status: 201,
@@ -504,6 +508,24 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     response: SettingsResponse,
   },
   {
+    method: 'GET',
+    path: '/involvement',
+    auth: 'signed',
+    roles: 'any',
+    summary:
+      "The person's latest signed involvement preference, or null; reading it creates nothing",
+    response: InvolvementResponse,
+  },
+  {
+    method: 'PUT',
+    path: '/involvement',
+    auth: 'signed',
+    roles: HUMANS,
+    summary: 'Replace the involvement preference (compare-and-swap on its revision)',
+    request: InvolvementBody,
+    response: InvolvementReceipt,
+  },
+  {
     method: 'POST',
     path: '/voice/session',
     auth: 'signed',
@@ -656,6 +678,7 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
   const api = await import('./api.js');
   const thread = await import('./thread.js');
   const snap = await import('./snapshot.js');
+  const inv = await import('./involvement.js');
   const pick = {
     DeviceCert: s.DeviceCert,
     EpochGrant: s.EpochGrant,
@@ -688,6 +711,11 @@ export async function buildSchemaBundle(): Promise<Record<string, unknown>> {
     PaneSnapshotBody: snap.PaneSnapshotBody,
     SnapshotRefreshBody: snap.SnapshotRefreshBody,
     PaneSnapshotResponse: snap.PaneSnapshotResponse,
+    PreparationReport: s.PreparationReport,
+    InvolvementRecord: inv.InvolvementRecord,
+    InvolvementBody: inv.InvolvementBody,
+    InvolvementReceipt: inv.InvolvementReceipt,
+    InvolvementResponse: inv.InvolvementResponse,
   };
   return Object.fromEntries(Object.entries(pick).map(([k, v]) => [k, jsonSchema(v as z.ZodType)]));
 }

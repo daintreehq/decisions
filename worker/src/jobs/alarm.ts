@@ -141,7 +141,7 @@ function threadAwaitsPerson(
       event_seq: m.event_seq,
     }));
   const lastHuman = room.q1<{ s: number | null }>(
-    `SELECT MAX(event_seq) AS s FROM actions WHERE question_id = ? AND provenance = 'human'`,
+    `SELECT MAX(event_seq) AS s FROM actions WHERE question_id = ? AND provenance IN ('human', 'human-desktop')`,
     questionId,
   )?.s;
   return threadAwaitsHuman({ status, messages, lastHumanActionSeq: lastHuman ?? null });

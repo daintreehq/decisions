@@ -3,9 +3,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
+import type { InvolvementView } from './involvement.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.7.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
@@ -47,6 +48,8 @@ function decisionResult(v: DecisionView) {
     requirement: v.requirement,
     workflow_gate_id: v.workflowGateId,
     provenance: v.provenance,
+    answered_on: v.answeredOn,
+    closed_reason: v.closedReason,
     choice: v.choice,
     text: v.text,
     reviewed_digests_match: v.reviewedDigestsMatch,
@@ -56,6 +59,7 @@ function decisionResult(v: DecisionView) {
     answers: v.answers.map((a) => ({
       revision: a.revision,
       source: a.source,
+      answered_on: a.answeredOn,
       choices: a.choices,
       text: a.text,
       correction: a.correction,
@@ -69,6 +73,7 @@ function decisionResult(v: DecisionView) {
             kind: t.kind,
             revision: t.revision,
             source: t.source,
+            answered_on: t.answeredOn,
             choices: t.choices,
             text: t.text,
             correction: t.correction,
@@ -103,6 +108,41 @@ function decisionResult(v: DecisionView) {
   };
 }
 
+/** The `get_involvement` structured result: every field present, null where it does not apply. */
+function involvementResult(v: InvolvementView) {
+  const on = v.status === 'available' ? v : null;
+  return {
+    status: v.status,
+    mode: on?.mode ?? null,
+    normal_mode: on?.normalMode ?? null,
+    consult_count: on?.consultCount ?? null,
+    revision: on?.revision ?? null,
+    override_active: on?.overrideActive ?? false,
+    until: on?.until ?? null,
+    set_at: on?.setAt ?? null,
+    last_synced_at: v.lastSyncedAt,
+    stale: v.stale,
+    reason: v.status === 'unavailable' ? v.reason : null,
+  };
+}
+
+/** The `get_involvement` result text: what the person asked for, in words an agent acts on. */
+export function involvementText(v: InvolvementView): string {
+  if (v.status === 'unavailable')
+    return `No involvement preference is available (${v.reason}). Use your normal configured behaviour.`;
+  const how =
+    v.mode === 'involve-early'
+      ? 'involve the person early: ask while you explore the options, rather than waiting for a finished recommendation'
+      : `bring a recommendation: consult ${v.consultCount} other agent${v.consultCount === 1 ? '' : 's'} first, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives`;
+  const temporary = v.until
+    ? ` This is temporary until ${v.until}; then it returns to ${v.normalMode}.`
+    : '';
+  const stale = v.stale
+    ? ` It may be out of date: last confirmed with the relay ${v.lastSyncedAt ? `at ${v.lastSyncedAt}` : 'never'}.`
+    : '';
+  return `Involvement (revision ${v.revision}): ${how}.${temporary}${stale}`;
+}
+
 /**
  * The `DecisionsBridge` operations the handler calls. A host that forwards them across a process boundary
  * (instead of passing a bridge) forwards exactly these, with the pane identity and any `BridgeError` intact.
@@ -112,14 +152,20 @@ export const MCP_BRIDGE_METHODS = [
   'getDecision',
   'cancelQuestion',
   'postMessage',
+  'getInvolvement',
 ] as const satisfies readonly (keyof DecisionsBridge)[];
 
 /** What `createDecisionsMcpHandler` needs from a bridge: a `DecisionsBridge`, or a host's forwarder. */
 export type DecisionsMcpBridge = Pick<DecisionsBridge, (typeof MCP_BRIDGE_METHODS)[number]>;
 
-/** What agents are told when they connect: questions return at once, and each one is a conversation. */
+/**
+ * What agents are told when they connect: questions return at once, each one is a conversation, and how involved
+ * the person wants to be is read from get_involvement, before preparing and again before asking. Sent once, at
+ * `initialize`, so it points at the tool rather than carrying the preference.
+ */
 export const SERVER_INSTRUCTIONS =
-  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way.';
+  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
+  "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
 /** The `ask_human` result text. */
 export const askedInstruction = (alias: number) =>
@@ -210,6 +256,38 @@ export const TOOLS = [
           maxLength: 64,
           description: 'Repeat calls with the same id return the same question.',
         },
+        preparation: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['agents_consulted', 'outcome'],
+          description:
+            'How you prepared this under get_involvement, in your own words. Shown to the person as your account; it never answers or approves anything.',
+          properties: {
+            preference_revision: {
+              type: ['integer', 'null'],
+              minimum: 1,
+              description:
+                'The get_involvement revision you prepared under; null if none was available.',
+            },
+            agents_consulted: {
+              type: 'integer',
+              minimum: 0,
+              maximum: 64,
+              description: 'Other agents you actually consulted.',
+            },
+            outcome: {
+              type: 'string',
+              enum: ['agreed', 'split', 'not-run'],
+              description:
+                'agreed: they agreed on the recommendation. split: they did not agree, or it was inconclusive. not-run: no consultation happened.',
+            },
+            summary: {
+              type: 'string',
+              maxLength: 2000,
+              description: 'The reasoning, the disagreement, or why the consultation did not run.',
+            },
+          },
+        },
       },
     },
     // Only adds a question to the owner's own inbox. Clients that gate tool calls on these hints
@@ -226,7 +304,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images) and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -252,6 +330,18 @@ export const TOOLS = [
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
         provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
+        answered_on: {
+          type: ['string', 'null'],
+          enum: ['phone', 'computer', null],
+          description:
+            "Where the person gave the human answer in force: phone (a phone or tablet) or computer (on the person's own computer; still their answer, never a proxy's). Null unless provenance is human.",
+        },
+        closed_reason: {
+          type: ['string', 'null'],
+          enum: ['declined', 'withdrawn', 'expired', null],
+          description:
+            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop) or expired. None authorises anything.',
+        },
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
         reviewed_digests_match: { type: 'boolean' },
@@ -266,6 +356,7 @@ export const TOOLS = [
               kind: { type: 'string', enum: ['answer', 'message'] },
               revision: { type: 'integer' },
               source: { type: 'string', enum: ['human', 'proxy', 'system'] },
+              answered_on: { type: ['string', 'null'], enum: ['phone', 'computer', null] },
               choices: { type: 'array', items: { type: 'string' } },
               message_id: { type: 'string' },
               message_seq: { type: 'integer' },
@@ -358,6 +449,39 @@ export const TOOLS = [
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'get_involvement',
+    description:
+      "Read how involved the person wants to be right now: involve-early (ask while exploring options) or recommend (consult consult_count other agents, then bring a recommendation or the disagreement). Read it before preparing a question and again just before ask_human. Reads this desktop's copy only and never asks the person. Unavailable or stale: use your normal behaviour.",
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['available', 'unavailable'] },
+        mode: { type: ['string', 'null'], enum: ['involve-early', 'recommend', null] },
+        normal_mode: { type: ['string', 'null'], enum: ['involve-early', 'recommend', null] },
+        consult_count: { type: ['integer', 'null'] },
+        revision: { type: ['integer', 'null'] },
+        override_active: { type: 'boolean' },
+        until: { type: ['string', 'null'] },
+        set_at: { type: ['string', 'null'] },
+        last_synced_at: { type: ['string', 'null'] },
+        stale: { type: 'boolean' },
+        reason: {
+          type: ['string', 'null'],
+          enum: ['not-synced', 'not-set', 'unsupported', 'signer-revoked', 'device-revoked', null],
+        },
+        error: { type: 'string' },
+      },
+    },
+    annotations: {
+      title: 'Read the involvement preference',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
       openWorldHint: false,
     },
   },
@@ -492,10 +616,12 @@ export function createDecisionsMcpHandler(
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
         const summary = v.provenance
-          ? `q-${v.alias} is ${v.status}. Answer (${v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+          ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
             ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : `q-${v.alias} is ${v.status}; no answer in force.`;
+            : v.closedReason === 'declined'
+              ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+              : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;
         return text(
           messages > 0
@@ -512,6 +638,10 @@ export function createDecisionsMcpHandler(
           question_id: args.question_id,
           status: 'cancelling',
         });
+      }
+      if (name === 'get_involvement') {
+        const v = await bridge.getInvolvement();
+        return text(involvementText(v), involvementResult(v));
       }
       if (name === 'send_followup') {
         const r = await bridge.postMessage(args, pane);

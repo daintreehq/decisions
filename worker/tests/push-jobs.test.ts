@@ -701,6 +701,29 @@ describe('reply pushes', () => {
       expect((await replyJobs(q)).map((j) => j.status)).toEqual(['done']);
   });
 
+  it('counts an answer made on the owner desktop as the person answering', async () => {
+    await subscriber(phone);
+    await declare(w.owner, ['thread-messages-v1', 'owner-desktop-answers-v1']);
+    const questionId = await asked();
+    await quiet(true);
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['pending']);
+    expect((await act(w, w.owner, 'answer', questionId, 0)).res.status).toBe(201);
+    // The answer cancels the held push; put it back, so only the alarm's own check can drop it.
+    await inRoom((room) =>
+      room.run(
+        `UPDATE scheduled_jobs SET status = 'pending' WHERE kind = 'notify_reply' AND question_id = ?`,
+        questionId,
+      ),
+    );
+    await quiet(false);
+    calls.length = 0;
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+    expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['done']);
+  });
+
   it('keeps one reply push per question, and a cancelled question takes it along', async () => {
     await subscriber(phone);
     const twice = await asked();

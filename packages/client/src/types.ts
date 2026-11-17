@@ -90,8 +90,13 @@ export interface QuestionRow {
   attachment_digests: string[];
 }
 
-/** `message` is an agent message for a question's thread (`MessagePayload`); it never touches the answer. */
-export type OutboxKind = 'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain' | 'message';
+/**
+ * `message` is an agent message for a question's thread (`MessagePayload`); it never touches the answer.
+ * `owner-answer` is the person's answer given on the owner desktop (`OwnerAnswerPayload`), for any question, the
+ * owner's or a Remote Host's.
+ */
+export type OutboxKind =
+  'create' | 'cancel' | 'proxy-answer' | 'proxy-abstain' | 'message' | 'owner-answer';
 
 export interface OutboxItem {
   /** Also the relay idempotency key. */

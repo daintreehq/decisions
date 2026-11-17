@@ -365,6 +365,11 @@ export const EventData = {
   }),
   /** `decision.snapshot.refresh_requested`: sent to the publishing desktop, which answers with a new snapshot. */
   snapshotRefreshRequested: SnapshotRefresh.extend({ target_host_id: Id }),
+  /**
+   * `involvement.updated`: a hint only, with no question. Fetch `GET /involvement` for the signed record; the
+   * revision says which one the relay accepted, and is never trusted on its own.
+   */
+  involvementUpdated: z.object({ revision: z.number().int().min(1) }),
 } as const;
 
 export { Sha256Hex };

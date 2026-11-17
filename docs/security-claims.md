@@ -15,11 +15,13 @@ This page says what Decisions protects, and just as importantly what it does not
 
 Ids, timestamps, requirement level (needed to enforce policy), question status, revision numbers, ciphertext sizes, which device acted, when you were notified, device labels you chose, push endpoints, IP addresses and ordinary request metadata. This reveals _activity patterns_ (for example that you answered something at 02:00), not content.
 
+Your notification settings (quiet hours and reminders) and your involvement preference are stored in plaintext: the relay sees whether you want agents to involve you early or bring you a recommendation, how many agents they should consult, and when a temporary setting ends. The involvement preference is signed by your phone, so the relay cannot change it or attribute it to another device. An agent's report of how it prepared a question travels inside the encrypted question.
+
 ## What is authenticated
 
 - Every request is signed by a paired device (ECDSA P-256) and includes a timestamp and nonce; replays are rejected.
 - Every question and every answer is a signed record committing to the exact ciphertext. Phones and the desktop verify signatures through a certificate chain rooted at the owner key the phone pinned from the QR code, so the relay cannot forge, swap or re-attribute them.
-- A human answer must be signed by a phone or tablet device; a proxy answer is signed by a desktop and is always labelled. The relay enforces this and so does every client.
+- A human answer must be signed by a phone or tablet device, or by the owner desktop, which certifies every other device and so could pair a phone of its own anyway. An answer from the owner desktop is recorded as the person's answer made on the computer (`human-desktop` provenance) and accepted only for a question whose asking desktop declared support for it. A Remote Host never signs a human answer, and only a phone or tablet overrides an answer or confirms a proxy answer. A proxy answer is signed by a desktop and is always labelled. The relay enforces this, and every client checks the signer's role. The phone app shows an answer made on the computer as the person's, named with the computer's certified name, and a client that cannot yet show one refuses it.
 
 ## What is not protected
 

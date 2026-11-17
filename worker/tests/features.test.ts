@@ -85,7 +85,10 @@ describe('declaring features', () => {
 
   it('advertises the extensions the relay implements', async () => {
     expect((await raw('GET', '/api/v1/info')).json.features).toEqual([
+      'involvement-v1',
+      'owner-desktop-answers-v1',
       'pane-snapshots-v1',
+      'person-declines-v1',
       'phone-images-v1',
       'thread-messages-v1',
     ]);
@@ -243,7 +246,10 @@ describe('feature negotiation with pane snapshots (docs/protocol.md section 19)'
   it('advertises the features the relay implements', async () => {
     const info = await raw('GET', '/api/v1/info');
     expect(InfoResponse.parse(info.json).features).toEqual([
+      'involvement-v1',
+      'owner-desktop-answers-v1',
       'pane-snapshots-v1',
+      'person-declines-v1',
       'phone-images-v1',
       'thread-messages-v1',
     ]);

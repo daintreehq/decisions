@@ -7,14 +7,14 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import { isPersonDecline, type HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
-import { StaleQuestionError } from '../../domain/answer.js';
+import { DeclineUnsupportedError, StaleQuestionError } from '../../domain/answer.js';
 import {
   composeShape,
   verdict as computeVerdict,
@@ -26,6 +26,7 @@ import { choiceLine } from '../../domain/lists.js';
 import { ThreadClosedError } from '../../domain/message.js';
 import {
   agentName,
+  answerBy,
   canOverrule,
   currentAnswer,
   DELIVERY_LABELS,
@@ -38,6 +39,7 @@ import {
   proxyNeedsReview,
   submitKind,
   unreadableHere,
+  withdrawnLabel,
 } from '../../domain/selectors.js';
 import { drafts, readyPhotos, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
@@ -67,7 +69,7 @@ import { AnswerDock } from './AnswerDock.js';
 import { Composer } from './Composer.js';
 import { ConsentSheet } from './ConsentSheet.js';
 import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
-import { Receipt } from './DeliveryStatus.js';
+import { AnswerReceipt, Receipt } from './DeliveryStatus.js';
 import { DraftPhotoStrip, PhotoGrid, type PhotoUpload } from './Photos.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
@@ -146,6 +148,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const [field, setField] = useState<FieldId | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  /** The revision the person was looking at when they chose Dismiss: what the decline is signed against. */
+  const [declineAt, setDeclineAt] = useState<number | null>(null);
+  const [declining, setDeclining] = useState(false);
+  const [declineError, setDeclineError] = useState<string | null>(null);
   const [headingAway, setHeadingAway] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -360,12 +366,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     if (pendingEntry && pendingEntry.kind !== 'confirm-proxy')
       return {
         author: 'You',
+        model: false,
         text: short(pendingEntry.selected, pendingEntry.text, pendingEntry.images?.length),
       };
     if (!answer) return null;
     const c = answer.content as HumanAnswerContentV1 | null;
+    const { author, model } = answerBy(answer);
     return {
-      author: answer.provenance === 'proxy' ? 'Model' : 'You',
+      author,
+      model,
       text: short(c?.selected_option_ids ?? [], c?.text ?? '', c?.images?.length),
     };
   })();
@@ -629,6 +638,16 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     onSelect: () => void navigator.clipboard?.writeText(id).catch(() => undefined),
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
+  // Declining is deliberate and final, so it lives here behind a confirmation, never in the composer.
+  // Only where the desktop that asked can file a decline; an older one would leave the question open.
+  if (status === 'open' && verified && !pendingEntry && app.declinesFor(view))
+    menu.push({
+      label: 'Dismiss question…',
+      onSelect: () => {
+        setDeclineError(null);
+        setDeclineAt(view.revision);
+      },
+    });
   // Clearing is an explicit loss with Undo, so it lives here rather than in the composer.
   if (composing && hasWords(draft))
     menu.push({
@@ -1067,7 +1086,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // answer reads as a changed one.
             changed={a.action === 'override' && replaced?.provenance !== 'proxy'}
             now={now}
-            receipt={isCurrent && progress ? <Receipt progress={progress} fromPhone /> : undefined}
+            receipt={
+              isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined
+            }
             flagged={isCurrent && progress?.step === 'attention'}
           />,
         );
@@ -1088,7 +1109,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             onConfirm={() => void confirmModel()}
             onOverrule={canCorrect ? startCorrection : undefined}
             receipt={
-              isCurrent && progress ? <Receipt progress={progress} fromPhone={false} /> : undefined
+              isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined
             }
           />,
         );
@@ -1107,15 +1128,20 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </OutgoingMessage>,
         );
       } else if (a.action === 'cancel') {
+        const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
         items.push(
           <SystemLine
             key={a.actionId}
             now={now}
             at={a.createdAt}
             icon={<UndoIcon size={14} />}
-            detail="No answer is needed, and nothing was approved here."
+            detail={
+              declined
+                ? 'You chose not to answer it, so nothing was approved.'
+                : 'No answer is needed, and nothing was approved here.'
+            }
           >
-            Withdrawn by your agent
+            {declined ? 'Declined by you' : withdrawnLabel(view)}
           </SystemLine>,
         );
       } else if (a.action === 'reopen') {
@@ -1146,6 +1172,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         <Receipt
           progress={pendingProgress}
           fromPhone
+          subject="Your answer"
           steps={pendingEntry.kind !== 'confirm-proxy'}
           label={uploadLabel(pendingEntry)}
           note={queuedOffline ? 'Sends when you’re back online' : undefined}
@@ -1519,8 +1546,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const prev = lastOutcome.current;
     lastOutcome.current = outcomeKey;
     if (!outcomeKey || outcomeKey === prev || !answer || !progress) return;
-    const subject = answer.provenance === 'proxy' ? 'The model answer' : 'Your answer';
-    if (progress.step === 'terminal') announce(`${subject} was typed into the terminal.`);
+    if (progress.step === 'terminal')
+      announce(`${answerBy(answer).subject} was typed into the terminal.`);
     else if (progress.step === 'attention')
       announce(`${progress.label}. Open Daintree on your computer to see what happened.`);
   }, [outcomeKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1670,6 +1697,58 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </p>
         </Sheet>
       )}
+      <Sheet
+        open={declineAt !== null}
+        title="Dismiss this question?"
+        // Closing never waits on the request (a swipe or Back must not leave a stuck layer); a failure reopens it.
+        onClose={() => setDeclineAt(null)}
+        footer={
+          <>
+            <button type="button" className="btn" onClick={() => setDeclineAt(null)}>
+              Keep it
+            </button>
+            <button
+              type="button"
+              className="btn danger"
+              disabled={declining}
+              onClick={() => {
+                if (declineAt === null || declining) return;
+                const at = declineAt;
+                setDeclining(true);
+                setDeclineError(null);
+                if (dictation.isActive()) void dictation.stop();
+                app
+                  .declineQuestion(view, at)
+                  .then(() => {
+                    setDeclineAt(null);
+                    announce('Question dismissed.');
+                  })
+                  .catch((e: unknown) => {
+                    setDeclineError(
+                      e instanceof StaleQuestionError || e instanceof DeclineUnsupportedError
+                        ? e.message
+                        : 'Could not dismiss it. Check your connection and try again.',
+                    );
+                    setDeclineAt(at);
+                  })
+                  .finally(() => setDeclining(false));
+              }}
+            >
+              {declining ? 'Dismissing…' : 'Dismiss question'}
+            </button>
+          </>
+        }
+      >
+        <p>
+          You won’t answer it. It leaves Needs you on all your devices and stops reminders. If your
+          agent is still waiting, it is told you declined, and nothing is approved.
+        </p>
+        {declineError && (
+          <p className="status error" role="alert">
+            {declineError}
+          </p>
+        )}
+      </Sheet>
       <Sheet
         open={discardOpen}
         title="Discard this correction?"

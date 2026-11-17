@@ -1,5 +1,10 @@
-import { threadAwaitsHuman, type ActionKind } from '@daintreehq/decisions-protocol';
+import {
+  isPersonDecline,
+  threadAwaitsHuman,
+  type ActionKind,
+} from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
+import { sanitizeText } from '../lib/safe-text.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
@@ -30,6 +35,20 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
     if (a.verified && a.action === 'proxy-answer') return a;
   }
   return null;
+}
+
+/**
+ * The person dismissed this question from a phone or tablet: it is cancelled, and the cancel in force was signed by
+ * a human device (its certificate checked when the event was verified). A desktop's cancel is a withdrawal instead.
+ */
+export function declinedByPerson(v: QuestionView): boolean {
+  if (v.status !== 'cancelled' || !v.verification.ok) return false;
+  for (let i = v.actions.length - 1; i >= 0; i--) {
+    const a = v.actions[i]!;
+    if (a.verified && a.action === 'cancel')
+      return a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+  }
+  return false;
 }
 
 /** A question that can still be answered: open, verified and not past its deadline. */
@@ -104,7 +123,7 @@ export function statusLabel(s: EffectiveStatus, v?: QuestionView): string {
     case 'human-answered':
       return 'Answered by you';
     case 'cancelled':
-      return 'Withdrawn';
+      return v && declinedByPerson(v) ? 'Declined' : 'Withdrawn';
     case 'expired':
       return 'Expired';
     default:
@@ -150,6 +169,53 @@ export function originParts(v: QuestionView): { project: string; machine: string
     machine: unnamed ? 'Unnamed computer' : machine,
   };
 }
+/**
+ * What the phone can observe of a cancelled question: it was withdrawn on the named computer. The cancel is signed by
+ * the computer's key whether an agent or the person at the keyboard asked for it, so this never says who did.
+ */
+export function withdrawnLabel(v: QuestionView): string {
+  // The name comes from the signing computer: drop control and escape characters, and fold line breaks to spaces.
+  const machine = sanitizeText(originParts(v).machine).replace(/\s+/g, ' ').trim();
+  if (!machine) return 'Withdrawn on the computer';
+  return machine === 'Unnamed computer'
+    ? 'Withdrawn on an unnamed computer'
+    : `Withdrawn on ${machine}`;
+}
+
+/**
+ * Who made an answer, in the words every surface uses: the decision model, the person on a phone or tablet, or the
+ * person on the computer (the owner desktop signed it, `human-desktop` provenance), named from its certificate. Decide
+ * by `model` and `computer`, never by the words.
+ */
+export interface AnswerBy {
+  model: boolean;
+  /** The computer the person answered on, or null when they answered on a phone or tablet (or the model did). */
+  computer: string | null;
+  /** Short, for rows and the header: "Model", "You", "You on Studio Mac". */
+  author: string;
+  /** As a sentence's subject: "The model answer", "Your answer", "Your answer on Studio Mac". */
+  subject: string;
+}
+
+export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): AnswerBy {
+  if (a.provenance === 'proxy')
+    return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
+  if (a.provenance !== 'human-desktop')
+    return { model: false, computer: null, author: 'You', subject: 'Your answer' };
+  // The owner chose the name and its key signed it, but it is still shown as text: drop control and escape
+  // characters and fold line breaks, as for the asking computer's name.
+  const name = sanitizeText(a.signerLabel ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const computer = name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
+  return {
+    model: false,
+    computer,
+    author: `You on ${computer}`,
+    subject: `Your answer on ${computer}`,
+  };
+}
+
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
   if (effectiveStatus(v, now) !== 'proxy-answered') return false;
   return !v.actions.some(
@@ -213,6 +279,8 @@ export function deliveryNeedsAttention(v: QuestionView): boolean {
 
 /** Which delivery needs the owner: the answer in force (named first), a follow-up, or none. */
 export function deliveryIssue(v: QuestionView): 'answer' | 'follow-up' | null {
+  // The person declined it: nothing about it waits on them, an old delivery failure included.
+  if (declinedByPerson(v)) return null;
   const stuck = (s: string | undefined) => s === 'needs-attention' || s === 'delivery-uncertain';
   const a = currentAnswer(v);
   if (a && stuck(v.deliveries[a.revision]?.status)) return 'answer';

@@ -184,14 +184,26 @@ describe.skipIf(!chromiumPath)(
     const call = async (c: Client, name: string, args: Record<string, unknown>) =>
       (await c.callTool({ name, arguments: args })) as ToolResult;
 
-    /** Opens a question from the inbox, as a person would the first time. */
+    /**
+     * Opens a question from the inbox, as a person would the first time. Home can render from its cache before the
+     * question syncs, and then holds it behind "N new questions" (rows never reshuffle): take it the way a person would.
+     */
     const openFromInbox = async (text: string) => {
       await page.goto(`${relay.origin}/`);
-      await page.getByText(text).first().waitFor({ timeout: 30_000 });
-      await page.getByText(text).first().click();
+      const row = page.locator('main').getByText(text).first();
+      await until(
+        async () => {
+          const pill = page.locator('main .nav-new');
+          if (await pill.isVisible().catch(() => false)) await pill.click();
+          return row.isVisible().catch(() => false);
+        },
+        30_000,
+        `"${text}" listed on Home`,
+      );
+      await row.click();
     };
 
-    it('negotiates with the SDK client and lists the four tools with their annotations', async () => {
+    it('negotiates with the SDK client and lists the five tools with their annotations', async () => {
       expect(paneA.getServerVersion()?.name).toBe('daintree-decisions');
       expect(paneA.getInstructions()).toMatch(/ask_human/);
       expect(paneA.getInstructions()).toMatch(/send_followup/);
@@ -202,8 +214,11 @@ describe.skipIf(!chromiumPath)(
         'get_decision',
         'cancel_question',
         'send_followup',
+        'get_involvement',
       ]);
       expect(byName.get_decision!.annotations?.readOnlyHint).toBe(true);
+      expect(byName.get_involvement!.annotations?.readOnlyHint).toBe(true);
+      expect(paneA.getInstructions()).toMatch(/get_involvement/);
       for (const name of ['ask_human', 'send_followup']) {
         expect(byName[name]!.annotations).toMatchObject({
           destructiveHint: false,
@@ -341,11 +356,58 @@ describe.skipIf(!chromiumPath)(
         'cancelled on the relay',
       );
       await page.goto(`${relay.origin}/q/${id}`);
-      await page.getByText('Withdrawn by your agent').first().waitFor({ timeout: 20_000 });
+      await page
+        .getByText(/^Withdrawn on /)
+        .first()
+        .waitFor({ timeout: 20_000 });
       // a withdrawn question is never typed into anyone's terminal, even once the desktop has caught up
       await bridge.catchUp();
       await bridge.delivery.drain();
       expect(sink.typed.some((t) => t.text.includes(id))).toBe(false);
+    });
+
+    it('the person dismisses an open question on the phone, and the agent hears it was declined', async () => {
+      const typedBefore = sink.typed.length;
+      const asked = await call(paneA, 'ask_human', {
+        question: 'Bump the lint rules to the strict preset?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      });
+      const id = String(asked.structuredContent!.question_id);
+      await bridge.pump();
+      await openFromInbox('Bump the lint rules to the strict preset?');
+      // This bridge declares person-declines-v1, so the phone offers Dismiss.
+      await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+      await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
+      await page.getByRole('button', { name: 'Dismiss question' }).click();
+      // The sheet closes once the decline is sent and synced, and the question reads as declined. Wait for both, as a
+      // person would before moving on: the sheet's history entry is unwound asynchronously when it closes.
+      await page
+        .getByRole('dialog', { name: 'Dismiss this question?' })
+        .waitFor({ state: 'hidden', timeout: 30_000 });
+      await page.getByText('Declined by you').first().waitFor({ timeout: 30_000 });
+
+      await until(
+        async () => (await relayClient.getQuestion(id)).status === 'cancelled',
+        30_000,
+        'declined on the relay',
+      );
+      const view = await until(
+        async () => {
+          const r = await call(paneA, 'get_decision', { question_id: id });
+          return r.structuredContent?.status === 'cancelled' ? r : null;
+        },
+        30_000,
+        'declined locally',
+      );
+      expect(view.structuredContent).toMatchObject({ closed_reason: 'declined', provenance: null });
+      await until(async () => sink.typed.length > typedBefore, 30_000, 'the decline notice');
+      const notice = sink.typed.at(-1)!;
+      expect(notice.pane).toBe('pane-a');
+      expect(notice.text).toContain('status: declined');
+      expect(notice.text).toContain('authorised: no');
     });
 
     it('keeps panes apart: the same correlation id is a new question, answered into that pane only', async () => {
@@ -376,6 +438,64 @@ describe.skipIf(!chromiumPath)(
       expect(typed[0]!.text).toContain('choice: hide');
       // and pane A still sees only its own question
       expect((await call(paneA, 'get_decision', { question_id: id })).isError).toBe(true);
+    });
+
+    it('the person changes their involvement on the phone, and the agent reads it in the same session', async () => {
+      const read = async () => (await call(paneA, 'get_involvement', {})).structuredContent!;
+      // Nobody has set one: the agent is told to use its normal behaviour.
+      const before = await until(
+        async () => {
+          const r = await read();
+          return r.reason === 'not-set' ? r : null;
+        },
+        30_000,
+        'the relay to say nobody has set one',
+      );
+      expect(before).toMatchObject({ status: 'unavailable', mode: null });
+
+      await page.goto(`${relay.origin}/settings/involvement`);
+      await page.locator('input[type="radio"][value="recommend"]').first().check();
+      await page.getByLabel('Agents to consult').selectOption('2');
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByText('Saved on your relay').first().waitFor({ timeout: 20_000 });
+
+      // The relay's hint reaches the running bridge: no restart, no new session.
+      const after = await until(
+        async () => {
+          const r = await read();
+          return r.status === 'available' ? r : null;
+        },
+        30_000,
+        'the new preference',
+      );
+      expect(after).toMatchObject({
+        mode: 'recommend',
+        normal_mode: 'recommend',
+        consult_count: 2,
+        revision: 1,
+        override_active: false,
+        until: null,
+      });
+
+      // The agent's account of its preparation reaches the phone, and changes nothing about who answers.
+      const asked = await call(paneA, 'ask_human', {
+        question: 'Ship the smaller migration first?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+        preparation: {
+          preference_revision: 1,
+          agents_consulted: 3,
+          outcome: 'agreed',
+          summary: 'All three prefer the smaller migration.',
+        },
+      });
+      expect(asked.structuredContent).toMatchObject({ enforced_requirement: 'human-required' });
+      await bridge.pump();
+      await openFromInbox('Ship the smaller migration first?');
+      await page.getByText('The agent’s account').first().waitFor({ timeout: 20_000 });
+      await page.getByText('All three prefer the smaller migration.').first().waitFor();
     });
 
     it('rejects what an agent must not be able to do over MCP', async () => {

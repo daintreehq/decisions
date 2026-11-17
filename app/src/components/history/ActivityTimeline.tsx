@@ -1,8 +1,16 @@
 import type { ReactNode } from 'react';
+import { isPersonDecline } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
 import { answerSummary, correctionCount, decidedAt, optionLabels } from '../../domain/lists.js';
-import { agentName, currentAnswer, effectiveStatus } from '../../domain/selectors.js';
+import {
+  agentName,
+  answerBy,
+  currentAnswer,
+  declinedByPerson,
+  effectiveStatus,
+  withdrawnLabel,
+} from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { SuccessIcon, WarningIcon } from '../Icons.js';
 import { SafeText } from '../SafeText.js';
@@ -261,12 +269,13 @@ function entries(v: QuestionView, now: number): Entry[] {
       } else {
         const model = a.action === 'proxy-answer';
         const conf = model && a.content && 'confidence' in a.content ? a.content.confidence : null;
+        const computer = answerBy(a).computer;
         out.push({
           key: a.actionId,
           kind: model ? 'model' : 'answer',
           at: a.createdAt,
           revision,
-          title: model ? 'Model answer' : 'You answered',
+          title: model ? 'Model answer' : computer ? `You answered on ${computer}` : 'You answered',
           body: (
             <>
               <Answer v={v} a={a} />
@@ -298,14 +307,15 @@ function entries(v: QuestionView, now: number): Entry[] {
           <SafeText text={a.content.reason} className="tl-note" />
         ) : undefined,
       });
-    else if (a.action === 'cancel')
+    else if (a.action === 'cancel') {
+      const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
       out.push({
         key: a.actionId,
-        kind: 'withdrawn',
+        kind: declined ? 'declined' : 'withdrawn',
         at: a.createdAt,
-        title: 'Withdrawn by your agent',
+        title: declined ? 'Declined by you' : withdrawnLabel(v),
       });
-    else if (a.action === 'reopen')
+    } else if (a.action === 'reopen')
       out.push({
         key: a.actionId,
         kind: 'reopen',
@@ -334,7 +344,9 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
       s === 'expired'
         ? 'Expired without an answer'
         : s === 'cancelled'
-          ? 'Withdrawn by your agent'
+          ? declinedByPerson(v)
+            ? 'Declined by you'
+            : withdrawnLabel(v)
           : s === 'open'
             ? 'Not answered yet'
             : 'No answer this device can show';
@@ -351,9 +363,9 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
       </div>
     );
   }
-  const model = sum.author !== 'You';
+  const model = sum.model;
   const author = !model
-    ? 'Your answer'
+    ? answerBy(a).subject
     : sum.confirmed
       ? 'Model answer, confirmed by you'
       : 'Model answer, not yet reviewed';

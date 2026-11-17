@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  CREATOR_MISSING_FEATURE,
   DevicesResponse,
   KeyGrantsResponse,
   MessagesPage,
@@ -31,11 +32,27 @@ import {
 } from '../data/outbox.js';
 import type { PreparedPhoto } from '../data/photos.js';
 import { runPairing, type PairingPhase } from '../data/pairing.js';
+import {
+  InvolvementStore,
+  type InvolvementSaveResult,
+  type InvolvementSnapshot,
+} from '../data/involvement.js';
 import { publicJson, Relay, RelayError } from '../data/relay.js';
 import { SnapshotStore } from '../data/snapshots.js';
 import { SyncEngine, type Connection } from '../data/sync.js';
-import { buildAnswerRequest, highestEpoch, type HumanActionKind } from '../domain/answer.js';
+import {
+  buildAnswerRequest,
+  buildDeclineRequest,
+  DeclineUnsupportedError,
+  highestEpoch,
+  type HumanActionKind,
+} from '../domain/answer.js';
 import { buildMessageRequest } from '../domain/message.js';
+import {
+  buildInvolvementRecord,
+  verifyInvolvementResponse,
+  type InvolvementDraft,
+} from '../domain/involvement.js';
 import { QuestionStore, type QuestionView } from '../domain/model.js';
 import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
@@ -53,6 +70,10 @@ const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
 const THREAD_BACKFILL_PREF = 'thread-backfill-v1';
 /** Phone images: photos the person attaches to an answer or a follow-up (docs/protocol.md section 17). */
 const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
+/** Declines: the asking desktop files the person's dismissal of its question (docs/protocol.md section 6.1). */
+const DECLINE_FEATURE: ProtocolFeature = 'person-declines-v1';
+/** The involvement preference: how involved the person wants agents to make them (docs/protocol.md section 20). */
+const INVOLVEMENT_FEATURE: ProtocolFeature = 'involvement-v1';
 
 /** A photo the composer hands over at Send: scaled, stripped and hashed, still plaintext. */
 export type OutgoingPhoto = PreparedPhoto;
@@ -95,6 +116,9 @@ export class AppController {
   sync: SyncEngine | null = null;
   /** Each question's latest pane snapshot, while the relay serves them. */
   snapshots: SnapshotStore | null = null;
+  /** The involvement preference, read on demand while the relay serves it. */
+  private involvement: InvolvementStore | null = null;
+  private involvementListeners = new Set<() => void>();
   readonly images = new ImageCache({
     createUrl: (b) => URL.createObjectURL(b),
     revokeUrl: (u) => URL.revokeObjectURL(u),
@@ -182,6 +206,11 @@ export class AppController {
     return this.snap.info?.features?.includes(PHOTO_FEATURE) ?? false;
   }
 
+  /** Whether the relay keeps the involvement preference; until it does, nothing reads or offers it. */
+  involvementServed(): boolean {
+    return this.snap.info?.features?.includes(INVOLVEMENT_FEATURE) ?? false;
+  }
+
   /**
    * What this app declares to the relay: only features the relay advertises (docs/protocol.md section 19). Phone
    * images are declared with thread messages, so a photo sent from this or another phone is never hidden from it.
@@ -191,6 +220,7 @@ export class AppController {
       ...(this.snapshotsServed() ? [SNAPSHOT_FEATURE] : []),
       ...(this.threadsServed() ? [THREAD_FEATURE] : []),
       ...(this.photosServed() ? [PHOTO_FEATURE] : []),
+      ...(this.involvementServed() ? [INVOLVEMENT_FEATURE] : []),
     ];
   }
 
@@ -213,6 +243,18 @@ export class AppController {
     const d = this.snap.devices?.devices.find((x) => x.device_id === view.originatingDeviceId);
     if (!d) return 'no';
     return d.features?.includes(THREAD_FEATURE) ? 'yes' : 'desktop';
+  }
+
+  /**
+   * Whether the person can dismiss this question: the desktop that asked it files declines. One that predates them
+   * would keep the question open while everything else closed it, so the relay refuses the decline and nothing offers
+   * it. A revoked desktop is sent nothing, so its leftover questions can always be let go.
+   */
+  declinesFor(view: QuestionView): boolean {
+    const devices = this.snap.devices?.devices;
+    if (!devices) return false;
+    const d = devices.find((x) => x.device_id === view.originatingDeviceId);
+    return !d || d.revoked_at !== null || !!d.features?.includes(DECLINE_FEATURE);
   }
 
   /**
@@ -304,6 +346,38 @@ export class AppController {
         }),
     });
     this.snapshots.noteEvents(cached, false);
+    this.involvement = new InvolvementStore({
+      fetch: () => this.relay!.json('GET', '/involvement'),
+      put: (record) =>
+        this.relay!.json('PUT', '/involvement', {
+          body: {
+            protocol_version: PROTOCOL_VERSION,
+            idempotency_key: newId(),
+            preference: record,
+          },
+        }),
+      verify: async (raw) => {
+        const check = () =>
+          verifyInvolvementResponse(raw, {
+            installationId: config.installationId,
+            trust: this.trust!,
+          });
+        const r = await check();
+        if (r.ok || r.reason !== 'unknown signer') return r;
+        // A phone paired since this one last read the device list: read it once, then decide.
+        await this.refreshDevices().catch(() => undefined);
+        return check();
+      },
+      sign: (draft, currentRevision) =>
+        buildInvolvementRecord({
+          installationId: config.installationId,
+          deviceId: config.deviceId,
+          signingKey: keys.signingPrivate,
+          currentRevision,
+          draft,
+        }),
+    });
+    this.involvement.subscribe(() => this.emitInvolvement());
 
     this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
       onChange: () => this.patch({}),
@@ -338,6 +412,7 @@ export class AppController {
       ingest: async (events) => {
         await this.store!.ingestAll(events);
         if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
+        if (this.involvementServed()) this.involvement?.noteEvents(events);
       },
       features: () => this.declaredFeatures(),
       onServerTime: (iso) => this.snapshots?.setServerTime(iso),
@@ -345,7 +420,11 @@ export class AppController {
         this.patch(
           connection === 'live' ? { connection, relayUnreachable: false } : { connection },
         );
-        if (connection === 'live') void this.outbox?.flush();
+        if (connection === 'live') {
+          void this.outbox?.flush();
+          // What another phone saved while this one was away arrives as a hint the cursor may already be past.
+          if (this.involvementServed()) this.involvement?.refresh();
+        }
       },
       onSynced: (at) =>
         this.patch({ lastSyncedAt: at, syncing: false, lastError: null, relayUnreachable: false }),
@@ -374,6 +453,7 @@ export class AppController {
     this.teardown();
     this.outbox?.stop();
     this.snapshots?.clear();
+    this.involvement?.clear();
     this.images.dispose();
     this.patch({ phase: 'revoked' });
   }
@@ -394,6 +474,9 @@ export class AppController {
   private resume() {
     this.sync?.kick();
     void this.outbox?.flush();
+    if (this.involvementServed()) this.involvement?.refresh();
+    // What each desktop declares gates Dismiss, photos and follow-ups, and a desktop may have upgraded meanwhile.
+    if (this.relay) void this.refreshDevices().catch(() => undefined);
   }
 
   /* ---------------- pairing ---------------- */
@@ -450,11 +533,13 @@ export class AppController {
     this.sync?.stop();
     this.outbox?.stop();
     this.snapshots?.clear();
+    this.involvement?.clear();
     this.images.dispose();
     const db = this.db;
     this.db = null;
     this.relay = this.store = this.outbox = this.drafts = this.sync = this.trust = null;
     this.snapshots = null;
+    this.involvement = null;
     this.keys = this.cacheKey = null;
     this.epochKeys.clear();
     applyTheme(DEFAULT_PREFS.theme);
@@ -523,6 +608,51 @@ export class AppController {
     await this.relay!.json('PUT', '/settings', {
       body: { protocol_version: PROTOCOL_VERSION, ...s },
     });
+  }
+
+  /* ---------------- involvement ---------------- */
+
+  private emitInvolvement(): void {
+    for (const l of this.involvementListeners) l();
+  }
+
+  /** Heard whenever the involvement preference this device holds changes, or is forgotten. */
+  onInvolvement(l: () => void): () => void {
+    this.involvementListeners.add(l);
+    return () => this.involvementListeners.delete(l);
+  }
+
+  /** The preference as this device last read it; `idle` until something asks for it. */
+  involvementState(): InvolvementSnapshot {
+    return (
+      this.involvement?.get() ?? {
+        status: 'idle',
+        record: null,
+        receivedAt: null,
+        revision: 0,
+        problem: null,
+      }
+    );
+  }
+
+  /** Reads the preference from the relay. Never called while the relay does not serve it. */
+  async loadInvolvement(): Promise<InvolvementSnapshot> {
+    if (!this.involvement || !this.involvementServed())
+      throw new Error('this relay does not keep an involvement preference');
+    return this.involvement.load();
+  }
+
+  /**
+   * Signs `draft` on this device and saves it over `baseRevision`, the revision the person's edits started from. If
+   * another device saved since, it is reported as a conflict, never overwritten.
+   */
+  async saveInvolvement(
+    draft: InvolvementDraft,
+    baseRevision: number,
+  ): Promise<InvolvementSaveResult> {
+    if (!this.involvement || !this.involvementServed())
+      throw new Error('this relay does not keep an involvement preference');
+    return this.involvement.save(draft, baseRevision);
   }
 
   async setPrefs(p: Partial<LocalPrefs>): Promise<void> {
@@ -645,6 +775,33 @@ export class AppController {
     );
     await this.drafts?.delete(args.view.id);
     void this.outbox.flush();
+  }
+
+  /**
+   * The person declines to answer an open question: a signed `cancel` from this device, sent now rather than queued,
+   * so the confirmation that asked for it can say whether it took. The relay stops its pushes and every paired device
+   * files it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
+   */
+  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<void> {
+    if (!this.keys || !this.snap.config || !this.relay) throw new Error('not paired');
+    const req = await buildDeclineRequest({
+      installationId: this.snap.config.installationId,
+      deviceId: this.snap.config.deviceId,
+      signingKey: this.keys.signingPrivate,
+      view,
+      expectedRevision,
+    });
+    try {
+      await this.relay.jsonRaw('POST', req.path, req.bodyText);
+    } catch (e) {
+      if (e instanceof RelayError && e.details?.reason === CREATOR_MISSING_FEATURE) {
+        // The asking desktop stopped taking declines since the device list was read: read it again, so the menu agrees.
+        void this.refreshDevices().catch(() => undefined);
+        throw new DeclineUnsupportedError();
+      }
+      throw e;
+    }
+    await this.sync?.catchUp().catch(() => undefined);
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */

@@ -96,13 +96,15 @@ function oneLine(s: string, max = 200): string {
 }
 
 export interface AnswerNoticeInput {
-  kind: 'answer' | 'expired';
+  kind: 'answer' | 'expired' | 'declined';
   questionId: string;
   alias?: number;
   revision: number;
   /** The question as it was asked, quoted so the agent knows what the answer is to. */
   question?: string;
   source: 'human' | 'proxy';
+  /** Human only: true when the person gave the answer on their computer (the owner desktop), not a phone. */
+  onComputer?: boolean;
   /** Selected option ids and their (decrypted) labels, in order. */
   choices?: { id: string; label?: string }[];
   comment?: string;
@@ -144,8 +146,21 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       lines.push(
         'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
       );
+    } else if (n.kind === 'declined') {
+      lines.push('source: human');
+      lines.push('status: declined');
+      lines.push('authorised: no');
+      lines.push(
+        'note: The person declined to answer this question. Nothing was decided or approved; stop waiting for it and do not continue the gated step.',
+      );
     } else {
       lines.push(`source: ${n.source}`);
+      if (n.source === 'human' && n.onComputer) {
+        lines.push('answered_on: computer');
+        lines.push(
+          "note: This is the person's own answer, made on their computer rather than a phone. It is not a proxy answer.",
+        );
+      }
       if (n.source === 'proxy') {
         lines.push(
           'note: This is a proxy answer from the decision model, not the human. The human may still confirm or overrule it.',

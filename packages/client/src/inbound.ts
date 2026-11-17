@@ -9,19 +9,24 @@ import {
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForAction,
+  provenanceForSigner,
+  roleMaySign,
   type ActionKind,
   type ActionRecord,
   type CryptoEnvelope,
   type DeviceCert,
   type EnvelopePurpose,
+  type InvolvementRecord,
   type LedgerEvent,
   type MessageEntry,
+  type Provenance,
   type Role,
 } from '@daintreehq/decisions-protocol';
 import {
   decryptEnvelope,
   importSigningPublicKey,
   verifyDeviceCert,
+  verifyObject,
   verifyRecordAndEnvelope,
 } from '@daintreehq/decisions-crypto';
 import type { BridgeContext } from './context.js';
@@ -56,7 +61,8 @@ export interface VerifiedAnswer {
   ok: true;
   action: ActionKind;
   record: ActionRecord;
-  provenance: 'human' | 'proxy' | null;
+  /** From the signer's certified role: `human-desktop` for the person's answer signed by the owner desktop. */
+  provenance: Provenance | null;
   signerDeviceId: string;
   signerRole: Role;
   content:
@@ -212,19 +218,31 @@ export class EventVerifier {
     if ('reason' in signer) return signer;
 
     const role = signer.cert.role;
-    const prov = provenanceForAction(action);
-    if (prov === 'human' && !HUMAN_ROLES.includes(role))
-      return { ok: false, reason: 'human-action-by-non-human-device' };
-    if (prov === 'proxy' && !DESKTOP_ROLES.includes(role))
-      return { ok: false, reason: 'proxy-action-by-non-desktop-device' };
-    if (prov === 'none' && !DESKTOP_ROLES.includes(role))
-      return { ok: false, reason: 'desktop-action-by-non-desktop-device' };
-    if (action === 'reopen' && role !== 'owner-desktop')
-      return { ok: false, reason: 'reopen-by-non-owner' };
-    // Relay-declared provenance is only a claim; it must match what the signed action implies.
+    // The shared role table: a phone or tablet signs the person's actions, and the pinned owner desktop may also
+    // sign the person's first `answer` (never an override or a confirmation); a `desktop-host` never signs one.
+    if (!roleMaySign(action, role)) {
+      const kind = provenanceForAction(action);
+      return {
+        ok: false,
+        reason:
+          kind === 'human'
+            ? 'human-action-by-non-human-device'
+            : kind === 'proxy'
+              ? 'proxy-action-by-non-desktop-device'
+              : action === 'reopen' && DESKTOP_ROLES.includes(role)
+                ? 'reopen-by-non-owner'
+                : 'desktop-action-by-non-desktop-device',
+      };
+    }
+    const prov = provenanceForSigner(action, role);
+    // Relay-declared provenance is only a claim; it must match what the signed action and its signer imply, so an
+    // owner-desktop answer never passes as a phone's, nor a phone's as one made on the computer.
     const declared = parsed.data.provenance;
     if (prov === 'none' ? declared !== null : declared !== prov)
       return { ok: false, reason: 'provenance-mismatch' };
+    // Phone images come from a phone or tablet: the relay refuses them on an owner-desktop answer, and so does this.
+    if (prov === 'human-desktop' && (record.attachment_ids?.length ?? 0) > 0)
+      return { ok: false, reason: 'images-on-desktop-answer' };
     if (!(await verifyRecordAndEnvelope(record, envelope as CryptoEnvelope | null, signer.pub))) {
       return { ok: false, reason: 'bad-signature-or-digest' };
     }
@@ -309,5 +327,26 @@ export class EventVerifier {
       signerRole: role,
       targetHostId: target_host_id,
     };
+  }
+
+  /**
+   * Verify the person's involvement preference (protocol section 20) as it stands now, not as of a ledger
+   * position: this installation's, signed by a phone or tablet the pinned directory knows, and not revoked by the
+   * directory or by any revocation seen in the ledger. A directory that cannot be read throws `TransientError`.
+   */
+  async verifyInvolvement(r: InvolvementRecord): Promise<{ ok: true } | Rejection> {
+    if (r.installation_id !== this.ctx.identity.config.installationId)
+      return { ok: false, reason: 'wrong-installation' };
+    const signer = await this.lookup(r.signer_device_id);
+    if (!signer) return { ok: false, reason: 'unknown-signer' };
+    if (!HUMAN_ROLES.includes(signer.cert.role))
+      return { ok: false, reason: 'set-by-non-human-device' };
+    if (!(await verifyObject(signer.pub, r))) return { ok: false, reason: 'bad-signature' };
+    if (
+      signer.revokedAt !== null ||
+      (await this.ctx.store.getMeta(revokedKey(r.signer_device_id))) !== null
+    )
+      return { ok: false, reason: 'signer-revoked' };
+    return { ok: true };
   }
 }

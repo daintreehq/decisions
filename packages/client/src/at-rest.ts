@@ -243,7 +243,7 @@ export async function openAnswerContent(
   }
   if (hasLegacyContent(e)) return legacyContent(e);
   // Every answer is stored with its content sealed: one without any has lost it, and must never pass as an
-  // empty answer. Only content-free entries (expiry notices) open as empty.
+  // empty answer. Only content-free entries (expiry and decline notices) open as empty.
   if (e.kind === 'answer') throw new SealedContentError('answer content is missing');
   return { ...EMPTY_ANSWER_CONTENT, choices: [], reviewed_attachment_digests: [] };
 }

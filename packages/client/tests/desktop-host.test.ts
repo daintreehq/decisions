@@ -374,7 +374,7 @@ describe('a desktop-host never attempts owner-only operations', () => {
     for (const call of refused) {
       await expect(Promise.resolve().then(call)).rejects.toThrow(/owner desktop/);
     }
-    // Reopening is the owner's; a desktop never signs a human answer, override or confirmation.
+    // Reopening and the person's answer are the owner's; a desktop never signs an override or confirmation.
     const qid = newId();
     const reopen = await buildSignedAction({
       installationId: host.identity.config.installationId,
@@ -387,7 +387,10 @@ describe('a desktop-host never attempts owner-only operations', () => {
     await expect(client.postAction('reopen', qid, newId(), reopen)).rejects.toThrow(
       /owner desktop/,
     );
-    for (const kind of ['answer', 'override', 'confirm-proxy'] as const) {
+    await expect(client.postAction('answer', qid, newId(), reopen)).rejects.toThrow(
+      /answering for the person is only possible on the owner desktop/,
+    );
+    for (const kind of ['override', 'confirm-proxy'] as const) {
       await expect(client.postAction(kind, qid, newId(), reopen)).rejects.toThrow(
         /only a phone or tablet/,
       );
@@ -398,7 +401,7 @@ describe('a desktop-host never attempts owner-only operations', () => {
     expect(relay.calls.length).toBe(before);
   });
 
-  it('the owner desktop never signs human actions either', async () => {
+  it('the owner desktop never signs an override or a confirmation either', async () => {
     const owner = await makeIdentity();
     const relay = new FakeRelay(owner);
     await relay.initOwner();
@@ -412,7 +415,7 @@ describe('a desktop-host never attempts owner-only operations', () => {
       signingKey: owner.keys.signing.privateKey,
       expectedRevision: 0,
     });
-    for (const kind of ['answer', 'override', 'confirm-proxy'] as const) {
+    for (const kind of ['override', 'confirm-proxy'] as const) {
       await expect(client.postAction(kind, qid, newId(), signed)).rejects.toThrow(
         /only a phone or tablet/,
       );

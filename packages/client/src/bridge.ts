@@ -15,9 +15,11 @@ import {
 import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
+import { InvolvementSync, type InvolvementView } from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
-import { sameDigests, type OpenAnswerEntry } from './answers.js';
+import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
+import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
   openMessageContent,
@@ -104,9 +106,18 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
- * answer from a client that does not declare it, and its words must still arrive.
+ * answer from a client that does not declare it, and its words must still arrive. `involvement-v1` brings the
+ * hint that the person's involvement preference changed (section 20). `owner-desktop-answers-v1` says this desktop
+ * accepts the person's answer signed by the owner desktop (section 2), which the relay commits to its questions
+ * only once declared; it needs nothing from the host. `person-declines-v1` says it files a phone's or tablet's
+ * decline (section 6.1); the relay refuses a decline of a question whose desktop has not declared it.
  */
-export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1'];
+export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
+  'phone-images-v1',
+  'involvement-v1',
+  'owner-desktop-answers-v1',
+  'person-declines-v1',
+];
 
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
@@ -128,6 +139,8 @@ export type ThreadEntryView =
       kind: 'answer';
       revision: number;
       source: 'human' | 'proxy' | 'system';
+      /** Where the person gave a human answer: `computer` (the owner desktop) or `phone` (a phone or tablet). */
+      answeredOn: 'computer' | 'phone' | null;
       choices: string[];
       text: string;
       correction: boolean;
@@ -175,13 +188,25 @@ export interface DecisionView {
    * cancelled question reports no provenance, no choice and no text, whatever its history holds.
    */
   provenance: 'human' | 'proxy' | null;
+  /**
+   * Where the person put a human answer in force: `computer` when they answered on their computer (the owner
+   * desktop signed it; still their own answer, never a proxy's), `phone` from a phone or tablet (a confirmed proxy
+   * answer included). Null unless `provenance` is `human`.
+   */
+  answeredOn: 'computer' | 'phone' | null;
+  /**
+   * Why a closed question is closed without an answer: `declined` when the person dismissed it from a phone or
+   * tablet, `withdrawn` when a desktop cancelled it, `expired` when its deadline passed. Null otherwise. None of
+   * them authorises anything.
+   */
+  closedReason: 'declined' | 'withdrawn' | 'expired' | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
   choice: string | null;
   /** The free text of the answer in force ('' when none). */
   text: string;
   /**
    * True only when the question carries attachments and the answer in force lists exactly their plaintext
-   * SHA-256 digests as the images the phone displayed. A question with no attachments, a proxy answer
+   * SHA-256 digests as the images the person's device displayed. A question with no attachments, a proxy answer
    * (which reviews nothing, even once a human confirms it) or an approval sent before every image loaded
    * reports false.
    */
@@ -189,6 +214,8 @@ export interface DecisionView {
   answers: {
     revision: number;
     source: 'human' | 'proxy' | 'system';
+    /** As `answeredOn`, for this entry. */
+    answeredOn: 'computer' | 'phone' | null;
     choices: string[];
     text: string;
     correction: boolean;
@@ -252,6 +279,8 @@ type Listener = {
   socket: (s: SocketState, detail?: string) => void;
   delivered: (questionId: string) => void;
   error: (e: Error) => void;
+  /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
+  answer: (result: OwnerAnswerResult) => void;
 };
 
 /**
@@ -266,6 +295,8 @@ export class DecisionsBridge {
   readonly delivery: DeliveryEngine;
   readonly socket: RelaySocket;
   readonly snapshots: SnapshotPublisher;
+  /** The person's involvement preference, as this desktop last verified it (`getInvolvement`). */
+  readonly involvement: InvolvementSync;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
@@ -276,6 +307,7 @@ export class DecisionsBridge {
     socket: [],
     delivered: [],
     error: [],
+    answer: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -303,9 +335,20 @@ export class DecisionsBridge {
       ...(o.learner ? { learner: o.learner } : {}),
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
-    this.publisher = new Publisher(this.ctx);
+    this.publisher = new Publisher(this.ctx, {
+      onOwnerAnswer: (r) => {
+        for (const l of [...this.listeners.answer]) {
+          try {
+            l(r);
+          } catch (e) {
+            this.emitError(e as Error);
+          }
+        }
+      },
+    });
     this.verifier = new EventVerifier(this.ctx);
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
+    this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -314,6 +357,7 @@ export class DecisionsBridge {
         onRevokedSelf: () => this.markRevoked(),
         onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
+        onInvolvementHint: () => this.involvement.hint(),
       },
       { messages: !!o.followUps },
     );
@@ -331,7 +375,10 @@ export class DecisionsBridge {
       handlers: {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
-        onState: (s, d) => this.listeners.socket.forEach((l) => l(s, d)),
+        onState: (s, d) => {
+          this.involvement.socketState(s);
+          this.listeners.socket.forEach((l) => l(s, d));
+        },
         onRevoked: () => this.markRevoked(),
         onError: (e) => this.emitError(e),
       },
@@ -412,6 +459,7 @@ export class DecisionsBridge {
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
     this.snapshots.start();
+    this.involvement.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -429,6 +477,7 @@ export class DecisionsBridge {
     this.timer = null;
     this.socket.stop();
     this.snapshots.stop();
+    this.involvement.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -440,6 +489,7 @@ export class DecisionsBridge {
     this.delivery.stopped = true;
     this.socket.stop();
     this.snapshots.stop();
+    this.involvement.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -463,6 +513,69 @@ export class DecisionsBridge {
     await this.owned(questionId, pane);
     await this.publisher.enqueueCancel(questionId);
     void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  /**
+   * Publish the person's answer to an open question, given in the host app's own UI on the owner desktop and signed
+   * with its key (protocol section 2: `human-desktop` provenance, typed and reported as the person's answer made on the
+   * computer). It answers the owner's own questions and a Remote Host's alike, and needs no local copy of the
+   * question: the host passes the revision the person reviewed, and the answer is signed against it and never moved
+   * to a later one. The owner's own question is checked against its options, text rule and gate first.
+   *
+   * The answer is committed to the outbox, and one send is tried at once, in the outbox's order. The result says where
+   * it stands: `sent`; `already-answered` (another answer won); `changed` (the question is open at another revision);
+   * `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer
+   * that asked (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when it is not settled yet
+   * (the relay could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in
+   * which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
+   * outcome is reported on `answer` by the process that settles it, this one included. Pass `answerId` to make a
+   * repeated submission the same answer.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is
+   * not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async answerQuestion(input: AnswerQuestionInput): Promise<OwnerAnswerResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop answers for the person; a Remote Host never signs the person's answer",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = AnswerQuestionInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { answerId, settled } = await this.publisher.enqueueOwnerAnswer(parsed.data);
+    if (settled) return settled;
+    // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create
+    // or cancellation, and is called off if the bridge stops or is revoked while it waits its turn.
+    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
+    if (running()) {
+      await this.publisher
+        .flush({ only: ownerAnswerItemId(answerId), proceed: running })
+        .catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerAnswerResult(answerId)) ?? {
+        answerId,
+        questionId: parsed.data.questionId,
+        expectedRevision: parsed.data.expectedRevision,
+        status: 'queued',
+      }
+    );
+  }
+
+  /**
+   * Where an answer from `answerQuestion` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
+  getAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
+    return this.publisher.ownerAnswerResult(answerId);
   }
 
   /**
@@ -517,6 +630,23 @@ export class DecisionsBridge {
     return this.snapshots.clear(row);
   }
 
+  /**
+   * How involved the person wants to be right now (protocol section 20), from this desktop's verified copy: it
+   * never touches the network and creates nothing. A temporary mode's end is worked out on each call, without a
+   * new revision. Unavailable, stale or unsupported means the agent keeps its normal configured behaviour. It
+   * carries no authority: no requirement, gate or proxy rule reads it.
+   */
+  async getInvolvement(): Promise<InvolvementView> {
+    const v = await this.involvement.view();
+    if (this.state !== 'revoked') return v;
+    return {
+      status: 'unavailable',
+      reason: 'device-revoked',
+      lastSyncedAt: v.lastSyncedAt,
+      stale: true,
+    };
+  }
+
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
     const row = await this.owned(questionId, pane);
     return this.view(row);
@@ -546,16 +676,22 @@ export class DecisionsBridge {
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
-    let confirmed = false;
+    let confirmation: OpenAnswerEntry | undefined;
     for (const e of entries) {
       if (e.kind !== 'answer') continue;
-      if (e.action === 'confirm-proxy') confirmed = !!current;
+      if (e.action === 'confirm-proxy') confirmation = current ? e : undefined;
       else {
         current = e;
-        confirmed = false;
+        confirmation = undefined;
       }
     }
+    const confirmed = !!confirmation;
     const inForce = answered ? current : undefined;
+    // Only a reopen changes a cancelled question, and it moves the revision on: a decline at this revision is the
+    // cancellation in force.
+    const declined = entries.some(
+      (e) => e.kind === 'declined' && e.revision === row.question_revision,
+    );
     return {
       questionId: row.question_id,
       alias: row.alias,
@@ -572,6 +708,15 @@ export class DecisionsBridge {
             ? 'proxy'
             : 'human'
         : null,
+      answeredOn: inForce ? answeredOn(confirmation ?? inForce) : null,
+      closedReason:
+        row.local_status === 'cancelled'
+          ? declined
+            ? 'declined'
+            : 'withdrawn'
+          : row.local_status === 'expired'
+            ? 'expired'
+            : null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
       // Only a human answer that carried its own content attests to the images the phone displayed.
@@ -585,6 +730,7 @@ export class DecisionsBridge {
         .map((e) => ({
           revision: e.revision,
           source: e.source,
+          answeredOn: answeredOn(e),
           choices: e.choices.map((c) => c.id),
           text: e.text,
           correction: e.correction,
@@ -607,6 +753,7 @@ export class DecisionsBridge {
           kind: 'answer',
           revision: e.revision,
           source: e.source,
+          answeredOn: answeredOn(e),
           choices: e.choices.map((c) => c.id),
           text: e.text,
           correction: e.correction,
@@ -687,6 +834,7 @@ export class DecisionsBridge {
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();
+        this.involvement.retryIfDue();
       } finally {
         this.pumping = null;
       }
@@ -696,7 +844,7 @@ export class DecisionsBridge {
 
   private async deliverNow(): Promise<void> {
     const before = await this.ctx.store.listQuestions({
-      status: ['open', 'proxy-answered', 'human-answered', 'expired'],
+      status: ['open', 'proxy-answered', 'human-answered', 'expired', 'cancelled'],
     });
     const r = await this.delivery.drain();
     if (r.delivered > 0) {
@@ -784,6 +932,9 @@ export class DecisionsBridge {
       /* informational */
     }
     if (await this.inbox.processPending()) await this.deliverNow();
+    // Without a socket there is no reconnect to read the preference on: read it after each catch-up.
+    if (this.socket.currentState !== 'live')
+      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
     return cursor;
   }
 

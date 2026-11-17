@@ -22,20 +22,46 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 
 ## 2. Principals and roles
 
-| Role              | Who                                              | May                                                                                                                     |
-| ----------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `owner-desktop`   | The Daintree installation that claimed the relay | create questions, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
-| `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                           |
-| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, settings, push, voice                                                                  |
+| Role              | Who                                              | May                                                                                                                                            |
+| ----------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner-desktop`   | The Daintree installation that claimed the relay | create questions, answer for the person, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
+| `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                                                  |
+| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                                                      |
 
-With the extensions in sections 16 to 18, a phone or tablet also sends human messages, attaches phone images and asks
-for pane snapshots, and the desktop that published a question (its `originating_device_id`, whatever its role)
+With the extensions in sections 16 to 18 and 20, a phone or tablet also sends human messages, attaches phone images,
+asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its `originating_device_id`, whatever its role)
 publishes that question's agent messages and pane snapshots and reports delivery of its human messages.
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
-role: only `phone`/`tablet` can sign `answer`, `override` and `confirm-proxy` (**human** provenance); only
-desktops sign `proxy-answer` (**proxy** provenance). A `human-required` question can never be satisfied by a proxy
-(`state.ts`).
+the signer (`provenanceForSigner` in `state.ts`):
+
+- a `phone` or `tablet` signs `answer`, `override` and `confirm-proxy`: **human** provenance;
+- the `owner-desktop` may also sign `answer` on an open question, `human-required` ones included: **human-desktop**
+  provenance, the person's answer made on the computer. The owner desktop certifies every other device, so this gives
+  it nothing it could not get by pairing a phone of its own. It never signs `override` or `confirm-proxy` and gains no
+  other human action: a decline, human messages, phone images, snapshot refresh, push and voice keep their roles;
+- a `desktop-host` never signs `answer`, `override` or `confirm-proxy`;
+- desktops sign `proxy-answer`: **proxy** provenance. A `human-required` question can never be satisfied by a proxy.
+
+`cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question, signed by a phone or
+tablet it records that the person **declined** to answer (section 6.1). `roleMaySign` in `state.ts` is the one role
+table the relay and every client check signers against, and the relay's provenance claim must equal what the signer's
+certified role implies (`provenanceForSigner`). The phone app accepts an owner-desktop `answer` only with
+`human-desktop` provenance, shows it as the person's and names the computer from the owner certificate's signed
+`label`. The desktop library accepts one on the owner desktop and on a Remote Host, refuses one that lists phone
+images, and declares `owner-desktop-answers-v1` on every bridge's socket ticket. It keeps the answer as the person's
+with its signer, types it with `source: human` and `answered_on: computer`, and `get_decision` reports
+`provenance: human` with `answered_on: computer` (`phone` for a phone or tablet). A host app publishes one with
+`DecisionsBridge.answerQuestion`, on the owner desktop only: the library signs it against the revision the person
+reviewed, sends it through its outbox, and never moves it to a later revision.
+
+The question's publishing desktop types the answer, and a desktop that predates owner-desktop answers rejects one. So
+the relay commits an owner-desktop `answer` only when the publishing desktop (its `originating_device_id`) declared
+`owner-desktop-answers-v1` on its latest socket ticket (section 19). Otherwise it refuses with `409 invalid_state`
+and `details: {reason: "creator-missing-feature", required_feature: "owner-desktop-answers-v1"}`
+(`CREATOR_MISSING_FEATURE`), which a client tells apart by `details.reason`. The check comes after the usual expiry
+and revision checks; a refused command stores no receipt, so the same signed answer commits once the publishing desktop
+declares support. An owner-desktop answer lists no phone images (`403 forbidden`).
 
 ## 3. Authentication
 
@@ -116,19 +142,19 @@ Lifecycle: `open → human-answered | proxy-answered | cancelled | expired`; `pr
 Every state-changing command carries `expected_revision` and the relay compare-and-swaps: **first human answer
 wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 
-| Route                                   | Role          | Notes                                                                                           |
-| --------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
-| `POST /questions`                       | desktops      | `{protocol_version, idempotency_key, question:{record, envelope}}` → `201 CommandReceipt`       |
-| `GET /questions?status=&cursor=&limit=` | any           | `QuestionList` (summaries only)                                                                 |
-| `GET /questions/{id}`                   | any           | `QuestionDetail` incl. action log, attachments, deliveries                                      |
-| `POST /questions/{id}/answer`           | phone, tablet | `ActionBody`; `record.action = "answer"`, `expected_revision` = revision seen                   |
-| `POST /questions/{id}/override`         | phone, tablet | replace a proxy answer, or (deprecated, section 16.1) a human answer; delivered as a correction |
-| `POST /questions/{id}/confirm-proxy`    | phone, tablet | human affirms the proxy answer; not re-delivered                                                |
-| `POST /questions/{id}/proxy-answer`     | desktops      | rejected for `human-required`                                                                   |
-| `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                          |
-| `POST /questions/{id}/cancel`           | desktops      | idempotent; cannot remove a committed human answer                                              |
-| `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                         |
-| `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, messages, attachments; emits `decision.deleted`                  |
+| Route                                   | Role                         | Notes                                                                                                                                                                 |
+| --------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /questions`                       | desktops                     | `{protocol_version, idempotency_key, question:{record, envelope}}` → `201 CommandReceipt`                                                                             |
+| `GET /questions?status=&cursor=&limit=` | any                          | `QuestionList` (summaries only)                                                                                                                                       |
+| `GET /questions/{id}`                   | any                          | `QuestionDetail` incl. action log, attachments, deliveries                                                                                                            |
+| `POST /questions/{id}/answer`           | phone, tablet, owner-desktop | `ActionBody`; `record.action = "answer"`, `expected_revision` = revision seen; owner-desktop needs `owner-desktop-answers-v1` from the publishing desktop (section 2) |
+| `POST /questions/{id}/override`         | phone, tablet                | replace a proxy answer, or (deprecated, section 16.1) a human answer; delivered as a correction                                                                       |
+| `POST /questions/{id}/confirm-proxy`    | phone, tablet                | human affirms the proxy answer; not re-delivered                                                                                                                      |
+| `POST /questions/{id}/proxy-answer`     | desktops                     | rejected for `human-required`                                                                                                                                         |
+| `POST /questions/{id}/proxy-abstain`    | desktops                     | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                                                                                                |
+| `POST /questions/{id}/cancel`           | any                          | idempotent; cannot remove a committed human answer; a phone/tablet only from `open`, and only once the question's desktop declares `person-declines-v1` (6.1)         |
+| `POST /questions/{id}/reopen`           | owner-desktop                | new revision, optional new `expires_at`                                                                                                                               |
+| `DELETE /questions/{id}`                | owner-desktop                | hard-delete question, answers, messages, attachments; emits `decision.deleted`                                                                                        |
 
 Idempotency: a repeated `idempotency_key` with identical body returns the original receipt; a different body is
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent.
@@ -137,6 +163,39 @@ Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opa
 chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the
 future and at most `LIMITS.maxQuestionExpiryMs` (366 days) away. `now >= expires_at` means expired (checked lazily
 on every read/write as well as by the alarm).
+
+### 6.1 Declining a question
+
+A person who will not answer an open question dismisses it from a phone or tablet: the device signs an ordinary
+`cancel` action (no envelope, `expected_revision` = the revision they saw) and posts it to
+`POST /questions/{id}/cancel`. There is no new action, status or event type, so every client that already parses
+`cancel` and `cancelled` still parses it.
+
+- **Transition.** A human-signed `cancel` is legal only from `open` (`409 invalid_state` from `proxy-answered`,
+  `human-answered` or `expired`); it compare-and-swaps on `expected_revision` and does not bump the revision, exactly
+  like a desktop's. The first committed cancel wins; a retry after it is a no-op, so a decline is never relabelled a
+  withdrawal or the other way round. A desktop's cancel keeps its existing rules (`open` or `proxy-answered`).
+- **Relay.** The question becomes `cancelled`, emits `decision.cancelled` (provenance `null`, `deliverable: false`) and
+  cancels every scheduled job for it: no further new-question, reminder, reply or expiry work is scheduled or run. A
+  notification already being sent when the cancel commits may still arrive. Its snapshot is cleared and its thread closed, as for any cancelled question.
+- **Attribution.** "Declined by the person" versus "withdrawn by the desktop" is derived only from the signed record:
+  the signer's owner-certified role (`isPersonDecline` in `state.ts`), never from a relay-supplied field. Receivers
+  verify the signature and certificate before classifying it, so a relay cannot forge a decline.
+- **Phones and tablets** show a declined question as "Declined by you" in History, distinct from "Withdrawn on
+  {computer}" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
+- **Desktops** that verify a human-signed cancel record a content-free decline entry and, if the asking agent is still
+  listening, type a notice with `status: declined` and `authorised: no`. An agent that has gone is never resumed, nor
+  flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with
+  `closed_reason: declined` (`withdrawn` for a desktop cancel, `expired` for an expiry) and no provenance, choice or
+  text. A decline never authorises anything.
+- **Older desktops.** A desktop that predates declines rejects a phone-signed cancel during verification and only
+  audits it, so its copy of the question would stay open while everything else treated it as closed. So the relay
+  commits a person's decline only when the question's publishing desktop (its `originating_device_id`) declared
+  `person-declines-v1` on its latest socket ticket (section 19). Otherwise it refuses with `409 invalid_state` and
+  `details: {reason: "creator-missing-feature", required_feature: "person-declines-v1"}`, stores no receipt, and the
+  question stays open until it is answered, withdrawn or expires. A revoked publishing desktop is sent nothing, so its
+  questions can always be declined. The check comes after the transition and revision checks. Phones and tablets
+  offer Dismiss only where the publishing desktop declared it; the desktop library declares it on every bridge.
 
 ## 7. Event ledger and sync
 
@@ -242,7 +301,8 @@ decoding (terminal line wraps). Both objects are strict: unknown top-level field
   own: a Host cannot introduce devices), and accepts exactly one `owner-desktop`, the pinned owner. It acts only on
   the questions it created: events for any other device's questions are stored and acknowledged for sync, but never
   verified for delivery or acted on. It never attempts the owner-only routes (pairing, revoke, rotate, enroll-host,
-  reopen, delete, diagnostics), and like every desktop it never signs `answer`, `override` or `confirm-proxy`.
+  reopen, delete, diagnostics), and it never signs `answer`, `override` or `confirm-proxy` (only the owner desktop
+  answers for the person, section 2).
 - `POST /epoch/rotate` (owner): same body, without revoking anyone.
 
 ## 11. Push, reminders and expiry
@@ -291,10 +351,10 @@ proxy never satisfying `human-required`, idempotency, ordered event paging, revo
 attachment integrity, no plaintext in storage, and feature filtering that keeps a 0.3.0 client parsing every page and
 frame (section 19).
 
-## Extensions: threads, phone images and pane snapshots
+## Extensions: threads, phone images, pane snapshots and involvement
 
-Sections 16 to 19 define three opt-in extensions, each named by a feature (section 19). Their shapes are in
-`thread.ts`, `snapshot.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
+Sections 16 to 20 define four opt-in extensions, each named by a feature (section 19). Their shapes are in
+`thread.ts`, `snapshot.ts`, `involvement.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
 and `openapi.json` when the relay serves them (the thread-message routes have); until a relay advertises a feature in
 `GET /info`, clients MUST NOT use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
 with messages in both directions (`THREAD_FIXTURE`), phone image references, a fresh snapshot, stale snapshots and a
@@ -337,7 +397,8 @@ quota checks.
 | `expired`                 | Expired      | `410 expired`       | `410 expired`       |
 | `cancelled` ("withdrawn") | Withdrawn    | `409 invalid_state` | `409 invalid_state` |
 
-"Withdrawn" is how the app shows `cancelled`; there is no separate status. An answer is final for the answer, not for
+"Withdrawn" is how the app shows `cancelled`, and "Declined" when a phone or tablet signed the cancel (section 6.1);
+there is no separate status. An answer is final for the answer, not for
 the thread, so answered questions keep taking messages. Expired and cancelled questions are closed, and a `reopen`
 opens the thread again with its earlier messages and order intact. The relay checks the status inside the committing
 transaction.
@@ -380,8 +441,8 @@ deprecated.
 
 An agent message with `expects_reply: true` asks the person something. The thread waits on the person
 (`threadAwaitsHuman`) while the latest agent message expects a reply and nothing human came after it in ledger order:
-a human message, or a human answer, override or confirmation. A later agent message that asks nothing withdraws the
-request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
+a human message, or the person's answer (from a phone, a tablet or the owner desktop), override or confirmation. A
+later agent message that asks nothing withdraws the request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
 "Needs you" again. The relay sends a `decision-reply` push (`{type, question_id}` and nothing else) for an agent message
 that expects a reply. Quiet hours hold it back like any push, a newer asking message on the same question replaces one
 not yet sent, and when it is due the relay sends it only if the thread still waits on the person.
@@ -575,8 +636,19 @@ A 0.3.0 client validates every events page and socket frame against a closed `Ev
 type fails its whole catch-up, and an unknown frame is dropped. So a relay sends each client only what it declared it
 understands.
 
-**Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`. Lists a client
-receives use `FeatureToken`, so a newer peer's unknown features parse and are ignored (`knownFeatures`).
+**Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+features parse and are ignored (`knownFeatures`).
+
+`owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
+answers to its questions (section 2), and the relay checks that desktop's latest socket-ticket declaration before
+committing one; a `GET /events` declaration is not recorded and does not count. The committed answer is sent to every
+client whatever it declared, so no client's cursor passes over it unseen; whether a client accepts it is the signer
+check of section 2.
+
+`person-declines-v1` filters no events either. A publishing desktop declares it to say it files a phone's or tablet's
+decline of its questions (section 6.1), and the relay checks that desktop's latest socket-ticket declaration in the
+same way before committing one. The committed `decision.cancelled` is sent to every client.
 
 **Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
 and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No
@@ -603,15 +675,97 @@ feature it needs: the new event types need their feature, and an answer or messa
 - a socket `caught_up` frame carries the same `next_after` as `high_water`, and the same `has_more`.
 
 A client that turns a feature on later (after an upgrade) backfills from that feature's own routes
-(`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`): its cursor may already be past events it was not
-sent.
+(`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`, `GET /involvement`): its cursor may already be past
+events it was not sent.
 
-**Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive and opt-in, and a client that declares nothing
-sees exactly the 0.3.0 protocol. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
-`HumanAnswerContentV1.images`, `InfoResponse.features`, `DeviceInfo.features`, `SocketTicketBody.features`) parse
-under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0 client is never sent (an empty
-list is harmless).
+**Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive, and a client that declares nothing sees the
+0.3.0 protocol but for one new value, below. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
+`HumanAnswerContentV1.images`, `DecisionContentV1.preparation`, `InfoResponse.features`, `DeviceInfo.features`,
+`SocketTicketBody.features`) parse under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0
+client is never sent (an empty list is harmless). The one new value in an existing field is `human-desktop`
+provenance, on the action events and question details of an owner-desktop answer, which every client is sent. An
+events page still parses under 0.3.0 schemas, since they leave event data unchecked. A client that verifies the event
+(its `EventData.action` schema, or the signer's role) rejects that one event and goes on with the rest of the page,
+and one that validates a question detail against its old `QuestionDetail` schema fails on a detail that lists it. The
+relay commits one only for a question whose publishing desktop declared `owner-desktop-answers-v1`, so a desktop that
+cannot read it never has one of its own to deliver.
 
 **Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
 desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and
 `worker/tests/legacy-client.test.ts` against the relay.
+
+## 20. Involvement preference (`involvement-v1`)
+
+How involved the person wants to be right now, set on a phone or tablet and read by agents through their desktop.
+There is one per installation. It describes how the person wants to take part, never what an agent may do: no
+requirement, workflow gate, proxy rule or approval reads it (`enforceRequirement` and `applyAction` take nothing from
+it), and a consensus among agents is a recommendation, never an answer. A `human-required` question still goes to the
+person, and a preparation must not stop or indefinitely delay it.
+
+**Modes** (`InvolvementMode`):
+
+| Mode            | What the person asked for                                                                                                                                                    |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `involve-early` | ask while exploring the options, rather than waiting for a finished recommendation                                                                                           |
+| `recommend`     | consult `consult_count` other agents first, try to agree, then bring the recommendation and its reasoning; if they cannot agree, bring the disagreement and the alternatives |
+
+`InvolvementRecord` (signed by the phone or tablet that sets it, not encrypted): `{v, type: "involvement.preference",
+installation_id, revision, normal_mode, consult_count, override, created_at, signer_device_id, signature}`.
+`consult_count` is 1 to 8 (`involvementConsultMax`) other agents, the asking agent excluded, and applies to
+`recommend`. `override` is null or `{mode, until}`: a temporary mode in force while `now < until`, after which the
+normal mode applies again. `created_at` is the signer's clock: shown, never used to order records.
+
+**In force** (`effectiveInvolvement`). Worked out on every read: the temporary mode until `until`, the normal mode
+from `until` on. Nothing is written when a temporary mode ends: no timer, event or new revision. A reader that only
+compares revisions therefore misses the end of a temporary mode; it compares the mode and `until` too.
+
+**Setting.** `PUT /involvement` (phone, tablet) `InvolvementBody {protocol_version, idempotency_key, preference}` →
+`200 InvolvementReceipt {revision, event_seq}`. The record must name this installation and the authenticated device as
+its signer, and its signature must verify (`400 validation_error`). Its `revision` must be exactly one more than the
+stored one (0 when there is none); anything else is `409 revision_conflict {details.latest_revision}`, so two phones
+saving at once cannot both win, and a phone that lost reads the preference again rather than re-signing over the
+other's choice. A temporary mode must end after relay time and at most 30 days (`involvementOverrideMaxMs`) plus the
+request skew ahead (`involvementWriteIssue`, `400 validation_error`). The revision, the end time and the device's
+standing are checked again in the final transaction. A retry with the same `idempotency_key` and body returns the
+original receipt and changes nothing, even after a later write or after its temporary mode ended; the receipt holds
+the revision and event sequence only, never the preference.
+
+**Reading.** `GET /involvement` (any paired device) → `InvolvementResponse {preference, received_at}`: the latest
+signed record and when the relay accepted it, or nulls. The relay keeps no older record. Reading creates nothing: no
+event, job or notification.
+
+**Hint.** Each accepted record appends `involvement.updated {revision}` with a null `question_id` and
+`question_revision`, and removes the hint before it, so the ledger holds no history of the preference. It is sent only
+to clients that declared `involvement-v1`. It only says "read again": its revision is the relay's word and is never
+trusted on its own. Setting the preference never triggers a push.
+
+**Verifying.** Readers verify the record before using it: this installation's, signed by a phone or tablet whose
+certificate chains to the pinned owner, with a signature covering every field. A record whose signer is revoked (in
+the device directory, or by a `device.revoked` the reader saw) steers nothing. A desktop keeps the highest revision it
+has verified and refuses a lower one, a different record at the same revision, and no record at all once it has
+verified one, so a relay cannot roll the preference back or swap it. A signature proves who set a record, not that it
+is the newest: a relay can still withhold a newer one, which is why readers report when they last confirmed it.
+
+**Storage and deletion.** The relay keeps the latest record and when it accepted it. A questions wipe
+(`POST /admin/delete-data {scope: "questions"}`) keeps it; `scope: "everything"` removes it.
+
+| Route              | Role          | Notes                                                                      |
+| ------------------ | ------------- | -------------------------------------------------------------------------- |
+| `GET /involvement` | any           | `InvolvementResponse`; nulls when nobody has set one                       |
+| `PUT /involvement` | phone, tablet | `InvolvementBody` → `200 InvolvementReceipt`; compare-and-swap on revision |
+
+### 20.1 Preparation reports
+
+An agent can say how it prepared a question: `ask_human`'s optional `preparation`, carried inside the encrypted
+question content as `DecisionContentV1.preparation`:
+
+`PreparationReport {preference_revision, agents_consulted, outcome, summary?}`, where `preference_revision` is the
+involvement revision the agent worked under (null when none was available), `agents_consulted` is how many other
+agents it actually consulted (0 to 64), `outcome` is `agreed`, `split` (no agreement, or inconclusive) or `not-run`
+(no consultation happened), and `summary` is at most 2,000 characters of its reasoning, the disagreement, or why the
+consultation did not run.
+
+It is the agent's own account and nothing checks it. Phones show it as such, never as a verified result. It is not
+signed separately and is not visible to the relay, and its absence means only that no report was given, never that a
+consultation succeeded. A reader drops a malformed report rather than failing the question, and a 0.3.0 phone ignores
+it. Accepting a question never depends on it or on the preference's current revision.

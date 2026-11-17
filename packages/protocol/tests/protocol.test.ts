@@ -7,8 +7,12 @@ import {
   canonicalize,
   enforceRequirement,
   formatAuthHeader,
+  isPersonDecline,
   normalizeQuery,
   parseAuthHeader,
+  provenanceForAction,
+  provenanceForSigner,
+  roleMaySign,
   signingString,
 } from '../src/index.js';
 
@@ -116,10 +120,59 @@ describe('state machine', () => {
     expect(() => applyAction(open, 'proxy-answer', 'owner-desktop', 0)).toThrow(/never answer/);
     expect(() => applyAction(open, 'proxy-abstain', 'owner-desktop', 0)).toThrow();
   });
-  it('phones cannot proxy, desktops cannot answer as human', () => {
+  it('phones cannot proxy, and a Host can never answer as the person', () => {
     const p = { ...open, requirement: 'proxy-ok' } as const;
     expect(() => applyAction(p, 'proxy-answer', 'phone', 0)).toThrow(/may not/);
-    expect(() => applyAction(p, 'answer', 'owner-desktop', 0)).toThrow(/may not/);
+    expect(() => applyAction(p, 'answer', 'desktop-host', 0)).toThrow(/may not/);
+    expect(() => applyAction(open, 'answer', 'desktop-host', 0)).toThrow(/may not/);
+  });
+  it('the owner desktop answers for the person at every requirement, and does nothing else a human does', () => {
+    for (const requirement of ['human-required', 'proxy-ok', 'proxy-first'] as const) {
+      expect(applyAction({ ...open, requirement }, 'answer', 'owner-desktop', 0)).toMatchObject({
+        status: 'human-answered',
+        revision: 1,
+        deliverable: true,
+        eventType: 'decision.answer.committed',
+      });
+    }
+    // First answer wins for the owner desktop as for a phone.
+    const answered = { ...open, status: 'human-answered', revision: 1 } as const;
+    expect(() => applyAction(answered, 'answer', 'owner-desktop', 1)).toThrow(/changed/);
+    const cancelled = { ...open, status: 'cancelled' } as const;
+    expect(() => applyAction(cancelled, 'answer', 'owner-desktop', 0)).toThrow(/cannot answer/);
+    const expired = { ...open, status: 'expired' } as const;
+    expect(() => applyAction(expired, 'answer', 'owner-desktop', 0)).toThrow(/expired/);
+    const proxied = {
+      status: 'proxy-answered',
+      revision: 1,
+      requirement: 'proxy-ok',
+      proxyAbstained: false,
+    } as const;
+    for (const action of ['override', 'confirm-proxy'] as const) {
+      expect(() => applyAction(proxied, action, 'owner-desktop', 1)).toThrow(/may not/);
+      expect(() => applyAction(proxied, action, 'desktop-host', 1)).toThrow(/may not/);
+    }
+  });
+  it('provenance follows the signer: human, human-desktop or proxy', () => {
+    expect(provenanceForSigner('answer', 'phone')).toBe('human');
+    expect(provenanceForSigner('answer', 'tablet')).toBe('human');
+    expect(provenanceForSigner('answer', 'owner-desktop')).toBe('human-desktop');
+    expect(provenanceForSigner('override', 'phone')).toBe('human');
+    expect(provenanceForSigner('confirm-proxy', 'tablet')).toBe('human');
+    expect(provenanceForSigner('proxy-answer', 'owner-desktop')).toBe('proxy');
+    expect(provenanceForSigner('proxy-answer', 'desktop-host')).toBe('proxy');
+    expect(provenanceForSigner('cancel', 'desktop-host')).toBe('none');
+    for (const [action, role] of [
+      ['answer', 'desktop-host'],
+      ['override', 'owner-desktop'],
+      ['confirm-proxy', 'owner-desktop'],
+      ['proxy-answer', 'phone'],
+      ['reopen', 'desktop-host'],
+    ] as const) {
+      expect(() => provenanceForSigner(action, role), `${action} by ${role}`).toThrow(/may not/);
+    }
+    // The role-blind mapping clients verify phone answers with is unchanged.
+    expect(provenanceForAction('answer')).toBe('human');
   });
   it('proxy-answered can be overridden or confirmed, then rev increments', () => {
     const p = {
@@ -147,6 +200,55 @@ describe('state machine', () => {
       revision: 1,
     });
     expect(() => applyAction(c, 'reopen', 'desktop-host', 0)).toThrow(/may not/);
+  });
+  it('a phone or tablet declines an open question with a cancel', () => {
+    for (const requirement of ['human-required', 'proxy-ok', 'proxy-first'] as const) {
+      for (const role of ['phone', 'tablet'] as const) {
+        expect(applyAction({ ...open, requirement }, 'cancel', role, 0)).toEqual({
+          status: 'cancelled',
+          revision: 0,
+          proxyAbstained: false,
+          deliverable: false,
+          noop: false,
+          eventType: 'decision.cancelled',
+        });
+      }
+    }
+    expect(isPersonDecline('cancel', 'phone')).toBe(true);
+    expect(isPersonDecline('cancel', 'tablet')).toBe(true);
+    expect(isPersonDecline('cancel', 'owner-desktop')).toBe(false);
+    expect(isPersonDecline('answer', 'phone')).toBe(false);
+    expect(roleMaySign('cancel', 'phone')).toBe(true);
+    expect(roleMaySign('reopen', 'phone')).toBe(false);
+    expect(provenanceForAction('cancel')).toBe('none');
+  });
+  it('a person declines only an open question, at the revision they saw', () => {
+    const conflict = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        return (e as ApiError).code;
+      }
+      return null;
+    };
+    expect(conflict(() => applyAction({ ...open, revision: 2 }, 'cancel', 'phone', 1))).toBe(
+      'revision_conflict',
+    );
+    const proxied = { ...open, status: 'proxy-answered', revision: 1 } as const;
+    expect(conflict(() => applyAction(proxied, 'cancel', 'phone', 1))).toBe('invalid_state');
+    // The desktop still withdraws a proxy-answered question.
+    expect(applyAction(proxied, 'cancel', 'owner-desktop', 1).status).toBe('cancelled');
+    for (const status of ['human-answered', 'expired'] as const) {
+      expect(conflict(() => applyAction({ ...open, status }, 'cancel', 'tablet', 0))).toBe(
+        'invalid_state',
+      );
+    }
+    // A retry after the question closed is a no-op, as for a desktop.
+    expect(applyAction({ ...open, status: 'cancelled' }, 'cancel', 'phone', 0).noop).toBe(true);
+    // Declining never answers, and a declined question cannot be answered.
+    expect(
+      conflict(() => applyAction({ ...open, status: 'cancelled' }, 'answer', 'phone', 0)),
+    ).toBe('invalid_state');
   });
 });
 

@@ -17,6 +17,11 @@ export const Role = z.enum(['owner-desktop', 'desktop-host', 'phone', 'tablet'])
 export type Role = z.infer<typeof Role>;
 export const DESKTOP_ROLES: readonly Role[] = ['owner-desktop', 'desktop-host'];
 export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
+/**
+ * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
+ * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`.
+ */
+export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 
 export const QuestionStatus = z.enum([
   'open',
@@ -38,7 +43,11 @@ export const DeliveryStatus = z.enum([
 ]);
 export type DeliveryStatus = z.infer<typeof DeliveryStatus>;
 
-export const Provenance = z.enum(['human', 'proxy']);
+/**
+ * Who an answer is from. `human`: the person, on a phone or tablet. `human-desktop`: the person, on the owner desktop
+ * (an `answer` only, docs/protocol.md section 2). `proxy`: a desktop's model, never the person.
+ */
+export const Provenance = z.enum(['human', 'human-desktop', 'proxy']);
 export type Provenance = z.infer<typeof Provenance>;
 
 /**
@@ -50,6 +59,9 @@ export const ProtocolFeature = z.enum([
   'thread-messages-v1',
   'phone-images-v1',
   'pane-snapshots-v1',
+  'owner-desktop-answers-v1',
+  'involvement-v1',
+  'person-declines-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -268,6 +280,29 @@ export const AttachmentDescriptor = z.object({
 });
 export type AttachmentDescriptor = z.infer<typeof AttachmentDescriptor>;
 
+/**
+ * How a preparation the person asked for went (section 20.1): the consulted agents `agreed` on a recommendation,
+ * `split` (no agreement, or the consultation was inconclusive), or the consultation was `not-run`.
+ */
+export const PreparationOutcome = z.enum(['agreed', 'split', 'not-run']);
+export type PreparationOutcome = z.infer<typeof PreparationOutcome>;
+
+/**
+ * The asking agent's own account of how it prepared a question: which involvement revision it worked under, how
+ * many other agents it consulted and whether they agreed. Nothing checks it, and it carries no authority: it never
+ * answers, approves or changes the requirement of the question it travels with.
+ */
+export const PreparationReport = z.object({
+  /** The involvement revision the agent prepared under; null when no preference was available to it. */
+  preference_revision: z.number().int().min(1).nullable().default(null),
+  /** Other agents actually consulted, the asking agent excluded. */
+  agents_consulted: z.number().int().min(0).max(LIMITS.preparationAgentsMax),
+  outcome: PreparationOutcome,
+  /** The recommendation's reasoning, the disagreement, or why the consultation did not run. */
+  summary: z.string().max(LIMITS.preparationSummaryChars).optional(),
+});
+export type PreparationReport = z.infer<typeof PreparationReport>;
+
 export const DecisionContentV1 = z.object({
   content_version: z.literal(1).default(1),
   question: z.string().min(1).max(LIMITS.questionChars),
@@ -283,6 +318,11 @@ export const DecisionContentV1 = z.object({
   project_label: z.string().max(200).optional(),
   machine_label: z.string().max(200).optional(),
   origin_summary: z.string().max(500).optional(),
+  /**
+   * The agent's preparation report (section 20.1). A malformed one is dropped rather than failing the question:
+   * it is informational, and the question must still reach the person.
+   */
+  preparation: PreparationReport.optional().catch(undefined),
 });
 export type DecisionContentV1 = z.infer<typeof DecisionContentV1>;
 
@@ -369,6 +409,7 @@ export const EventType = z.enum([
   'delivery.message',
   'decision.snapshot.updated',
   'decision.snapshot.refresh_requested',
+  'involvement.updated',
 ]);
 export type EventType = z.infer<typeof EventType>;
 

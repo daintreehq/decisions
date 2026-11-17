@@ -1,9 +1,11 @@
 import type { ActionView, QuestionView } from './model.js';
 import {
   agentName,
+  answerBy,
   answerable,
   awaitingReply,
   currentAnswer,
+  declinedByPerson,
   deliveryNeedsAttention,
   effectiveStatus,
   hiddenQuestionText,
@@ -13,6 +15,7 @@ import {
   proxyNeedsReview,
   sortNeedsYou,
   unreadableHere,
+  withdrawnLabel,
 } from './selectors.js';
 
 /**
@@ -31,6 +34,8 @@ export type RowStatus =
   | 'answered'
   | 'expired'
   | 'withdrawn'
+  /** The person dismissed it from a phone or tablet. */
+  | 'declined'
   | 'delivery'
   | 'unverified'
   | 'unreadable'
@@ -43,6 +48,7 @@ export const STATUS_LABEL: Record<RowStatus, string> = {
   answered: 'Answered',
   expired: 'Expired',
   withdrawn: 'Withdrawn',
+  declined: 'Declined',
   delivery: 'Delivery needs attention',
   unverified: 'Could not verify',
   unreadable: 'Not readable here',
@@ -53,6 +59,8 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
   const s = effectiveStatus(v, now);
   if (s === 'unverified') return unreadableHere(v) ? 'unreadable' : 'unverified';
   if (s === 'open') return 'needs';
+  // Declined is the person's own choice and final: nothing about it waits on them.
+  if (s === 'cancelled' && declinedByPerson(v)) return 'declined';
   if (deliveryNeedsAttention(v)) return 'delivery';
   // The agent asked something in the thread after the answer: it is the person's turn again.
   if (awaitingReply(v, now)) return 'needs';
@@ -63,9 +71,10 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
 }
 
 /** What a row says in place of an answer when a question closed without one (Home and History). */
-export function closedLine(status: RowStatus): string | null {
+export function closedLine(status: RowStatus, v: QuestionView): string | null {
   if (status === 'expired') return 'Expired without an answer';
-  if (status === 'withdrawn') return 'Withdrawn by your agent';
+  if (status === 'withdrawn') return withdrawnLabel(v);
+  if (status === 'declined') return 'Declined by you';
   if (status === 'unreadable') return 'This device holds no key for it';
   if (status === 'unverified') return 'Could not be verified';
   return null;
@@ -214,7 +223,8 @@ export function homeSections(
   for (const v of rows) {
     if (q.pending?.has(v.id)) sending.push(v);
     else if (needsYou(v, now)) needs.push(v);
-    else if (deliveryNeedsAttention(v) || q.refused?.has(v.id)) delivery.push(v);
+    else if (deliveryNeedsAttention(v) || (q.refused?.has(v.id) && !declinedByPerson(v)))
+      delivery.push(v);
     else if (proxyNeedsReview(v, now)) review.push(v);
     else rest.push(v);
   }
@@ -266,6 +276,8 @@ export function stableOrder(
 
 export interface AnswerSummary {
   author: string;
+  /** The decision model's answer, not the person's: styled as the model's, whatever the author says. */
+  model: boolean;
   /** The agent is asking the person something: this line is what needs them. */
   ask?: boolean;
   /** Option labels and the note, as one plain line. */
@@ -296,6 +308,7 @@ export function rowSummary(v: QuestionView, now: number): AnswerSummary | null {
   if (ask)
     return {
       author: agentName(v),
+      model: false,
       text: ask.text.replace(/\s+/g, ' ').trim(),
       confirmed: false,
       ask: true,
@@ -316,10 +329,10 @@ export function answerSummary(v: QuestionView): AnswerSummary | null {
     .join(' · ');
   const note = (a.content?.text ?? '').replace(/\s+/g, ' ').trim();
   const text = [head, note].filter(Boolean).join(' — ');
+  const { model, author } = answerBy(a);
   const confirmed =
-    a.provenance === 'proxy' &&
-    v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);
-  return { author: a.provenance === 'proxy' ? 'Model' : 'You', text, confirmed };
+    model && v.actions.some((x) => x.verified && x.action === 'confirm-proxy' && x.seq > a.seq);
+  return { author, model, text, confirmed };
 }
 
 export const correctionCount = (v: QuestionView): number =>
@@ -365,7 +378,8 @@ export function decidedAt(v: QuestionView, now: number): string {
 }
 
 /**
- * History answers "what did I decide". Decisions: human answers, confirmed model answers, expired and withdrawn.
+ * History answers "what did I decide". Decisions: human answers, confirmed model answers, declined, expired and
+ * withdrawn.
  * All activity adds model answers still awaiting review, and anything this device could not read or verify.
  */
 export function historyEntries(

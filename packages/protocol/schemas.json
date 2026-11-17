@@ -624,6 +624,47 @@
       "origin_summary": {
         "type": "string",
         "maxLength": 500
+      },
+      "preparation": {
+        "type": "object",
+        "properties": {
+          "preference_revision": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agents_consulted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "agreed",
+              "split",
+              "not-run"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "preference_revision",
+          "agents_consulted",
+          "outcome"
+        ],
+        "additionalProperties": false
       }
     },
     "required": [
@@ -845,7 +886,8 @@
           "decision.message.posted",
           "delivery.message",
           "decision.snapshot.updated",
-          "decision.snapshot.refresh_requested"
+          "decision.snapshot.refresh_requested",
+          "involvement.updated"
         ]
       },
       "occurred_at": {
@@ -1007,7 +1049,8 @@
                   "decision.message.posted",
                   "delivery.message",
                   "decision.snapshot.updated",
-                  "decision.snapshot.refresh_requested"
+                  "decision.snapshot.refresh_requested",
+                  "involvement.updated"
                 ]
               },
               "occurred_at": {
@@ -1279,7 +1322,10 @@
     "enum": [
       "thread-messages-v1",
       "phone-images-v1",
-      "pane-snapshots-v1"
+      "pane-snapshots-v1",
+      "owner-desktop-answers-v1",
+      "involvement-v1",
+      "person-declines-v1"
     ]
   },
   "PhoneImageReference": {
@@ -2912,6 +2958,388 @@
       "snapshot",
       "received_at",
       "refresh"
+    ],
+    "additionalProperties": false
+  },
+  "PreparationReport": {
+    "type": "object",
+    "properties": {
+      "preference_revision": {
+        "default": null,
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "agents_consulted": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 64
+      },
+      "outcome": {
+        "type": "string",
+        "enum": [
+          "agreed",
+          "split",
+          "not-run"
+        ]
+      },
+      "summary": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    },
+    "required": [
+      "preference_revision",
+      "agents_consulted",
+      "outcome"
+    ],
+    "additionalProperties": false
+  },
+  "InvolvementRecord": {
+    "type": "object",
+    "properties": {
+      "v": {
+        "type": "number",
+        "const": 1
+      },
+      "type": {
+        "type": "string",
+        "const": "involvement.preference"
+      },
+      "installation_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "normal_mode": {
+        "type": "string",
+        "enum": [
+          "involve-early",
+          "recommend"
+        ]
+      },
+      "consult_count": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 8
+      },
+      "override": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "involve-early",
+                  "recommend"
+                ]
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+              }
+            },
+            "required": [
+              "mode",
+              "until"
+            ],
+            "additionalProperties": {}
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+      },
+      "signer_device_id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "signature": {
+        "type": "string",
+        "minLength": 86,
+        "maxLength": 86,
+        "pattern": "^[A-Za-z0-9_-]*$"
+      }
+    },
+    "required": [
+      "v",
+      "type",
+      "installation_id",
+      "revision",
+      "normal_mode",
+      "consult_count",
+      "override",
+      "created_at",
+      "signer_device_id",
+      "signature"
+    ],
+    "additionalProperties": {}
+  },
+  "InvolvementBody": {
+    "type": "object",
+    "properties": {
+      "protocol_version": {
+        "type": "number",
+        "const": 1
+      },
+      "idempotency_key": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{8,64}$"
+      },
+      "preference": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "number",
+            "const": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "involvement.preference"
+          },
+          "installation_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "normal_mode": {
+            "type": "string",
+            "enum": [
+              "involve-early",
+              "recommend"
+            ]
+          },
+          "consult_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "override": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "involve-early",
+                      "recommend"
+                    ]
+                  },
+                  "until": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "until"
+                ],
+                "additionalProperties": {}
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+          },
+          "signer_device_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 86,
+            "maxLength": 86,
+            "pattern": "^[A-Za-z0-9_-]*$"
+          }
+        },
+        "required": [
+          "v",
+          "type",
+          "installation_id",
+          "revision",
+          "normal_mode",
+          "consult_count",
+          "override",
+          "created_at",
+          "signer_device_id",
+          "signature"
+        ],
+        "additionalProperties": {}
+      }
+    },
+    "required": [
+      "protocol_version",
+      "idempotency_key",
+      "preference"
+    ],
+    "additionalProperties": false
+  },
+  "InvolvementReceipt": {
+    "type": "object",
+    "properties": {
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "event_seq": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      }
+    },
+    "required": [
+      "revision",
+      "event_seq"
+    ],
+    "additionalProperties": false
+  },
+  "InvolvementResponse": {
+    "type": "object",
+    "properties": {
+      "preference": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "number",
+                "const": 1
+              },
+              "type": {
+                "type": "string",
+                "const": "involvement.preference"
+              },
+              "installation_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{8,64}$"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "normal_mode": {
+                "type": "string",
+                "enum": [
+                  "involve-early",
+                  "recommend"
+                ]
+              },
+              "consult_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8
+              },
+              "override": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "involve-early",
+                          "recommend"
+                        ]
+                      },
+                      "until": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "until"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+              },
+              "signer_device_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{8,64}$"
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 86,
+                "maxLength": 86,
+                "pattern": "^[A-Za-z0-9_-]*$"
+              }
+            },
+            "required": [
+              "v",
+              "type",
+              "installation_id",
+              "revision",
+              "normal_mode",
+              "consult_count",
+              "override",
+              "created_at",
+              "signer_device_id",
+              "signature"
+            ],
+            "additionalProperties": {}
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "received_at": {
+        "anyOf": [
+          {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "preference",
+      "received_at"
     ],
     "additionalProperties": false
   }

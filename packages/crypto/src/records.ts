@@ -1,7 +1,10 @@
 import {
+  INVOLVEMENT_RECORD_TYPE,
   PROTOCOL_VERSION,
   SNAPSHOT_RECORD_TYPE,
   type ActionKind,
+  type InvolvementMode,
+  type InvolvementRecord,
   type ActionRecord,
   MESSAGE_RECORD_TYPE,
   type CryptoEnvelope,
@@ -169,6 +172,34 @@ export async function buildSignedSnapshot(i: BuildSnapshotInput): Promise<{
     signer_device_id: i.signerDeviceId,
   })) as PaneSnapshotRecord;
   return { record, envelope };
+}
+
+export interface BuildInvolvementInput {
+  installationId: string;
+  signerDeviceId: string;
+  signingKey: CryptoKey;
+  /** One more than the revision this replaces (1 when there is none yet). */
+  revision: number;
+  normalMode: InvolvementMode;
+  consultCount: number;
+  /** A temporary mode and when it ends, or null. */
+  override: { mode: InvolvementMode; until: string } | null;
+  createdAt?: string;
+}
+
+/** A signed `InvolvementRecord` (docs/protocol.md section 20), signed by the phone or tablet that sets it. */
+export async function buildSignedInvolvement(i: BuildInvolvementInput): Promise<InvolvementRecord> {
+  return (await signObject(i.signingKey, {
+    v: PROTOCOL_VERSION,
+    type: INVOLVEMENT_RECORD_TYPE,
+    installation_id: i.installationId,
+    revision: i.revision,
+    normal_mode: i.normalMode,
+    consult_count: i.consultCount,
+    override: i.override ? { mode: i.override.mode, until: i.override.until } : null,
+    created_at: i.createdAt ?? nowIso(),
+    signer_device_id: i.signerDeviceId,
+  })) as InvolvementRecord;
 }
 
 /** Verifies the record signature and that the envelope is the one the signer committed to. */

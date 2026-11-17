@@ -391,7 +391,7 @@ describe('ordering, expiry, proxy labelling', () => {
 });
 
 describe('verification: forged or unauthorised events never reach a terminal', () => {
-  it('a desktop-signed action claiming to be a human answer is rejected', async () => {
+  it("an owner-desktop answer the relay passes off as a phone's is rejected", async () => {
     const { bridge, relay, sink, qid, identity, store } = await asked();
     const ownerAsPhone = { deviceId: identity.config.deviceId, keys: identity.keys };
     await relay.answerEvent({ questionId: qid, phone: ownerAsPhone, options: ['approve'] });
@@ -399,9 +399,7 @@ describe('verification: forged or unauthorised events never reach a terminal', (
     expect(sink.typed).toHaveLength(0);
     const audit = await store.listAudit(50);
     expect(
-      audit.some(
-        (a) => a.event === 'event.rejected' && a.result === 'human-action-by-non-human-device',
-      ),
+      audit.some((a) => a.event === 'event.rejected' && a.result === 'provenance-mismatch'),
     ).toBe(true);
   });
 

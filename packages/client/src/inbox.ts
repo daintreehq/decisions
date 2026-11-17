@@ -2,6 +2,7 @@ import {
   ApiError,
   EventData,
   applyAction,
+  isPersonDecline,
   isThreadClosedStatus,
   type DecisionContentV1,
   type LedgerEvent,
@@ -20,7 +21,7 @@ import {
 } from './inbound.js';
 import { parseMessages, serializeMessages, type StoredMessage } from './messages.js';
 import { Mutex, TransientError } from './mutex.js';
-import { gateAllowsText } from './policy.js';
+import { answerRuleViolation } from './policy.js';
 import type { QuestionRow } from './types.js';
 
 export interface InboxCallbacks {
@@ -30,6 +31,8 @@ export interface InboxCallbacks {
   onSnapshotRefresh?(row: QuestionRow, refresh: SnapshotRefresh): void;
   /** One of this device's questions expired, was cancelled or was deleted. Must return without waiting. */
   onQuestionClosed?(questionId: string): void;
+  /** The relay says the involvement preference changed (a hint, not the record). Must return without waiting. */
+  onInvolvementHint?(): void;
 }
 
 export interface InboxOptions {
@@ -214,6 +217,10 @@ export class Inbox {
       case 'device.approved':
         this.verifier.invalidate();
         return false;
+      case 'involvement.updated':
+        // Installation-wide and question-free: read the signed record again, outside the delivery path.
+        this.cb.onInvolvementHint?.();
+        return false;
       case 'device.key_rotated': {
         // The owner reloads its key store; a Host fetches the grant the owner sealed to it for the new epoch.
         this.verifier.invalidate();
@@ -374,18 +381,37 @@ export class Inbox {
     switch (v.action) {
       case 'cancel': {
         const dropped = entries.map((e) => (e.delivered ? e : { ...e, deliver: false }));
+        // A cancel signed by a phone or tablet is the person declining to answer: the agent is told so, plainly,
+        // in a content-free notice (never an answer). A desktop's own withdrawal tells the agent nothing.
+        const declined = isPersonDecline(v.action, v.signerRole);
+        if (declined) {
+          dropped.push({
+            entry_id: v.record.action_id,
+            kind: 'declined',
+            action: 'cancel',
+            revision: row.question_revision,
+            source: 'human',
+            correction: false,
+            created_at: v.record.created_at,
+            event_seq: ev.seq,
+            deliver: true,
+            delivered: false,
+            sealed: null,
+          });
+        }
         await ctx.store.updateQuestion(row.question_id, {
           ...patch,
+          ...(declined ? { delivery_status: 'desktop-received' as const } : {}),
           answers_json: serializeAnswers(dropped),
           messages_json: withdrawMessages(row.messages_json),
         });
         await ctx.audit.log({
           event: 'question.cancelled',
           question_id: row.question_id,
-          result: 'relay',
+          result: declined ? 'declined' : 'relay',
         });
         this.cb.onQuestionClosed?.(row.question_id);
-        return false;
+        return declined;
       }
       case 'reopen':
         await ctx.store.updateQuestion(row.question_id, patch);
@@ -419,30 +445,16 @@ export class Inbox {
     const question = await this.content(row);
     if (!question) return this.reject(row, 'question-content-unreadable');
     const opts = question.options ?? [];
-    const allow_text = question.allow_text !== false;
     const chosen = v.content?.selected_option_ids ?? [];
-    const text = v.content?.text ?? '';
-    const gate = ctx.policy.get(row.origin.workflow_gate_id);
-    const bad = chosen.find(
-      (id) =>
-        (opts.length > 0 && !opts.some((o) => o.id === id)) ||
-        (gate?.allowedOptionIds && !gate.allowedOptionIds.includes(id)) ||
-        (gate?.choices && !gate.choices.some((c) => c.id === id)),
-    );
     // The answer rules the question was published with (and the gate's, should it have tightened since).
     // confirm-proxy carries no content of its own: it affirms an answer that was already checked.
-    const ruled = v.action !== 'confirm-proxy';
-    const textAllowed = allow_text && gateAllowsText(gate);
-    const invalid =
-      bad !== undefined
-        ? 'unknown_option'
-        : ruled && gate?.choices && chosen.length > 1
-          ? 'too_many_choices'
-          : ruled && text.trim() !== '' && !textAllowed
-            ? 'text_not_allowed'
-            : ruled && !textAllowed && chosen.length === 0
-              ? 'choice_required'
-              : null;
+    const invalid = answerRuleViolation(
+      question,
+      ctx.policy.get(row.origin.workflow_gate_id),
+      chosen,
+      v.content?.text ?? '',
+      v.action !== 'confirm-proxy',
+    );
     if (invalid) {
       await ctx.store.updateQuestion(row.question_id, {
         delivery_status: 'needs-attention',
@@ -452,6 +464,8 @@ export class Inbox {
     }
     // Null provenance is never human: answer-like actions always carry an explicit human/proxy provenance.
     if (v.provenance === null) return this.reject(row, 'missing-provenance');
+    // The person's answer, from a phone, a tablet or the owner desktop; which one is kept as the signer's role.
+    const human = v.provenance === 'human' || v.provenance === 'human-desktop';
     const labelOf = (id: string) => opts.find((o) => o.id === id)?.label;
     const content: AnswerContent = {
       choices: chosen.map((id) => ({ id, ...(labelOf(id) ? { label: labelOf(id)! } : {}) })),
@@ -471,7 +485,9 @@ export class Inbox {
       kind: 'answer',
       action: v.action as AnswerEntry['action'],
       revision: t.revision,
-      source: v.provenance,
+      source: human ? 'human' : 'proxy',
+      signer_device_id: v.signerDeviceId,
+      signer_role: v.signerRole,
       correction: v.action === 'override',
       created_at: v.record.created_at,
       event_seq: ev.seq,
@@ -496,10 +512,10 @@ export class Inbox {
       event: entry.deliver ? 'answer.received' : 'answer.confirmed',
       question_id: row.question_id,
       requirement: row.requirement,
-      provenance: entry.source,
+      provenance: v.provenance,
       result: 'verified',
     });
-    if (v.provenance === 'human' && (v.action === 'answer' || v.action === 'override')) {
+    if (human && (v.action === 'answer' || v.action === 'override')) {
       await this.learn(row, question, content, entry);
     }
     return entry.deliver;

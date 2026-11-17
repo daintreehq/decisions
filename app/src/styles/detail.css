@@ -316,6 +316,28 @@
   margin-top: 0;
 }
 
+/* The agent's own account of how it prepared, behind the same hairline as the context: attributed, never an answer. */
+.msg-prep {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.msg-prep-head {
+  margin: 0;
+}
+.msg-prep-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.msg-prep .safe-text {
+  margin-top: 6px;
+}
+.msg-prep .safe-text p:first-child {
+  margin-top: 0;
+}
+
 /* Choices that can be picked: rows inside the message. Selected is a neutral lift with a text-secondary edge. */
 .options {
   display: grid;
@@ -812,6 +834,8 @@
 }
 .sys-text {
   font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .sys-detail {
   max-width: 44ch;

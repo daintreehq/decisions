@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { app, type AppSnapshot } from './controller.js';
 import type { QuestionView } from '../domain/model.js';
 import { agentStateView, type AgentStateView } from '../domain/agentState.js';
-import { needsAction } from '../domain/selectors.js';
+import { declinedByPerson, needsAction } from '../domain/selectors.js';
 
 export function useApp(): AppSnapshot {
   return useSyncExternalStore(app.subscribe, app.getSnapshot);
@@ -31,7 +31,10 @@ export function refusedFollowUps(): Set<string> {
 export function useActionCount(now: number, except?: (v: QuestionView) => boolean): number {
   const all = useQuestions();
   const refused = refusedFollowUps();
-  return all.filter((v) => !except?.(v) && (needsAction(v, now) || refused.has(v.id))).length;
+  // A question the person declined holds nothing for them, whatever its refused follow-ups.
+  return all.filter(
+    (v) => !except?.(v) && (needsAction(v, now) || (refused.has(v.id) && !declinedByPerson(v))),
+  ).length;
 }
 
 const noSubscribe = () => () => undefined;

@@ -279,6 +279,7 @@
 .summary-closed {
   margin: 0;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .tl-answer {
   min-width: 0;
@@ -447,6 +448,10 @@
   font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text);
+}
+.tl-title > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .tl-title time {
   font-size: var(--text-xs);

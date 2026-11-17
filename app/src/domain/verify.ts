@@ -10,8 +10,8 @@ import {
   QuestionRecord,
   imagesMatchRecord,
   messageEnvelopeIssues,
-  provenanceForAction,
-  type ActionKind,
+  provenanceForSigner,
+  roleMaySign,
   type ActionRecord,
   type MessageRecord,
   type Provenance,
@@ -41,17 +41,6 @@ export interface VerifyCtx {
 
 const DESKTOP: readonly Role[] = ['owner-desktop', 'desktop-host'];
 const HUMAN: readonly Role[] = ['phone', 'tablet'];
-/** Mirrors the relay's role table (protocol state.ts); duplicated because the protocol keeps it private. */
-const ACTION_ROLES: Record<ActionKind, readonly Role[]> = {
-  answer: HUMAN,
-  override: HUMAN,
-  'confirm-proxy': HUMAN,
-  'proxy-answer': DESKTOP,
-  'proxy-abstain': DESKTOP,
-  cancel: DESKTOP,
-  reopen: ['owner-desktop'],
-};
-
 const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
 
 export interface VerifiedQuestion {
@@ -182,6 +171,8 @@ export interface VerifiedAction {
   record: ActionRecord;
   provenance: Provenance | null;
   signerRole: Role;
+  /** The signer's name, from its certificate (signed by the owner key): the computer an answer made there was made on. */
+  signerLabel: string;
   content: AnswerContent | null;
   /**
    * A human answer's photos are exactly the ones its signed record lists (docs/protocol.md section 17). When they
@@ -211,12 +202,14 @@ export async function verifyActionEvent(
     return fail('relay metadata disagrees with the signed action');
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
-  if (!ACTION_ROLES[record.action].includes(signer.role)) {
+  // The certified role decides, never the relay: the owner desktop may sign the person's first answer (made on the
+  // computer, `human-desktop`), a `desktop-host` never answers for them.
+  if (!roleMaySign(record.action, signer.role)) {
     return fail(`a ${signer.role} cannot sign ${record.action}`);
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
     return fail('signed by a device after it was revoked');
-  const provenance = provenanceForAction(record.action);
+  const provenance = provenanceForSigner(record.action, signer.role);
   const claimed = parsed.data.provenance;
   if ((provenance === 'none' ? null : provenance) !== claimed)
     return fail('relay provenance disagrees with the signed action');
@@ -255,6 +248,7 @@ export async function verifyActionEvent(
       record,
       provenance: provenance === 'none' ? null : provenance,
       signerRole: signer.role,
+      signerLabel: signer.cert.label,
       content,
       imagesOk,
     },

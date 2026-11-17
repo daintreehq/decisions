@@ -10,6 +10,7 @@ export const SECTIONS = [
   { id: 'dictation', title: 'Dictation' },
   { id: 'notifications', title: 'Notifications' },
   { id: 'quiet-hours', title: 'Quiet hours & reminders' },
+  { id: 'involvement', title: 'Involvement' },
   { id: 'devices', title: 'Devices' },
   { id: 'privacy', title: 'Privacy & security' },
   { id: 'about', title: 'About & help' },
