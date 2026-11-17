@@ -217,6 +217,20 @@ export class FakeRelay {
   holdAnswers: Promise<void> | null = null;
   /** Each committed answer's receipt, by action id, returned unchanged for a retry. */
   answerReceipts = new Map<string, unknown>();
+  /** Every flagged `POST /questions/{id}/cancel` body (an owner-desktop decline), retries included, in order. */
+  declines: { idem: string; action: SignedAction }[] = [];
+  /** Refusals for upcoming decline POSTs, in order; when empty the relay decides from the question's state. */
+  rejectDecline: { status: number; code: string; details?: Record<string, unknown> }[] = [];
+  /** Publishing desktops that have not declared `owner-desktop-declines-v1`: their questions refuse the decline. */
+  undeclaredDeclines = new Set<string>();
+  /** Number of upcoming decline POSTs the relay COMMITS but whose reply is lost. */
+  dropDeclineReply = 0;
+  /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
+  failDetail = 0;
+  /** The signature each committed answer or decline carried, by action id. */
+  committedSignatures = new Map<string, string>();
+  /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
+  cancelLog = new Map<string, { action_id: string; action: 'cancel'; record: unknown }[]>();
 
   constructor(private readonly owner: Identity) {}
 
@@ -412,6 +426,7 @@ export class FakeRelay {
       });
       const receipt = { question_id: qid, revision, status: 'human-answered', event_seq: ev.seq };
       this.answerReceipts.set(b.action.record.action_id, receipt);
+      this.committedSignatures.set(b.action.record.action_id, b.action.record.signature);
       if (this.dropAnswerReply > 0) {
         this.dropAnswerReply--;
         throw new TypeError('connection reset after the relay committed the answer');
@@ -419,16 +434,40 @@ export class FakeRelay {
       return json(201, receipt);
     }
     if (
+      method === 'POST' &&
+      (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/cancel$/)) &&
+      (body as { action: SignedAction }).action.record.decline === true
+    ) {
+      return this.decline(m[1]!, body as { idempotency_key: string; action: SignedAction });
+    }
+    if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
+      if (this.failDetail > 0) {
+        this.failDetail--;
+        throw new TypeError('fetch failed');
+      }
+      const q = this.questions.get(m[1]!);
+      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+      const state = this.answerState.get(m[1]!) ?? { status: 'open' as const, revision: 0 };
+      return json(200, {
+        question_id: m[1],
+        status: state.status,
+        revision: state.revision,
+        actions: this.cancelLog.get(m[1]!) ?? [],
+      });
+    }
+    if (
       (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/(cancel|proxy-answer|proxy-abstain)$/)) &&
       method === 'POST'
     ) {
       const b = body as { idempotency_key: string; action: SignedAction };
       // A cancellation closes the question to answers that come after it.
-      if (m[2] === 'cancel')
+      if (m[2] === 'cancel') {
         this.answerState.set(m[1]!, {
           status: 'cancelled',
           revision: b.action.record.expected_revision,
         });
+        this.logCancel(m[1]!, b.action);
+      }
       return json(201, {
         question_id: m[1],
         revision: b.action.record.expected_revision,
@@ -596,6 +635,103 @@ export class FakeRelay {
       signingPub: o.signingPub,
       exchangePub: o.exchangePub,
     });
+  }
+
+  private logCancel(questionId: string, action: SignedAction): void {
+    const log = this.cancelLog.get(questionId) ?? [];
+    log.push({ action_id: action.record.action_id, action: 'cancel', record: action.record });
+    this.cancelLog.set(questionId, log);
+  }
+
+  /**
+   * The owner desktop's decline (a `cancel` with `decline: true`), as the relay takes it (section 6.1): the same
+   * signed body again gets its receipt, a cancel of a question already cancelled at that revision is a no-op `200`,
+   * the publishing desktop must have declared `owner-desktop-declines-v1`, and a committed decline is a
+   * `decision.cancelled` in the ledger and in the question's action log.
+   */
+  private decline(qid: string, b: { idempotency_key: string; action: SignedAction }): Response {
+    this.declines.push({ idem: b.idempotency_key, action: b.action });
+    const record = b.action.record;
+    // The very same signed command again gets the receipt it was first given (its `201`); an action id an answer or
+    // another decline committed under any other signature is a collision.
+    const prior = this.answerReceipts.get(record.action_id);
+    if (prior) {
+      return this.committedSignatures.get(record.action_id) === record.signature
+        ? json(201, prior)
+        : json(409, { code: 'idempotency_collision', message: 'different command' });
+    }
+    const reject = this.rejectDecline.shift();
+    if (reject)
+      return json(reject.status, {
+        code: reject.code,
+        message: 'no',
+        ...(reject.details ? { details: reject.details } : {}),
+      });
+    const q = this.questions.get(qid);
+    if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+    const state = this.answerState.get(qid) ?? { status: 'open' as const, revision: 0 };
+    const role =
+      record.signer_device_id === this.owner.config.deviceId
+        ? ('owner-desktop' as const)
+        : (this.devices.find((d) => d.device_id === record.signer_device_id)?.role ?? 'phone');
+    let noop: boolean;
+    try {
+      noop = applyAction(
+        { ...state, requirement: q.signed.record.requirement, proxyAbstained: false },
+        'cancel',
+        role,
+        record.expected_revision,
+        record.decline,
+      ).noop;
+      if (!noop && this.undeclaredDeclines.has(q.signed.record.originating_device_id))
+        throw new ApiError('invalid_state', "the question's desktop does not take them", {
+          details: {
+            reason: CREATOR_MISSING_FEATURE,
+            required_feature: 'owner-desktop-declines-v1',
+          },
+        });
+    } catch (e) {
+      const err = e as ApiError;
+      return json(err.status, {
+        code: err.code,
+        message: err.message,
+        ...(err.details ? { details: err.details } : {}),
+      });
+    }
+    if (noop)
+      return json(200, {
+        question_id: qid,
+        revision: state.revision,
+        status: 'cancelled',
+        event_seq: this.seqCounter,
+      });
+    this.answerState.set(qid, { status: 'cancelled', revision: state.revision });
+    this.logCancel(qid, b.action);
+    const ev = this.push('decision.cancelled', qid, state.revision, {
+      ...EventData.action.parse({
+        action: 'cancel',
+        record,
+        envelope: null,
+        provenance: null,
+        status: 'cancelled',
+        revision: state.revision,
+        target_host_id: q.signed.record.target_host_id,
+        deliverable: false,
+      }),
+    });
+    const receipt = {
+      question_id: qid,
+      revision: state.revision,
+      status: 'cancelled',
+      event_seq: ev.seq,
+    };
+    this.answerReceipts.set(record.action_id, receipt);
+    this.committedSignatures.set(record.action_id, record.signature);
+    if (this.dropDeclineReply > 0) {
+      this.dropDeclineReply--;
+      throw new TypeError('connection reset after the relay committed the decline');
+    }
+    return json(201, receipt);
   }
 
   push(
@@ -786,6 +922,8 @@ export class FakeRelay {
     revision?: number;
     eventType?: LedgerEvent['event_type'];
     provenance?: 'human' | 'proxy' | null;
+    /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
+    decline?: true;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -796,6 +934,7 @@ export class FakeRelay {
       signerDeviceId: opts.signer.deviceId,
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
+      ...(opts.decline ? { decline: true as const } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

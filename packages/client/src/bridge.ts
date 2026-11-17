@@ -25,6 +25,11 @@ import {
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
+import {
+  DeclineQuestionInput,
+  ownerDeclineItemId,
+  type OwnerDeclineResult,
+} from './owner-decline.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -116,13 +121,15 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
  * hint that the person's involvement preference changed (section 20). `owner-desktop-answers-v1` says this desktop
  * accepts the person's answer signed by the owner desktop (section 2), which the relay commits to its questions
  * only once declared; it needs nothing from the host. `person-declines-v1` says it files a phone's or tablet's
- * decline (section 6.1); the relay refuses a decline of a question whose desktop has not declared it.
+ * decline, and `owner-desktop-declines-v1` the owner desktop's signed `decline` (section 6.1); the relay refuses
+ * either decline of a question whose desktop has not declared it.
  */
 export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
   'phone-images-v1',
   'involvement-v1',
   'owner-desktop-answers-v1',
   'person-declines-v1',
+  'owner-desktop-declines-v1',
 ];
 
 /**
@@ -201,9 +208,9 @@ export interface DecisionView {
    */
   answeredOn: 'computer' | 'phone' | null;
   /**
-   * Why a closed question is closed without an answer: `declined` when the person dismissed it from a phone or
-   * tablet, `withdrawn` when a desktop cancelled it, `expired` when its deadline passed. Null otherwise. None of
-   * them authorises anything.
+   * Why a closed question is closed without an answer: `declined` when the person dismissed it (from a phone or
+   * tablet, or on the computer through the owner desktop's signed decline), `withdrawn` when a desktop cancelled it,
+   * `expired` when its deadline passed. Null otherwise. None of them authorises anything.
    */
   closedReason: 'declined' | 'withdrawn' | 'expired' | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
@@ -287,6 +294,8 @@ type Listener = {
   error: (e: Error) => void;
   /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
   answer: (result: OwnerAnswerResult) => void;
+  /** A decline from `declineQuestion` reached its outcome (anything but `queued`), however it was sent. */
+  decline: (result: OwnerDeclineResult) => void;
 };
 
 /**
@@ -314,6 +323,7 @@ export class DecisionsBridge {
     delivered: [],
     error: [],
     answer: [],
+    decline: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -344,6 +354,15 @@ export class DecisionsBridge {
     this.publisher = new Publisher(this.ctx, {
       onOwnerAnswer: (r) => {
         for (const l of [...this.listeners.answer]) {
+          try {
+            l(r);
+          } catch (e) {
+            this.emitError(e as Error);
+          }
+        }
+      },
+      onOwnerDecline: (r) => {
+        for (const l of [...this.listeners.decline]) {
           try {
             l(r);
           } catch (e) {
@@ -515,6 +534,10 @@ export class DecisionsBridge {
     return r;
   }
 
+  /**
+   * Withdraw a question this desktop asked: the desktop calls it off, which tells its agent nothing. The person
+   * declining it on the owner desktop is `declineQuestion`.
+   */
   async cancelQuestion(questionId: string, pane?: PaneIdentity): Promise<void> {
     await this.owned(questionId, pane);
     await this.publisher.enqueueCancel(questionId);
@@ -582,6 +605,68 @@ export class DecisionsBridge {
    */
   getAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
     return this.publisher.ownerAnswerResult(answerId);
+  }
+
+  /**
+   * Decline an open question for the person, from the host app's own UI on the owner desktop: a `cancel` signed with
+   * its key and carrying `decline: true` (protocol section 6.1). Every desktop files it as the person's decline, as it
+   * would a phone's: `get_decision` reports `closed_reason: declined`, and a listening agent is told it was declined.
+   * It declines the owner's own questions and a Remote Host's alike, and needs no local copy of the question: the host
+   * passes the revision the person saw, and the decline is signed against it and never moved to a later one.
+   * Withdrawing a question is `cancelQuestion`, a different action.
+   *
+   * The decline is committed to the outbox, and one send is tried at once, in the outbox's order. The result says where
+   * it stands: `declined`; `already-answered`; `changed` (the question is open at another revision); `closed` (expired,
+   * withdrawn or declined first, or unknown to the relay); `unsupported` by the relay or by the computer that asked
+   * (which has not declared `owner-desktop-declines-v1`); `rejected`; or `queued` when it is not settled yet (the relay
+   * could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in which case
+   * the outbox keeps sending it and its outcome arrives on `decline` (and from `getDeclineResult`). Every outcome is
+   * reported on `decline` by the process that settles it, this one included. Pass `declineId` to make a repeated
+   * submission the same decline.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is not
+   * an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async declineQuestion(input: DeclineQuestionInput): Promise<OwnerDeclineResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop declines for the person; a Remote Host never signs the person's decline",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = DeclineQuestionInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { declineId, settled } = await this.publisher.enqueueOwnerDecline(parsed.data);
+    if (settled) return settled;
+    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
+    if (running()) {
+      await this.publisher
+        .flush({ only: ownerDeclineItemId(declineId), proceed: running })
+        .catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerDeclineResult(declineId)) ?? {
+        declineId,
+        questionId: parsed.data.questionId,
+        expectedRevision: parsed.data.expectedRevision,
+        status: 'queued',
+      }
+    );
+  }
+
+  /**
+   * Where a decline from `declineQuestion` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
+  getDeclineResult(declineId: string): Promise<OwnerDeclineResult | null> {
+    return this.publisher.ownerDeclineResult(declineId);
   }
 
   /**

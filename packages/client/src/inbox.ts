@@ -362,6 +362,7 @@ export class Inbox {
         v.action,
         v.signerRole,
         v.record.expected_revision,
+        v.record.decline,
       );
     } catch (e) {
       return this.reject(row, e instanceof ApiError ? `transition:${e.code}` : 'transition:error');
@@ -381,9 +382,10 @@ export class Inbox {
     switch (v.action) {
       case 'cancel': {
         const dropped = entries.map((e) => (e.delivered ? e : { ...e, deliver: false }));
-        // A cancel signed by a phone or tablet is the person declining to answer: the agent is told so, plainly,
-        // in a content-free notice (never an answer). A desktop's own withdrawal tells the agent nothing.
-        const declined = isPersonDecline(v.action, v.signerRole);
+        // A cancel signed by a phone or tablet, or by the owner desktop with the signed `decline` flag, is the person
+        // declining to answer: the agent is told so, plainly, in a content-free notice (never an answer), whichever
+        // device it came from. A desktop's withdrawal (an owner cancel without the flag included) tells it nothing.
+        const declined = isPersonDecline(v.action, v.signerRole, v.record.decline);
         if (declined) {
           dropped.push({
             entry_id: v.record.action_id,
@@ -391,6 +393,8 @@ export class Inbox {
             action: 'cancel',
             revision: row.question_revision,
             source: 'human',
+            signer_device_id: v.signerDeviceId,
+            signer_role: v.signerRole,
             correction: false,
             created_at: v.record.created_at,
             event_seq: ev.seq,

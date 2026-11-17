@@ -267,8 +267,11 @@ export class RelayClient {
       body: { protocol_version: PROTOCOL_VERSION, idempotency_key: idempotencyKey, question },
     });
   }
-  getQuestion(id: string): Promise<QuestionDetail> {
-    return this.request('GET', `${API_PREFIX}/questions/${id}`);
+  getQuestion(
+    id: string,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
+  ): Promise<QuestionDetail> {
+    return this.request('GET', `${API_PREFIX}/questions/${id}`, opts);
   }
   listQuestions(q: { status?: string; cursor?: string; limit?: number } = {}) {
     return this.request<{ questions: unknown[]; next_cursor: string | null }>(
@@ -294,6 +297,7 @@ export class RelayClient {
     }
     const send = () => this.sendAction(kind, questionId, idempotencyKey, action, opts);
     if (kind === 'answer') return this.ownerOnly('answering for the person', send);
+    if (action.record.decline === true) return this.ownerOnly('declining for the person', send);
     return kind === 'reopen' ? this.ownerOnly('reopening a question', send) : send();
   }
   private sendAction(
