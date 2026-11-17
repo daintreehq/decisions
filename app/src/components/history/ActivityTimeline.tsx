@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import { isPersonDecline } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
 import { answerSummary, correctionCount, decidedAt, optionLabels } from '../../domain/lists.js';
@@ -7,7 +6,9 @@ import {
   agentName,
   answerBy,
   currentAnswer,
+  declineBy,
   declinedByPerson,
+  declinedLabel,
   effectiveStatus,
   followUpBy,
   withdrawnLabel,
@@ -317,12 +318,12 @@ function entries(v: QuestionView, now: number): Entry[] {
         ) : undefined,
       });
     else if (a.action === 'cancel') {
-      const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+      const declined = declineBy(a);
       out.push({
         key: a.actionId,
         kind: declined ? 'declined' : 'withdrawn',
         at: a.createdAt,
-        title: declined ? 'Declined by you' : withdrawnLabel(v),
+        title: declined ? declined.label : withdrawnLabel(v),
       });
     } else if (a.action === 'reopen')
       out.push({
@@ -354,7 +355,7 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
         ? 'Expired without an answer'
         : s === 'cancelled'
           ? declinedByPerson(v)
-            ? 'Declined by you'
+            ? declinedLabel(v)
             : withdrawnLabel(v)
           : s === 'open'
             ? 'Not answered yet'

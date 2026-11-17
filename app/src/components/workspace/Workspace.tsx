@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { isPersonDecline, type HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
@@ -29,6 +29,7 @@ import {
   answerBy,
   canOverrule,
   currentAnswer,
+  declineBy,
   DELIVERY_LABELS,
   deliveryProgress,
   effectiveStatus,
@@ -1134,7 +1135,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </OutgoingMessage>,
         );
       } else if (a.action === 'cancel') {
-        const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+        const declined = declineBy(a);
         items.push(
           <SystemLine
             key={a.actionId}
@@ -1147,7 +1148,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 : 'No answer is needed, and nothing was approved here.'
             }
           >
-            {declined ? 'Declined by you' : withdrawnLabel(view)}
+            {declined ? declined.label : withdrawnLabel(view)}
           </SystemLine>,
         );
       } else if (a.action === 'reopen') {
