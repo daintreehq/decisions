@@ -669,6 +669,16 @@ export const SettingsBody = z.object({
 });
 export type SettingsBody = z.infer<typeof SettingsBody>;
 
+/**
+ * `PUT /presence` (owner desktop, `presence-v1`, section 11): `present: true` starts or renews the lease that says
+ * the person is at the computer, `false` ends it. It carries nothing about questions, panes or content.
+ */
+export const PresenceBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  present: z.boolean(),
+});
+export type PresenceBody = z.infer<typeof PresenceBody>;
+
 export const VoiceSessionBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
   provider: z.enum(['xai', 'openai']),

@@ -19,6 +19,7 @@ import {
   PairingInvitationBody,
   PairingRejectBody,
   PhoneImageReserveBody,
+  PresenceBody,
   PushSubscribeBody,
   RevokeDeviceBody,
   RotateEpochBody,
@@ -38,6 +39,7 @@ import {
   PairingCandidateResponse,
   PairingStatusResponse,
   PendingPairing,
+  PresenceResponse,
   PushConfig,
   PushSubscriptionInfo,
   PushTestResponse,
@@ -525,6 +527,16 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     summary: 'Replace the involvement preference (compare-and-swap on its revision)',
     request: InvolvementBody,
     response: InvolvementReceipt,
+  },
+  {
+    method: 'PUT',
+    path: '/presence',
+    auth: 'signed',
+    roles: OWNER,
+    summary:
+      "Start, renew or end the lease saying the person is at the computer; while it is current a new question's push is held briefly",
+    request: PresenceBody,
+    response: PresenceResponse,
   },
   {
     method: 'POST',

@@ -205,6 +205,13 @@ export const SettingsResponse = z.object({
   settings: SettingsBody.omit({ protocol_version: true }),
 });
 
+/** `PUT /presence`: whether a lease is now current, and when it lapses unless renewed (relay time). */
+export const PresenceResponse = z.object({
+  present: z.boolean(),
+  until: IsoTime.nullable(),
+});
+export type PresenceResponse = z.infer<typeof PresenceResponse>;
+
 export const VoiceSessionResponse = z.object({
   ticket: B64Url,
   ws_path: z.string(),

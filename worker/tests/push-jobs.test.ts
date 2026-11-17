@@ -2,13 +2,21 @@ import { settle } from './helpers.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
-import { PushPayload, bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import {
+  LIMITS,
+  PresenceResponse,
+  PushPayload,
+  bytesToBase64Url,
+} from '@daintreehq/decisions-protocol';
 import { newId } from '@daintreehq/decisions-crypto';
+import { PRESENCE_META } from '../src/room/presence.js';
 import {
   act,
   ask,
   claimRelay,
   declare,
+  enrollHost,
+  events,
   inRoom,
   pairDevice,
   say,
@@ -756,5 +764,244 @@ describe('reply pushes', () => {
     await quiet(false);
     await runDue('notify_reply');
     expect(calls).toEqual([]);
+  });
+});
+
+describe("presence holds a new question's push (docs/protocol.md section 11)", () => {
+  let w: World;
+  let phone: Actor;
+  const calls: { url: string; init: RequestInit }[] = [];
+
+  beforeEach(async () => {
+    calls.length = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(null, { status: 201 });
+    }) as never);
+    w = await claimRelay();
+    phone = await pairDevice(w);
+    await subscribe(phone);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const present = (a: Actor, on = true) =>
+    a.call('PUT', '/api/v1/presence', { protocol_version: 1, present: on });
+  /** Sets when the lease ends, as if relay time had moved on. */
+  const leaseEnds = (at: number) => inRoom((room) => room.setMeta(PRESENCE_META, String(at)));
+  /** Moves a question's creation `ms` into the past, as if that long had passed since. */
+  const age = (questionId: string, ms: number) =>
+    inRoom((room) =>
+      room.run(
+        `UPDATE questions SET created_at = created_at - ? WHERE question_id = ?`,
+        ms,
+        questionId,
+      ),
+    );
+  const createdAt = (questionId: string) =>
+    inRoom(
+      (room) =>
+        room.q1<{ created_at: number }>(
+          `SELECT created_at FROM questions WHERE question_id = ?`,
+          questionId,
+        )!.created_at,
+    );
+  const newPushes = async (questionId: string) =>
+    (await pending('notify_new')).filter((j) => j.question_id === questionId);
+  const heldPush = async (questionId: string) =>
+    (await newPushes(questionId)).find((j) => j.status === 'pending');
+
+  it('takes presence from the owner desktop only, as a lease that keeps nothing else', async () => {
+    const { host } = await enrollHost(w);
+    for (const a of [phone, host]) expect((await present(a)).status).toBe(403);
+    expect(
+      (await w.owner.call('PUT', '/api/v1/presence', { protocol_version: 1 })).status,
+    ).toBe(400);
+    const jobs = (await pending()).length;
+    const evs = (await events(w.owner)).length;
+
+    const before = Date.now();
+    const on = await present(w.owner);
+    expect(on.status).toBe(200);
+    const res = PresenceResponse.parse(on.json);
+    expect(res.present).toBe(true);
+    expect(Date.parse(res.until!)).toBeGreaterThanOrEqual(before + LIMITS.presenceLeaseMs);
+    expect(Date.parse(res.until!)).toBeLessThanOrEqual(Date.now() + LIMITS.presenceLeaseMs);
+    expect(await inRoom((room) => room.getMeta(PRESENCE_META))).toBe(
+      String(Date.parse(res.until!)),
+    );
+
+    const off = await present(w.owner, false);
+    expect(off.json).toEqual({ present: false, until: null });
+    expect(await inRoom((room) => room.getMeta(PRESENCE_META))).toBeUndefined();
+    // No job, event or push: presence is a lease and nothing more.
+    expect((await pending()).length).toBe(jobs);
+    expect((await events(w.owner)).length).toBe(evs);
+    expect(calls).toEqual([]);
+  });
+
+  it('holds a human-required question while the lease is current, and sends once it lapses', async () => {
+    await present(w.owner);
+    const { questionId } = await ask(w);
+    const [job] = await newPushes(questionId);
+    // Held to the lease's end, which comes before the hold's own bound.
+    expect(job!.run_at).toBeGreaterThan(Date.now() + LIMITS.presenceLeaseMs - 10_000);
+    expect(job!.run_at).toBeLessThanOrEqual(Date.now() + LIMITS.presenceLeaseMs);
+
+    // Run early, it waits again rather than sending, and spends no attempt.
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    const again = await heldPush(questionId);
+    expect(again).toMatchObject({ status: 'pending', attempt_count: 0 });
+    expect(again!.run_at).toBeGreaterThan(Date.now());
+
+    // The desktop slept: its lease lapsed, so nothing holds the push any more.
+    await leaseEnds(Date.now() - 1);
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+    expect((await newPushes(questionId)).map((j) => j.status)).toEqual(['done']);
+  });
+
+  it('never holds past the bound, however often the lease is renewed', async () => {
+    await present(w.owner);
+    const { questionId } = await ask(w);
+    await age(questionId, LIMITS.presenceHoldMs - 10_000);
+    // Renewed now, the lease would outlast the hold: the hold ends first.
+    await present(w.owner);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    expect((await heldPush(questionId))!.run_at).toBe(
+      (await createdAt(questionId)) + LIMITS.presenceHoldMs,
+    );
+
+    await age(questionId, 10_000);
+    await present(w.owner);
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('sends nothing for a question answered, declined or withdrawn during the hold', async () => {
+    await declare(w.owner, ['owner-desktop-answers-v1', 'person-declines-v1']);
+    await present(w.owner);
+    const answered = (await ask(w)).questionId;
+    const declined = (await ask(w)).questionId;
+    const withdrawn = (await ask(w)).questionId;
+    expect((await act(w, w.owner, 'answer', answered, 0)).res.status).toBe(201);
+    expect((await act(w, phone, 'cancel', declined, 0)).res.status).toBe(201);
+    expect((await act(w, w.owner, 'cancel', withdrawn, 0)).res.status).toBe(201);
+    for (const q of [answered, declined, withdrawn])
+      expect((await newPushes(q)).map((j) => j.status)).toEqual(['cancelled']);
+
+    // Should a held push outlive its question's resolution, the job's own check still drops it.
+    await inRoom((room) =>
+      room.run(`UPDATE scheduled_jobs SET status = 'pending' WHERE kind = 'notify_new'`),
+    );
+    await leaseEnds(Date.now() - 1);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps the proxy grace, holds a lease that starts during it, and a proxy abstaining keeps the deadline', async () => {
+    const { questionId } = await ask(w, { requirement: 'proxy-first' });
+    expect((await heldPush(questionId))!.run_at).toBeGreaterThan(Date.now() + 60_000); // the grace
+
+    // The person sat down during the grace: when it ends, the push waits for them.
+    await present(w.owner);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+
+    // The proxy abstains late in the hold: the push waits only until the hold that began with the question ends.
+    await age(questionId, LIMITS.presenceHoldMs - 20_000);
+    expect((await act(w, w.owner, 'proxy-abstain', questionId, 0, { content: null })).res.status).toBe(
+      201,
+    );
+    const held = await heldPush(questionId);
+    expect(held!.run_at).toBe((await createdAt(questionId)) + LIMITS.presenceHoldMs);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    await age(questionId, 20_000);
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('gives a reopened question a hold of its own, counted from the reopen', async () => {
+    await present(w.owner);
+    const { questionId } = await ask(w);
+    expect((await act(w, w.owner, 'cancel', questionId, 0)).res.status).toBe(201);
+    await age(questionId, 10 * 60_000);
+    expect((await act(w, w.owner, 'reopen', questionId, 0, { content: null })).res.status).toBe(
+      201,
+    );
+    expect((await heldPush(questionId))!.run_at).toBeGreaterThan(Date.now());
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+
+    await inRoom((room) =>
+      room.run(
+        `UPDATE actions SET created_at = created_at - ? WHERE question_id = ? AND action = 'reopen'`,
+        LIMITS.presenceHoldMs,
+        questionId,
+      ),
+    );
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+  });
+
+  it("holds only a new question's push: a proxy answer, a reply push and a reminder go as before", async () => {
+    await declare(w.owner);
+    await present(w.owner);
+    const proxied = (await ask(w, { requirement: 'proxy-ok' })).questionId;
+    await act(w, w.owner, 'proxy-answer', proxied, 0, {
+      content: {
+        selected_option_ids: ['approve'],
+        model_id: 'm',
+        prompt_template_version: '1',
+        confidence: 0.9,
+      },
+    });
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1); // the proxy answer's notice
+
+    calls.length = 0;
+    const asked = (await ask(w)).questionId;
+    await say(w, w.owner, asked, { expectsReply: true });
+    await runDue('notify_reply');
+    expect(calls).toHaveLength(1);
+
+    calls.length = 0;
+    await runDue('remind');
+    expect(calls).toHaveLength(1);
+    // The new question's own push is still held.
+    expect(await heldPush(asked)).toBeTruthy();
+  });
+
+  it('leaves quiet hours deferring a push once the hold ends', async () => {
+    await present(w.owner);
+    await ask(w);
+    const quiet = (enabled: boolean) =>
+      phone.call('PUT', '/api/v1/settings', {
+        protocol_version: 1,
+        quiet_hours: { enabled, start: '00:00', end: '23:59', time_zone: 'UTC' },
+      });
+    expect((await quiet(true)).status).toBe(200);
+    await leaseEnds(Date.now() - 1);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    await quiet(false);
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps the lease through a questions wipe and drops it with everything', async () => {
+    await present(w.owner);
+    const wipe = (scope: string) =>
+      w.owner.call('POST', '/api/v1/admin/delete-data', {
+        protocol_version: 1,
+        confirm: 'DELETE',
+        scope,
+      });
+    expect((await wipe('questions')).status).toBe(200);
+    expect(await inRoom((room) => room.getMeta(PRESENCE_META))).toBeTruthy();
+    expect((await wipe('everything')).status).toBe(200);
+    expect(await inRoom((room) => room.getMeta(PRESENCE_META))).toBeUndefined();
   });
 });
