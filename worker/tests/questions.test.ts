@@ -643,6 +643,10 @@ describe('cancel, expiry and reopen', () => {
     expect(byPhone.res.status).toBe(403);
     expect((await phone.call('GET', `/api/v1/questions/${h.questionId}`)).json.status).toBe('open');
     expect((await act(hostWorld, host, 'cancel', h.questionId, 0)).res.status).toBe(201);
+    // The flag means a decline on a cancel and nothing on any other action.
+    const reopen = await act(w, w.owner, 'reopen', h.questionId, 0, { decline: true });
+    expect(reopen.res.status).toBe(400);
+    expect(reopen.res.json.code).toBe('validation_error');
 
     // The transition and revision checks come first: a proxy answer is withdrawn, never declined.
     const p = await ask(w, { requirement: 'proxy-ok' });
