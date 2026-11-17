@@ -1,6 +1,6 @@
 import { ApiError } from './errors.js';
-import type { ActionKind, QuestionStatus, Requirement, Role } from './schema.js';
-import { DESKTOP_ROLES, HUMAN_ROLES } from './schema.js';
+import type { ActionKind, Provenance, QuestionStatus, Requirement, Role } from './schema.js';
+import { DESKTOP_ROLES, HUMAN_ANSWER_ROLES, HUMAN_ROLES } from './schema.js';
 
 export interface QuestionState {
   status: QuestionStatus;
@@ -30,7 +30,7 @@ export interface Transition {
 }
 
 const ROLE_ALLOWED: Record<ActionKind, readonly Role[]> = {
-  answer: HUMAN_ROLES,
+  answer: HUMAN_ANSWER_ROLES,
   override: HUMAN_ROLES,
   'confirm-proxy': HUMAN_ROLES,
   'proxy-answer': DESKTOP_ROLES,
@@ -52,7 +52,10 @@ export function roleMaySign(action: ActionKind, role: Role): boolean {
 export const isPersonDecline = (action: ActionKind, role: Role): boolean =>
   action === 'cancel' && HUMAN_ROLES.includes(role);
 
-/** The provenance an action's signer role implies. Used by relay and clients alike. */
+/**
+ * The provenance an action implies when a phone or tablet signs the human actions and a desktop the rest. It cannot
+ * tell the owner desktop's `answer` (`human-desktop`) from a phone's: `provenanceForSigner` can.
+ */
 export function provenanceForAction(action: ActionKind): 'human' | 'proxy' | 'none' {
   switch (action) {
     case 'answer':
@@ -66,6 +69,23 @@ export function provenanceForAction(action: ActionKind): 'human' | 'proxy' | 'no
   }
 }
 
+function assertRoleAllowed(action: ActionKind, role: Role): void {
+  if (!roleMaySign(action, role)) {
+    throw new ApiError('forbidden', `role ${role} may not perform ${action}`);
+  }
+}
+
+/**
+ * The provenance a signed action carries, from its action and its signer's certified role: `human-desktop` for the
+ * person's answer signed on the owner desktop, otherwise `provenanceForAction`. Throws `forbidden` for a role the
+ * action does not allow, as `applyAction` does.
+ */
+export function provenanceForSigner(action: ActionKind, role: Role): Provenance | 'none' {
+  assertRoleAllowed(action, role);
+  if (action === 'answer' && role === 'owner-desktop') return 'human-desktop';
+  return provenanceForAction(action);
+}
+
 /**
  * Pure, authoritative transition table (spec section 7). Throws ApiError on any illegal move.
  * `expectedRevision` is compare-and-swap input from the signer.
@@ -76,9 +96,7 @@ export function applyAction(
   role: Role,
   expectedRevision: number,
 ): Transition {
-  if (!roleMaySign(action, role)) {
-    throw new ApiError('forbidden', `role ${role} may not perform ${action}`);
-  }
+  assertRoleAllowed(action, role);
   const conflict = () =>
     new ApiError('revision_conflict', 'question changed since you last saw it', {
       details: { latest_revision: state.revision, status: state.status },

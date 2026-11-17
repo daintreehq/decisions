@@ -14,6 +14,13 @@ import { PROTOCOL_VERSION } from './version.js';
  * exactly the 0.3.0 protocol.
  */
 
+/**
+ * `details.reason` of the `409 invalid_state` the relay returns for a command the question's publishing desktop has
+ * not declared it can take (`details.required_feature` names the feature): today an owner-desktop `answer` without
+ * `owner-desktop-answers-v1`. A client tells this refusal apart by the reason, never by the message.
+ */
+export const CREATOR_MISSING_FEATURE = 'creator-missing-feature';
+
 /** The `features` query parameter of `GET /events`: a comma-separated list, sorted. */
 export const FEATURES_QUERY_PARAM = 'features';
 

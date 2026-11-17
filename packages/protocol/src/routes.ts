@@ -74,6 +74,7 @@ export interface RouteSpec {
 
 const DESKTOPS = ['owner-desktop', 'desktop-host'] as const;
 const HUMANS = ['phone', 'tablet'] as const;
+const HUMAN_ANSWERERS = ['owner-desktop', 'phone', 'tablet'] as const;
 const OWNER = ['owner-desktop'] as const;
 const ok = z.object({ ok: z.literal(true) });
 
@@ -209,8 +210,9 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'POST',
     path: '/questions/{id}/answer',
     auth: 'signed',
-    roles: HUMANS,
-    summary: 'First human answer (compare-and-swap on revision)',
+    roles: HUMAN_ANSWERERS,
+    summary:
+      "First human answer, from a phone, a tablet or the owner desktop (compare-and-swap on revision; an owner-desktop answer needs the question's desktop to declare owner-desktop-answers-v1)",
     request: ActionBody,
     response: CommandReceipt,
     status: 201,
