@@ -1,5 +1,10 @@
 import { forwardRef, type ReactNode, type Ref } from 'react';
-import type { HumanAnswerContentV1, ProxyAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type {
+  HumanAnswerContentV1,
+  PreparationReport,
+  ProxyAnswerContentV1,
+} from '@daintreehq/decisions-protocol';
+import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
 import { agentName, originParts } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
@@ -44,8 +49,25 @@ function Time({ iso, now }: { iso: string; now: number }) {
 }
 
 /**
+ * How the agent says it prepared the question (docs/protocol.md section 20.1): whether it consulted other agents and
+ * whether they agreed, with its own summary. It is the agent's account, labelled as such: nothing checked it, and it
+ * is never an answer.
+ */
+export function PreparationNote({ report }: { report: PreparationReport }) {
+  return (
+    <div className="msg-prep" role="note" aria-label="The agent’s account of how it prepared">
+      <p className="msg-prep-head">
+        <span className="msg-prep-label">The agent’s account</span> {preparationLine(report)}
+      </p>
+      {report.summary && <SafeText text={report.summary} className="msg-prep-summary" />}
+    </div>
+  );
+}
+
+/**
  * The agent's question: who asked (agent kind and project), then one message holding the question, its files, its
- * context (collapsed) and its choices. `meta` sits under the message (the deadline).
+ * context (collapsed), the agent's account of how it prepared (when it gave one) and its choices. `meta` sits under
+ * the message (the deadline).
  */
 export function AgentMessage({
   view,
@@ -81,6 +103,7 @@ export function AgentMessage({
         </div>
         {files}
         {context}
+        {c.preparation && <PreparationNote report={c.preparation} />}
         {choices}
       </div>
       {meta && <p className="msg-meta">{meta}</p>}

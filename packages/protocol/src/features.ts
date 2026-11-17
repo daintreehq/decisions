@@ -55,6 +55,7 @@ const EVENT_FEATURES: Record<EventType, readonly ProtocolFeature[]> = {
   'delivery.message': ['thread-messages-v1'],
   'decision.snapshot.updated': ['pane-snapshots-v1'],
   'decision.snapshot.refresh_requested': ['pane-snapshots-v1'],
+  'involvement.updated': ['involvement-v1'],
 };
 
 const hasImages = (record: unknown): boolean => {

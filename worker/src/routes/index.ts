@@ -6,6 +6,7 @@ import * as attachments from './attachments.js';
 import * as deliveries from './deliveries.js';
 import * as devices from './devices.js';
 import * as events from './events.js';
+import * as involvement from './involvement.js';
 import * as messages from './messages.js';
 import * as pairing from './pairing.js';
 import * as push from './push.js';
@@ -104,6 +105,8 @@ export const ROUTES: Route[] = [
   r('POST', '/push/test', 'signed', push.test, HUMAN_ROLES),
   r('GET', '/settings', 'signed', push.getSettings, ANY),
   r('PUT', '/settings', 'signed', push.putSettings, ANY),
+  r('GET', '/involvement', 'signed', involvement.getInvolvement, ANY),
+  r('PUT', '/involvement', 'signed', involvement.putInvolvement, HUMAN_ROLES),
 
   r('POST', '/voice/session', 'signed', voice.voiceSession, HUMAN_ROLES),
 

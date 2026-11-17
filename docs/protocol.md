@@ -28,8 +28,8 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 | `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                                                  |
 | `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                                                      |
 
-With the extensions in sections 16 to 18, a phone or tablet also sends human messages, attaches phone images and asks
-for pane snapshots, and the desktop that published a question (its `originating_device_id`, whatever its role)
+With the extensions in sections 16 to 18 and 20, a phone or tablet also sends human messages, attaches phone images,
+asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its `originating_device_id`, whatever its role)
 publishes that question's agent messages and pane snapshots and reports delivery of its human messages.
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
@@ -339,10 +339,10 @@ proxy never satisfying `human-required`, idempotency, ordered event paging, revo
 attachment integrity, no plaintext in storage, and feature filtering that keeps a 0.3.0 client parsing every page and
 frame (section 19).
 
-## Extensions: threads, phone images and pane snapshots
+## Extensions: threads, phone images, pane snapshots and involvement
 
-Sections 16 to 19 define three opt-in extensions, each named by a feature (section 19). Their shapes are in
-`thread.ts`, `snapshot.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
+Sections 16 to 20 define four opt-in extensions, each named by a feature (section 19). Their shapes are in
+`thread.ts`, `snapshot.ts`, `involvement.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
 and `openapi.json` when the relay serves them (the thread-message routes have); until a relay advertises a feature in
 `GET /info`, clients MUST NOT use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
 with messages in both directions (`THREAD_FIXTURE`), phone image references, a fresh snapshot, stale snapshots and a
@@ -625,8 +625,8 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown features parse and
-are ignored (`knownFeatures`).
+`owner-desktop-answers-v1`, `involvement-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+features parse and are ignored (`knownFeatures`).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
 answers to its questions (section 2), and the relay checks that desktop's latest socket-ticket declaration before
@@ -659,21 +659,97 @@ feature it needs: the new event types need their feature, and an answer or messa
 - a socket `caught_up` frame carries the same `next_after` as `high_water`, and the same `has_more`.
 
 A client that turns a feature on later (after an upgrade) backfills from that feature's own routes
-(`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`): its cursor may already be past events it was not
-sent.
+(`GET /questions/{id}/messages`, `GET /questions/{id}/snapshot`, `GET /involvement`): its cursor may already be past
+events it was not sent.
 
 **Version.** `PROTOCOL_VERSION` stays 1. Everything here is additive, and a client that declares nothing sees the
 0.3.0 protocol but for one new value, below. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
-`HumanAnswerContentV1.images`, `InfoResponse.features`, `DeviceInfo.features`, `SocketTicketBody.features`) parse
-under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0 client is never sent (an empty
-list is harmless). The one new value in an existing field is `human-desktop` provenance, on the action events and
-question details of an owner-desktop answer, which every client is sent. An events page still parses under 0.3.0
-schemas, since they leave event data unchecked. A client that verifies the event (its `EventData.action` schema, or
-the signer's role) rejects that one event and goes on with the rest of the page, and one that validates a question
-detail against its old `QuestionDetail` schema fails on a detail that lists it. The relay commits one only for a
-question whose publishing desktop declared `owner-desktop-answers-v1`, so a desktop that cannot read it never has one
-of its own to deliver.
+`HumanAnswerContentV1.images`, `DecisionContentV1.preparation`, `InfoResponse.features`, `DeviceInfo.features`,
+`SocketTicketBody.features`) parse under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0
+client is never sent (an empty list is harmless). The one new value in an existing field is `human-desktop`
+provenance, on the action events and question details of an owner-desktop answer, which every client is sent. An
+events page still parses under 0.3.0 schemas, since they leave event data unchecked. A client that verifies the event
+(its `EventData.action` schema, or the signer's role) rejects that one event and goes on with the rest of the page,
+and one that validates a question detail against its old `QuestionDetail` schema fails on a detail that lists it. The
+relay commits one only for a question whose publishing desktop declared `owner-desktop-answers-v1`, so a desktop that
+cannot read it never has one of its own to deliver.
 
 **Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
 desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and
 `worker/tests/legacy-client.test.ts` against the relay.
+
+## 20. Involvement preference (`involvement-v1`)
+
+How involved the person wants to be right now, set on a phone or tablet and read by agents through their desktop.
+There is one per installation. It describes how the person wants to take part, never what an agent may do: no
+requirement, workflow gate, proxy rule or approval reads it (`enforceRequirement` and `applyAction` take nothing from
+it), and a consensus among agents is a recommendation, never an answer. A `human-required` question still goes to the
+person, and a preparation must not stop or indefinitely delay it.
+
+**Modes** (`InvolvementMode`):
+
+| Mode            | What the person asked for                                                                                                                                                    |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `involve-early` | ask while exploring the options, rather than waiting for a finished recommendation                                                                                           |
+| `recommend`     | consult `consult_count` other agents first, try to agree, then bring the recommendation and its reasoning; if they cannot agree, bring the disagreement and the alternatives |
+
+`InvolvementRecord` (signed by the phone or tablet that sets it, not encrypted): `{v, type: "involvement.preference",
+installation_id, revision, normal_mode, consult_count, override, created_at, signer_device_id, signature}`.
+`consult_count` is 1 to 8 (`involvementConsultMax`) other agents, the asking agent excluded, and applies to
+`recommend`. `override` is null or `{mode, until}`: a temporary mode in force while `now < until`, after which the
+normal mode applies again. `created_at` is the signer's clock: shown, never used to order records.
+
+**In force** (`effectiveInvolvement`). Worked out on every read: the temporary mode until `until`, the normal mode
+from `until` on. Nothing is written when a temporary mode ends: no timer, event or new revision. A reader that only
+compares revisions therefore misses the end of a temporary mode; it compares the mode and `until` too.
+
+**Setting.** `PUT /involvement` (phone, tablet) `InvolvementBody {protocol_version, idempotency_key, preference}` →
+`200 InvolvementReceipt {revision, event_seq}`. The record must name this installation and the authenticated device as
+its signer, and its signature must verify (`400 validation_error`). Its `revision` must be exactly one more than the
+stored one (0 when there is none); anything else is `409 revision_conflict {details.latest_revision}`, so two phones
+saving at once cannot both win, and a phone that lost reads the preference again rather than re-signing over the
+other's choice. A temporary mode must end after relay time and at most 30 days (`involvementOverrideMaxMs`) plus the
+request skew ahead (`involvementWriteIssue`, `400 validation_error`). The revision, the end time and the device's
+standing are checked again in the final transaction. A retry with the same `idempotency_key` and body returns the
+original receipt and changes nothing, even after a later write or after its temporary mode ended; the receipt holds
+the revision and event sequence only, never the preference.
+
+**Reading.** `GET /involvement` (any paired device) → `InvolvementResponse {preference, received_at}`: the latest
+signed record and when the relay accepted it, or nulls. The relay keeps no older record. Reading creates nothing: no
+event, job or notification.
+
+**Hint.** Each accepted record appends `involvement.updated {revision}` with a null `question_id` and
+`question_revision`, and removes the hint before it, so the ledger holds no history of the preference. It is sent only
+to clients that declared `involvement-v1`. It only says "read again": its revision is the relay's word and is never
+trusted on its own. Setting the preference never triggers a push.
+
+**Verifying.** Readers verify the record before using it: this installation's, signed by a phone or tablet whose
+certificate chains to the pinned owner, with a signature covering every field. A record whose signer is revoked (in
+the device directory, or by a `device.revoked` the reader saw) steers nothing. A desktop keeps the highest revision it
+has verified and refuses a lower one, a different record at the same revision, and no record at all once it has
+verified one, so a relay cannot roll the preference back or swap it. A signature proves who set a record, not that it
+is the newest: a relay can still withhold a newer one, which is why readers report when they last confirmed it.
+
+**Storage and deletion.** The relay keeps the latest record and when it accepted it. A questions wipe
+(`POST /admin/delete-data {scope: "questions"}`) keeps it; `scope: "everything"` removes it.
+
+| Route              | Role          | Notes                                                                      |
+| ------------------ | ------------- | -------------------------------------------------------------------------- |
+| `GET /involvement` | any           | `InvolvementResponse`; nulls when nobody has set one                       |
+| `PUT /involvement` | phone, tablet | `InvolvementBody` → `200 InvolvementReceipt`; compare-and-swap on revision |
+
+### 20.1 Preparation reports
+
+An agent can say how it prepared a question: `ask_human`'s optional `preparation`, carried inside the encrypted
+question content as `DecisionContentV1.preparation`:
+
+`PreparationReport {preference_revision, agents_consulted, outcome, summary?}`, where `preference_revision` is the
+involvement revision the agent worked under (null when none was available), `agents_consulted` is how many other
+agents it actually consulted (0 to 64), `outcome` is `agreed`, `split` (no agreement, or inconclusive) or `not-run`
+(no consultation happened), and `summary` is at most 2,000 characters of its reasoning, the disagreement, or why the
+consultation did not run.
+
+It is the agent's own account and nothing checks it. Phones show it as such, never as a verified result. It is not
+signed separately and is not visible to the relay, and its absence means only that no report was given, never that a
+consultation succeeded. A reader drops a malformed report rather than failing the question, and a 0.3.0 phone ignores
+it. Accepting a question never depends on it or on the preference's current revision.

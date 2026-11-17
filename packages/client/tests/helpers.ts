@@ -164,6 +164,15 @@ export class FakeRelay {
   snapshots: { questionId: string; body: unknown }[] = [];
   /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
   snapshotReplies: { status: number; body: Record<string, unknown> }[] = [];
+  /** What `GET /involvement` serves; null makes the route unknown (404), like a relay from before it. */
+  involvement: { preference: unknown; received_at: string | null } | null = {
+    preference: null,
+    received_at: null,
+  };
+  /** While set, `GET /involvement` waits for it before answering (a slow relay). */
+  holdInvolvement: Promise<void> | null = null;
+  /** Each device's `revoked_at` in `GET /devices`, by device id. */
+  revokedAt = new Map<string, string>();
 
   constructor(private readonly owner: Identity) {}
 
@@ -316,7 +325,7 @@ export class FakeRelay {
           role: cert.role,
           label: cert.label,
           created_at: cert.issued_at,
-          revoked_at: null,
+          revoked_at: this.revokedAt.get(cert.device_id) ?? null,
           last_seen_at: null,
           last_ack_seq: 0,
           cert,
@@ -387,6 +396,11 @@ export class FakeRelay {
       if (reply) return json(reply.status, reply.body);
       this.snapshots.push({ questionId: m[1]!, body });
       return json(200, { ok: true });
+    }
+    if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
+      const served = this.involvement;
+      if (this.holdInvolvement) await this.holdInvolvement;
+      return json(200, served);
     }
     if (method === 'POST' && p === '/api/v1/socket-ticket') {
       return json(200, {
