@@ -77,6 +77,7 @@ export const ProtocolFeature = z.enum([
   'person-declines-v1',
   'owner-desktop-messages-v1',
   'owner-desktop-declines-v1',
+  'presence-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -667,6 +668,16 @@ export const SettingsBody = z.object({
   attachment_retention_days: z.number().int().min(1).max(365).optional(),
 });
 export type SettingsBody = z.infer<typeof SettingsBody>;
+
+/**
+ * `PUT /presence` (owner desktop, `presence-v1`, section 11): `present: true` starts or renews the lease that says
+ * the person is at the computer, `false` ends it. It carries nothing about questions, panes or content.
+ */
+export const PresenceBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  present: z.boolean(),
+});
+export type PresenceBody = z.infer<typeof PresenceBody>;
 
 export const VoiceSessionBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),

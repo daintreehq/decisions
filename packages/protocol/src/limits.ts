@@ -89,6 +89,15 @@ export const LIMITS = {
   /** The agent's own account of how it prepared a question, in characters. */
   preparationSummaryChars: 2_000,
 
+  /* ---- presence (section 11) ---- */
+  /** A presence lease lasts this long after the relay accepts the owner desktop's report, unless renewed. */
+  presenceLeaseMs: 60_000,
+  /**
+   * The longest a new question's push is held while the person is at the computer, counted from when the relay
+   * accepted the question or its latest reopen. Renewing the lease never extends it.
+   */
+  presenceHoldMs: 120_000,
+
   /* ---- feature negotiation (section 19) ---- */
   /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */
   featuresPerDeclaration: 16,

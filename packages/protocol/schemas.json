@@ -1331,7 +1331,8 @@
       "involvement-v1",
       "person-declines-v1",
       "owner-desktop-messages-v1",
-      "owner-desktop-declines-v1"
+      "owner-desktop-declines-v1",
+      "presence-v1"
     ]
   },
   "PhoneImageReference": {

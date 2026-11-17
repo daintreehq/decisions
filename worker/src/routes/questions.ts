@@ -24,6 +24,7 @@ import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { nextAllowed } from '../push/quiet-hours.js';
 import { clearSnapshot, deleteSnapshotState } from '../room/snapshots.js';
+import { presenceHold } from '../room/presence.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
@@ -155,6 +156,25 @@ function assertQuota(room: Room, originRef: string): void {
     throw new ApiError('rate_limited', 'too many open questions for this pane', {
       retryAfterMs: 60_000,
     });
+}
+
+/**
+ * Schedules a question's `decision-new` push for `earliest`, or later while the person is at the computer: a
+ * current presence lease holds it until the lease lapses or the round's bounded hold ends (section 11). The job
+ * checks again when it runs, so this only saves an early wake-up.
+ */
+function scheduleNewPush(
+  room: Room,
+  questionId: string,
+  createdAt: number,
+  earliest: number,
+): void {
+  const hold = presenceHold(room, { question_id: questionId, created_at: createdAt }, nowMs());
+  room.schedule({
+    kind: 'notify_new',
+    runAt: hold === null ? earliest : Math.max(earliest, hold),
+    questionId,
+  });
 }
 
 function scheduleReminders(room: Room, questionId: string, from: number, n = 1): void {
@@ -311,7 +331,7 @@ export const createQuestion: Handler = async (room, c) => {
     );
 
     const grace = record.requirement === 'human-required' ? 0 : PROXY_GRACE_MS;
-    room.schedule({ kind: 'notify_new', runAt: t + grace, questionId: record.question_id });
+    scheduleNewPush(room, record.question_id, createdAt, t + grace);
     scheduleReminders(room, record.question_id, t);
     if (expiresAt !== null)
       room.schedule({ kind: 'expire', runAt: expiresAt, questionId: record.question_id });
@@ -648,14 +668,16 @@ function scheduleAfterAction(
       });
       break;
     case 'proxy-abstain':
+      // The person is told now, unless they are at the computer within the round's hold (section 11).
       room.cancelJobs({ questionId: id, kinds: ['notify_new'] });
-      room.schedule({ kind: 'notify_new', runAt: t, questionId: id });
+      scheduleNewPush(room, id, q.created_at, t);
       break;
     case 'reopen':
       // A reopened question starts with no snapshot and no outstanding refresh.
       clearSnapshot(room, id);
       room.cancelJobs({ questionId: id, kinds: ['delete_attachments'] });
-      room.schedule({ kind: 'notify_new', runAt: t, questionId: id });
+      // A reopen starts a new round, and with it a new bounded hold (section 11).
+      scheduleNewPush(room, id, q.created_at, t);
       scheduleReminders(room, id, t);
       if (expiresAt !== null) room.schedule({ kind: 'expire', runAt: expiresAt, questionId: id });
       break;

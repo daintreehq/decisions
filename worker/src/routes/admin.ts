@@ -4,6 +4,7 @@ import { WORKER_VERSION } from '../env.js';
 import type { Handler, Room } from '../room/types.js';
 import { iso, isoOrNull, json } from '../util.js';
 import { INVOLVEMENT_META } from './involvement.js';
+import { PRESENCE_META } from '../room/presence.js';
 import type { DecisionRoom } from '../decision-room.js';
 
 export const diagnostics: Handler = async (room) => {
@@ -103,6 +104,7 @@ export const deleteData: Handler = async (room, c) => {
         'vapid',
         'settings',
         INVOLVEMENT_META,
+        PRESENCE_META,
       ])
         room.run(`DELETE FROM meta WHERE key = ?`, k);
     }

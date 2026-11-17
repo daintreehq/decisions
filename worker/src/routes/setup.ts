@@ -23,6 +23,7 @@ export const RELAY_FEATURES: readonly ProtocolFeature[] = [
   'pane-snapshots-v1',
   'person-declines-v1',
   'phone-images-v1',
+  'presence-v1',
   'thread-messages-v1',
 ];
 

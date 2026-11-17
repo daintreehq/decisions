@@ -9197,6 +9197,88 @@
         }
       }
     },
+    "/api/v1/presence": {
+      "put": {
+        "summary": "Start, renew or end the lease saying the person is at the computer; while it is current a new question's push is held briefly",
+        "operationId": "put_presence",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": [
+          "owner-desktop"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "present": {
+                      "type": "boolean"
+                    },
+                    "until": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "present",
+                    "until"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "present": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "protocol_version",
+                  "present"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/voice/session": {
       "post": {
         "summary": "Mint a one-use dictation ticket (explicit consent required)",

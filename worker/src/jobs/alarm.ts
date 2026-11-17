@@ -6,6 +6,7 @@ import {
 } from '@daintreehq/decisions-protocol';
 import { sha256 } from '@daintreehq/decisions-crypto';
 import { nextAllowed } from '../push/quiet-hours.js';
+import { presenceHold } from '../room/presence.js';
 import type { Room } from '../room/types.js';
 import { expireQuestionNow, type QuestionRow } from '../routes/questions.js';
 import { nowMs } from '../util.js';
@@ -184,6 +185,12 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
       const type = payload.type === 'decision-proxy' ? 'decision-proxy' : 'decision-new';
       if (type === 'decision-new' && q.status !== 'open') return;
       if (type === 'decision-proxy' && q.status !== 'proxy-answered') return;
+      // While the person is at the computer, a new question waits there first, for a bounded time (section 11).
+      // A proxy answer's notice is not held: only a phone or tablet can confirm or override it.
+      if (type === 'decision-new') {
+        const hold = presenceHold(room, q, nowMs());
+        if (hold !== null) return { deferUntil: hold };
+      }
       return pushJob(room, job, q, type, 'high');
     }
     case 'notify_reply': {

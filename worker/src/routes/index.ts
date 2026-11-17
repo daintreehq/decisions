@@ -14,6 +14,7 @@ import * as events from './events.js';
 import * as involvement from './involvement.js';
 import * as messages from './messages.js';
 import * as pairing from './pairing.js';
+import * as presence from './presence.js';
 import * as push from './push.js';
 import * as questions from './questions.js';
 import * as setup from './setup.js';
@@ -114,6 +115,7 @@ export const ROUTES: Route[] = [
   r('PUT', '/settings', 'signed', push.putSettings, ANY),
   r('GET', '/involvement', 'signed', involvement.getInvolvement, ANY),
   r('PUT', '/involvement', 'signed', involvement.putInvolvement, INVOLVEMENT_SETTER_ROLES),
+  r('PUT', '/presence', 'signed', presence.putPresence, OWNER),
 
   r('POST', '/voice/session', 'signed', voice.voiceSession, HUMAN_ROLES),
 
