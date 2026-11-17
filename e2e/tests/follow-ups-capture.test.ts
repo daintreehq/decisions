@@ -9,6 +9,7 @@ import {
   MemoryLocalStore,
   PolicyRegistry,
   RelayClient,
+  RelayError,
   approveCandidate,
   claimRelay,
   createPairingInvite,
@@ -206,15 +207,25 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
       envelope,
       createdAt: nowIso(at),
     });
-    await client.socketTicket([...bridge.features, 'owner-desktop-messages-v1']);
+    const body = MessageBody.parse({
+      protocol_version: PROTOCOL_VERSION,
+      idempotency_key: newId(),
+      message,
+    });
     try {
-      await client.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, {
-        body: MessageBody.parse({
-          protocol_version: PROTOCOL_VERSION,
-          idempotency_key: newId(),
-          message,
-        }),
-      });
+      // The bridge's own socket can take a new ticket at any moment, replacing the declaration: declare again and
+      // resend the same request when the relay says the desktop had not declared it.
+      for (let attempt = 1; ; attempt++) {
+        await client.socketTicket([...bridge.features, 'owner-desktop-messages-v1']);
+        try {
+          await client.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, { body });
+          break;
+        } catch (e) {
+          const missing =
+            e instanceof RelayError && e.details?.reason === 'creator-missing-feature';
+          if (!missing || attempt >= 3) throw e;
+        }
+      }
     } finally {
       await client.socketTicket(bridge.features);
     }
@@ -451,7 +462,30 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     );
     await openId('mixed');
     await sees('Waiting for your reply');
+    const inNeedsYou = () =>
+      page
+        .locator('main section[data-section="needs"] a.qrow', {
+          hasText: 'Run the staging database migration',
+        })
+        .count();
+    await go('/');
+    await page
+      .locator('main a.qrow', { hasText: 'Run the staging database migration' })
+      .waitFor({ timeout: 30_000 });
+    await until(async () => (await inNeedsYou()) === 1, 30_000, 'the question in Needs you');
     await computerSays('mixed', 'Yes, pause it, and turn it back on once the migration finishes.');
+    // The reply from the computer, on its own, answers the agent: before the agent says anything more.
+    await openId('mixed');
+    await page
+      .locator('.ws .msg.out .bubble-label', { hasText: 'Follow-up on Greg’s MacBook Pro' })
+      .waitFor({ timeout: 30_000 });
+    expect(await page.locator('.ws').getByText('Waiting for your reply').count()).toBe(0);
+    await go('/');
+    await page
+      .locator('main a.qrow', { hasText: 'Run the staging database migration' })
+      .waitFor({ timeout: 30_000 });
+    // Synced after the reload: its row leaves Needs you once the reply from the computer is read.
+    await until(async () => (await inNeedsYou()) === 0, 30_000, 'the question out of Needs you');
     await agentSays(
       'mixed',
       'Paused. I’ll turn the nightly import back on after the migration and let you know.',
@@ -697,6 +731,6 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     ];
     const missing = expected.filter((n) => !existsSync(join(OUT!, `${n}.png`)));
     expect(missing).toEqual([]);
-    expect(written.length).toBe(expected.length);
+    expect([...written].sort()).toEqual([...expected].sort());
   });
 });

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { randomBytes } from '@daintreehq/decisions-crypto';
 import { Db } from '../src/data/db.js';
 import { Outbox, type Poster } from '../src/data/outbox.js';
 import { RelayError } from '../src/data/relay.js';
@@ -243,6 +245,44 @@ describe('a thread in the question store', () => {
     );
     const v = s.get(id)!;
     expect(v.messages.at(-1)).toMatchObject({ side: 'human', verified: false, text: '' });
+    expect(awaitingReply(v)).toBe(true);
+    expect(needsYou(v)).toBe(true);
+  });
+
+  it("never counts a follow-up it cannot verify as the person's reply", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const stranger = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const { s, id } = await answered(w);
+    await s.ingest(await messageEvent(w, { questionId: id, side: 'agent', expectsReply: true }));
+    // A desktop this phone has no certificate for, a computer reply whose signature was swapped, and a phone's
+    // reply after that phone was revoked.
+    const unknown = await messageEvent(w, {
+      questionId: id,
+      side: 'human',
+      signer: stranger.owner,
+    });
+    const tampered = await messageEvent(w, { questionId: id, side: 'human', signer: w.owner });
+    (tampered.data as { record: { signature: string } }).record.signature = bytesToBase64Url(
+      randomBytes(64),
+    );
+    w.trust.markRevoked(w.phone.id, '2026-01-01T00:00:00.000Z');
+    const revoked = await messageEvent(w, { questionId: id, side: 'human', signer: w.phone });
+    for (const e of [unknown, tampered, revoked]) await s.ingest(e);
+    const v = s.get(id)!;
+    expect(v.messages.filter((m) => m.side === 'human')).toEqual([
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+    ]);
+    expect(
+      v.messages.filter((m) => m.side === 'human').every((m) => m.signerLabel === undefined),
+    ).toBe(true);
+    expect(v.integrityIssues).toEqual(
+      expect.arrayContaining([
+        'message: signature or ciphertext does not match',
+        'message: signed by a device after it was revoked',
+      ]),
+    );
     expect(awaitingReply(v)).toBe(true);
     expect(needsYou(v)).toBe(true);
   });

@@ -237,8 +237,10 @@ describe("a follow-up sent on the computer, as the person's", () => {
     const host = render(
       createElement(ActivityTimeline, { view: view([phone, agent, computer, forged]), now: NOW }),
     );
-    const titles = texts(host, '.tl-item[data-kind="message"] .tl-title span');
-    expect(titles).toEqual([
+    // In ledger order after the answer, the one that could not be verified left out.
+    expect(texts(host, '.tl-item .tl-title span')).toEqual([
+      'Asked by your agent',
+      'You answered',
       'You sent a follow-up',
       'Claude Code replied',
       'You sent a follow-up on Studio Mac',

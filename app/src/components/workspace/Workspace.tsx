@@ -1227,13 +1227,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           now={now}
           tone="pending"
           receipt={
-            <Receipt
+            <FollowUpReceipt
+              by={PHONE_FOLLOW_UP}
               progress={messageProgress(
                 null,
                 e.state === 'committed' ? undefined : (e.state as 'queued' | 'sending'),
               )}
-              fromPhone
-              subject={PHONE_FOLLOW_UP.subject}
               label={uploadLabel(e)}
               note={queuedOffline ? 'Sends when you’re back online' : undefined}
             />
