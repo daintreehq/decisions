@@ -306,6 +306,43 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     expect(r.content[0].text).toContain('the person chose not to answer');
     expect(r.content[0].text).toContain('Nothing was approved');
   });
+  it("get_decision reports the owner desktop's answer as the person's, made on their computer", async () => {
+    const { mcp, bridge, relay, phone, identity } = await boot();
+    const owner = { deviceId: identity.config.deviceId, keys: identity.keys };
+    const ids: string[] = [];
+    for (const signer of [owner, phone]) {
+      const ask = await call(mcp, 'ask_human', {
+        question: 'Ship it?',
+        options: [{ id: 'approve', label: 'Approve' }],
+      });
+      ids.push(ask.structuredContent.question_id as string);
+      await bridge.pump();
+      await relay.answerEvent({
+        questionId: ids.at(-1)!,
+        phone: signer,
+        options: ['approve'],
+        ...(signer === owner ? { provenance: 'human-desktop' as const } : {}),
+      });
+    }
+    await bridge.catchUp();
+    const computer = await call(mcp, 'get_decision', { question_id: ids[0] });
+    expect(computer.structuredContent).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      answered_on: 'computer',
+      choice: 'approve',
+      answers: [{ source: 'human', answered_on: 'computer' }],
+      thread: [{ kind: 'answer', source: 'human', answered_on: 'computer' }],
+    });
+    expect(computer.content[0].text).toContain('Answer (human, made on their computer): approve');
+    const fromPhone = await call(mcp, 'get_decision', { question_id: ids[1] });
+    expect(fromPhone.structuredContent).toMatchObject({
+      provenance: 'human',
+      answered_on: 'phone',
+      answers: [{ source: 'human', answered_on: 'phone' }],
+    });
+    expect(fromPhone.content[0].text).toContain('Answer (human): approve');
+  });
 });
 
 describe('HTTP MCP: get_involvement', () => {

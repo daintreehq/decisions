@@ -6,6 +6,7 @@ import {
   type DeviceCert,
   type EpochGrant,
   type LedgerEvent,
+  type Provenance,
   type SignedAction,
   type SignedMessage,
   type SignedQuestion,
@@ -467,7 +468,8 @@ export class FakeRelay {
     text?: string;
     status?: string;
     eventType?: LedgerEvent['event_type'];
-    provenance?: 'human' | 'proxy';
+    /** What the relay declares; `human-desktop` for an owner-desktop answer (default: what the action implies). */
+    provenance?: Provenance;
     extra?: Record<string, unknown>;
     signWith?: DeviceKeys;
     epoch?: EpochKey;

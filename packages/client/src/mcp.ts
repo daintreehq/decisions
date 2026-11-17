@@ -48,6 +48,7 @@ function decisionResult(v: DecisionView) {
     requirement: v.requirement,
     workflow_gate_id: v.workflowGateId,
     provenance: v.provenance,
+    answered_on: v.answeredOn,
     closed_reason: v.closedReason,
     choice: v.choice,
     text: v.text,
@@ -58,6 +59,7 @@ function decisionResult(v: DecisionView) {
     answers: v.answers.map((a) => ({
       revision: a.revision,
       source: a.source,
+      answered_on: a.answeredOn,
       choices: a.choices,
       text: a.text,
       correction: a.correction,
@@ -71,6 +73,7 @@ function decisionResult(v: DecisionView) {
             kind: t.kind,
             revision: t.revision,
             source: t.source,
+            answered_on: t.answeredOn,
             choices: t.choices,
             text: t.text,
             correction: t.correction,
@@ -301,7 +304,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -327,6 +330,12 @@ export const TOOLS = [
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
         provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
+        answered_on: {
+          type: ['string', 'null'],
+          enum: ['phone', 'computer', null],
+          description:
+            "Where the person gave the human answer in force: phone (a phone or tablet) or computer (on the person's own computer; still their answer, never a proxy's). Null unless provenance is human.",
+        },
         closed_reason: {
           type: ['string', 'null'],
           enum: ['declined', 'withdrawn', 'expired', null],
@@ -347,6 +356,7 @@ export const TOOLS = [
               kind: { type: 'string', enum: ['answer', 'message'] },
               revision: { type: 'integer' },
               source: { type: 'string', enum: ['human', 'proxy', 'system'] },
+              answered_on: { type: ['string', 'null'], enum: ['phone', 'computer', null] },
               choices: { type: 'array', items: { type: 'string' } },
               message_id: { type: 'string' },
               message_seq: { type: 'integer' },
@@ -606,7 +616,7 @@ export function createDecisionsMcpHandler(
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
         const summary = v.provenance
-          ? `q-${v.alias} is ${v.status}. Answer (${v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+          ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
             ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.closedReason === 'declined'

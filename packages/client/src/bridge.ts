@@ -18,7 +18,7 @@ import { Inbox } from './inbox.js';
 import { InvolvementSync, type InvolvementView } from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
-import { sameDigests, type OpenAnswerEntry } from './answers.js';
+import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
   openMessageContent,
@@ -106,9 +106,15 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
  * answer from a client that does not declare it, and its words must still arrive. `involvement-v1` brings the
- * hint that the person's involvement preference changed (section 20).
+ * hint that the person's involvement preference changed (section 20). `owner-desktop-answers-v1` says this desktop
+ * accepts the person's answer signed by the owner desktop (section 2), which the relay commits to its questions
+ * only once declared; it needs nothing from the host.
  */
-export const BRIDGE_FEATURES: readonly ProtocolFeature[] = ['phone-images-v1', 'involvement-v1'];
+export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
+  'phone-images-v1',
+  'involvement-v1',
+  'owner-desktop-answers-v1',
+];
 
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
@@ -130,6 +136,8 @@ export type ThreadEntryView =
       kind: 'answer';
       revision: number;
       source: 'human' | 'proxy' | 'system';
+      /** Where the person gave a human answer: `computer` (the owner desktop) or `phone` (a phone or tablet). */
+      answeredOn: 'computer' | 'phone' | null;
       choices: string[];
       text: string;
       correction: boolean;
@@ -178,6 +186,12 @@ export interface DecisionView {
    */
   provenance: 'human' | 'proxy' | null;
   /**
+   * Where the person put a human answer in force: `computer` when they answered on their computer (the owner
+   * desktop signed it; still their own answer, never a proxy's), `phone` from a phone or tablet (a confirmed proxy
+   * answer included). Null unless `provenance` is `human`.
+   */
+  answeredOn: 'computer' | 'phone' | null;
+  /**
    * Why a closed question is closed without an answer: `declined` when the person dismissed it from a phone or
    * tablet, `withdrawn` when a desktop cancelled it, `expired` when its deadline passed. Null otherwise. None of
    * them authorises anything.
@@ -189,7 +203,7 @@ export interface DecisionView {
   text: string;
   /**
    * True only when the question carries attachments and the answer in force lists exactly their plaintext
-   * SHA-256 digests as the images the phone displayed. A question with no attachments, a proxy answer
+   * SHA-256 digests as the images the person's device displayed. A question with no attachments, a proxy answer
    * (which reviews nothing, even once a human confirms it) or an approval sent before every image loaded
    * reports false.
    */
@@ -197,6 +211,8 @@ export interface DecisionView {
   answers: {
     revision: number;
     source: 'human' | 'proxy' | 'system';
+    /** As `answeredOn`, for this entry. */
+    answeredOn: 'computer' | 'phone' | null;
     choices: string[];
     text: string;
     correction: boolean;
@@ -581,15 +597,16 @@ export class DecisionsBridge {
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
-    let confirmed = false;
+    let confirmation: OpenAnswerEntry | undefined;
     for (const e of entries) {
       if (e.kind !== 'answer') continue;
-      if (e.action === 'confirm-proxy') confirmed = !!current;
+      if (e.action === 'confirm-proxy') confirmation = current ? e : undefined;
       else {
         current = e;
-        confirmed = false;
+        confirmation = undefined;
       }
     }
+    const confirmed = !!confirmation;
     const inForce = answered ? current : undefined;
     // Only a reopen changes a cancelled question, and it moves the revision on: a decline at this revision is the
     // cancellation in force.
@@ -612,6 +629,7 @@ export class DecisionsBridge {
             ? 'proxy'
             : 'human'
         : null,
+      answeredOn: inForce ? answeredOn(confirmation ?? inForce) : null,
       closedReason:
         row.local_status === 'cancelled'
           ? declined
@@ -633,6 +651,7 @@ export class DecisionsBridge {
         .map((e) => ({
           revision: e.revision,
           source: e.source,
+          answeredOn: answeredOn(e),
           choices: e.choices.map((c) => c.id),
           text: e.text,
           correction: e.correction,
@@ -655,6 +674,7 @@ export class DecisionsBridge {
           kind: 'answer',
           revision: e.revision,
           source: e.source,
+          answeredOn: answeredOn(e),
           choices: e.choices.map((c) => c.id),
           text: e.text,
           correction: e.correction,

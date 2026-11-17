@@ -103,6 +103,8 @@ export interface AnswerNoticeInput {
   /** The question as it was asked, quoted so the agent knows what the answer is to. */
   question?: string;
   source: 'human' | 'proxy';
+  /** Human only: true when the person gave the answer on their computer (the owner desktop), not a phone. */
+  onComputer?: boolean;
   /** Selected option ids and their (decrypted) labels, in order. */
   choices?: { id: string; label?: string }[];
   comment?: string;
@@ -153,6 +155,12 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       );
     } else {
       lines.push(`source: ${n.source}`);
+      if (n.source === 'human' && n.onComputer) {
+        lines.push('answered_on: computer');
+        lines.push(
+          "note: This is the person's own answer, made on their computer rather than a phone. It is not a proxy answer.",
+        );
+      }
       if (n.source === 'proxy') {
         lines.push(
           'note: This is a proxy answer from the decision model, not the human. The human may still confirm or overrule it.',
