@@ -268,8 +268,9 @@ describe('before the bridge starts', () => {
     const w = await world();
     w.bridge.reportPresence(true);
     await w.pass(5 * SECOND);
-    expect(w.relay.calls.filter((c) => c.path === PRESENCE_PATH || c.path === '/api/v1/info'))
-      .toEqual([]);
+    expect(
+      w.relay.calls.filter((c) => c.path === PRESENCE_PATH || c.path === '/api/v1/info'),
+    ).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
     await w.start();
     expect(w.puts()).toEqual([true]);
