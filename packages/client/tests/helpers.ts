@@ -194,6 +194,8 @@ export class FakeRelay {
   rejectInvolvement: { status: number; code: string; details?: Record<string, unknown> }[] = [];
   /** Called as each `PUT /involvement` arrives, before the relay looks at it. */
   onInvolvementPut: (() => void | Promise<void>) | null = null;
+  /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
+  holdDevices: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -435,6 +437,7 @@ export class FakeRelay {
       });
     }
     if (method === 'GET' && p === '/api/v1/devices') {
+      if (this.holdDevices) await this.holdDevices;
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,

@@ -925,6 +925,29 @@ describe('setting it on the owner desktop', () => {
     await s.bridge.stop();
   });
 
+  it('a read waiting on the device directory does not hold up a save', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    const directoryReads = () => s.relay.calls.filter((c) => c.path === '/api/v1/devices').length;
+    const before = directoryReads();
+    let release!: () => void;
+    s.relay.holdDevices = new Promise<void>((r) => (release = r));
+    s.bridge.verifier.invalidate();
+    const reading = s.bridge.involvement.refresh(); // verifying it waits on a directory that does not answer
+    while (directoryReads() === before) await tick();
+    expect(await s.bridge.setInvolvementPreference(choice(1))).toEqual({
+      status: 'saved',
+      revision: 2,
+    });
+    expect(available(await s.view()).revision).toBe(2);
+    s.relay.holdDevices = null;
+    release();
+    await reading;
+    expect(available(await s.view()).revision).toBe(2);
+    await s.bridge.stop();
+  });
+
   it('a save the relay took while the bridge stopped still bars older records after a restart', async () => {
     const s = await setup();
     s.serve(await s.sign({ revision: 1 }));
