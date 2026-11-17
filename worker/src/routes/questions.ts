@@ -1,12 +1,14 @@
 import {
   ActionBody,
   ApiError,
+  CREATOR_MISSING_FEATURE,
   CreateQuestionBody,
   DEFAULTS,
+  HUMAN_ROLES,
   LIMITS,
   applyAction,
   canonicalize,
-  provenanceForAction,
+  provenanceForSigner,
   type ActionKind,
   type ActionRecord,
   type CryptoEnvelope,
@@ -15,6 +17,7 @@ import {
   type Requirement,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { deviceHasFeature } from '../room/features.js';
 import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
@@ -451,6 +454,7 @@ function actionHandler(kind: ActionKind): Handler {
           event_seq: q.last_event_seq,
         });
       }
+      const provenance = provenanceForSigner(kind, auth.role);
 
       let newExpires = q.expires_at;
       if (kind === 'confirm-proxy') {
@@ -472,6 +476,26 @@ function actionHandler(kind: ActionKind): Handler {
           throw bad('expires_at must be in the future (or null)');
         }
       }
+      // The owner desktop's answer is typed by the question's desktop, which must accept one (section 2).
+      if (
+        provenance === 'human-desktop' &&
+        !deviceHasFeature(room.getDevice(q.creator_device_id), 'owner-desktop-answers-v1')
+      ) {
+        throw new ApiError(
+          'invalid_state',
+          "the question's desktop does not accept desktop answers",
+          {
+            details: {
+              reason: CREATOR_MISSING_FEATURE,
+              required_feature: 'owner-desktop-answers-v1',
+            },
+          },
+        );
+      }
+      // Only a phone or tablet attaches phone images, whatever the reservations say.
+      if ((record.attachment_ids?.length ?? 0) > 0 && !HUMAN_ROLES.includes(auth.role)) {
+        throw new ApiError('forbidden', `role ${auth.role} may not attach phone images`);
+      }
       // The phone images an answer or override lists bind with it, or it does not commit (section 17).
       bindPhoneImages(room, {
         questionId: qid,
@@ -482,7 +506,6 @@ function actionHandler(kind: ActionKind): Handler {
         t,
         retainMs: retentionMs(room),
       });
-      const provenance = provenanceForAction(kind);
       const terminal = tr.status === 'human-answered' || tr.status === 'cancelled';
       room.run(
         `UPDATE questions SET status = ?, revision = ?, proxy_abstained = ?, resolved_at = ?, expires_at = ? WHERE question_id = ?`,

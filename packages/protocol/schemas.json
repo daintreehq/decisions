@@ -1279,7 +1279,8 @@
     "enum": [
       "thread-messages-v1",
       "phone-images-v1",
-      "pane-snapshots-v1"
+      "pane-snapshots-v1",
+      "owner-desktop-answers-v1"
     ]
   },
   "PhoneImageReference": {

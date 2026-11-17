@@ -11,6 +11,7 @@ import {
   normalizeQuery,
   parseAuthHeader,
   provenanceForAction,
+  provenanceForSigner,
   roleMaySign,
   signingString,
 } from '../src/index.js';
@@ -119,10 +120,59 @@ describe('state machine', () => {
     expect(() => applyAction(open, 'proxy-answer', 'owner-desktop', 0)).toThrow(/never answer/);
     expect(() => applyAction(open, 'proxy-abstain', 'owner-desktop', 0)).toThrow();
   });
-  it('phones cannot proxy, desktops cannot answer as human', () => {
+  it('phones cannot proxy, and a Host can never answer as the person', () => {
     const p = { ...open, requirement: 'proxy-ok' } as const;
     expect(() => applyAction(p, 'proxy-answer', 'phone', 0)).toThrow(/may not/);
-    expect(() => applyAction(p, 'answer', 'owner-desktop', 0)).toThrow(/may not/);
+    expect(() => applyAction(p, 'answer', 'desktop-host', 0)).toThrow(/may not/);
+    expect(() => applyAction(open, 'answer', 'desktop-host', 0)).toThrow(/may not/);
+  });
+  it('the owner desktop answers for the person at every requirement, and does nothing else a human does', () => {
+    for (const requirement of ['human-required', 'proxy-ok', 'proxy-first'] as const) {
+      expect(applyAction({ ...open, requirement }, 'answer', 'owner-desktop', 0)).toMatchObject({
+        status: 'human-answered',
+        revision: 1,
+        deliverable: true,
+        eventType: 'decision.answer.committed',
+      });
+    }
+    // First answer wins for the owner desktop as for a phone.
+    const answered = { ...open, status: 'human-answered', revision: 1 } as const;
+    expect(() => applyAction(answered, 'answer', 'owner-desktop', 1)).toThrow(/changed/);
+    const cancelled = { ...open, status: 'cancelled' } as const;
+    expect(() => applyAction(cancelled, 'answer', 'owner-desktop', 0)).toThrow(/cannot answer/);
+    const expired = { ...open, status: 'expired' } as const;
+    expect(() => applyAction(expired, 'answer', 'owner-desktop', 0)).toThrow(/expired/);
+    const proxied = {
+      status: 'proxy-answered',
+      revision: 1,
+      requirement: 'proxy-ok',
+      proxyAbstained: false,
+    } as const;
+    for (const action of ['override', 'confirm-proxy'] as const) {
+      expect(() => applyAction(proxied, action, 'owner-desktop', 1)).toThrow(/may not/);
+      expect(() => applyAction(proxied, action, 'desktop-host', 1)).toThrow(/may not/);
+    }
+  });
+  it('provenance follows the signer: human, human-desktop or proxy', () => {
+    expect(provenanceForSigner('answer', 'phone')).toBe('human');
+    expect(provenanceForSigner('answer', 'tablet')).toBe('human');
+    expect(provenanceForSigner('answer', 'owner-desktop')).toBe('human-desktop');
+    expect(provenanceForSigner('override', 'phone')).toBe('human');
+    expect(provenanceForSigner('confirm-proxy', 'tablet')).toBe('human');
+    expect(provenanceForSigner('proxy-answer', 'owner-desktop')).toBe('proxy');
+    expect(provenanceForSigner('proxy-answer', 'desktop-host')).toBe('proxy');
+    expect(provenanceForSigner('cancel', 'desktop-host')).toBe('none');
+    for (const [action, role] of [
+      ['answer', 'desktop-host'],
+      ['override', 'owner-desktop'],
+      ['confirm-proxy', 'owner-desktop'],
+      ['proxy-answer', 'phone'],
+      ['reopen', 'desktop-host'],
+    ] as const) {
+      expect(() => provenanceForSigner(action, role), `${action} by ${role}`).toThrow(/may not/);
+    }
+    // The role-blind mapping clients verify phone answers with is unchanged.
+    expect(provenanceForAction('answer')).toBe('human');
   });
   it('proxy-answered can be overridden or confirmed, then rev increments', () => {
     const p = {

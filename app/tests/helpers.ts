@@ -194,7 +194,7 @@ export async function actionEvent(
     expectedRevision?: number;
     plaintext?: unknown;
     status?: 'open' | 'proxy-answered' | 'human-answered' | 'cancelled' | 'expired';
-    provenance?: 'human' | 'proxy' | null;
+    provenance?: 'human' | 'human-desktop' | 'proxy' | null;
     occurredAt?: string;
     envelopeQuestionId?: string;
     confirms?: string | null;

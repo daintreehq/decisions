@@ -1,5 +1,5 @@
 import type { Role } from '@daintreehq/decisions-protocol';
-import { DESKTOP_ROLES, HUMAN_ROLES } from '@daintreehq/decisions-protocol';
+import { DESKTOP_ROLES, HUMAN_ANSWER_ROLES, HUMAN_ROLES } from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import * as admin from './admin.js';
 import * as attachments from './attachments.js';
@@ -59,7 +59,8 @@ export const ROUTES: Route[] = [
   r('GET', '/questions', 'signed', questions.listQuestions, ANY),
   r('GET', `/questions/${ID}`, 'signed', questions.getQuestion, ANY),
   r('DELETE', `/questions/${ID}`, 'signed', questions.deleteQuestion, OWNER),
-  r('POST', `/questions/${ID}/answer`, 'signed', questions.answer, HUMAN_ROLES),
+  // The owner desktop may answer too (`human-desktop`); the handler checks the question's desktop accepts that.
+  r('POST', `/questions/${ID}/answer`, 'signed', questions.answer, HUMAN_ANSWER_ROLES),
   r('POST', `/questions/${ID}/override`, 'signed', questions.override, HUMAN_ROLES),
   r('POST', `/questions/${ID}/confirm-proxy`, 'signed', questions.confirmProxy, HUMAN_ROLES),
   r('POST', `/questions/${ID}/proxy-answer`, 'signed', questions.proxyAnswer, DESKTOP_ROLES),

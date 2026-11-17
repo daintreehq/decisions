@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -252,6 +252,32 @@ const V4 = [
   `CREATE INDEX IF NOT EXISTS attachments_creator_unbound_idx ON attachments(creator_device_id, bound)`,
 ];
 
+/**
+ * The owner desktop's answers for the person carry their own provenance, `human-desktop` (docs/protocol.md
+ * section 2). SQLite cannot change a CHECK constraint in place, so `actions` is rebuilt: every row is copied as it
+ * was, rowid included, and its index recreated. No column is dropped and the old values all stay valid.
+ */
+const ACTION_COLUMNS =
+  'action_id, question_id, action, revision, provenance, actor_device_id, record_json, envelope_json, created_at, event_seq';
+const V5 = [
+  `CREATE TABLE actions_v5 (
+    action_id TEXT PRIMARY KEY,
+    question_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    provenance TEXT CHECK(provenance IN ('human','human-desktop','proxy')),
+    actor_device_id TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    envelope_json TEXT,
+    created_at INTEGER NOT NULL,
+    event_seq INTEGER NOT NULL
+  )`,
+  `INSERT INTO actions_v5 (rowid, ${ACTION_COLUMNS}) SELECT rowid, ${ACTION_COLUMNS} FROM actions`,
+  `DROP TABLE actions`,
+  `ALTER TABLE actions_v5 RENAME TO actions`,
+  `CREATE INDEX IF NOT EXISTS actions_question_idx ON actions(question_id, event_seq)`,
+];
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -264,6 +290,7 @@ export function migrate(sql: SqlStorage): void {
   if (current < 2) for (const stmt of V2) sql.exec(stmt);
   if (current < 3) for (const stmt of V3) sql.exec(stmt);
   if (current < 4) for (const stmt of V4) sql.exec(stmt);
+  if (current < 5) for (const stmt of V5) sql.exec(stmt);
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),

@@ -17,6 +17,11 @@ export const Role = z.enum(['owner-desktop', 'desktop-host', 'phone', 'tablet'])
 export type Role = z.infer<typeof Role>;
 export const DESKTOP_ROLES: readonly Role[] = ['owner-desktop', 'desktop-host'];
 export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
+/**
+ * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
+ * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`.
+ */
+export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 
 export const QuestionStatus = z.enum([
   'open',
@@ -38,7 +43,11 @@ export const DeliveryStatus = z.enum([
 ]);
 export type DeliveryStatus = z.infer<typeof DeliveryStatus>;
 
-export const Provenance = z.enum(['human', 'proxy']);
+/**
+ * Who an answer is from. `human`: the person, on a phone or tablet. `human-desktop`: the person, on the owner desktop
+ * (an `answer` only, docs/protocol.md section 2). `proxy`: a desktop's model, never the person.
+ */
+export const Provenance = z.enum(['human', 'human-desktop', 'proxy']);
 export type Provenance = z.infer<typeof Provenance>;
 
 /**
@@ -50,6 +59,7 @@ export const ProtocolFeature = z.enum([
   'thread-messages-v1',
   'phone-images-v1',
   'pane-snapshots-v1',
+  'owner-desktop-answers-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');

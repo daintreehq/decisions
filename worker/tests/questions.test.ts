@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
-import { act, ask, claimRelay, events, inRoom, pairDevice, type World } from './helpers.js';
+import {
+  act,
+  ask,
+  claimRelay,
+  enrollHost,
+  events,
+  inRoom,
+  pairDevice,
+  type World,
+} from './helpers.js';
 
 const ids = (evs: any[]) => evs.map((e) => e.event_type);
 
@@ -246,13 +255,18 @@ describe('human answers: first answer wins', () => {
     ).toBe(400);
   });
 
-  it('answering a missing question is 404; a desktop cannot answer as a human', async () => {
+  it('answering a missing question is 404; a Host cannot answer as a human', async () => {
     const w = await claimRelay();
     const phone = await pairDevice(w);
     expect((await act(w, phone, 'answer', newId(), 0)).res.status).toBe(404);
     const { questionId } = await ask(w);
-    const desktop = await act(w, w.owner, 'answer', questionId, 0);
+    const { host } = await enrollHost(w);
+    const desktop = await act(w, host, 'answer', questionId, 0);
     expect(desktop.res.status).toBe(403);
+    // The owner desktop may answer for the person only where the asking desktop accepts it (owner-answers.test.ts).
+    const owner = await act(w, w.owner, 'answer', questionId, 0);
+    expect(owner.res.status).toBe(409);
+    expect(owner.res.json.details.reason).toBe('creator-missing-feature');
   });
 
   it('override replaces a human answer with a new revision and a new delivery', async () => {

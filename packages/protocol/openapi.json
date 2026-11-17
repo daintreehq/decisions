@@ -2330,6 +2330,7 @@
                                 "type": "string",
                                 "enum": [
                                   "human",
+                                  "human-desktop",
                                   "proxy"
                                 ]
                               },
@@ -2792,7 +2793,7 @@
     },
     "/api/v1/questions/{id}/answer": {
       "post": {
-        "summary": "First human answer (compare-and-swap on revision)",
+        "summary": "First human answer, from a phone, a tablet or the owner desktop (compare-and-swap on revision; an owner-desktop answer needs the question's desktop to declare owner-desktop-answers-v1)",
         "operationId": "post_questions_id_answer",
         "security": [
           {
@@ -2800,6 +2801,7 @@
           }
         ],
         "x-roles": [
+          "owner-desktop",
           "phone",
           "tablet"
         ],

@@ -3,6 +3,7 @@ import {
   CryptoEnvelope,
   DecisionContentV1,
   EventData,
+  HUMAN_ROLES,
   HumanAnswerContentV1,
   MESSAGE_RECORD_TYPE,
   MessageContentV1,
@@ -200,7 +201,12 @@ export async function verifyActionEvent(
     return fail('relay metadata disagrees with the signed action');
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
-  if (!roleMaySign(record.action, signer.role)) {
+  // The relay also accepts the owner desktop's answer for the person (`human-desktop`). This app does not yet show
+  // one as the person's, so it keeps answers to a phone or tablet: a relay claiming `human` for one never passes.
+  if (
+    !roleMaySign(record.action, signer.role) ||
+    (record.action === 'answer' && !HUMAN_ROLES.includes(signer.role))
+  ) {
     return fail(`a ${signer.role} cannot sign ${record.action}`);
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
