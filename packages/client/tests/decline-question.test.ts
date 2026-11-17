@@ -16,7 +16,15 @@ import {
   type OwnerDeclineResult,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
-import { FakeRelay, FakeSink, makeHost, makeIdentity, origin, setupBridge } from './helpers.js';
+import {
+  FakeRelay,
+  FakeSink,
+  makeHost,
+  makeIdentity,
+  origin,
+  setupBridge,
+  tick,
+} from './helpers.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'decisions-decline-question-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -382,6 +390,34 @@ describe('a decline is sent once and settled once', () => {
     expect(a.status).toBe('declined');
     expect(relay.declines).toHaveLength(1);
     expect(seen).toHaveLength(1);
+  });
+
+  it('a bridge stopped while the relay’s features are being read sends nothing', async () => {
+    const { bridge, relay, identity, qid, seen } = await ownQuestion();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let reading = false;
+    // A fresh client, so the features are read for this decline, and that read is slow.
+    bridge.publisher['features'] = null;
+    bridge.ctx.client = new RelayClient({
+      identity,
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/api/v1/info')) {
+          reading = true;
+          await held;
+        }
+        return relay.fetch(input, init);
+      },
+      sleep: async () => {},
+      maxRetries: 0,
+    });
+    const r = bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    while (!reading) await tick(1);
+    await bridge.stop();
+    release();
+    expect(await r).toMatchObject({ status: 'queued' });
+    expect(declinePosts(relay)).toEqual([]);
+    expect(seen).toEqual([]);
   });
 
   it('a lost reply is queued, then the same signed body is replayed and confirmed as declined', async () => {

@@ -9,26 +9,16 @@ import {
   MemoryLocalStore,
   PolicyRegistry,
   RelayClient,
-  RelayError,
   approveCandidate,
   claimRelay,
   createPairingInvite,
-  currentEpochKey,
   paneIdentityOf,
-  type Identity,
   type LocateResult,
   type ProxyEngine,
   type QuestionOrigin,
   type TerminalSink,
   type TerminalTarget,
 } from '@daintreehq/decisions-client';
-import { buildSignedMessage, encryptEnvelope, newId, nowIso } from '@daintreehq/decisions-crypto';
-import {
-  API_PREFIX,
-  MESSAGE_RECORD_TYPE,
-  MessageBody,
-  PROTOCOL_VERSION,
-} from '@daintreehq/decisions-protocol';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
 
 /**
@@ -112,7 +102,6 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
   let page: Page;
   let bridge: DecisionsBridge;
   let client: RelayClient;
-  let identity: Identity;
   const sink = new Sink();
   const local = new MemoryLocalStore();
   const written: string[] = [];
@@ -177,58 +166,12 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
   };
   /**
    * The person's follow-up sent on the computer: the owner desktop signs a human message for them (docs/protocol.md
-   * section 16). The desktop library cannot send one yet, so this seals and signs it with the same crypto it uses for
-   * the agent's messages. The relay takes one only once the asking desktop (this bridge, the owner) has declared
-   * `owner-desktop-messages-v1`; the declaration goes back to the bridge's own once it is committed. The bridge does
-   * not accept the message yet either, so it is never typed: its receipt stays at the relay.
+   * section 16) through the host API Daintree's own UI calls. This bridge asked the question and has follow-ups on,
+   * so it types the follow-up into the pane too.
    */
   const computerSays = async (key: string, text: string) => {
-    const questionId = ids[key]!;
-    const at = Date.now();
-    const messageId = newId(at);
-    const envelope = await encryptEnvelope({
-      epochKey: currentEpochKey(identity),
-      installationId: identity.config.installationId,
-      questionId,
-      recordId: messageId,
-      recordType: MESSAGE_RECORD_TYPE,
-      revision: 0,
-      senderDeviceId: identity.config.deviceId,
-      purpose: 'message-content',
-      plaintext: { content_version: 1, side: 'human', text, images: [] },
-    });
-    const message = await buildSignedMessage({
-      installationId: identity.config.installationId,
-      questionId,
-      messageId,
-      side: 'human',
-      signerDeviceId: identity.config.deviceId,
-      signingKey: identity.keys.signing.privateKey,
-      envelope,
-      createdAt: nowIso(at),
-    });
-    const body = MessageBody.parse({
-      protocol_version: PROTOCOL_VERSION,
-      idempotency_key: newId(),
-      message,
-    });
-    try {
-      // The bridge's own socket can take a new ticket at any moment, replacing the declaration: declare again and
-      // resend the same request when the relay says the desktop had not declared it.
-      for (let attempt = 1; ; attempt++) {
-        await client.socketTicket([...bridge.features, 'owner-desktop-messages-v1']);
-        try {
-          await client.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, { body });
-          break;
-        } catch (e) {
-          const missing =
-            e instanceof RelayError && e.details?.reason === 'creator-missing-feature';
-          if (!missing || attempt >= 3) throw e;
-        }
-      }
-    } finally {
-      await client.socketTicket(bridge.features);
-    }
+    const sent = await bridge.sendFollowUp({ questionId: ids[key]!, text });
+    if (sent.status !== 'sent') throw new Error(`follow-up from the computer: ${sent.status}`);
     await bridge.pump();
   };
 
@@ -262,12 +205,12 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
   it('pairs, asks and answers, and builds threads in both directions', async () => {
     const home = mkdtempSync(join(tmpdir(), 'decisions-follow-ups-'));
     const keyStore = new FileKeyStore(home);
-    ({ identity } = await claimRelay({
+    const { identity } = await claimRelay({
       origin: relay.origin,
       claimSecret: CLAIM_SECRET,
       label: 'Greg’s MacBook Pro',
       store: keyStore,
-    }));
+    });
     client = new RelayClient({ identity });
     bridge = new DecisionsBridge({
       identity,

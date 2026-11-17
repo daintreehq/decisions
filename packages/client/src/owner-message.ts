@@ -46,8 +46,8 @@ export type SendFollowUpRequest = z.output<typeof SendFollowUpInput>;
 /**
  * Where a follow-up stands, for a UI to show:
  * - `queued`: committed locally and not settled yet: the relay could not be reached, the follow-up waits behind its
- *   question's unsent create or withdrawal or an earlier follow-up, or the bridge is stopped. The outbox keeps
- *   sending it.
+ *   question's unsent create or withdrawal or the person's earlier follow-up, answer or decline on it, or the bridge
+ *   is stopped. The outbox keeps sending it.
  * - `sent`: the relay committed it to the thread. The asking desktop types it into the pane, as it would a phone's.
  * - `closed`: the question expired or was cancelled or declined, or the relay has no such question (`not-found`).
  * - `unsupported`: the relay, or the computer that asked the question, does not take follow-ups sent from a computer
@@ -75,7 +75,10 @@ export type OwnerFollowUpResult = {
  */
 export interface OwnerMessagePayload {
   signed: SignedMessage;
-  /** The follow-up's place among the person's follow-ups from this computer on its question, from 1: sent in order. */
+  /**
+   * The follow-up's place among the person's follow-ups, answers and declines from this computer on its question,
+   * from 1: sent in order.
+   */
   seq: number;
 }
 
@@ -94,7 +97,7 @@ export interface OwnerMessageRecord extends OwnerMessagePayload {
 export const ownerMessageKey = (messageId: string) => `owner-message:${messageId}`;
 /** The outbox id of a follow-up, kept apart from every other item's id whatever id the host chose. */
 export const ownerMessageItemId = (messageId: string) => `owner-message:${messageId}`;
-/** The person's follow-ups from this computer on a question, ever: their order. */
+/** The person's follow-ups, answers and declines from this computer on a question, ever: their order. */
 export const ownerMessageCountKey = (questionId: string) => `owner-messages:${questionId}`;
 
 export function parseOwnerMessageRecord(raw: string | null): OwnerMessageRecord | null {

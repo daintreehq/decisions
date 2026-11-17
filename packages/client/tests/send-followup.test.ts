@@ -251,6 +251,78 @@ describe('sendFollowUp on the owner’s own question', () => {
   });
 });
 
+describe('the person’s follow-ups, answers and declines on one question keep the order they were made', () => {
+  const posted = (relay: FakeRelay, qid: string) =>
+    relay.calls
+      .filter((c) => c.method === 'POST' && c.path.startsWith(`/api/v1/questions/${qid}/`))
+      .map((c) => c.path.split('/').at(-1));
+
+  it('a clarification queued offline reaches the thread before the answer made after it', async () => {
+    let t = Date.now();
+    const { bridge, relay, qid } = await ownQuestion({ now: () => t });
+    relay.features = [...FEATURES, 'owner-desktop-answers-v1'];
+    relay.rejectMessage = { status: 503, code: 'temporarily_unavailable' };
+    const note = await bridge.sendFollowUp({ questionId: qid, text: 'Only after the backup.' });
+    relay.rejectMessage = null;
+    const answer = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['ship'],
+    });
+    // The answer waits its turn behind the clarification, which is backed off.
+    expect([note.status, answer.status]).toEqual(['queued', 'queued']);
+    expect(posted(relay, qid)).toEqual(['messages']);
+
+    t += 10 * 60_000;
+    await bridge.pump();
+    expect(posted(relay, qid)).toEqual(['messages', 'messages', 'answer']);
+    expect(await bridge.getFollowUpResult(note.messageId)).toMatchObject({ status: 'sent' });
+    expect(await bridge.getAnswerResult(answer.answerId)).toMatchObject({ status: 'sent' });
+  });
+
+  it('a decline made after a queued follow-up never closes the question under it', async () => {
+    let t = Date.now();
+    const { bridge, relay, qid } = await ownQuestion({ now: () => t });
+    relay.features = [...FEATURES, 'owner-desktop-declines-v1'];
+    relay.rejectMessage = { status: 503, code: 'temporarily_unavailable' };
+    const note = await bridge.sendFollowUp({ questionId: qid, text: 'Not this week.' });
+    relay.rejectMessage = null;
+    const decline = await bridge.declineQuestion({ questionId: qid, expectedRevision: 0 });
+    expect([note.status, decline.status]).toEqual(['queued', 'queued']);
+
+    t += 10 * 60_000;
+    await bridge.pump();
+    expect(await bridge.getFollowUpResult(note.messageId)).toMatchObject({ status: 'sent' });
+    expect(await bridge.getDeclineResult(decline.declineId)).toMatchObject({
+      status: 'declined',
+    });
+    expect(relay.messages.map((m) => m.message.record.message_id)).toEqual([note.messageId]);
+  });
+
+  it('an answer queued before the order was kept goes first', async () => {
+    let t = Date.now();
+    const { bridge, relay, store, qid } = await ownQuestion({ now: () => t });
+    relay.features = [...FEATURES, 'owner-desktop-answers-v1'];
+    relay.rejectAnswer = [{ status: 503, code: 'temporarily_unavailable' }];
+    const answer = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['ship'],
+    });
+    expect(answer.status).toBe('queued');
+    // As a 0.7.0 desktop queued it: no place in the order.
+    const [item] = (await store.outboxFor(qid)).filter((o) => o.kind === 'owner-answer');
+    delete (item!.payload as { seq?: number }).seq;
+    await store.putOutbox(item!);
+    const note = await bridge.sendFollowUp({ questionId: qid, text: 'Ship it on Monday.' });
+    expect(note.status).toBe('queued');
+
+    t += 10 * 60_000;
+    await bridge.pump();
+    expect(posted(relay, qid).slice(-2)).toEqual(['answer', 'messages']);
+  });
+});
+
 describe('sendFollowUp on a Remote Host’s question', () => {
   it('needs no local row: the owner signs and sends it, and the Host types it as sent from the computer', async () => {
     const { relay, asking, ownerSide, qid, owner } = await hostQuestion();

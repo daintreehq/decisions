@@ -583,8 +583,9 @@ export class DecisionsBridge {
    * it stands: `sent`; `already-answered` (another answer won); `changed` (the question is open at another revision);
    * `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer
    * that asked (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when it is not settled yet
-   * (the relay could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in
-   * which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
+   * (the relay could not be reached, it waits behind its question's create or withdrawal or the person's earlier
+   * follow-up or decline on it, or the bridge is stopped), in which case the outbox keeps sending it and its outcome
+   * arrives on `answer` (and from `getAnswerResult`). Every
    * outcome is reported on `answer` by the process that settles it, this one included. Pass `answerId` to make a
    * repeated submission the same answer.
    *
@@ -646,8 +647,9 @@ export class DecisionsBridge {
    * it stands: `declined`; `already-answered`; `changed` (the question is open at another revision); `closed` (expired,
    * withdrawn or declined first, or unknown to the relay); `unsupported` by the relay or by the computer that asked
    * (which has not declared `owner-desktop-declines-v1`); `rejected`; or `queued` when it is not settled yet (the relay
-   * could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in which case
-   * the outbox keeps sending it and its outcome arrives on `decline` (and from `getDeclineResult`). Every outcome is
+   * could not be reached, it waits behind its question's create or withdrawal or the person's earlier follow-up or
+   * answer on it, or the bridge is stopped), in which case the outbox keeps sending it and its outcome arrives on
+   * `decline` (and from `getDeclineResult`). Every outcome is
    * reported on `decline` by the process that settles it, this one included. Pass `declineId` to make a repeated
    * submission the same decline.
    *
@@ -704,7 +706,7 @@ export class DecisionsBridge {
    * question. As from a phone, it is text only, never expects a reply and never answers or changes the answer.
    *
    * The follow-up is committed to the outbox, and one send is tried at once, in the outbox's order (after its
-   * question's create, a queued withdrawal and the person's earlier follow-ups on it). The result says where it
+   * question's create, a queued withdrawal and the person's earlier follow-ups, answers and declines on it). The result says where it
    * stands: `sent`; `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or
    * by the computer that asked (which has not declared `owner-desktop-messages-v1`); `rejected` (a thread at its
    * message limit is `invalid_state`); or `queued` when it is not settled yet (the relay could not be reached, it

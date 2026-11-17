@@ -49,7 +49,8 @@ export type AnswerQuestionRequest = z.output<typeof AnswerQuestionInput>;
 /**
  * Where an answer stands, for a UI to show:
  * - `queued`: committed locally and not settled yet: the relay could not be reached, the answer waits behind its
- *   question's unsent create or cancellation, or the bridge is stopped. The outbox keeps sending it.
+ *   question's unsent create or cancellation or the person's earlier follow-up or decline on it, or the bridge is
+ *   stopped. The outbox keeps sending it.
  * - `sent`: the relay committed it. The asking desktop types it, as it would a phone's.
  * - `already-answered`: another answer (from a phone, the decision model or this computer) was committed first.
  * - `changed`: the question is open at another revision than the one the person reviewed (it was reopened); review
@@ -82,6 +83,12 @@ export type OwnerAnswerResult = {
  */
 export interface OwnerAnswerPayload {
   signed: SignedAction;
+  /**
+   * Its place among the person's follow-ups, answers and declines from this computer on its question
+   * (`ownerMessageCountKey`), from 1: they are sent in that order. Absent on an answer queued before the order was
+   * kept, which goes first.
+   */
+  seq?: number;
 }
 
 /**
