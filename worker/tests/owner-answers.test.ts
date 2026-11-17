@@ -307,12 +307,16 @@ describe('the owner desktop gains no other human action', () => {
     expect((await state(proxied.questionId)).actions.map((a) => a.provenance)).toEqual(['proxy']);
   });
 
-  it('cannot send a human message, attach a phone image or ask for a fresh snapshot', async () => {
+  it('cannot attach a phone image or ask for a fresh snapshot, and answering grants no messages', async () => {
     const { w } = await world();
     const { questionId } = await ask(w);
+    // The person's messages from the computer need their own feature (owner-messages.test.ts).
     const message = await say(w, w.owner, questionId, { side: 'human' });
-    expect(message.res.status).toBe(403);
-    expect(message.res.json.code).toBe('forbidden');
+    expect(message.res.status).toBe(409);
+    expect(message.res.json.details).toEqual({
+      reason: CREATOR_MISSING_FEATURE,
+      required_feature: 'owner-desktop-messages-v1',
+    });
     const image = await uploadPhoneImage(
       w,
       w.owner,

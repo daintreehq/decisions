@@ -131,12 +131,14 @@ describe('posting thread messages (docs/protocol.md section 16)', () => {
     // No desktop speaks for another desktop's agent, not even the owner.
     await refused(say(w, host, questionId));
     await refused(say(world, w.owner, hosted));
-    // Sides follow roles: a phone never speaks for the agent, a desktop never for the person.
+    // Sides follow roles: a phone never speaks for the agent, a Host never for the person. The owner desktop may, once
+    // the asking desktop accepts it (owner-messages.test.ts); this one declared threads alone.
     const tablet = await pairDevice(w, 'tablet', 'Test iPad');
     await refused(say(w, phone, questionId, { side: 'agent' }));
     await refused(say(w, tablet, questionId, { side: 'agent', expectsReply: true }));
-    await refused(say(w, w.owner, questionId, { side: 'human' }));
     await refused(say(world, host, hosted, { side: 'human' }));
+    await refused(say(w, host, questionId, { side: 'human' }));
+    await refused(say(w, w.owner, questionId, { side: 'human' }), 409);
 
     // Unsigned, and revoked.
     const unsigned = await raw('POST', `/api/v1/questions/${questionId}/messages`, {

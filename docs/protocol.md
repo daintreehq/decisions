@@ -22,15 +22,16 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 
 ## 2. Principals and roles
 
-| Role              | Who                                              | May                                                                                                                                            |
-| ----------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner-desktop`   | The Daintree installation that claimed the relay | create questions, answer for the person, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
-| `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                                                  |
-| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                                                      |
+| Role              | Who                                              | May                                                                                                                                                              |
+| ----------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner-desktop`   | The Daintree installation that claimed the relay | create questions, answer and send messages for the person, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
+| `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                                                                    |
+| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                                                                        |
 
 With the extensions in sections 16 to 18 and 20, a phone or tablet also sends human messages, attaches phone images,
 asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its `originating_device_id`, whatever its role)
-publishes that question's agent messages and pane snapshots and reports delivery of its human messages.
+publishes that question's agent messages and pane snapshots and reports delivery of its human messages. The owner
+desktop may also send the person's human messages (section 16).
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
 the signer (`provenanceForSigner` in `state.ts`):
@@ -38,15 +39,17 @@ the signer (`provenanceForSigner` in `state.ts`):
 - a `phone` or `tablet` signs `answer`, `override` and `confirm-proxy`: **human** provenance;
 - the `owner-desktop` may also sign `answer` on an open question, `human-required` ones included: **human-desktop**
   provenance, the person's answer made on the computer. The owner desktop certifies every other device, so this gives
-  it nothing it could not get by pairing a phone of its own. It never signs `override` or `confirm-proxy` and gains no
-  other human action: a decline, human messages, phone images, snapshot refresh, push and voice keep their roles;
+  it nothing it could not get by pairing a phone of its own. It never signs `override` or `confirm-proxy`, and its one
+  other human action is the person's thread message (section 16): a decline, phone images, snapshot refresh, push
+  and voice keep their roles;
 - a `desktop-host` never signs `answer`, `override` or `confirm-proxy`;
 - desktops sign `proxy-answer`: **proxy** provenance. A `human-required` question can never be satisfied by a proxy.
 
 `cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question, signed by a phone or
 tablet it records that the person **declined** to answer (section 6.1). `roleMaySign` in `state.ts` is the one role
-table the relay and every client check signers against, and the relay's provenance claim must equal what the signer's
-certified role implies (`provenanceForSigner`). The phone app accepts an owner-desktop `answer` only with
+table the relay and every client check action signers against (thread messages have their own rule, `applyMessage`
+in section 16), and the relay's provenance claim must equal what the signer's certified role implies
+(`provenanceForSigner`). The phone app accepts an owner-desktop `answer` only with
 `human-desktop` provenance, shows it as the person's and names the computer from the owner certificate's signed
 `label`. The desktop library accepts one on the owner desktop and on a Remote Host, refuses one that lists phone
 images, and declares `owner-desktop-answers-v1` on every bridge's socket ticket. It keeps the answer as the person's
@@ -365,7 +368,8 @@ with its own keys.
 
 A message is a follow-up on one existing question, from one of two sides:
 
-- **human**: signed by a paired `phone` or `tablet`;
+- **human**: signed by a paired `phone` or `tablet`, or by the `owner-desktop` for the person on the computer
+  (below), never by a `desktop-host`;
 - **agent**: signed by the desktop that published the question on behalf of the asking pane, the device whose id is
   the question's `originating_device_id`. `target_host_id` is a host reference, not a device id. No other desktop,
   not even the owner, speaks for another desktop's agent.
@@ -380,6 +384,26 @@ The envelope has purpose `message-content`, `record_id = message_id`, `aad.recor
 images or both) or `AgentMessageContentV1 {content_version: 1, side: "agent", text}` (non-blank text). Message
 content has no options, approval or reason: unknown fields are dropped. Before showing a message, a client checks
 that `content.side` equals `record.side` and that the content's image ids equal the record's (`imagesMatchRecord`).
+
+**From the computer.** The owner desktop may sign the person's human message on any question, its own or a Host's,
+before or after an answer, as a phone does; `expects_reply` stays false on it like on every human message. The
+reasoning of section 2 holds: it certifies every device, so this gives it nothing it could not get by pairing a phone
+of its own. A message carries no provenance field, so a client attributes a human message by its signer's certified
+role (`humanMessageSentOn` in `thread.ts`): the person's message sent from the computer for the owner desktop, and
+from the phone for a phone or tablet. Nothing the relay says plays a part. An owner-desktop message lists no phone
+images (`403 forbidden`).
+
+The question's publishing desktop types the message into the pane (section 16.3), and a desktop that predates
+owner-desktop messages rejects one. So the relay commits an owner-desktop human message only when the publishing
+desktop (its `originating_device_id`) declared `owner-desktop-messages-v1` on its latest socket ticket (section 19);
+a revoked desktop has declared nothing. Otherwise it refuses with `409 invalid_state` and
+`details: {reason: "creator-missing-feature", required_feature: "owner-desktop-messages-v1"}` (`CREATOR_MISSING_FEATURE`),
+which a client tells apart by `details.reason`. The check comes after the role and state checks of `applyMessage`
+and before the `thread-messages-v1` check every human message passes, so a desktop that declared neither gets this
+refusal. A refused message stores no receipt, so the same signed message commits once the publishing desktop declares
+support, and a retry of a committed one returns its receipt whatever the desktop declared since. The phone app and the
+desktop library do not yet accept a human message the owner desktop signed: each refuses that one message as
+unverified and goes on with the rest of the thread.
 
 **Order.** The relay assigns `message_seq` (1, 2, … per question) when it commits a message. It is independent of
 the question's `revision`: nothing is compare-and-swapped, so concurrent senders never conflict. A retry with the same
@@ -417,11 +441,11 @@ is bounded by `envelopeCiphertextChars`, like every envelope. The relay never se
 signed record and the per-question count. Until it advertises `phone-images-v1`, it refuses a message that lists
 images (`400 validation_error`).
 
-| Route                                        | Role                                  | Notes                                                                               |
-| -------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------- |
-| `POST /questions/{id}/messages`              | phone, tablet; the publishing desktop | `MessageBody {protocol_version, idempotency_key, message}` → `201 MessageReceipt`   |
-| `GET /questions/{id}/messages?after=&limit=` | any                                   | `MessagesPage`: `MessageView` (entry, `event_seq`, delivery) in `message_seq` order |
-| `POST /deliveries/messages`                  | the publishing desktop                | `MessageReceiptBody` (section 16.4)                                                 |
+| Route                                        | Role                                                               | Notes                                                                                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /questions/{id}/messages`              | human: phone, tablet, owner-desktop; agent: the publishing desktop | `MessageBody {protocol_version, idempotency_key, message}` → `201 MessageReceipt`; owner-desktop needs `owner-desktop-messages-v1` from the publishing desktop |
+| `GET /questions/{id}/messages?after=&limit=` | any                                                                | `MessagesPage`: `MessageView` (entry, `event_seq`, delivery) in `message_seq` order                                                                            |
+| `POST /deliveries/messages`                  | the publishing desktop                                             | `MessageReceiptBody` (section 16.4)                                                                                                                            |
 
 Events: `decision.message.posted` (`EventData.messagePosted`: the `MessageEntry` and `target_host_id`; the event's
 `question_revision` is null) and `delivery.message` (`EventData.messageDelivery`).
@@ -441,7 +465,7 @@ deprecated.
 
 An agent message with `expects_reply: true` asks the person something. The thread waits on the person
 (`threadAwaitsHuman`) while the latest agent message expects a reply and nothing human came after it in ledger order:
-a human message, or the person's answer (from a phone, a tablet or the owner desktop), override or confirmation. A
+a human message or the person's answer (each from a phone, a tablet or the owner desktop), override or confirmation. A
 later agent message that asks nothing withdraws the request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
 "Needs you" again. The relay sends a `decision-reply` push (`{type, question_id}` and nothing else) for an agent message
 that expects a reply. Quiet hours hold it back like any push, a newer asking message on the same question replaces one
@@ -456,9 +480,10 @@ It follows the answer's rules: the exact pane identity, only at an idle prompt, 
 when the agent's session must be, and `needs-attention` when the pane is gone. An answer and messages waiting for the
 same pane are typed in thread order (ledger order), batched when they fit, and a message never holds back or changes
 an answer's delivery. The typed text is its own block, distinct from an answer block, saying that it is a message the
-reviewer sent from their phone about the question and that it does not change the answer. The client library's
-format (`[DAINTREE DECISION FOLLOW-UP]`) is specified line by line in the
-[integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes.
+reviewer sent about the question, from their phone or, for one the owner desktop signed, from the computer, and that
+it does not change the answer. The client library's format (`[DAINTREE DECISION FOLLOW-UP]`) is specified line by line
+in the [integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes; it names the
+phone only, since the library does not yet accept a message from the computer.
 
 ### 16.4 Message receipts
 
@@ -637,7 +662,7 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
 features parse and are ignored (`knownFeatures`).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
@@ -649,6 +674,12 @@ check of section 2.
 `person-declines-v1` filters no events either. A publishing desktop declares it to say it files a phone's or tablet's
 decline of its questions (section 6.1), and the relay checks that desktop's latest socket-ticket declaration in the
 same way before committing one. The committed `decision.cancelled` is sent to every client.
+
+`owner-desktop-messages-v1` adds no event filter either. A publishing desktop declares it to say it accepts the
+person's human messages signed by the owner desktop on its questions (section 16), and the relay checks that desktop's
+latest socket-ticket declaration in the same way before committing one. The committed `decision.message.posted` needs
+`thread-messages-v1`, like every message, and nothing more; whether a client accepts it is the signer check of
+section 16.
 
 **Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
 and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No

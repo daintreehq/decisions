@@ -1,5 +1,7 @@
 import {
   ApiError,
+  CREATOR_MISSING_FEATURE,
+  HUMAN_ROLES,
   LIMITS,
   MessageBody,
   MessageReceiptBody,
@@ -12,6 +14,7 @@ import {
   type MessageSide,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { deviceHasFeature } from '../room/features.js';
 import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
@@ -64,7 +67,10 @@ const unsigned = (r: Record<string, unknown>): string => {
   return canonicalize(rest);
 };
 
-/** `POST /questions/{id}/messages`: a human message from a phone or tablet, or an agent message from the publisher. */
+/**
+ * `POST /questions/{id}/messages`: a human message from a phone, a tablet or the owner desktop, or an agent message
+ * from the publisher.
+ */
 export const postMessage: Handler = async (room, c) => {
   const auth = c.auth!;
   const qid = c.params[0]!;
@@ -151,12 +157,34 @@ export const postMessage: Handler = async (room, c) => {
         messageCount: count,
       },
     );
+    // The person's message from the owner desktop is typed by the question's desktop, and one that predates these
+    // rejects it (section 16). Checked first, so a desktop that declared nothing gets the refusal a client can read.
+    if (
+      record.side === 'human' &&
+      !HUMAN_ROLES.includes(auth.role) &&
+      !deviceHasFeature(room.getDevice(q.creator_device_id), 'owner-desktop-messages-v1')
+    ) {
+      throw new ApiError(
+        'invalid_state',
+        "the question's desktop does not accept messages from the computer",
+        {
+          details: {
+            reason: CREATOR_MISSING_FEATURE,
+            required_feature: 'owner-desktop-messages-v1',
+          },
+        },
+      );
+    }
     // A human message is typed into the pane by the publishing desktop, which must understand messages.
     if (
       record.side === 'human' &&
       !deviceFeatures(room, q.creator_device_id).includes('thread-messages-v1')
     ) {
       throw new ApiError('invalid_state', "the question's desktop does not accept messages");
+    }
+    // Only a phone or tablet attaches phone images, whatever the reservations say.
+    if (record.attachment_ids.length > 0 && !HUMAN_ROLES.includes(auth.role)) {
+      throw new ApiError('forbidden', `role ${auth.role} may not attach phone images`);
     }
 
     // The phone images a human message lists bind with it, or it does not commit (section 17).

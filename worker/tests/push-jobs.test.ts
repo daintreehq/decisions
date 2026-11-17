@@ -724,6 +724,26 @@ describe('reply pushes', () => {
     expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['done']);
   });
 
+  it('counts a message from the owner desktop as the person writing back', async () => {
+    await subscriber(phone);
+    await declare(w.owner, ['thread-messages-v1', 'owner-desktop-messages-v1']);
+    const questionId = await asked();
+    expect((await act(w, phone, 'answer', questionId, 0)).res.status).toBe(201);
+    await quiet(true);
+    await say(w, w.owner, questionId, { expectsReply: true });
+    // Run it into its quiet-hour deferral first, so the runtime's own alarm cannot settle it early.
+    await runDue('notify_reply');
+    expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['pending']);
+    // The person replies on the computer: a human message, which cancels no push job.
+    expect((await say(w, w.owner, questionId, { side: 'human' })).res.status).toBe(201);
+    expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['pending']);
+    await quiet(false);
+    calls.length = 0;
+    await runDue('notify_reply');
+    expect(calls).toEqual([]);
+    expect((await replyJobs(questionId)).map((j) => j.status)).toEqual(['done']);
+  });
+
   it('keeps one reply push per question, and a cancelled question takes it along', async () => {
     await subscriber(phone);
     const twice = await asked();

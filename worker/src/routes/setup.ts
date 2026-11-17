@@ -18,6 +18,7 @@ import { iso, json, nowMs } from '../util.js';
 export const RELAY_FEATURES: readonly ProtocolFeature[] = [
   'involvement-v1',
   'owner-desktop-answers-v1',
+  'owner-desktop-messages-v1',
   'pane-snapshots-v1',
   'person-declines-v1',
   'phone-images-v1',

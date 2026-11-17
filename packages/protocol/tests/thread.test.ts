@@ -17,6 +17,7 @@ import {
   SignedMessage,
   applyAction,
   applyMessage,
+  humanMessageSentOn,
   imagesMatchRecord,
   isTerminalStatus,
   isThreadClosedStatus,
@@ -377,7 +378,9 @@ describe('thread state rules', () => {
     signerIsPublisher: boolean,
   ): string => {
     const human = role === 'phone' || role === 'tablet';
-    if (side === 'human' ? !human : human || !signerIsPublisher) return 'forbidden';
+    // The owner desktop also speaks for the person; a Host never does.
+    const speaksForPerson = human || role === 'owner-desktop';
+    if (side === 'human' ? !speaksForPerson : human || !signerIsPublisher) return 'forbidden';
     if (status === 'expired') return 'expired';
     if (status === 'cancelled') return 'invalid_state';
     return 'ok';
@@ -414,11 +417,12 @@ describe('thread state rules', () => {
         }
       }
     }
-    // 3 accepting statuses x (2 human roles, either publisher flag, + 2 desktop roles as the publisher)
-    expect(accepted).toBe(18);
+    // 3 accepting statuses x (phone, tablet and owner desktop for the person, either publisher flag, + 2 desktop
+    // roles as the publisher for the agent)
+    expect(accepted).toBe(24);
   });
 
-  it('takes human messages from paired phones and agent messages only from the publishing desktop', () => {
+  it('takes human messages from paired phones and the owner desktop, and agent messages only from the publishing desktop', () => {
     const open = stateOf('open');
     const code = (f: () => unknown) => {
       try {
@@ -432,12 +436,29 @@ describe('thread state rules', () => {
       code(() => applyMessage(open, { side, role, signerIsPublisher, messageCount: 0 }));
     expect(msg('human', 'phone')).toBe('ok');
     expect(msg('human', 'tablet')).toBe('ok');
-    expect(msg('human', 'owner-desktop', true)).toBe('forbidden');
+    // The owner desktop speaks for the person on any question, its own or a Host's; a Host never does.
+    expect(msg('human', 'owner-desktop', true)).toBe('ok');
+    expect(msg('human', 'owner-desktop', false)).toBe('ok');
+    expect(msg('human', 'desktop-host', true)).toBe('forbidden');
+    expect(msg('human', 'desktop-host', false)).toBe('forbidden');
     expect(msg('agent', 'desktop-host', true)).toBe('ok');
     expect(msg('agent', 'owner-desktop', true)).toBe('ok');
     // the owner has no exemption for another host's question
     expect(msg('agent', 'owner-desktop', false)).toBe('forbidden');
     expect(msg('agent', 'phone', true)).toBe('forbidden');
+  });
+
+  it("attributes the person's message to the computer or the phone by its signer's certified role", () => {
+    expect(humanMessageSentOn('owner-desktop')).toBe('computer');
+    expect(humanMessageSentOn('phone')).toBe('phone');
+    expect(humanMessageSentOn('tablet')).toBe('phone');
+    // A Host never speaks for the person, so it has no answer here rather than a default.
+    expect(() => humanMessageSentOn('desktop-host')).toThrow(ApiError);
+    try {
+      humanMessageSentOn('desktop-host');
+    } catch (e) {
+      expect((e as ApiError).code).toBe('forbidden');
+    }
   });
 
   it('refuses expired and withdrawn (cancelled) questions, and allows them again after a reopen', () => {

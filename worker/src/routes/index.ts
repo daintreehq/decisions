@@ -69,7 +69,8 @@ export const ROUTES: Route[] = [
   // A desktop withdraws its question; a phone or tablet declines an open one (state.ts checks which).
   r('POST', `/questions/${ID}/cancel`, 'signed', questions.cancel, ANY),
   r('POST', `/questions/${ID}/reopen`, 'signed', questions.reopen, OWNER),
-  // Human messages need a phone or tablet and agent messages the publishing desktop; the handler checks which.
+  // Human messages need a phone, a tablet or the owner desktop and agent messages the publishing desktop; the
+  // handler checks which.
   r('POST', `/questions/${ID}/messages`, 'signed', messages.postMessage, ANY),
   r('GET', `/questions/${ID}/messages`, 'signed', messages.listMessages, ANY),
   r('PUT', `/questions/${ID}/snapshot`, 'signed', snapshots.putSnapshot, DESKTOP_ROLES),

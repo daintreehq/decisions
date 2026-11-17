@@ -312,7 +312,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     auth: 'signed',
     roles: 'any',
     summary:
-      'Post a thread message: human from a phone or tablet, agent from the publishing desktop (thread-messages-v1)',
+      "Post a thread message: human from a phone, a tablet or the owner desktop, agent from the publishing desktop (thread-messages-v1; an owner-desktop human message needs the question's desktop to declare owner-desktop-messages-v1)",
     request: MessageBody,
     response: MessageReceipt,
     status: 201,
