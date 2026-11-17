@@ -30,12 +30,17 @@ export function roundStartedAt(room: Room, questionId: string, createdAt: number
 }
 
 /**
- * Until when a `decision-new` push is held because the person is at the computer, or null to send it now: the
- * earlier of the lease's end and `presenceHoldMs` after the round began.
+ * Until when a question's `decision-new` push is held because the person is at the computer, or null to send it
+ * now: the earlier of the lease's end and `presenceHoldMs` after the question's round began. Without a current
+ * lease it reads nothing else.
  */
-export function presenceHold(room: Room, roundStart: number, now: number): number | null {
-  const deadline = roundStart + LIMITS.presenceHoldMs;
-  if (deadline <= now) return null;
+export function presenceHold(
+  room: Room,
+  q: { question_id: string; created_at: number },
+  now: number,
+): number | null {
   const lease = presenceLeaseUntil(room, now);
-  return lease === null ? null : Math.min(deadline, lease);
+  if (lease === null) return null;
+  const deadline = roundStartedAt(room, q.question_id, q.created_at) + LIMITS.presenceHoldMs;
+  return deadline > now ? Math.min(deadline, lease) : null;
 }

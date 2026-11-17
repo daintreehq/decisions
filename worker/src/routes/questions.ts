@@ -24,7 +24,7 @@ import type { Handler, Room } from '../room/types.js';
 import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '../util.js';
 import { nextAllowed } from '../push/quiet-hours.js';
 import { clearSnapshot, deleteSnapshotState } from '../room/snapshots.js';
-import { presenceHold, roundStartedAt } from '../room/presence.js';
+import { presenceHold } from '../room/presence.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
@@ -169,7 +169,7 @@ function scheduleNewPush(
   createdAt: number,
   earliest: number,
 ): void {
-  const hold = presenceHold(room, roundStartedAt(room, questionId, createdAt), nowMs());
+  const hold = presenceHold(room, { question_id: questionId, created_at: createdAt }, nowMs());
   room.schedule({
     kind: 'notify_new',
     runAt: hold === null ? earliest : Math.max(earliest, hold),

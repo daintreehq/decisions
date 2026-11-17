@@ -359,14 +359,14 @@ abstaining never moves it, so a question not answered at the computer still reac
 included. The relay checks the hold when the push is due, so a lease that starts during a `proxy-*` question's grace
 holds that push too; the grace itself is unchanged. Ending a lease releases a held push when the relay was already due
 to check it again, at most one lease later. A question answered on any device, declined, withdrawn or expired during
-the hold sends no push. A push whose sending has begun cannot be recalled.
+the hold never sends its held push. A push whose sending has begun cannot be recalled.
 
 The hold covers the `decision-new` push of a new question, of a proxy abstaining and of a reopen. It leaves out the
 `decision-proxy` notice of a proxy answer and the proxy-review reminder (only a phone or tablet confirms or overrides a
 proxy answer), reply pushes (`decision-reply`: the person replies to an agent message from a phone or tablet),
-reminders (hours later, past any hold) and test pushes. Quiet hours apply after the hold as before, and can defer a
-push past it. A relay that does not advertise `presence-v1` has no `/presence` route and pushes as it always has; a
-client MUST NOT send presence to it.
+reminders (never held; the first comes hours later unless the person set it sooner) and test pushes. Quiet hours
+apply after the hold as before, and can defer a push past it. A relay that does not advertise `presence-v1` has no
+`/presence` route and pushes as it always has; a client MUST NOT send presence to it.
 
 ## 12. Deliveries
 
