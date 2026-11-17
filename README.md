@@ -53,7 +53,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 ## Safety rules that do not bend
 
 - A workflow can require a human (`human-required`). A model, a proxy, or the agent itself can never satisfy it, and the agent cannot lower the level.
-- Only a signed answer from a device you paired counts as a human answer. The relay cannot forge one.
+- Only a signed answer counts as a human answer: one from a phone or tablet you paired, or one you make on the computer that set up the relay. An answer made on the computer is labelled as yours from that computer, never as a phone's. The relay cannot forge either.
 - Answers are typed into the exact pane they were asked from, or not at all. If that pane or session cannot be found, the answer waits and tells you.
 - Answers are typed as inert, delimited data. Control characters and escape sequences are stripped, and nothing in an answer can close the block or pose as a field.
 - An expired question never authorizes anything.
