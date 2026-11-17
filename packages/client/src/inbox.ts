@@ -555,6 +555,7 @@ export class Inbox {
       side: record.side,
       expects_reply: record.expects_reply,
       signer_device_id: record.signer_device_id,
+      signer_role: v.signerRole,
       attachment_ids: [...record.attachment_ids],
       created_at: record.created_at,
       committed_at: v.entry.committed_at,

@@ -462,8 +462,9 @@ support, and a retry of a committed one returns its receipt whatever the desktop
 a human message the owner desktop signed as the person's, sent from the computer and named with that desktop's
 certified name, and counts it as the person's reply (section 16.2) on every phone. A phone app that cannot verify one
 (an unknown or revoked signer, or one that predates this) never shows it as the person's: it refuses that one message
-as unverified and goes on with the rest of the thread. The desktop library does not yet accept one and refuses it the
-same way.
+as unverified and goes on with the rest of the thread. The desktop library declares `owner-desktop-messages-v1`
+together with `thread-messages-v1` when it types follow-ups, accepts such a message from the pinned owner desktop only
+then (never one that lists phone images, and never a `desktop-host`'s), and types it with `sent_from: computer`.
 
 **Order.** The relay assigns `message_seq` (1, 2, … per question) when it commits a message. It is independent of
 the question's `revision`: nothing is compare-and-swapped, so concurrent senders never conflict. A retry with the same
@@ -542,8 +543,8 @@ same pane are typed in thread order (ledger order), batched when they fit, and a
 an answer's delivery. The typed text is its own block, distinct from an answer block, saying that it is a message the
 reviewer sent about the question, from their phone or, for one the owner desktop signed, from the computer, and that
 it does not change the answer. The client library's format (`[DAINTREE DECISION FOLLOW-UP]`) is specified line by line
-in the [integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes; it names the
-phone only, since the library does not yet accept a message from the computer.
+in the [integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes: its preface
+names no device, and a block for a message sent from the computer adds `sent_from: computer` after `source: human`.
 
 ### 16.4 Message receipts
 

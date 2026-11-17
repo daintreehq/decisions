@@ -23,6 +23,7 @@ export * from './proxy.js';
 export * from './publisher.js';
 export * from './owner-answer.js';
 export * from './owner-decline.js';
+export * from './owner-message.js';
 export * from './inbound.js';
 export * from './inbox.js';
 export * from './phone-images.js';

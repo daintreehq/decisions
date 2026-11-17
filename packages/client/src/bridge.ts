@@ -30,6 +30,12 @@ import {
   ownerDeclineItemId,
   type OwnerDeclineResult,
 } from './owner-decline.js';
+import {
+  OWNER_MESSAGE_FEATURE,
+  SendFollowUpInput,
+  ownerMessageItemId,
+  type OwnerFollowUpResult,
+} from './owner-message.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -37,7 +43,7 @@ import {
   openQuestionContent,
   sealStoredContent,
 } from './at-rest.js';
-import { parseMessages, type LocalMessageStatus } from './messages.js';
+import { messageSentOn, parseMessages, type LocalMessageStatus } from './messages.js';
 import { RelayError } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
@@ -133,14 +139,15 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
 ];
 
 /**
- * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
- * `pane-snapshots-v1` when snapshots are on.
+ * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
+ * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
+ * `sent_from: computer`), and `pane-snapshots-v1` when snapshots are on.
  */
 export function bridgeFeatures(
   o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
 ): readonly ProtocolFeature[] {
   const extra: ProtocolFeature[] = [
-    ...(o.followUps ? (['thread-messages-v1'] as const) : []),
+    ...(o.followUps ? (['thread-messages-v1', OWNER_MESSAGE_FEATURE] as const) : []),
     ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
   ];
   return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
@@ -165,8 +172,13 @@ export type ThreadEntryView =
       messageId: string;
       /** The relay's order of the question's messages, from 1. */
       messageSeq: number;
-      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up from their phone. */
+      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up. */
       side: 'agent' | 'human';
+      /**
+       * Where the person sent a human follow-up from: `computer` (the owner desktop signed it; still the person's
+       * own message) or `phone` (a phone or tablet). Null for the agent's own.
+       */
+      sentFrom: 'computer' | 'phone' | null;
       expectsReply: boolean;
       /** The whole text ('' for a message of images only, or one whose content can't be opened now). */
       text: string;
@@ -296,6 +308,8 @@ type Listener = {
   answer: (result: OwnerAnswerResult) => void;
   /** A decline from `declineQuestion` reached its outcome (anything but `queued`), however it was sent. */
   decline: (result: OwnerDeclineResult) => void;
+  /** A follow-up from `sendFollowUp` reached its outcome (anything but `queued`), however it was sent. */
+  followUp: (result: OwnerFollowUpResult) => void;
 };
 
 /**
@@ -324,6 +338,7 @@ export class DecisionsBridge {
     error: [],
     answer: [],
     decline: [],
+    followUp: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -352,26 +367,11 @@ export class DecisionsBridge {
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
     this.publisher = new Publisher(this.ctx, {
-      onOwnerAnswer: (r) => {
-        for (const l of [...this.listeners.answer]) {
-          try {
-            l(r);
-          } catch (e) {
-            this.emitError(e as Error);
-          }
-        }
-      },
-      onOwnerDecline: (r) => {
-        for (const l of [...this.listeners.decline]) {
-          try {
-            l(r);
-          } catch (e) {
-            this.emitError(e as Error);
-          }
-        }
-      },
+      onOwnerAnswer: (r) => this.notify('answer', r),
+      onOwnerDecline: (r) => this.notify('decline', r),
+      onOwnerFollowUp: (r) => this.notify('followUp', r),
     });
-    this.verifier = new EventVerifier(this.ctx);
+    this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
@@ -420,6 +420,20 @@ export class DecisionsBridge {
 
   private emitError(e: Error): void {
     this.listeners.error.forEach((l) => l(e));
+  }
+
+  /** Tell the host an owner-desktop answer, decline or follow-up settled; a listener that throws is reported on `error`. */
+  private notify<K extends 'answer' | 'decline' | 'followUp'>(
+    event: K,
+    r: Parameters<Listener[K]>[0],
+  ): void {
+    for (const l of [...(this.listeners[event] as ((x: typeof r) => void)[])]) {
+      try {
+        l(r);
+      } catch (e) {
+        this.emitError(e as Error);
+      }
+    }
   }
 
   /** A Host without a persistent key store keeps the epochs it fetches here, seeded from its identity. */
@@ -583,10 +597,9 @@ export class DecisionsBridge {
     if (settled) return settled;
     // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create
     // or cancellation, and is called off if the bridge stops or is revoked while it waits its turn.
-    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
-    if (running()) {
+    if (this.running()) {
       await this.publisher
-        .flush({ only: ownerAnswerItemId(answerId), proceed: running })
+        .flush({ only: ownerAnswerItemId(answerId), proceed: this.running })
         .catch((e) => this.emitError(e as Error));
     }
     return (
@@ -667,6 +680,67 @@ export class DecisionsBridge {
    */
   getDeclineResult(declineId: string): Promise<OwnerDeclineResult | null> {
     return this.publisher.ownerDeclineResult(declineId);
+  }
+
+  /**
+   * Publish the person's follow-up on a question's thread, written in the host app's own UI on the owner desktop and
+   * signed with its key as the person's message (protocol section 16): the asking desktop types it into the pane as
+   * a follow-up `sent_from: computer`, and `get_decision` shows it as the person's, sent from the computer. It goes
+   * to the owner's own questions and a Remote Host's alike, open or answered, and needs no local copy of the
+   * question. As from a phone, it is text only, never expects a reply and never answers or changes the answer.
+   *
+   * The follow-up is committed to the outbox, and one send is tried at once, in the outbox's order (after its
+   * question's create, a queued withdrawal and the person's earlier follow-ups on it). The result says where it
+   * stands: `sent`; `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or
+   * by the computer that asked (which has not declared `owner-desktop-messages-v1`); `rejected` (a thread at its
+   * message limit is `invalid_state`); or `queued` when it is not settled yet (the relay could not be reached, it
+   * waits its turn, or the bridge is stopped), in which case the outbox keeps sending it and its outcome arrives on
+   * `followUp` (and from `getFollowUpResult`). Every outcome is reported on `followUp` by the process that settles
+   * it, this one included. Pass `messageId` to make a repeated submission the same follow-up.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is
+   * not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async sendFollowUp(input: SendFollowUpInput): Promise<OwnerFollowUpResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop sends the person's follow-up; a Remote Host never speaks for the person",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = SendFollowUpInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { messageId, settled } = await this.publisher.enqueueOwnerMessage(parsed.data);
+    if (settled) return settled;
+    // The same ordered outbox send as the pump's, for this follow-up alone, called off if the bridge stops or is
+    // revoked while it waits its turn.
+    if (this.running()) {
+      await this.publisher
+        .flush({ only: ownerMessageItemId(messageId), proceed: this.running })
+        .catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerMessageResult(messageId)) ?? {
+        messageId,
+        questionId: parsed.data.questionId,
+        status: 'queued',
+      }
+    );
+  }
+
+  /**
+   * Where a follow-up from `sendFollowUp` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
+  getFollowUpResult(messageId: string): Promise<OwnerFollowUpResult | null> {
+    return this.publisher.ownerMessageResult(messageId);
   }
 
   /**
@@ -931,6 +1005,7 @@ export class DecisionsBridge {
           messageId: m.message_id,
           messageSeq: m.message_seq,
           side: m.side,
+          sentFrom: messageSentOn(m),
           expectsReply: m.expects_reply,
           text,
           images: images.map((i) => ({
@@ -967,16 +1042,20 @@ export class DecisionsBridge {
 
   /* ---------------- pump ---------------- */
 
+  /** Neither stopped nor revoked: an outbox send waiting its turn goes ahead only while this holds. */
+  private readonly running = () => this.state !== 'stopped' && this.state !== 'revoked';
+
   /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
   pump(): Promise<void> {
-    if (this.state === 'revoked' || this.state === 'stopped') return Promise.resolve();
+    if (!this.running()) return Promise.resolve();
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
-        const flushed = await this.publisher.flush();
+        // A flush that waits behind another, or is still sending when the bridge stops, sends nothing more.
+        const flushed = await this.publisher.flush({ proceed: this.running });
         if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
-        if (flushed.created.length > 0) await this.publisher.flush();
+        if (flushed.created.length > 0) await this.publisher.flush({ proceed: this.running });
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();

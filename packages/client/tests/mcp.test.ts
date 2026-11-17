@@ -413,6 +413,36 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     });
     expect(fromPhone.content[0].text).toContain('Answer (human): approve');
   });
+  it('get_decision says where the person sent each follow-up from, and lists the agent’s own as neither', async () => {
+    const { mcp, bridge, relay, phone, identity } = await boot({ bridge: { followUps: true } });
+    relay.postMessageEvents = true;
+    const ask = await call(mcp, 'ask_human', { question: 'Ship it?' });
+    const id = ask.structuredContent.question_id as string;
+    await bridge.pump();
+    const owner = { deviceId: identity.config.deviceId, keys: identity.keys };
+    await relay.messageEvent({ questionId: id, signer: owner, text: 'From the computer' });
+    await relay.messageEvent({ questionId: id, signer: phone, text: 'From the phone' });
+    await call(mcp, 'send_followup', { question_id: id, text: 'Thanks', expects_reply: false });
+    await bridge.pump();
+    await bridge.catchUp();
+    const r = await call(mcp, 'get_decision', { question_id: id });
+    expect(
+      (r.structuredContent.thread as { side: string; sent_from: unknown; text: string }[]).map(
+        (t) => [t.side, t.sent_from, t.text],
+      ),
+    ).toEqual([
+      ['human', 'computer', 'From the computer'],
+      ['human', 'phone', 'From the phone'],
+      ['agent', null, 'Thanks'],
+    ]);
+    // The advertised schema allows exactly those values.
+    const list = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const tool = list.result.tools.find((t: { name: string }) => t.name === 'get_decision');
+    expect(tool.outputSchema.properties.thread.items.properties.sent_from).toEqual({
+      type: ['string', 'null'],
+      enum: ['phone', 'computer', null],
+    });
+  });
 });
 
 describe('HTTP MCP: get_involvement', () => {

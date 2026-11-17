@@ -2,6 +2,7 @@ import type {
   MessageDeliveryStatus,
   MessageSide,
   PhoneImageReference,
+  Role,
 } from '@daintreehq/decisions-protocol';
 
 /**
@@ -57,6 +58,11 @@ export interface StoredMessage {
   side: MessageSide;
   expects_reply: boolean;
   signer_device_id: string;
+  /**
+   * The signer's certified role when the message was verified. Absent on messages stored before it was kept, which
+   * were all a phone's or tablet's when human: an earlier library refused every other signer of the person's message.
+   */
+  signer_role?: Role;
   /** The phone images the signed record lists. */
   attachment_ids: string[];
   created_at: string;
@@ -76,6 +82,17 @@ export interface MessageContent {
   text: string;
   /** Human only: the phone images, in the order the person attached them. */
   images: PhoneImageReference[];
+}
+
+/**
+ * Where the person sent a human message from: `computer` when the owner desktop signed it (the person's own message,
+ * written on their computer), `phone` for a phone or tablet. Null for the agent's own messages.
+ */
+export function messageSentOn(
+  m: Pick<StoredMessage, 'side' | 'signer_role'>,
+): 'computer' | 'phone' | null {
+  if (m.side !== 'human') return null;
+  return m.signer_role === 'owner-desktop' ? 'computer' : 'phone';
 }
 
 export function parseMessages(json: string | null | undefined): StoredMessage[] {

@@ -317,28 +317,30 @@ export class RelayClient {
       ...opts,
     });
   }
-  /** Post an agent message into a question's thread (docs/protocol.md section 16). */
+  /**
+   * Post a message into a question's thread (docs/protocol.md section 16): the agent's, from the desktop that
+   * published the question, or the person's follow-up written on the owner desktop, which only the owner desktop
+   * signs (a Remote Host never speaks for the person).
+   */
   postMessage(
     questionId: string,
     idempotencyKey: string,
     message: SignedMessage,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
   ): Promise<MessageReceipt> {
-    // A desktop speaks only for its agent: a human message is a phone's or tablet's, like a human answer.
-    if (message.record.side !== 'agent') {
-      return Promise.reject(
-        new RelayError(
-          'forbidden',
-          'a desktop never signs a human message: only a phone or tablet speaks for the person',
-          403,
-        ),
-      );
-    }
     const body: MessageBody = {
       protocol_version: PROTOCOL_VERSION,
       idempotency_key: idempotencyKey,
       message,
     };
-    return this.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, { body });
+    const send = () =>
+      this.request<MessageReceipt>('POST', `${API_PREFIX}/questions/${questionId}/messages`, {
+        body,
+        ...opts,
+      });
+    return message.record.side === 'agent'
+      ? send()
+      : this.ownerOnly("sending the person's follow-up", send);
   }
   deleteQuestion(id: string): Promise<unknown> {
     return this.ownerOnly('deleting a question', () =>
