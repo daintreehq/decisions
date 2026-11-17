@@ -32,23 +32,27 @@ function useInvolvement(): InvolvementSnapshot {
   return s;
 }
 
-/** The clock, moved on exactly when a temporary mode ends, so the screen never shows one that is over. */
-function useBoundaryClock(until: string | null): number {
-  const [now, setNow] = useState(Date.now);
+/**
+ * Re-renders the screen when the next of `ends` passes, so it never shows a temporary mode that is over. Ends already
+ * past are skipped, so a later one is still waited for. Returns a tick that changes at each boundary.
+ */
+function useBoundaryTick(ends: readonly (string | null | undefined)[]): number {
+  const [tick, setTick] = useState(0);
+  const now = Date.now();
+  const next = ends
+    .map((u) => (u ? Date.parse(u) : NaN))
+    .filter((t) => t > now)
+    .sort((a, b) => a - b)[0];
   useEffect(() => {
-    if (!until) return;
-    const at = Date.parse(until);
-    const wait = at - Date.now();
-    if (!(wait > 0)) {
-      // Already over (it ended while the screen was loading): catch the clock up now.
-      if (now < at) setNow(Date.now());
-      return;
-    }
+    if (next === undefined) return;
     // setTimeout holds at most ~24.8 days; a later end is re-armed when this one fires.
-    const t = setTimeout(() => setNow(Date.now()), Math.min(wait + 50, 2_000_000_000));
+    const t = setTimeout(
+      () => setTick((n) => n + 1),
+      Math.min(next - Date.now() + 50, 2_000_000_000),
+    );
     return () => clearTimeout(t);
-  }, [until, now]);
-  return now;
+  }, [next, tick]);
+  return tick;
 }
 
 function ModeChoice({
@@ -109,10 +113,11 @@ export function InvolvementSection() {
 
   const loaded = state.status === 'ready' || state.status === 'invalid';
   const record = state.status === 'ready' ? state.record : null;
-  const effective = inForce(record, Date.now());
   // Re-render when the saved temporary mode ends, and when the one being edited does, so neither outlives its time.
-  const ends = [effective?.until, draft?.override?.until].filter((u): u is string => !!u).sort();
-  const now = useBoundaryClock(ends[0] ?? null);
+  const tick = useBoundaryTick([record?.override?.until, draft?.override?.until]);
+  // Everything is worked out against the time now, so a screen left open never judges by when it opened.
+  const now = Date.now();
+  const effective = inForce(record, now);
   const baseline = draftOf(record, now);
 
   // The form starts from what is saved, and follows it while there is nothing unsaved (another device's save, or
@@ -127,7 +132,7 @@ export function InvolvementSection() {
       setBase(state.revision);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, record, now, state.revision]);
+  }, [loaded, record, tick, state.revision]);
 
   const dirty = !!draft && !draftsEqual(draft, baseline);
   /** Nothing usable is saved (none set, or one this device couldn't verify): what the form shows can be saved as is. */
@@ -145,6 +150,8 @@ export function InvolvementSection() {
   const guard = useLeaveGuard(dirty);
 
   const edit = (next: InvolvementDraft) => {
+    // Edits that start from what is saved start from its revision, whatever an earlier edit started from.
+    if (draft && draftsEqual(draft, baseline)) setBase(state.revision);
     setDraft(next);
     setJustSaved(false);
     setSaveError(null);
@@ -152,12 +159,6 @@ export function InvolvementSection() {
 
   const save = async (): Promise<boolean> => {
     if (!draft || invalid || saving) return false;
-    // The screen's clock moves only at boundaries: check the end time against now, as the relay will.
-    const late = draftError(draft, Date.now());
-    if (late) {
-      setSaveError(late);
-      return false;
-    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -185,6 +186,7 @@ export function InvolvementSection() {
   };
   const discard = () => {
     setDraft(baseline);
+    setBase(state.revision);
     setSaveError(null);
     setConflict(false);
   };

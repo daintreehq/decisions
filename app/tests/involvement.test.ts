@@ -373,6 +373,28 @@ describe('the involvement store', () => {
     expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
   });
 
+  it('judges a retried save by what it reads back, never by what it showed before', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0)); // this phone's revision 1, read and shown
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    (relay.deps.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ preference: 'garbage' });
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
+  });
+
+  it('a record it could not verify sets no floor for a valid one', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    relay.setCurrent({ ...(await sign(w, draft(), 8)), consult_count: 8 }); // revision 9, tampered
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    expect(s.get()).toMatchObject({ status: 'invalid', revision: 9 });
+    relay.setCurrent(await sign(w, draft({ consultCount: 2 }), 2));
+    await s.load();
+    expect(s.get()).toMatchObject({ status: 'ready', revision: 3, record: { consult_count: 2 } });
+  });
+
   it('a slow read never replaces a newer save', async () => {
     const w = await makeWorld();
     const relay = fakeRelay(w);

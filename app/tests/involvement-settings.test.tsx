@@ -270,6 +270,25 @@ describe('the involvement section', () => {
     expect(text()).not.toContain('Unsaved changes');
   });
 
+  it('discarding after another device’s change starts the next edit from that change', async () => {
+    relay.current = record({ revision: 2, normal_mode: 'involve-early' });
+    await mount();
+    await act(async () => radio(0, 'recommend').click());
+    relay.current = record({ revision: 3, consult_count: 6, signer_device_id: 'tablet_00001' });
+    await act(async () => (store.s as InstanceType<typeof InvolvementStore>).refresh());
+    await flush();
+    await act(async () => button('Discard').click());
+    await act(async () => radio(0, 'recommend').click());
+    await act(async () => button('Save').click());
+    await flush();
+    expect(text()).not.toContain('Another device changed this');
+    expect(relay.puts[0]).toMatchObject({
+      revision: 4,
+      normal_mode: 'recommend',
+      consult_count: 6,
+    });
+  });
+
   it('a change that arrives while you edit is a conflict when you save, never silently replaced', async () => {
     relay.current = record({ revision: 2, normal_mode: 'involve-early' });
     await mount();

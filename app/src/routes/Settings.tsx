@@ -83,15 +83,16 @@ function useInvolvementSummary(served: boolean): string {
       void app.loadInvolvement().catch(() => undefined);
   }, [served]);
   // Repaint when a temporary mode ends, so the row never shows one that is over.
-  const [, tick] = useState(0);
+  const [ticks, tick] = useState(0);
   const until = state.status === 'ready' && state.record?.override?.until;
   useEffect(() => {
     if (!until) return;
     const wait = Date.parse(until) - Date.now();
     if (!(wait > 0)) return;
+    // setTimeout holds at most ~24.8 days: each tick re-arms until the end is reached.
     const t = setTimeout(() => tick((n) => n + 1), Math.min(wait + 50, 2_000_000_000));
     return () => clearTimeout(t);
-  }, [until]);
+  }, [until, ticks]);
   if (!served) return '';
   if (state.status === 'invalid') return 'Couldn’t verify';
   return involvementSummary(state.status === 'ready' ? state.record : undefined, Date.now());
