@@ -36,9 +36,13 @@ describe("waiting for the relay's /info", () => {
   it('joins the request already on its way instead of asking twice', async () => {
     const asks = relay();
     const ctl = new AppController('https://relay.example');
-    const first = ctl.ensureInfo();
-    const second = ctl.ensureInfo();
+    const settled: string[] = [];
+    const first = ctl.ensureInfo().then(() => void settled.push('first'));
+    const second = ctl.ensureInfo().then(() => void settled.push('second'));
     expect(asks).toHaveLength(1);
+    // Both wait for the answer: joining is not settling early.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toEqual([]);
     asks[0]!.resolve(answer());
     await Promise.all([first, second]);
     expect(ctl.getSnapshot().info?.voice).toEqual(VOICE);

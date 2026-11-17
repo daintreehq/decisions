@@ -578,6 +578,29 @@ describe('before the relay has said whether dictation is set up', () => {
     expect(t.mic.calls).toBe(1);
   });
 
+  it('an answer without dictation keys, or a connection lost while asking, says so and starts nothing', async () => {
+    for (const consent of [true, false]) {
+      h.prefs.voice.consent = consent;
+      const unset = late();
+      act(() => unset.d.request(bindingFor()));
+      await unset.answer({ xai: false, openai: false, anthropic: false });
+      expect(unset.d.getState()).toMatchObject({
+        phase: 'idle',
+        message: { text: MESSAGES.unconfigured },
+      });
+      let online = true;
+      const lost = late({ online: () => online });
+      act(() => lost.d.request(bindingFor()));
+      online = false;
+      await lost.answer(XAI);
+      expect(lost.d.getState()).toMatchObject({
+        phase: 'idle',
+        message: { text: MESSAGES.offline },
+      });
+      expect(unset.mic.calls + unset.clients.length + lost.mic.calls + lost.clients.length).toBe(0);
+    }
+  });
+
   it('offline, or a relay without dictation keys, is said at once without waiting', () => {
     const offline = late({ online: () => false });
     act(() => offline.d.request(bindingFor()));
