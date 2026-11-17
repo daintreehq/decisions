@@ -169,6 +169,24 @@ describe('the involvement section', () => {
     expect(relay.puts[0]).toMatchObject({ revision: 5, override: null });
   });
 
+  it('follows a temporary mode ending while the screen is open, and stays savable', async () => {
+    relay.current = record({
+      revision: 4,
+      normal_mode: 'recommend',
+      override: { mode: 'involve-early', until: new Date(Date.now() + 40).toISOString() },
+    });
+    await mount();
+    expect(host.querySelector<HTMLInputElement>('input[role="switch"]')!.checked).toBe(true);
+    // An unrelated render right after it ends, before the boundary timer fires.
+    await act(async () => new Promise((r) => setTimeout(r, 60)));
+    await act(async () => (store.s as InstanceType<typeof InvolvementStore>).refresh());
+    await act(async () => new Promise((r) => setTimeout(r, 100)));
+    expect(host.querySelector<HTMLInputElement>('input[role="switch"]')!.checked).toBe(false);
+    expect(text()).toContain('Your normal mode.');
+    expect(text()).not.toContain('Choose an end time in the future');
+    expect(text()).not.toContain('Unsaved changes');
+  });
+
   it('turns on a temporary mode, and refuses an end time in the past', async () => {
     await mount();
     await act(async () => host.querySelector<HTMLInputElement>('input[role="switch"]')!.click());

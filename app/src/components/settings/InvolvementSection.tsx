@@ -114,11 +114,12 @@ export function InvolvementSection() {
   const loaded = state.status === 'ready' || state.status === 'invalid';
   const record = state.status === 'ready' ? state.record : null;
   // Re-render when the saved temporary mode ends, and when the one being edited does, so neither outlives its time.
-  const tick = useBoundaryTick([record?.override?.until, draft?.override?.until]);
+  useBoundaryTick([record?.override?.until, draft?.override?.until]);
   // Everything is worked out against the time now, so a screen left open never judges by when it opened.
   const now = Date.now();
   const effective = inForce(record, now);
   const baseline = draftOf(record, now);
+  const baselineKey = JSON.stringify(baseline);
 
   // The form starts from what is saved, and follows it while there is nothing unsaved (another device's save, or
   // a temporary mode ending while the screen is open). Following moves the revision the edits start from too.
@@ -131,8 +132,9 @@ export function InvolvementSection() {
       setDraft(baseline);
       setBase(state.revision);
     }
+    // Keyed on the baseline itself: a temporary mode that ended changes it, however the render was caused.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, record, tick, state.revision]);
+  }, [loaded, baselineKey, state.revision]);
 
   const dirty = !!draft && !draftsEqual(draft, baseline);
   /** Nothing usable is saved (none set, or one this device couldn't verify): what the form shows can be saved as is. */
