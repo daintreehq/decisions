@@ -17,6 +17,8 @@ Ids, timestamps, requirement level (needed to enforce policy), question status, 
 
 Your notification settings (quiet hours and reminders) and your involvement preference are stored in plaintext: the relay sees whether you want agents to involve you early or bring you a recommendation, how many agents they should consult, and when a temporary setting ends. The involvement preference is signed by the phone, tablet or computer you set it on, so the relay cannot change it or attribute it to another device. An agent's report of how it prepared a question travels inside the encrypted question.
 
+When your desktop reports that you are at the computer (presence), the relay learns that you are, and when: it sees each report and renewal, so it can tell roughly when you sat at the computer and when you left it or it went to sleep. It keeps only when the current report lapses, never a history, and a report carries nothing about questions, panes or content. While a report is current, the relay holds a new question's phone notification for up to two minutes.
+
 ## What is authenticated
 
 - Every request is signed by a paired device (ECDSA P-256) and includes a timestamp and nonce; replays are rejected.

@@ -32,7 +32,8 @@ With the extensions in sections 16 to 18 and 20, a phone or tablet also sends hu
 asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its
 `originating_device_id`, whatever its role) publishes that question's agent messages and pane snapshots and reports
 delivery of its human messages. The owner desktop may also send the person's human messages (section 16) and set
-the involvement preference (section 20).
+the involvement preference (section 20). With `presence-v1` (section 11), the
+owner desktop alone also reports that the person is at the computer.
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
 the signer (`provenanceForSigner` in `state.ts`):
@@ -156,9 +157,9 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 | `POST /questions/{id}/override`         | phone, tablet                | replace a proxy answer, or (deprecated, section 16.1) a human answer; delivered as a correction                                                                                                                                                      |
 | `POST /questions/{id}/confirm-proxy`    | phone, tablet                | human affirms the proxy answer; not re-delivered                                                                                                                                                                                                     |
 | `POST /questions/{id}/proxy-answer`     | desktops                     | rejected for `human-required`                                                                                                                                                                                                                        |
-| `POST /questions/{id}/proxy-abstain`    | desktops                     | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                                                                                                                                                                               |
+| `POST /questions/{id}/proxy-abstain`    | desktops                     | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately, or after a presence hold (section 11)                                                                                                                                        |
 | `POST /questions/{id}/cancel`           | any                          | idempotent; cannot remove a committed human answer; a phone/tablet only from `open`, and only once the question's desktop declares `person-declines-v1`; an owner-desktop decline (`decline: true`) likewise, with `owner-desktop-declines-v1` (6.1) |
-| `POST /questions/{id}/reopen`           | owner-desktop                | new revision, optional new `expires_at`                                                                                                                                                                                                              |
+| `POST /questions/{id}/reopen`           | owner-desktop                | new revision, optional new `expires_at`; starts a new presence hold (section 11)                                                                                                                                                                     |
 | `DELETE /questions/{id}`                | owner-desktop                | hard-delete question, answers, messages, attachments; emits `decision.deleted`                                                                                                                                                                       |
 
 Idempotency: a repeated `idempotency_key` with identical body returns the original receipt; a different body is
@@ -343,6 +344,30 @@ on a known push-service host. One Durable Object alarm drives a SQL `scheduled_j
 every 24 h, max 3), proxy-review reminder, expiry, attachment deletion and orphan GC. `GET/PUT /settings` stores quiet
 hours and reminder preferences (notification preferences only; they never delay sync).
 
+**Presence** (`presence-v1`). The owner desktop says the person is at the computer with `PUT /presence`
+`PresenceBody {protocol_version, present}` → `200 PresenceResponse {present, until}`. `present: true` starts or renews
+a lease that ends `presenceLeaseMs` (60 s) after the relay accepts it, and `until` says when, so the desktop renews in
+time; `present: false` ends it at once. Only the owner desktop reports (`403 forbidden` for any other role), and a
+report carries nothing about questions, panes or content. The relay keeps only the current lease's end: no history,
+no event, no push, and nothing runs when a lease lapses. A desktop that sleeps or loses its connection stops renewing,
+so its lease lapses within a minute.
+
+While a lease is current, a question's `decision-new` push waits for the person at the computer: until the lease
+lapses or `presenceHoldMs` (120 s) after the relay accepted the question, whichever comes first. The hold counts from
+the question's creation, or from its latest reopen, which starts a new round. Renewing the lease, a retry or a proxy
+abstaining never moves it, so a question not answered at the computer still reaches the phone, `human-required` ones
+included. The relay checks the hold when the push is due, so a lease that starts during a `proxy-*` question's grace
+holds that push too; the grace itself is unchanged. Ending a lease releases a held push when the relay was already due
+to check it again, at most one lease later. A question answered on any device, declined, withdrawn or expired during
+the hold sends no push. A push whose sending has begun cannot be recalled.
+
+The hold covers the `decision-new` push of a new question, of a proxy abstaining and of a reopen. It leaves out the
+`decision-proxy` notice of a proxy answer and the proxy-review reminder (only a phone or tablet confirms or overrides a
+proxy answer), reply pushes (`decision-reply`: the person replies to an agent message from a phone or tablet),
+reminders (hours later, past any hold) and test pushes. Quiet hours apply after the hold as before, and can defer a
+push past it. A relay that does not advertise `presence-v1` has no `/presence` route and pushes as it always has; a
+client MUST NOT send presence to it.
+
 ## 12. Deliveries
 
 `POST /deliveries/received {seq}` (also the `ack` frame): the desktop durably stored events up to `seq`.
@@ -368,12 +393,14 @@ logged.
 
 `GET /admin/diagnostics` (owner) → `Diagnostics` (counters only, no content). `POST /admin/delete-data {confirm:
 "DELETE", scope: "questions" | "everything"}` (owner). Both scopes also remove every thread message, message receipt,
-phone image and reservation, pane snapshot and outstanding snapshot refresh.
+phone image and reservation, pane snapshot and outstanding snapshot refresh. `everything` also ends the presence lease
+(section 11); a questions wipe keeps it.
 
 ## 15. Conformance
 
 A compatible relay MUST pass `worker/tests/*.test.ts` semantics: signature/replay rejection, CAS and first-answer-wins,
-proxy never satisfying `human-required`, idempotency, ordered event paging, revocation, reminder cancellation,
+proxy never satisfying `human-required`, idempotency, ordered event paging, revocation, reminder cancellation, a
+presence hold that never outlasts its bound,
 attachment integrity, no plaintext in storage, and feature filtering that keeps a 0.3.0 client parsing every page and
 frame (section 19).
 
@@ -685,7 +712,7 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`, `presence-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
 features parse and are ignored (`knownFeatures`).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
@@ -693,6 +720,9 @@ answers to its questions (section 2), and the relay checks that desktop's latest
 committing one; a `GET /events` declaration is not recorded and does not count. The committed answer is sent to every
 client whatever it declared, so no client's cursor passes over it unseen; whether a client accepts it is the signer
 check of section 2.
+
+`presence-v1` filters no events and needs no declaration: it advertises `PUT /presence` and the push hold of
+section 11, and a client reports presence only to a relay that lists it.
 
 `person-declines-v1` filters no events either. A publishing desktop declares it to say it files a phone's or tablet's
 decline of its questions (section 6.1), and the relay checks that desktop's latest socket-ticket declaration in the
