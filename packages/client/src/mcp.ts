@@ -6,7 +6,7 @@ import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridg
 import type { InvolvementView } from './involvement.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
