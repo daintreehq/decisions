@@ -28,34 +28,40 @@ const RECHECK_MS = 10 * 60_000;
 /** Backoff for a failed renewal: never sooner than this, never later than one renewal period. */
 const RETRY_MIN_MS = 1_000;
 
+/**
+ * A moment by two clocks. The wall clock (`ctx.now()`) counts a sleeping machine's time, which a monotonic clock may
+ * not; the monotonic clock is never set back, as the wall clock can be.
+ */
+interface Stamp {
+  wall: number;
+  mono: number;
+}
+
 /** Keeps the relay's presence lease current while the host's latest report says the person is present. */
 export class PresenceReporter {
   private running = false;
   /** Bumped by every start and stop: a request from an earlier run changes nothing when it returns. */
   private generation = 0;
-  /** When the host last said the person is present (`ctx.now()`), or null after away, a stop, or never. */
-  private presentAt: number | null = null;
+  /** When the host last said the person is present, or null after away, a stop, or never. */
+  private presentAt: Stamp | null = null;
   /** The host said the person is away since the last report that they are present. */
   private awayReported = false;
   /** A `true` went to the relay (answered or not) with no `false` after it, so a lease may be current. */
   private leaseMaybe = false;
-  /** When the last accepted `true` was sent (`ctx.now()`): the next renewal is due `RENEW_MS` later. */
-  private renewedAt: number | null = null;
-  /** When a failed renewal may be tried again (`ctx.now()`), or null when none failed. */
-  private retryAt: number | null = null;
+  /** When the last accepted `true` was sent: the next renewal is due `RENEW_MS` later. */
+  private renewedAt: Stamp | null = null;
+  /** When a failed renewal may be tried again: `wait` after `from`. Null when none failed. */
+  private retry: { from: Stamp; wait: number } | null = null;
   private attempts = 0;
   /** Whether the relay advertises `presence-v1`, and when that was learned. */
-  private support: { value: boolean; at: number } | null = null;
+  private support: { value: boolean; at: Stamp } | null = null;
   private inflight = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  /** The latest `ctx.now()` read, to notice the wall clock stepping back. */
-  private seen = -Infinity;
-  /** Bumped whenever the wall clock is seen stepping back: a time read before one is never compared with one after. */
-  private rollbacks = 0;
 
   constructor(
     private readonly ctx: BridgeContext,
     private readonly onError: (e: Error) => void,
+    private readonly monotonic: () => number = () => performance.now(),
   ) {}
 
   /** True while a presence request (or the feature check) is in flight. */
@@ -65,15 +71,14 @@ export class PresenceReporter {
 
   /** The host's latest observation. Before `start()` it is only kept, and starting acts on it if it is still fresh. */
   report(present: boolean): void {
-    const now = this.clock();
     if (present) {
-      this.presentAt = now;
+      this.presentAt = this.stamp();
       this.awayReported = false;
     } else {
       this.presentAt = null;
       this.awayReported = true;
       this.renewedAt = null;
-      this.retryAt = null;
+      this.retry = null;
       this.attempts = 0;
     }
     this.schedule();
@@ -98,57 +103,46 @@ export class PresenceReporter {
     this.awayReported = false;
     this.leaseMaybe = false;
     this.renewedAt = null;
-    this.retryAt = null;
+    this.retry = null;
     this.attempts = 0;
   }
 
+  private stamp(): Stamp {
+    return { wall: this.ctx.now(), mono: this.monotonic() };
+  }
+
   /**
-   * `ctx.now()`, wall-clock time. When the clock stepped back since the last read, nothing measured before can be
-   * trusted: the host's report no longer counts (renewal waits for the next one, so a report never counts for longer
-   * than `PRESENCE_REPORT_MS`), and the renewal, backoff and feature-check times are forgotten, so the next report
-   * asks the relay and renews at once. A step forward (a machine waking from sleep) only makes them come due sooner:
-   * a report goes stale, a renewal or retry is due.
+   * Time from `then` to `now`: the longer of the two clocks' accounts. A wall clock set back cannot make a report seem
+   * younger or stall a renewal (the monotonic clock still counts), and a machine that slept cannot either (the wall
+   * clock counts the sleep). Either way things only come due sooner: a report goes stale, a renewal or retry is due.
    */
-  private clock(): number {
-    const now = this.ctx.now();
-    if (now < this.seen) {
-      this.rollbacks++;
-      this.presentAt = null;
-      this.renewedAt = null;
-      this.retryAt = null;
-      this.attempts = 0;
-      this.support = null;
-    }
-    this.seen = now;
-    return now;
+  private since(then: Stamp, now: Stamp): number {
+    return Math.max(now.wall - then.wall, now.mono - then.mono);
   }
 
   /** The host's latest report says the person is present, and it is recent enough to act on at `now`. */
-  private fresh(now: number): boolean {
-    return this.presentAt !== null && now - this.presentAt < PRESENCE_REPORT_MS;
+  private fresh(now: Stamp): boolean {
+    return this.presentAt !== null && this.since(this.presentAt, now) < PRESENCE_REPORT_MS;
   }
 
-  private knownUnsupported(now: number): boolean {
+  private known(now: Stamp, value: boolean): boolean {
     const s = this.support;
-    return s !== null && !s.value && now - s.at < RECHECK_MS;
+    return s !== null && s.value === value && this.since(s.at, now) < RECHECK_MS;
   }
 
-  private knownSupported(now: number): boolean {
-    const s = this.support;
-    return s !== null && s.value && now - s.at < RECHECK_MS;
-  }
-
-  /** What to send next and when, or null when nothing is owed. */
-  private next(now: number): { present: boolean; at: number } | null {
+  /** What to send next and how soon (ms from `now`), or null when nothing is owed. */
+  private next(now: Stamp): { present: boolean; inMs: number } | null {
     if (this.fresh(now)) {
-      if (this.knownUnsupported(now)) return null;
-      const due = this.renewedAt === null ? now : this.renewedAt + RENEW_MS;
-      const at = this.retryAt === null ? due : Math.max(due, this.retryAt);
+      if (this.known(now, false)) return null;
+      const renewal = this.renewedAt === null ? 0 : RENEW_MS - this.since(this.renewedAt, now);
+      const retry = this.retry === null ? 0 : this.retry.wait - this.since(this.retry.from, now);
+      const inMs = Math.max(0, renewal, retry);
       // Not renewed past the report's freshness: the lease lapses unless the host reports again.
-      return at < this.presentAt! + PRESENCE_REPORT_MS ? { present: true, at } : null;
+      const left = PRESENCE_REPORT_MS - this.since(this.presentAt!, now);
+      return inMs < left ? { present: true, inMs } : null;
     }
     // Ended once, when the person is reported away; a lease left by reports that simply stopped lapses alone.
-    if (this.awayReported && this.leaseMaybe) return { present: false, at: now };
+    if (this.awayReported && this.leaseMaybe) return { present: false, inMs: 0 };
     return null;
   }
 
@@ -156,17 +150,16 @@ export class PresenceReporter {
     if (!this.running || this.inflight) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    const now = this.clock();
-    const next = this.next(now);
+    const next = this.next(this.stamp());
     if (!next) return;
-    if (next.at <= now) {
+    if (next.inMs <= 0) {
       void this.send(next.present);
       return;
     }
     this.timer = setTimeout(() => {
       this.timer = null;
       this.schedule();
-    }, next.at - now);
+    }, next.inMs);
     (this.timer as { unref?: () => void }).unref?.();
   }
 
@@ -201,10 +194,9 @@ export class PresenceReporter {
       if (current()) this.retryLater(null);
       return;
     }
+    const sentAt = this.stamp();
     // Stopped, told away, or the report went stale while the relay was asked: send nothing.
-    if (!supported || !live() || !this.fresh(this.clock())) return;
-    const sentAt = this.clock();
-    const rollbacks = this.rollbacks;
+    if (!supported || !live() || !this.fresh(sentAt)) return;
     const hadLease = this.leaseMaybe;
     this.leaseMaybe = true;
     try {
@@ -221,16 +213,14 @@ export class PresenceReporter {
       // Refused, so this request started no lease, though an earlier one may still be current and is ended on away. A
       // 404 is a relay that lists the feature without the route: nothing there to end.
       this.leaseMaybe = err.status === 404 ? false : hadLease;
-      this.support = { value: false, at: this.clock() };
+      this.support = { value: false, at: this.stamp() };
       if (err.status !== 404) this.onError(err);
       return;
     }
-    // An away reported meanwhile is sent next, and a later return to present must not wait on this renewal. Nor must
-    // a send time from before the clock stepped back: the next report renews at once instead.
-    this.clock();
-    if (!current() || rollbacks !== this.rollbacks) return;
+    // An away reported meanwhile is sent next, and a later return to present must not wait on this renewal.
+    if (!current()) return;
     this.renewedAt = sentAt;
-    this.retryAt = null;
+    this.retry = null;
     this.attempts = 0;
   }
 
@@ -241,7 +231,7 @@ export class PresenceReporter {
       RETRY_MIN_MS,
       backoffMs(this.attempts, RETRY_MIN_MS, RENEW_MS),
     );
-    this.retryAt = this.clock() + wait;
+    this.retry = { from: this.stamp(), wait };
   }
 
   /**
@@ -251,9 +241,9 @@ export class PresenceReporter {
    * parse, or answers with a client error, advertises nothing; a network failure or 5xx throws, so the caller retries.
    */
   private async supported(): Promise<boolean> {
-    const now = this.clock();
-    if (this.knownSupported(now)) return true;
-    if (this.knownUnsupported(now)) return false;
+    const now = this.stamp();
+    if (this.known(now, true)) return true;
+    if (this.known(now, false)) return false;
     let value: boolean;
     try {
       const info = InfoResponse.safeParse(await this.ctx.client.info(REQUEST_TIMEOUT_MS));
@@ -262,7 +252,7 @@ export class PresenceReporter {
       if (!(e instanceof RelayError) || e.retryable) throw e;
       value = false;
     }
-    this.support = { value, at: this.clock() };
+    this.support = { value, at: this.stamp() };
     // A relay that no longer lists the feature is not sent an away either; a lease it holds lapses.
     if (!value) this.leaseMaybe = false;
     return value;

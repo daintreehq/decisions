@@ -19,6 +19,7 @@ import { FakeRelay, FakeSink, makeHost, makeIdentity, setupBridge } from './help
  */
 
 const SECOND = 1_000;
+const HOUR = 3_600_000;
 const realSetTimeout = globalThis.setTimeout;
 const realWait = (ms: number) => new Promise((r) => realSetTimeout(r, ms));
 const PRESENCE_PATH = '/api/v1/presence';
@@ -28,7 +29,7 @@ afterEach(() => {
 });
 
 async function world(o: { features?: string[] | undefined } = {}) {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
   const env = await setupBridge();
   env.relay.features = 'features' in o ? o.features : ['thread-messages-v1', 'presence-v1'];
   // The relay keeps its own time, moved on with the desktop's by `pass`, so the desktop's clock can be set apart.
@@ -222,60 +223,94 @@ describe('while the person is present', () => {
     expect(w.errors).toEqual([]);
   });
 
-  it('keeps renewing when the desktop clock steps back and the host keeps reporting', async () => {
+  it('keeps renewing on time when the desktop clock steps back', async () => {
     const w = await world();
     await w.start();
     w.bridge.reportPresence(true);
     await w.pass(30 * SECOND);
     expect(w.puts()).toEqual([true, true]);
-    vi.setSystemTime(Date.now() - 3_600_000);
+    vi.setSystemTime(Date.now() - HOUR);
     for (let s = 0; s < 180; s += 30) {
       w.bridge.reportPresence(true);
-      await w.idle();
       await w.pass(30 * SECOND, () => expect(w.leaseCurrent()).toBe(true));
     }
-    // The first report after the step renews at once (30 s), then every 20 seconds: no stall, and no burst.
-    expect(w.puts()).toHaveLength(12);
-    expect(w.infos()).toBe(2);
+    // Every 20 seconds from the start, at 0 to 200 s: no stall, no burst, no new feature check.
+    expect(w.puts()).toHaveLength(11);
+    expect(w.infos()).toBe(1);
   });
 
-  it('never times a renewal from a send made before the clock stepped back', async () => {
+  it('times a renewal on the wire when the clock steps back from its send, not from the clock', async () => {
     const w = await world();
     await w.start();
     let release!: () => void;
     w.relay.holdPresence = new Promise<void>((r) => (release = r));
     w.bridge.reportPresence(true);
     for (let i = 0; i < 500 && w.puts().length === 0; i++) await realWait(2);
-    vi.setSystemTime(Date.now() - 3_600_000);
+    vi.setSystemTime(Date.now() - HOUR);
     w.bridge.reportPresence(true);
     w.relay.holdPresence = null;
     release();
     await w.idle();
-    // Its send time is an hour ahead of the clock now: the report renews at once instead of waiting on it.
+    await w.pass(19 * SECOND);
+    expect(w.puts()).toEqual([true]);
+    await w.pass(SECOND);
     expect(w.puts()).toEqual([true, true]);
-    await w.pass(20 * SECOND);
-    expect(w.puts()).toEqual([true, true, true]);
   });
 
-  it('never stretches a report when the desktop clock steps back', async () => {
+  it('never stretches a report past two minutes when the clock steps back', async () => {
     const w = await world();
     await w.start();
     w.bridge.reportPresence(true);
     await w.pass(30 * SECOND);
-    vi.setSystemTime(Date.now() - 3_600_000);
-    // No report since the step: renewal stops, and the lease lapses a minute after the last one.
-    await w.pass(2 * LIMITS.presenceLeaseMs);
-    expect(w.puts()).toEqual([true, true]);
+    vi.setSystemTime(Date.now() - HOUR);
+    // No report since: renewed at 0 to 100 s only, and the lease lapses a minute after the last.
+    await w.pass(PRESENCE_REPORT_MS + LIMITS.presenceLeaseMs);
+    expect(w.puts()).toEqual(Array(6).fill(true));
     expect(w.leaseCurrent()).toBe(false);
 
-    // Nor one kept before the bridge started.
+    // Nor one kept before the bridge started, the clock set back by less than the time since.
     const v = await world();
     v.bridge.reportPresence(true);
     await v.pass(10 * 60 * SECOND, undefined, 60 * SECOND);
-    vi.setSystemTime(Date.now() - 3_600_000);
+    vi.setSystemTime(Date.now() - 9 * 60 * SECOND);
     await v.start();
     await v.pass(30 * SECOND);
     expect(v.puts()).toEqual([]);
+  });
+
+  it('lets a report go stale over a sleep the monotonic clock did not count, and renews at once on the next', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([true, true]);
+    // Asleep for ten minutes: only the wall clock moved.
+    vi.setSystemTime(Date.now() + 10 * 60 * SECOND);
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([true, true]);
+    w.bridge.reportPresence(true);
+    await w.idle();
+    expect(w.puts()).toEqual([true, true, true]);
+    expect(w.leaseCurrent()).toBe(true);
+  });
+
+  it('keeps a relay that refused left alone when the clock steps back', async () => {
+    const w = await world();
+    await w.start();
+    w.relay.presenceReplies.push({
+      status: 400,
+      body: { code: 'validation_error', message: 'no' },
+    });
+    w.bridge.reportPresence(true);
+    await w.idle();
+    expect(w.puts()).toEqual([true]);
+    vi.setSystemTime(Date.now() - HOUR);
+    for (let s = 0; s < 120; s += 30) {
+      w.bridge.reportPresence(true);
+      await w.pass(30 * SECOND);
+    }
+    expect(w.puts()).toEqual([true]);
+    expect(w.errors).toHaveLength(1);
   });
 });
 
