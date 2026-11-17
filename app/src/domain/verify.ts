@@ -3,7 +3,6 @@ import {
   CryptoEnvelope,
   DecisionContentV1,
   EventData,
-  HUMAN_ROLES,
   HumanAnswerContentV1,
   MESSAGE_RECORD_TYPE,
   MessageContentV1,
@@ -11,7 +10,7 @@ import {
   QuestionRecord,
   imagesMatchRecord,
   messageEnvelopeIssues,
-  provenanceForAction,
+  provenanceForSigner,
   roleMaySign,
   type ActionRecord,
   type MessageRecord,
@@ -201,17 +200,14 @@ export async function verifyActionEvent(
     return fail('relay metadata disagrees with the signed action');
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
-  // The relay also accepts the owner desktop's answer for the person (`human-desktop`). This app does not yet show
-  // one as the person's, so it keeps answers to a phone or tablet: a relay claiming `human` for one never passes.
-  if (
-    !roleMaySign(record.action, signer.role) ||
-    (record.action === 'answer' && !HUMAN_ROLES.includes(signer.role))
-  ) {
+  // The certified role decides, never the relay: the owner desktop may sign the person's first answer (made on the
+  // computer, `human-desktop`), a `desktop-host` never answers for them.
+  if (!roleMaySign(record.action, signer.role)) {
     return fail(`a ${signer.role} cannot sign ${record.action}`);
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
     return fail('signed by a device after it was revoked');
-  const provenance = provenanceForAction(record.action);
+  const provenance = provenanceForSigner(record.action, signer.role);
   const claimed = parsed.data.provenance;
   if ((provenance === 'none' ? null : provenance) !== claimed)
     return fail('relay provenance disagrees with the signed action');

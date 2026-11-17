@@ -10,7 +10,14 @@ import {
   sortNeedsYou,
   submitKind,
 } from '../src/domain/selectors.js';
-import { actionEvent, makeWorld, plainEvent, questionEvent, type World } from './helpers.js';
+import {
+  actionEvent,
+  makeWorld,
+  otherDesktop,
+  plainEvent,
+  questionEvent,
+  type World,
+} from './helpers.js';
 
 const store = (w: World, extra: Partial<ConstructorParameters<typeof QuestionStore>[0]> = {}) =>
   new QuestionStore({
@@ -55,17 +62,42 @@ describe('question store', () => {
   it('never presents a forged answer as a decision', async () => {
     const w = await makeWorld();
     const s = store(w);
-    const q = await questionEvent(w);
+    const host = await otherDesktop(w);
+    const q = await questionEvent(w, { signer: host });
     await s.ingest(q);
-    // The relay claims a human answered, but the desktop signed it.
+    // The relay claims a human answered, but a desktop-host signed it: it never answers for the person.
     await s.ingest(
-      await actionEvent(w, { questionId: q.question_id!, action: 'answer', signer: w.desktop }),
+      await actionEvent(w, {
+        questionId: q.question_id!,
+        action: 'answer',
+        signer: host,
+        provenance: 'human-desktop',
+      }),
     );
     const v = s.get(q.question_id!)!;
     expect(effectiveStatus(v)).toBe('unverified');
     expect(currentAnswer(v)).toBeNull();
     expect(needsYou(v)).toBe(false);
     expect(v.integrityIssues[0]).toMatch(/cannot sign answer/);
+  });
+
+  it("takes the owner desktop's answer as the person's decision, made on the computer", async () => {
+    const w = await makeWorld();
+    const s = store(w);
+    const q = await questionEvent(w);
+    await s.ingest(q);
+    await s.ingest(
+      await actionEvent(w, { questionId: q.question_id!, action: 'answer', signer: w.desktop }),
+    );
+    const v = s.get(q.question_id!)!;
+    expect(v.integrityIssues).toEqual([]);
+    expect(effectiveStatus(v)).toBe('human-answered');
+    expect(needsYou(v)).toBe(false);
+    expect(currentAnswer(v)).toMatchObject({
+      provenance: 'human-desktop',
+      signerRole: 'owner-desktop',
+      signerDeviceId: w.desktop.id,
+    });
   });
 
   it('shows an unverifiable question as unverified with no content', async () => {

@@ -258,7 +258,9 @@ export async function actionEvent(
     o.provenance !== undefined
       ? o.provenance
       : human
-        ? 'human'
+        ? o.action === 'answer' && signer.cert.role === 'owner-desktop'
+          ? 'human-desktop'
+          : 'human'
         : o.action === 'proxy-answer'
           ? 'proxy'
           : null;
