@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { closedLine, historyEntries } from '../src/domain/lists.js';
 import { QuestionStore } from '../src/domain/model.js';
 import { TrustStore } from '../src/domain/trust.js';
 import {
@@ -196,6 +197,43 @@ describe('question store', () => {
     expect(v.status).toBe('proxy-answered');
     expect(v.integrityIssues.join()).toMatch(/cannot decline a proxy-answered question/);
     expect(declinedByPerson(v)).toBe(false);
+  });
+
+  it('shows a decline after a reopen as the decline, not the model answer the withdrawal voided', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const s = store(w);
+    const q = await questionEvent(w, { requirement: 'proxy-ok' });
+    const id = q.question_id!;
+    await s.ingest(q);
+    await s.ingest(await actionEvent(w, { questionId: id, action: 'proxy-answer' }));
+    // The desktop withdraws the model-answered question, then reopens it; the person declines it on the computer.
+    await s.ingest(await actionEvent(w, { questionId: id, action: 'cancel', expectedRevision: 1 }));
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: id,
+        action: 'reopen',
+        expectedRevision: 1,
+        status: 'open',
+      }),
+    );
+    let v = s.get(id)!;
+    expect(v).toMatchObject({ status: 'open', revision: 2 });
+    expect(currentAnswer(v)).toBeNull();
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: id,
+        action: 'cancel',
+        expectedRevision: 2,
+        decline: true,
+      }),
+    );
+    v = s.get(id)!;
+    expect(v.integrityIssues).toEqual([]);
+    expect(currentAnswer(v)).toBeNull();
+    expect(declinedLabel(v)).toBe('Declined by you on Studio Mac');
+    const [entry] = historyEntries([v], 'decisions', '', Date.now());
+    expect(entry).toMatchObject({ status: 'declined', answer: null });
+    expect(closedLine(entry!.status, v)).toBe('Declined by you on Studio Mac');
   });
 
   it('never labels a decline the app cannot verify as the person’s', async () => {

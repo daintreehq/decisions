@@ -14,7 +14,7 @@ import {
   stableOrder,
   type ListQuery,
 } from '../src/domain/lists.js';
-import { answerBy, withdrawnLabel } from '../src/domain/selectors.js';
+import { answerBy, countsForAction, withdrawnLabel } from '../src/domain/selectors.js';
 
 const NOW = Date.parse('2026-11-03T15:00:00Z');
 const H = 3_600_000;
@@ -374,6 +374,11 @@ describe('History', () => {
     };
     expect(principalStatus(stuck, NOW)).toBe('declined');
     expect(needs([stuck], { ...base, refused: new Set(['c']) })).toEqual([]);
+    // Nor does the badge count it, a refused follow-up and all; a withdrawn one with a refused follow-up still counts.
+    const refused = new Set(['p', 'c', 'w']);
+    expect(list.map((v) => countsForAction(v, NOW, refused))).toEqual([false, false, true]);
+    expect(countsForAction(stuck, NOW, refused)).toBe(false);
+    expect(countsForAction(q('o'), NOW, new Set())).toBe(true);
     // The flag counts only on a verified owner-desktop cancel.
     const unverified = { ...computer, actions: [{ ...computerDecline(NOW - H), verified: false }] };
     expect(principalStatus(unverified, NOW)).toBe('withdrawn');

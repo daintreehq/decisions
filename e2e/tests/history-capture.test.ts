@@ -9,6 +9,7 @@ import {
   MemoryLocalStore,
   PolicyRegistry,
   RelayClient,
+  RelayError,
   approveCandidate,
   claimRelay,
   createPairingInvite,
@@ -631,7 +632,6 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
     // yet, so this signs the record itself with the owner desktop's key and declares the feature its relay requires
     // of the asking desktop. The bridge stops first, so no reconnect replaces that declaration before the decline.
     await bridge.stop();
-    await client.socketTicket([...bridge.features, 'owner-desktop-declines-v1']);
     const signed = await buildSignedAction({
       installationId: identity.config.installationId,
       questionId: ids.computer!,
@@ -642,7 +642,23 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
       envelope: null,
       decline: true,
     });
-    const receipt = await client.postAction('cancel', ids.computer!, newId(), signed);
+    // A ticket request the bridge had in flight when it stopped may still land after this declaration and replace it:
+    // the relay then refuses with creator-missing-feature and stores nothing, so declare again and resend.
+    const key = newId();
+    const receipt = await until(
+      async () => {
+        await client.socketTicket([...bridge.features, 'owner-desktop-declines-v1']);
+        try {
+          return await client.postAction('cancel', ids.computer!, key, signed);
+        } catch (e) {
+          if (e instanceof RelayError && e.details?.reason === 'creator-missing-feature')
+            return null;
+          throw e;
+        }
+      },
+      15_000,
+      'the decline on the computer to commit',
+    );
     expect(receipt).toMatchObject({ status: 'cancelled' });
 
     // History, framed on the three: two declines with the declined glyph, named where they were made, and the withdrawal.

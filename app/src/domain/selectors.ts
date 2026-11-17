@@ -23,10 +23,14 @@ export function effectiveStatus(v: QuestionView, now = Date.now()): EffectiveSta
   return v.status;
 }
 
-/** The answer currently in force (last verified answer-bearing action). */
+/**
+ * The answer currently in force (last verified answer-bearing action). None survives a reopen: a question is reopened
+ * only once it was withdrawn or expired, and the only answer either leaves behind is a model answer they voided.
+ */
 export function currentAnswer(v: QuestionView): ActionView | null {
   for (let i = v.actions.length - 1; i >= 0; i--) {
     const a = v.actions[i]!;
+    if (a.verified && a.action === 'reopen') return null;
     if (a.verified && ANSWER_KINDS.includes(a.action) && a.content) return a;
   }
   return null;
@@ -131,6 +135,16 @@ export const needsYou = (v: QuestionView, now = Date.now()): boolean =>
 /** Open questions, plus answered ones whose delivery needs the owner to look at their computer. */
 export const needsAction = (v: QuestionView, now = Date.now()): boolean =>
   needsYou(v, now) || deliveryNeedsAttention(v);
+
+/**
+ * What the action count (the badge) counts: `needsAction`, or a follow-up from this device the relay refused, unless
+ * the person declined the question, on a phone or tablet or on the computer: then nothing about it waits on them.
+ */
+export const countsForAction = (
+  v: QuestionView,
+  now: number,
+  refused: ReadonlySet<string>,
+): boolean => needsAction(v, now) || (refused.has(v.id) && !declinedByPerson(v));
 
 /** One display vocabulary for every status, shared by the inbox, the detail page and History. */
 /**
