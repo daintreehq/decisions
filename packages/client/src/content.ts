@@ -43,7 +43,7 @@ export const AskHumanInput = z.object({
   correlation_id: z.string().min(1).max(64).optional(),
   /**
    * The agent's own account of how it prepared the question under the person's involvement preference
-   * (protocol section 20.4). Shown to the person as the agent's account; it never changes the requirement.
+   * (protocol section 20.1). Shown to the person as the agent's account; it never changes the requirement.
    */
   preparation: PreparationReport.optional(),
 });

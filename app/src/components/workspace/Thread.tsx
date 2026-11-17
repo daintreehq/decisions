@@ -49,7 +49,7 @@ function Time({ iso, now }: { iso: string; now: number }) {
 }
 
 /**
- * How the agent says it prepared the question (docs/protocol.md section 20.4): whether it consulted other agents and
+ * How the agent says it prepared the question (docs/protocol.md section 20.1): whether it consulted other agents and
  * whether they agreed, with its own summary. It is the agent's account, labelled as such: nothing checked it, and it
  * is never an answer.
  */

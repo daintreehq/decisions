@@ -280,7 +280,7 @@ export const AttachmentDescriptor = z.object({
 export type AttachmentDescriptor = z.infer<typeof AttachmentDescriptor>;
 
 /**
- * How a preparation the person asked for went (section 20.4): the consulted agents `agreed` on a recommendation,
+ * How a preparation the person asked for went (section 20.1): the consulted agents `agreed` on a recommendation,
  * `split` (no agreement, or the consultation was inconclusive), or the consultation was `not-run`.
  */
 export const PreparationOutcome = z.enum(['agreed', 'split', 'not-run']);
@@ -318,7 +318,7 @@ export const DecisionContentV1 = z.object({
   machine_label: z.string().max(200).optional(),
   origin_summary: z.string().max(500).optional(),
   /**
-   * The agent's preparation report (section 20.4). A malformed one is dropped rather than failing the question:
+   * The agent's preparation report (section 20.1). A malformed one is dropped rather than failing the question:
    * it is informational, and the question must still reach the person.
    */
   preparation: PreparationReport.optional().catch(undefined),
