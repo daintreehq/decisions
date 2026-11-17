@@ -425,6 +425,22 @@ export class RelayClient {
     );
   }
 
+  /* ---- presence (section 11) ---- */
+  /**
+   * Owner only: start or renew (`true`) or end (`false`) the lease saying the person is at the computer. The body
+   * carries the flag alone. Never retried here: the presence reporter owns the timing, so a stopped bridge leaves no
+   * sleeping retry behind. Unparsed.
+   */
+  putPresence(present: boolean, timeoutMs?: number): Promise<unknown> {
+    return this.ownerOnly('reporting that the person is at the computer', () =>
+      this.request('PUT', `${API_PREFIX}/presence`, {
+        body: { protocol_version: PROTOCOL_VERSION, present },
+        retry: false,
+        ...(timeoutMs ? { timeoutMs } : {}),
+      }),
+    );
+  }
+
   /* ---- pairing ---- */
   createInvitation(body: {
     pairing_id: string;

@@ -22,6 +22,7 @@ import {
   type InvolvementView,
   type SetInvolvementResult,
 } from './involvement.js';
+import { PresenceReporter } from './presence.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
@@ -326,6 +327,8 @@ export class DecisionsBridge {
   readonly snapshots: SnapshotPublisher;
   /** The person's involvement preference, as this desktop last verified it (`getInvolvement`). */
   readonly involvement: InvolvementSync;
+  /** Keeps the relay's presence lease current while the host reports the person is here (`reportPresence`). */
+  readonly presence: PresenceReporter;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
@@ -374,6 +377,7 @@ export class DecisionsBridge {
     this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
+    this.presence = new PresenceReporter(this.ctx, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -499,6 +503,7 @@ export class DecisionsBridge {
     await this.delivery.recover();
     this.snapshots.start();
     this.involvement.start();
+    this.presence.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -517,6 +522,7 @@ export class DecisionsBridge {
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -529,6 +535,7 @@ export class DecisionsBridge {
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -865,6 +872,35 @@ export class DecisionsBridge {
     const issue = this.involvement.inputIssue(parsed.data);
     if (issue) throw new BridgeError('validation_error', issue);
     return this.involvement.save(parsed.data);
+  }
+
+  /**
+   * Say whether the person is at the owner desktop (protocol section 11), so the relay holds a new question's phone
+   * push briefly while they are. The host reports `true` when the person is active (again every 30 s or so while they
+   * stay, and at once when they come back) and `false` when they leave, lock the screen or the computer sleeps. Each
+   * `true` counts for `PRESENCE_REPORT_MS` (two minutes): while one does, the bridge keeps the relay's lease current
+   * in the background; `false` ends the lease, and a report left to go stale or a stopped bridge lets it lapse within a
+   * minute. Returns at once and never touches the network itself.
+   *
+   * Only the flag is sent: nothing about questions, panes or content. A relay that does not advertise `presence-v1` is
+   * never sent it, and reporting to one does nothing, without an error. Before `start()` the latest report is kept and
+   * acted on when the bridge starts, if still fresh; `stop()` forgets it.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`). This is a host API: it is not an MCP tool, and a
+   * pane's bearer token never reaches it.
+   */
+  reportPresence(present: boolean): void {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        'only the owner desktop reports that the person is at the computer; a Remote Host never does',
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (typeof present !== 'boolean')
+      throw new BridgeError('validation_error', 'present must be true or false');
+    this.presence.report(present);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
