@@ -167,7 +167,12 @@ export async function verifyMessageEvent(
     return fail('message images disagree with its record');
   return {
     ok: true,
-    value: { record, signerRole: signer.role, signerLabel: signer.cert.label, content: content.data },
+    value: {
+      record,
+      signerRole: signer.role,
+      signerLabel: signer.cert.label,
+      content: content.data,
+    },
   };
 }
 

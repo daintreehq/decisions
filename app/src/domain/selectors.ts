@@ -241,13 +241,19 @@ export interface FollowUpBy {
   subject: string;
 }
 
+/** A follow-up sent on a phone or tablet: this device's own, or another one's. */
+export const PHONE_FOLLOW_UP: FollowUpBy = {
+  computer: null,
+  label: 'Follow-up',
+  subject: 'Your follow-up',
+};
+
 export function followUpBy(
   m: Pick<ThreadMessage, 'side' | 'verified' | 'signerRole' | 'signerLabel'>,
 ): FollowUpBy | null {
   if (m.side !== 'human' || !m.verified || !m.signerRole) return null;
   if (!HUMAN_MESSAGE_ROLES.includes(m.signerRole)) return null;
-  if (humanMessageSentOn(m.signerRole) === 'phone')
-    return { computer: null, label: 'Follow-up', subject: 'Your follow-up' };
+  if (humanMessageSentOn(m.signerRole) === 'phone') return PHONE_FOLLOW_UP;
   const computer = computerName(m.signerLabel);
   return {
     computer,

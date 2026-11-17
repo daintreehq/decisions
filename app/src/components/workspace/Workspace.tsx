@@ -37,6 +37,7 @@ import {
   messageProgress,
   originParts,
   pendingAsk,
+  PHONE_FOLLOW_UP,
   proxyNeedsReview,
   submitKind,
   unreadableHere,
@@ -79,6 +80,7 @@ import {
   AgentMessage,
   AgentNote,
   HumanAnswer,
+  HumanFollowUp,
   MessageContext,
   ModelMessage,
   OutgoingMessage,
@@ -1052,20 +1054,20 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         } else if (by) {
           const p = messageProgress(m);
           items.push(
-            <OutgoingMessage
+            <HumanFollowUp
               key={m.messageId}
               id={`ws-msg-${m.messageId}`}
+              view={view}
+              // "Follow-up", or "Follow-up on Studio Mac" for one the person sent on the computer.
+              by={by}
+              text={m.text}
+              images={m.images}
               at={m.createdAt}
               now={now}
-              // "Follow-up", or "Follow-up on Studio Mac" for one the person sent on the computer.
-              label={by.label}
               flagged={p.step === 'attention'}
               // Every follow-up keeps its own receipt: each is typed (or held) on its own.
               receipt={<FollowUpReceipt by={by} progress={p} />}
-            >
-              <PhotoGrid view={view} images={m.images} />
-              {m.text.trim() && <SafeText text={m.text} className="answer-text" />}
-            </OutgoingMessage>,
+            />,
           );
         }
         continue;
@@ -1213,12 +1215,17 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     for (const e of pendingMessages) {
       const queuedOffline = e.state === 'queued' && !navigator.onLine;
       items.push(
-        <OutgoingMessage
+        <HumanFollowUp
           key={messageKey(e)}
+          view={view}
+          // Sent from this phone or tablet.
+          by={PHONE_FOLLOW_UP}
+          text={e.text}
+          images={entryImages(e)}
+          upload={uploadOf(e)}
           at={new Date(e.createdAt).toISOString()}
           now={now}
           tone="pending"
-          label="Follow-up"
           receipt={
             <Receipt
               progress={messageProgress(
@@ -1226,16 +1233,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 e.state === 'committed' ? undefined : (e.state as 'queued' | 'sending'),
               )}
               fromPhone
-              subject="Your follow-up"
+              subject={PHONE_FOLLOW_UP.subject}
               label={uploadLabel(e)}
               note={queuedOffline ? 'Sends when you’re back online' : undefined}
             />
           }
-        >
-          <PhotoGrid view={view} images={entryImages(e)} upload={uploadOf(e)} />
-          {e.text.trim() && <SafeText text={e.text} className="answer-text" />}
-          <UploadTrouble entry={e} subject="follow-up" />
-        </OutgoingMessage>,
+          extra={<UploadTrouble entry={e} subject="follow-up" />}
+        />,
       );
     }
     for (const e of failedMessages) {
@@ -1412,7 +1416,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const pendingAnswerKey = pendingEntry ? `ans-${pendingEntry.recordId ?? pendingEntry.id}` : null;
   const keysKey = itemKeys.join('|');
   const lastKey = itemKeys[itemKeys.length - 1] ?? '';
-  const sentFollowUps = view.messages.filter((m) => m.verified && m.side === 'human');
+  // The person's follow-ups as the thread shows them: from a phone, a tablet or the computer.
+  const sentFollowUps = view.messages.filter((m) => followUpBy(m) !== null);
   const latestFollowUp = sentFollowUps.at(-1);
   // Every follow-up's step counts: one further up needing attention is activity too.
   const deliveryKey = `${progress?.step ?? ''}/${pendingProgress?.step ?? ''}/${sentFollowUps
@@ -1567,7 +1572,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     if (!followKey || followKey === prev || !latestFollowUp) return;
     const p = messageProgress(latestFollowUp);
     if (p.step === 'terminal')
-      announce(`${followUpBy(latestFollowUp)?.subject ?? 'Your follow-up'} was typed into the terminal.`);
+      announce(
+        `${(followUpBy(latestFollowUp) ?? PHONE_FOLLOW_UP).subject} was typed into the terminal.`,
+      );
     else if (p.step === 'attention')
       announce(`${p.label}. Open Daintree on your computer to see what happened.`);
   }, [followKey]); // eslint-disable-line react-hooks/exhaustive-deps

@@ -6,7 +6,7 @@ import type {
 } from '@daintreehq/decisions-protocol';
 import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
-import { agentName, answerBy, originParts } from '../../domain/selectors.js';
+import { agentName, answerBy, originParts, type FollowUpBy } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
@@ -334,6 +334,58 @@ export function HumanAnswer({
         unverified={a.imagesOk === false}
       />
       <AnswerBody view={view} content={a.content as never} />
+      {extra}
+    </OutgoingMessage>
+  );
+}
+
+/**
+ * One of the person's follow-ups, as their outgoing reply: "Follow-up" from a phone or tablet, "Follow-up on Studio
+ * Mac" for one sent on the computer (`followUpBy`), with its own receipt. The same component, under the same key,
+ * while it is on its way from this device and once committed, so its photos (and a viewer open on one) stay put.
+ */
+export function HumanFollowUp({
+  view,
+  by,
+  text,
+  images,
+  at,
+  now,
+  receipt,
+  flagged,
+  tone,
+  upload,
+  extra,
+  id,
+}: {
+  view: QuestionView;
+  by: FollowUpBy;
+  text: string;
+  images: ThreadMessage['images'];
+  at: string;
+  now: number;
+  receipt?: ReactNode;
+  flagged?: boolean;
+  /** Still on this device (queued or sending). */
+  tone?: 'pending';
+  /** Its photos' progress while they upload. */
+  upload?: PhotoUpload;
+  /** What follows the words while it is on its way (an upload that stopped). */
+  extra?: ReactNode;
+  id?: string;
+}) {
+  return (
+    <OutgoingMessage
+      label={by.label}
+      at={at}
+      now={now}
+      receipt={receipt}
+      flagged={flagged}
+      tone={tone}
+      id={id}
+    >
+      <PhotoGrid view={view} images={images} upload={upload} />
+      {text.trim() && <SafeText text={text} className="answer-text" />}
       {extra}
     </OutgoingMessage>
   );
