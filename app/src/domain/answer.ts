@@ -118,6 +118,53 @@ export async function buildAnswerRequest(i: AnswerInput): Promise<BuiltRequest> 
   };
 }
 
+export interface DeclineInput {
+  installationId: string;
+  deviceId: string;
+  signingKey: CryptoKey;
+  view: QuestionView;
+  /** The revision the person looked at when they chose to decline; signed as-is. */
+  expectedRevision: number;
+  idempotencyKey?: string;
+}
+
+/**
+ * Builds the signed request by which the person declines to answer an open question: a `cancel` signed by this
+ * phone or tablet (docs/protocol.md section 6). It carries no content and never answers anything; the relay and
+ * every receiver tell it from a desktop's withdrawal by the signer's certified role.
+ */
+export async function buildDeclineRequest(
+  i: DeclineInput,
+): Promise<{ actionId: string; path: string; bodyText: string; idempotencyKey: string }> {
+  if (i.view.revision !== i.expectedRevision || effectiveStatus(i.view) !== 'open')
+    throw new StaleQuestionError(
+      'This question changed after you opened it. It can no longer be dismissed here.',
+    );
+  const actionId = newId();
+  const idempotencyKey = i.idempotencyKey ?? newId();
+  const action = await buildSignedAction({
+    installationId: i.installationId,
+    questionId: i.view.id,
+    action: 'cancel',
+    signerDeviceId: i.deviceId,
+    signingKey: i.signingKey,
+    expectedRevision: i.expectedRevision,
+    envelope: null,
+    actionId,
+  });
+  const body = ActionBody.parse({
+    protocol_version: PROTOCOL_VERSION,
+    idempotency_key: idempotencyKey,
+    action,
+  });
+  return {
+    actionId,
+    path: `/questions/${i.view.id}/cancel`,
+    bodyText: JSON.stringify(body),
+    idempotencyKey,
+  };
+}
+
 export function highestEpoch(keys: ReadonlyMap<number, EpochKey>): EpochKey {
   let best: EpochKey | undefined;
   for (const k of keys.values()) if (!best || k.epoch > best.epoch) best = k;

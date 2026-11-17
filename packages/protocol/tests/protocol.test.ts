@@ -7,8 +7,11 @@ import {
   canonicalize,
   enforceRequirement,
   formatAuthHeader,
+  isPersonDecline,
   normalizeQuery,
   parseAuthHeader,
+  provenanceForAction,
+  roleMaySign,
   signingString,
 } from '../src/index.js';
 
@@ -147,6 +150,55 @@ describe('state machine', () => {
       revision: 1,
     });
     expect(() => applyAction(c, 'reopen', 'desktop-host', 0)).toThrow(/may not/);
+  });
+  it('a phone or tablet declines an open question with a cancel', () => {
+    for (const requirement of ['human-required', 'proxy-ok', 'proxy-first'] as const) {
+      for (const role of ['phone', 'tablet'] as const) {
+        expect(applyAction({ ...open, requirement }, 'cancel', role, 0)).toEqual({
+          status: 'cancelled',
+          revision: 0,
+          proxyAbstained: false,
+          deliverable: false,
+          noop: false,
+          eventType: 'decision.cancelled',
+        });
+      }
+    }
+    expect(isPersonDecline('cancel', 'phone')).toBe(true);
+    expect(isPersonDecline('cancel', 'tablet')).toBe(true);
+    expect(isPersonDecline('cancel', 'owner-desktop')).toBe(false);
+    expect(isPersonDecline('answer', 'phone')).toBe(false);
+    expect(roleMaySign('cancel', 'phone')).toBe(true);
+    expect(roleMaySign('reopen', 'phone')).toBe(false);
+    expect(provenanceForAction('cancel')).toBe('none');
+  });
+  it('a person declines only an open question, at the revision they saw', () => {
+    const conflict = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        return (e as ApiError).code;
+      }
+      return null;
+    };
+    expect(conflict(() => applyAction({ ...open, revision: 2 }, 'cancel', 'phone', 1))).toBe(
+      'revision_conflict',
+    );
+    const proxied = { ...open, status: 'proxy-answered', revision: 1 } as const;
+    expect(conflict(() => applyAction(proxied, 'cancel', 'phone', 1))).toBe('invalid_state');
+    // The desktop still withdraws a proxy-answered question.
+    expect(applyAction(proxied, 'cancel', 'owner-desktop', 1).status).toBe('cancelled');
+    for (const status of ['human-answered', 'expired'] as const) {
+      expect(conflict(() => applyAction({ ...open, status }, 'cancel', 'tablet', 0))).toBe(
+        'invalid_state',
+      );
+    }
+    // A retry after the question closed is a no-op, as for a desktop.
+    expect(applyAction({ ...open, status: 'cancelled' }, 'cancel', 'phone', 0).noop).toBe(true);
+    // Declining never answers, and a declined question cannot be answered.
+    expect(
+      conflict(() => applyAction({ ...open, status: 'cancelled' }, 'answer', 'phone', 0)),
+    ).toBe('invalid_state');
   });
 });
 

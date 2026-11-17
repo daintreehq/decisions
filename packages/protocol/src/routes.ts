@@ -259,8 +259,9 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'POST',
     path: '/questions/{id}/cancel',
     auth: 'signed',
-    roles: DESKTOPS,
-    summary: 'Cancel an unanswered question (idempotent)',
+    roles: 'any',
+    summary:
+      'Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one',
     request: ActionBody,
     response: CommandReceipt,
     status: 201,

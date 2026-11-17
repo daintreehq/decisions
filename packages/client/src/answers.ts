@@ -9,8 +9,9 @@ import type { PhoneImageReference } from '@daintreehq/decisions-protocol';
  */
 export interface AnswerEntry {
   entry_id: string;
-  kind: 'answer' | 'expired';
-  action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire';
+  /** `declined`: the person dismissed the question from a phone or tablet (a human-signed cancel); no content. */
+  kind: 'answer' | 'expired' | 'declined';
+  action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;
   source: 'human' | 'proxy' | 'system';
   /** Replaces an earlier answer. */
@@ -25,7 +26,7 @@ export interface AnswerEntry {
   deliver: boolean;
   delivered: boolean;
   injection_id?: string;
-  /** The sealed `AnswerContent`, or null for an entry that carries none (an expiry notice). */
+  /** The sealed `AnswerContent`, or null for an entry that carries none (an expiry or decline notice). */
   sealed: string | null;
   /**
    * Phone images the host already stored for this answer, by attachment id: the path its `PhoneImageStore`

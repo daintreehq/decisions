@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import { isPersonDecline, type HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
@@ -146,6 +146,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const [field, setField] = useState<FieldId | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  /** The revision the person was looking at when they chose Dismiss: what the decline is signed against. */
+  const [declineAt, setDeclineAt] = useState<number | null>(null);
+  const [declining, setDeclining] = useState(false);
+  const [declineError, setDeclineError] = useState<string | null>(null);
   const [headingAway, setHeadingAway] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -629,6 +633,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     onSelect: () => void navigator.clipboard?.writeText(id).catch(() => undefined),
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
+  // Declining is deliberate and final, so it lives here behind a confirmation, never in the composer.
+  if (status === 'open' && verified && !pendingEntry)
+    menu.push({
+      label: 'Dismiss question…',
+      onSelect: () => {
+        setDeclineError(null);
+        setDeclineAt(view.revision);
+      },
+    });
   // Clearing is an explicit loss with Undo, so it lives here rather than in the composer.
   if (composing && hasWords(draft))
     menu.push({
@@ -1107,15 +1120,20 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </OutgoingMessage>,
         );
       } else if (a.action === 'cancel') {
+        const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
         items.push(
           <SystemLine
             key={a.actionId}
             now={now}
             at={a.createdAt}
             icon={<UndoIcon size={14} />}
-            detail="No answer is needed, and nothing was approved here."
+            detail={
+              declined
+                ? 'You chose not to answer it, so nothing was approved.'
+                : 'No answer is needed, and nothing was approved here.'
+            }
           >
-            Withdrawn by your agent
+            {declined ? 'Declined by you' : 'Withdrawn by your agent'}
           </SystemLine>,
         );
       } else if (a.action === 'reopen') {
@@ -1670,6 +1688,58 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </p>
         </Sheet>
       )}
+      <Sheet
+        open={declineAt !== null}
+        title="Dismiss this question?"
+        // Closing never waits on the request (a swipe or Back must not leave a stuck layer); a failure reopens it.
+        onClose={() => setDeclineAt(null)}
+        footer={
+          <>
+            <button type="button" className="btn" onClick={() => setDeclineAt(null)}>
+              Keep it
+            </button>
+            <button
+              type="button"
+              className="btn danger"
+              disabled={declining}
+              onClick={() => {
+                if (declineAt === null || declining) return;
+                const at = declineAt;
+                setDeclining(true);
+                setDeclineError(null);
+                if (dictation.isActive()) void dictation.stop();
+                app
+                  .declineQuestion(view, at)
+                  .then(() => {
+                    setDeclineAt(null);
+                    announce('Question dismissed.');
+                  })
+                  .catch((e: unknown) => {
+                    setDeclineError(
+                      e instanceof StaleQuestionError
+                        ? e.message
+                        : 'Could not dismiss it. Check your connection and try again.',
+                    );
+                    setDeclineAt(at);
+                  })
+                  .finally(() => setDeclining(false));
+              }}
+            >
+              {declining ? 'Dismissing…' : 'Dismiss question'}
+            </button>
+          </>
+        }
+      >
+        <p>
+          You won’t answer it. It leaves Needs you on all your devices and stops reminders. If your
+          agent is still waiting, it is told you declined, and nothing is approved.
+        </p>
+        {declineError && (
+          <p className="status error" role="alert">
+            {declineError}
+          </p>
+        )}
+      </Sheet>
       <Sheet
         open={discardOpen}
         title="Discard this correction?"

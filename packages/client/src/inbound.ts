@@ -9,6 +9,7 @@ import {
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForAction,
+  roleMaySign,
   type ActionKind,
   type ActionRecord,
   type CryptoEnvelope,
@@ -217,10 +218,14 @@ export class EventVerifier {
       return { ok: false, reason: 'human-action-by-non-human-device' };
     if (prov === 'proxy' && !DESKTOP_ROLES.includes(role))
       return { ok: false, reason: 'proxy-action-by-non-desktop-device' };
-    if (prov === 'none' && !DESKTOP_ROLES.includes(role))
-      return { ok: false, reason: 'desktop-action-by-non-desktop-device' };
-    if (action === 'reopen' && role !== 'owner-desktop')
-      return { ok: false, reason: 'reopen-by-non-owner' };
+    if (prov === 'none' && !roleMaySign(action, role))
+      return {
+        ok: false,
+        reason:
+          action === 'reopen' && DESKTOP_ROLES.includes(role)
+            ? 'reopen-by-non-owner'
+            : 'desktop-action-by-non-desktop-device',
+      };
     // Relay-declared provenance is only a claim; it must match what the signed action implies.
     const declared = parsed.data.provenance;
     if (prov === 'none' ? declared !== null : declared !== prov)

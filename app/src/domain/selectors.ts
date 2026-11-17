@@ -1,4 +1,8 @@
-import { threadAwaitsHuman, type ActionKind } from '@daintreehq/decisions-protocol';
+import {
+  isPersonDecline,
+  threadAwaitsHuman,
+  type ActionKind,
+} from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
@@ -30,6 +34,20 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
     if (a.verified && a.action === 'proxy-answer') return a;
   }
   return null;
+}
+
+/**
+ * The person dismissed this question from a phone or tablet: it is cancelled, and the cancel in force was signed by
+ * a human device (its certificate checked when the event was verified). A desktop's cancel is a withdrawal instead.
+ */
+export function declinedByPerson(v: QuestionView): boolean {
+  if (v.status !== 'cancelled' || !v.verification.ok) return false;
+  for (let i = v.actions.length - 1; i >= 0; i--) {
+    const a = v.actions[i]!;
+    if (a.verified && a.action === 'cancel')
+      return a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+  }
+  return false;
 }
 
 /** A question that can still be answered: open, verified and not past its deadline. */
@@ -104,7 +122,7 @@ export function statusLabel(s: EffectiveStatus, v?: QuestionView): string {
     case 'human-answered':
       return 'Answered by you';
     case 'cancelled':
-      return 'Withdrawn';
+      return v && declinedByPerson(v) ? 'Declined' : 'Withdrawn';
     case 'expired':
       return 'Expired';
     default:
@@ -213,6 +231,8 @@ export function deliveryNeedsAttention(v: QuestionView): boolean {
 
 /** Which delivery needs the owner: the answer in force (named first), a follow-up, or none. */
 export function deliveryIssue(v: QuestionView): 'answer' | 'follow-up' | null {
+  // The person declined it: nothing about it waits on them, an old delivery failure included.
+  if (declinedByPerson(v)) return null;
   const stuck = (s: string | undefined) => s === 'needs-attention' || s === 'delivery-uncertain';
   const a = currentAnswer(v);
   if (a && stuck(v.deliveries[a.revision]?.status)) return 'answer';

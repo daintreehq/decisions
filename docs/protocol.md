@@ -26,7 +26,7 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 | ----------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `owner-desktop`   | The Daintree installation that claimed the relay | create questions, proxy answer/abstain, cancel, reopen, pair/revoke devices, rotate keys, read diagnostics, delete data |
 | `desktop-host`    | Additional trusted desktop (a Daintree Host)     | create questions, proxy answer/abstain, cancel, delivery acks                                                           |
-| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, settings, push, voice                                                                  |
+| `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                               |
 
 With the extensions in sections 16 to 18, a phone or tablet also sends human messages, attaches phone images and asks
 for pane snapshots, and the desktop that published a question (its `originating_device_id`, whatever its role)
@@ -35,7 +35,9 @@ publishes that question's agent messages and pane snapshots and reports delivery
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
 role: only `phone`/`tablet` can sign `answer`, `override` and `confirm-proxy` (**human** provenance); only
 desktops sign `proxy-answer` (**proxy** provenance). A `human-required` question can never be satisfied by a proxy
-(`state.ts`).
+(`state.ts`). `cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question, signed
+by a phone or tablet it records that the person **declined** to answer (section 6.1). `roleMaySign` in `state.ts` is
+the one role table the relay and every client check signers against.
 
 ## 3. Authentication
 
@@ -126,7 +128,7 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 | `POST /questions/{id}/confirm-proxy`    | phone, tablet | human affirms the proxy answer; not re-delivered                                                |
 | `POST /questions/{id}/proxy-answer`     | desktops      | rejected for `human-required`                                                                   |
 | `POST /questions/{id}/proxy-abstain`    | desktops      | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                          |
-| `POST /questions/{id}/cancel`           | desktops      | idempotent; cannot remove a committed human answer                                              |
+| `POST /questions/{id}/cancel`           | any           | idempotent; cannot remove a committed human answer; a phone/tablet only from `open` (6.1)       |
 | `POST /questions/{id}/reopen`           | owner-desktop | new revision, optional new `expires_at`                                                         |
 | `DELETE /questions/{id}`                | owner-desktop | hard-delete question, answers, messages, attachments; emits `decision.deleted`                  |
 
@@ -137,6 +139,33 @@ Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opa
 chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the
 future and at most `LIMITS.maxQuestionExpiryMs` (366 days) away. `now >= expires_at` means expired (checked lazily
 on every read/write as well as by the alarm).
+
+### 6.1 Declining a question
+
+A person who will not answer an open question dismisses it from a phone or tablet: the device signs an ordinary
+`cancel` action (no envelope, `expected_revision` = the revision they saw) and posts it to
+`POST /questions/{id}/cancel`. There is no new action, status or event type, so every client that already parses
+`cancel` and `cancelled` still parses it.
+
+- **Transition.** A human-signed `cancel` is legal only from `open` (`409 invalid_state` from `proxy-answered`,
+  `human-answered` or `expired`); it compare-and-swaps on `expected_revision` and does not bump the revision, exactly
+  like a desktop's. The first committed cancel wins; a retry after it is a no-op, so a decline is never relabelled a
+  withdrawal or the other way round. A desktop's cancel keeps its existing rules (`open` or `proxy-answered`).
+- **Relay.** The question becomes `cancelled`, emits `decision.cancelled` (provenance `null`, `deliverable: false`) and
+  cancels every scheduled job for it: no further new-question, reminder, reply or expiry work is scheduled or run. A
+  notification already being sent when the cancel commits may still arrive. Its snapshot is cleared and its thread closed, as for any cancelled question.
+- **Attribution.** "Declined by the person" versus "withdrawn by the desktop" is derived only from the signed record:
+  the signer's owner-certified role (`isPersonDecline` in `state.ts`), never from a relay-supplied field. Receivers
+  verify the signature and certificate before classifying it, so a relay cannot forge a decline.
+- **Phones and tablets** show a declined question as "Declined by you" in History, distinct from "Withdrawn by your
+  agent" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
+- **Desktops** that verify a human-signed cancel record a content-free decline entry and, if the asking agent is still
+  listening, type a notice with `status: declined` and `authorised: no`. An agent that has gone is never resumed, nor
+  flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with
+  `closed_reason: declined` (`withdrawn` for a desktop cancel, `expired` for an expiry) and no provenance, choice or
+  text. A decline never authorises anything.
+- **Older desktops** (before this change) reject a phone-signed cancel during verification and only audit it: their
+  copy of the question stays open locally while the relay, the phones and current desktops treat it as closed.
 
 ## 7. Event ledger and sync
 
@@ -337,7 +366,8 @@ quota checks.
 | `expired`                 | Expired      | `410 expired`       | `410 expired`       |
 | `cancelled` ("withdrawn") | Withdrawn    | `409 invalid_state` | `409 invalid_state` |
 
-"Withdrawn" is how the app shows `cancelled`; there is no separate status. An answer is final for the answer, not for
+"Withdrawn" is how the app shows `cancelled`, and "Declined" when a phone or tablet signed the cancel (section 6.1);
+there is no separate status. An answer is final for the answer, not for
 the thread, so answered questions keep taking messages. Expired and cancelled questions are closed, and a `reopen`
 opens the thread again with its earlier messages and order intact. The relay checks the status inside the committing
 transaction.

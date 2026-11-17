@@ -2,6 +2,7 @@ import {
   ApiError,
   EventData,
   applyAction,
+  isPersonDecline,
   isThreadClosedStatus,
   type DecisionContentV1,
   type LedgerEvent,
@@ -374,18 +375,37 @@ export class Inbox {
     switch (v.action) {
       case 'cancel': {
         const dropped = entries.map((e) => (e.delivered ? e : { ...e, deliver: false }));
+        // A cancel signed by a phone or tablet is the person declining to answer: the agent is told so, plainly,
+        // in a content-free notice (never an answer). A desktop's own withdrawal tells the agent nothing.
+        const declined = isPersonDecline(v.action, v.signerRole);
+        if (declined) {
+          dropped.push({
+            entry_id: v.record.action_id,
+            kind: 'declined',
+            action: 'cancel',
+            revision: row.question_revision,
+            source: 'human',
+            correction: false,
+            created_at: v.record.created_at,
+            event_seq: ev.seq,
+            deliver: true,
+            delivered: false,
+            sealed: null,
+          });
+        }
         await ctx.store.updateQuestion(row.question_id, {
           ...patch,
+          ...(declined ? { delivery_status: 'desktop-received' as const } : {}),
           answers_json: serializeAnswers(dropped),
           messages_json: withdrawMessages(row.messages_json),
         });
         await ctx.audit.log({
           event: 'question.cancelled',
           question_id: row.question_id,
-          result: 'relay',
+          result: declined ? 'declined' : 'relay',
         });
         this.cb.onQuestionClosed?.(row.question_id);
-        return false;
+        return declined;
       }
       case 'reopen':
         await ctx.store.updateQuestion(row.question_id, patch);

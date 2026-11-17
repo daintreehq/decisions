@@ -11,7 +11,7 @@ import {
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForAction,
-  type ActionKind,
+  roleMaySign,
   type ActionRecord,
   type MessageRecord,
   type Provenance,
@@ -41,17 +41,6 @@ export interface VerifyCtx {
 
 const DESKTOP: readonly Role[] = ['owner-desktop', 'desktop-host'];
 const HUMAN: readonly Role[] = ['phone', 'tablet'];
-/** Mirrors the relay's role table (protocol state.ts); duplicated because the protocol keeps it private. */
-const ACTION_ROLES: Record<ActionKind, readonly Role[]> = {
-  answer: HUMAN,
-  override: HUMAN,
-  'confirm-proxy': HUMAN,
-  'proxy-answer': DESKTOP,
-  'proxy-abstain': DESKTOP,
-  cancel: DESKTOP,
-  reopen: ['owner-desktop'],
-};
-
 const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
 
 export interface VerifiedQuestion {
@@ -211,7 +200,7 @@ export async function verifyActionEvent(
     return fail('relay metadata disagrees with the signed action');
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
-  if (!ACTION_ROLES[record.action].includes(signer.role)) {
+  if (!roleMaySign(record.action, signer.role)) {
     return fail(`a ${signer.role} cannot sign ${record.action}`);
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
