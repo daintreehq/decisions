@@ -200,18 +200,6 @@ export interface AnswerBy {
   subject: string;
 }
 
-/**
- * The computer the person acted on, from the owner desktop's certified name. The owner chose the name and its key
- * signed it, but it is still shown as text: drop control and escape characters and fold line breaks, as for the
- * asking computer's name. No name, or a bare host id, reads "your computer".
- */
-function computerName(label: string | undefined): string {
-  const name = sanitizeText(label ?? '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
-}
-
 export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): AnswerBy {
   if (a.provenance === 'proxy')
     return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
