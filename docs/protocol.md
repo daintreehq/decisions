@@ -152,7 +152,7 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 | `POST /questions/{id}/confirm-proxy`    | phone, tablet                | human affirms the proxy answer; not re-delivered                                                                                                                      |
 | `POST /questions/{id}/proxy-answer`     | desktops                     | rejected for `human-required`                                                                                                                                         |
 | `POST /questions/{id}/proxy-abstain`    | desktops                     | escalates `proxy-first`/`proxy-ok` to the human and pushes immediately                                                                                                |
-| `POST /questions/{id}/cancel`           | any                          | idempotent; cannot remove a committed human answer; a phone/tablet only from `open` (6.1)                                                                             |
+| `POST /questions/{id}/cancel`           | any                          | idempotent; cannot remove a committed human answer; a phone/tablet only from `open`, and only once the question's desktop declares `person-declines-v1` (6.1)         |
 | `POST /questions/{id}/reopen`           | owner-desktop                | new revision, optional new `expires_at`                                                                                                                               |
 | `DELETE /questions/{id}`                | owner-desktop                | hard-delete question, answers, messages, attachments; emits `decision.deleted`                                                                                        |
 
@@ -188,8 +188,14 @@ A person who will not answer an open question dismisses it from a phone or table
   flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with
   `closed_reason: declined` (`withdrawn` for a desktop cancel, `expired` for an expiry) and no provenance, choice or
   text. A decline never authorises anything.
-- **Older desktops** (before this change) reject a phone-signed cancel during verification and only audit it: their
-  copy of the question stays open locally while the relay, the phones and current desktops treat it as closed.
+- **Older desktops.** A desktop that predates declines rejects a phone-signed cancel during verification and only
+  audits it, so its copy of the question would stay open while everything else treated it as closed. So the relay
+  commits a person's decline only when the question's publishing desktop (its `originating_device_id`) declared
+  `person-declines-v1` on its latest socket ticket (section 19). Otherwise it refuses with `409 invalid_state` and
+  `details: {reason: "creator-missing-feature", required_feature: "person-declines-v1"}`, stores no receipt, and the
+  question stays open until it is answered, withdrawn or expires. A revoked publishing desktop is sent nothing, so its
+  questions can always be declined. The check comes after the transition and revision checks. Phones and tablets
+  offer Dismiss only where the publishing desktop declared it; the desktop library declares it on every bridge.
 
 ## 7. Event ledger and sync
 
@@ -631,7 +637,7 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`, `involvement-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
 features parse and are ignored (`knownFeatures`).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
@@ -639,6 +645,10 @@ answers to its questions (section 2), and the relay checks that desktop's latest
 committing one; a `GET /events` declaration is not recorded and does not count. The committed answer is sent to every
 client whatever it declared, so no client's cursor passes over it unseen; whether a client accepts it is the signer
 check of section 2.
+
+`person-declines-v1` filters no events either. A publishing desktop declares it to say it files a phone's or tablet's
+decline of its questions (section 6.1), and the relay checks that desktop's latest socket-ticket declaration in the
+same way before committing one. The committed `decision.cancelled` is sent to every client.
 
 **Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
 and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No

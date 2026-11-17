@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import {
+  CREATOR_MISSING_FEATURE,
   DevicesResponse,
   KeyGrantsResponse,
   MessagesPage,
@@ -42,6 +43,7 @@ import { SyncEngine, type Connection } from '../data/sync.js';
 import {
   buildAnswerRequest,
   buildDeclineRequest,
+  DeclineUnsupportedError,
   highestEpoch,
   type HumanActionKind,
 } from '../domain/answer.js';
@@ -68,6 +70,8 @@ const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
 const THREAD_BACKFILL_PREF = 'thread-backfill-v1';
 /** Phone images: photos the person attaches to an answer or a follow-up (docs/protocol.md section 17). */
 const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
+/** Declines: the asking desktop files the person's dismissal of its question (docs/protocol.md section 6.1). */
+const DECLINE_FEATURE: ProtocolFeature = 'person-declines-v1';
 /** The involvement preference: how involved the person wants agents to make them (docs/protocol.md section 20). */
 const INVOLVEMENT_FEATURE: ProtocolFeature = 'involvement-v1';
 
@@ -239,6 +243,18 @@ export class AppController {
     const d = this.snap.devices?.devices.find((x) => x.device_id === view.originatingDeviceId);
     if (!d) return 'no';
     return d.features?.includes(THREAD_FEATURE) ? 'yes' : 'desktop';
+  }
+
+  /**
+   * Whether the person can dismiss this question: the desktop that asked it files declines. One that predates them
+   * would keep the question open while everything else closed it, so the relay refuses the decline and nothing offers
+   * it. A revoked desktop is sent nothing, so its leftover questions can always be let go.
+   */
+  declinesFor(view: QuestionView): boolean {
+    const devices = this.snap.devices?.devices;
+    if (!devices) return false;
+    const d = devices.find((x) => x.device_id === view.originatingDeviceId);
+    return !d || d.revoked_at !== null || !!d.features?.includes(DECLINE_FEATURE);
   }
 
   /**
@@ -459,6 +475,8 @@ export class AppController {
     this.sync?.kick();
     void this.outbox?.flush();
     if (this.involvementServed()) this.involvement?.refresh();
+    // What each desktop declares gates Dismiss, photos and follow-ups, and a desktop may have upgraded meanwhile.
+    if (this.relay) void this.refreshDevices().catch(() => undefined);
   }
 
   /* ---------------- pairing ---------------- */
@@ -773,7 +791,16 @@ export class AppController {
       view,
       expectedRevision,
     });
-    await this.relay.jsonRaw('POST', req.path, req.bodyText);
+    try {
+      await this.relay.jsonRaw('POST', req.path, req.bodyText);
+    } catch (e) {
+      if (e instanceof RelayError && e.details?.reason === CREATOR_MISSING_FEATURE) {
+        // The asking desktop stopped taking declines since the device list was read: read it again, so the menu agrees.
+        void this.refreshDevices().catch(() => undefined);
+        throw new DeclineUnsupportedError();
+      }
+      throw e;
+    }
     await this.sync?.catchUp().catch(() => undefined);
   }
 

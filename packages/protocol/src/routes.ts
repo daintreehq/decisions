@@ -264,7 +264,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     auth: 'signed',
     roles: 'any',
     summary:
-      'Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one',
+      "Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one (the question's desktop must declare person-declines-v1)",
     request: ActionBody,
     response: CommandReceipt,
     status: 201,

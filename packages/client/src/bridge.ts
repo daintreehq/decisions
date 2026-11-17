@@ -109,12 +109,14 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
  * answer from a client that does not declare it, and its words must still arrive. `involvement-v1` brings the
  * hint that the person's involvement preference changed (section 20). `owner-desktop-answers-v1` says this desktop
  * accepts the person's answer signed by the owner desktop (section 2), which the relay commits to its questions
- * only once declared; it needs nothing from the host.
+ * only once declared; it needs nothing from the host. `person-declines-v1` says it files a phone's or tablet's
+ * decline (section 6.1); the relay refuses a decline of a question whose desktop has not declared it.
  */
 export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
   'phone-images-v1',
   'involvement-v1',
   'owner-desktop-answers-v1',
+  'person-declines-v1',
 ];
 
 /**

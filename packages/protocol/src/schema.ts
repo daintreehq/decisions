@@ -61,6 +61,7 @@ export const ProtocolFeature = z.enum([
   'pane-snapshots-v1',
   'owner-desktop-answers-v1',
   'involvement-v1',
+  'person-declines-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');

@@ -1324,7 +1324,8 @@
       "phone-images-v1",
       "pane-snapshots-v1",
       "owner-desktop-answers-v1",
-      "involvement-v1"
+      "involvement-v1",
+      "person-declines-v1"
     ]
   },
   "PhoneImageReference": {

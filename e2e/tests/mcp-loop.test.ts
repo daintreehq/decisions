@@ -184,11 +184,23 @@ describe.skipIf(!chromiumPath)(
     const call = async (c: Client, name: string, args: Record<string, unknown>) =>
       (await c.callTool({ name, arguments: args })) as ToolResult;
 
-    /** Opens a question from the inbox, as a person would the first time. */
+    /**
+     * Opens a question from the inbox, as a person would the first time. Home can render from its cache before the
+     * question syncs, and then holds it behind "N new questions" (rows never reshuffle): take it the way a person would.
+     */
     const openFromInbox = async (text: string) => {
       await page.goto(`${relay.origin}/`);
-      await page.getByText(text).first().waitFor({ timeout: 30_000 });
-      await page.getByText(text).first().click();
+      const row = page.locator('main').getByText(text).first();
+      await until(
+        async () => {
+          const pill = page.locator('main .nav-new');
+          if (await pill.isVisible().catch(() => false)) await pill.click();
+          return row.isVisible().catch(() => false);
+        },
+        30_000,
+        `"${text}" listed on Home`,
+      );
+      await row.click();
     };
 
     it('negotiates with the SDK client and lists the five tools with their annotations', async () => {
@@ -352,6 +364,50 @@ describe.skipIf(!chromiumPath)(
       await bridge.catchUp();
       await bridge.delivery.drain();
       expect(sink.typed.some((t) => t.text.includes(id))).toBe(false);
+    });
+
+    it('the person dismisses an open question on the phone, and the agent hears it was declined', async () => {
+      const typedBefore = sink.typed.length;
+      const asked = await call(paneA, 'ask_human', {
+        question: 'Bump the lint rules to the strict preset?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      });
+      const id = String(asked.structuredContent!.question_id);
+      await bridge.pump();
+      await openFromInbox('Bump the lint rules to the strict preset?');
+      // This bridge declares person-declines-v1, so the phone offers Dismiss.
+      await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+      await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
+      await page.getByRole('button', { name: 'Dismiss question' }).click();
+      // The sheet closes once the decline is sent and synced, and the question reads as declined. Wait for both, as a
+      // person would before moving on: the sheet's history entry is unwound asynchronously when it closes.
+      await page
+        .getByRole('dialog', { name: 'Dismiss this question?' })
+        .waitFor({ state: 'hidden', timeout: 30_000 });
+      await page.getByText('Declined by you').first().waitFor({ timeout: 30_000 });
+
+      await until(
+        async () => (await relayClient.getQuestion(id)).status === 'cancelled',
+        30_000,
+        'declined on the relay',
+      );
+      const view = await until(
+        async () => {
+          const r = await call(paneA, 'get_decision', { question_id: id });
+          return r.structuredContent?.status === 'cancelled' ? r : null;
+        },
+        30_000,
+        'declined locally',
+      );
+      expect(view.structuredContent).toMatchObject({ closed_reason: 'declined', provenance: null });
+      await until(async () => sink.typed.length > typedBefore, 30_000, 'the decline notice');
+      const notice = sink.typed.at(-1)!;
+      expect(notice.pane).toBe('pane-a');
+      expect(notice.text).toContain('status: declined');
+      expect(notice.text).toContain('authorised: no');
     });
 
     it('keeps panes apart: the same correlation id is a new question, answered into that pane only', async () => {

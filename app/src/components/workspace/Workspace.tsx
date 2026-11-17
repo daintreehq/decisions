@@ -14,7 +14,7 @@ import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
-import { StaleQuestionError } from '../../domain/answer.js';
+import { DeclineUnsupportedError, StaleQuestionError } from '../../domain/answer.js';
 import {
   composeShape,
   verdict as computeVerdict,
@@ -639,7 +639,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
   // Declining is deliberate and final, so it lives here behind a confirmation, never in the composer.
-  if (status === 'open' && verified && !pendingEntry)
+  // Only where the desktop that asked can file a decline; an older one would leave the question open.
+  if (status === 'open' && verified && !pendingEntry && app.declinesFor(view))
     menu.push({
       label: 'Dismiss question…',
       onSelect: () => {
@@ -1724,7 +1725,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                   })
                   .catch((e: unknown) => {
                     setDeclineError(
-                      e instanceof StaleQuestionError
+                      e instanceof StaleQuestionError || e instanceof DeclineUnsupportedError
                         ? e.message
                         : 'Could not dismiss it. Check your connection and try again.',
                     );
