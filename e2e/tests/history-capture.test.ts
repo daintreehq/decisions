@@ -617,9 +617,11 @@ describe.skipIf(!OUT || !chromiumPath)('captures of History', () => {
     await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
     await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
     await page.getByRole('button', { name: 'Dismiss question' }).click();
+    // The sheet's history entry is unwound asynchronously when it closes: wait for the decline to show before moving on.
     await page
       .getByRole('dialog', { name: 'Dismiss this question?' })
       .waitFor({ state: 'hidden', timeout: 30_000 });
+    await sees('Declined by you', '.ws');
 
     // The agent's computer withdraws one.
     await bridge.cancelQuestion(ids.withdrawn!);
