@@ -248,6 +248,10 @@ describe('answerQuestion on a Remote Host’s question', () => {
         selectedOptionIds: ['approve'],
       }),
     ).rejects.toMatchObject({ code: 'forbidden', message: /only the owner desktop/ });
+    // Refused for what it is, before its input is even read.
+    await expect(asking.bridge.answerQuestion({} as never)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
     await expect(asking.bridge.publisher.enqueueOwnerAnswer({
       questionId: qid,
       expectedRevision: 0,
