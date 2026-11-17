@@ -346,6 +346,13 @@ describe('withdrawn questions', () => {
     expect(withdrawnLabel(v)).not.toMatch(/agent/i);
   });
 
+  it('strips control characters and line breaks from the computer name', () => {
+    expect(withdrawnLabel(withdrawn('Studio\u001b[31m\u202e\nMac'))).toBe(
+      'Withdrawn on Studio Mac',
+    );
+    expect(withdrawnLabel(withdrawn('\u001b[0m\n '))).toBe('Withdrawn on the computer');
+  });
+
   it('reads a computer with no usable name as what it is', () => {
     expect(withdrawnLabel(withdrawn(''))).toBe('Withdrawn on the computer');
     expect(withdrawnLabel(withdrawn('host_01JC8Z4MQ7'))).toBe('Withdrawn on an unnamed computer');

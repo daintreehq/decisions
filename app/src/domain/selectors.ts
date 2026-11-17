@@ -4,6 +4,7 @@ import {
   type ActionKind,
 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
+import { sanitizeText } from '../lib/safe-text.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
@@ -173,7 +174,8 @@ export function originParts(v: QuestionView): { project: string; machine: string
  * the computer's key whether an agent or the person at the keyboard asked for it, so this never says who did.
  */
 export function withdrawnLabel(v: QuestionView): string {
-  const { machine } = originParts(v);
+  // The name comes from the signing computer: drop control and escape characters, and fold line breaks to spaces.
+  const machine = sanitizeText(originParts(v).machine).replace(/\s+/g, ' ').trim();
   if (!machine) return 'Withdrawn on the computer';
   return machine === 'Unnamed computer'
     ? 'Withdrawn on an unnamed computer'
