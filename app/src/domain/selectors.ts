@@ -1,4 +1,6 @@
 import {
+  HUMAN_MESSAGE_ROLES,
+  humanMessageSentOn,
   isPersonDecline,
   threadAwaitsHuman,
   type ActionKind,
@@ -198,6 +200,18 @@ export interface AnswerBy {
   subject: string;
 }
 
+/**
+ * The computer the person acted on, from the owner desktop's certified name. The owner chose the name and its key
+ * signed it, but it is still shown as text: drop control and escape characters and fold line breaks, as for the
+ * asking computer's name. No name, or a bare host id, reads "your computer".
+ */
+function computerName(label: string | undefined): string {
+  const name = sanitizeText(label ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
+}
+
 export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): AnswerBy {
   if (a.provenance === 'proxy')
     return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
@@ -209,6 +223,36 @@ export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): Ans
     computer,
     author: `You on ${computer}`,
     subject: `Your answer on ${computer}`,
+  };
+}
+
+/**
+ * Where the person sent a follow-up from, in the words every surface uses: a phone or tablet, or the computer (the
+ * owner desktop signed it), named from its certificate. Decided by the signer's verified role
+ * (`humanMessageSentOn`), never by anything the relay says. Null for anything that is not the person's: an agent
+ * message, one that could not be verified, or a signer that never sends a human message.
+ */
+export interface FollowUpBy {
+  /** The computer the person sent it on, or null when they sent it on a phone or tablet. */
+  computer: string | null;
+  /** The bubble's label: "Follow-up", "Follow-up on Studio Mac". */
+  label: string;
+  /** As a sentence's subject: "Your follow-up", "Your follow-up on Studio Mac". */
+  subject: string;
+}
+
+export function followUpBy(
+  m: Pick<ThreadMessage, 'side' | 'verified' | 'signerRole' | 'signerLabel'>,
+): FollowUpBy | null {
+  if (m.side !== 'human' || !m.verified || !m.signerRole) return null;
+  if (!HUMAN_MESSAGE_ROLES.includes(m.signerRole)) return null;
+  if (humanMessageSentOn(m.signerRole) === 'phone')
+    return { computer: null, label: 'Follow-up', subject: 'Your follow-up' };
+  const computer = computerName(m.signerLabel);
+  return {
+    computer,
+    label: `Follow-up on ${computer}`,
+    subject: `Your follow-up on ${computer}`,
   };
 }
 

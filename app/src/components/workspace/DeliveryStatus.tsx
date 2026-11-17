@@ -5,6 +5,7 @@ import {
   DELIVERY_LABELS,
   type DeliveryProgress,
   type DeliveryStep,
+  type FollowUpBy,
 } from '../../domain/selectors.js';
 import { CheckIcon, ChevronDown, ClockIcon, WarningIcon } from '../Icons.js';
 
@@ -174,6 +175,14 @@ export function Receipt({
 export function AnswerReceipt({ a, progress }: { a: ActionView; progress: DeliveryProgress }) {
   const by = answerBy(a);
   return <Receipt progress={progress} fromPhone={!by.model && !by.computer} subject={by.subject} />;
+}
+
+/**
+ * The receipt under one of the person's follow-ups, said as where it was sent from: one from a phone or tablet starts
+ * on the phone, one sent on the computer never passed through one and starts at the relay.
+ */
+export function FollowUpReceipt({ by, progress }: { by: FollowUpBy; progress: DeliveryProgress }) {
+  return <Receipt progress={progress} fromPhone={!by.computer} subject={by.subject} />;
 }
 
 /**

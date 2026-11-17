@@ -32,6 +32,7 @@ import {
   DELIVERY_LABELS,
   deliveryProgress,
   effectiveStatus,
+  followUpBy,
   lastProxyAction,
   messageProgress,
   originParts,
@@ -69,7 +70,7 @@ import { AnswerDock } from './AnswerDock.js';
 import { Composer } from './Composer.js';
 import { ConsentSheet } from './ConsentSheet.js';
 import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
-import { AnswerReceipt, Receipt } from './DeliveryStatus.js';
+import { AnswerReceipt, FollowUpReceipt, Receipt } from './DeliveryStatus.js';
 import { DraftPhotoStrip, PhotoGrid, type PhotoUpload } from './Photos.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
@@ -1025,7 +1026,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       }
       if ('m' in t) {
         const m = t.m;
-        if (!m.verified) {
+        // The person's only when its signer's verified role says so; anything else is never shown as theirs.
+        const by = followUpBy(m);
+        if (!m.verified || (m.side === 'human' && !by)) {
           items.push(
             <SystemLine key={m.messageId} now={now} tone="warn" icon={<WarningIcon size={14} />}>
               A message could not be verified and was ignored
@@ -1046,7 +1049,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             />,
           );
           lastNote = m;
-        } else {
+        } else if (by) {
           const p = messageProgress(m);
           items.push(
             <OutgoingMessage
@@ -1054,10 +1057,11 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               id={`ws-msg-${m.messageId}`}
               at={m.createdAt}
               now={now}
-              label="Follow-up"
+              // "Follow-up", or "Follow-up on Studio Mac" for one the person sent on the computer.
+              label={by.label}
               flagged={p.step === 'attention'}
               // Every follow-up keeps its own receipt: each is typed (or held) on its own.
-              receipt={<Receipt progress={p} fromPhone subject="Your follow-up" />}
+              receipt={<FollowUpReceipt by={by} progress={p} />}
             >
               <PhotoGrid view={view} images={m.images} />
               {m.text.trim() && <SafeText text={m.text} className="answer-text" />}
@@ -1562,7 +1566,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     lastFollow.current = followKey;
     if (!followKey || followKey === prev || !latestFollowUp) return;
     const p = messageProgress(latestFollowUp);
-    if (p.step === 'terminal') announce('Your follow-up was typed into the terminal.');
+    if (p.step === 'terminal')
+      announce(`${followUpBy(latestFollowUp)?.subject ?? 'Your follow-up'} was typed into the terminal.`);
     else if (p.step === 'attention')
       announce(`${p.label}. Open Daintree on your computer to see what happened.`);
   }, [followKey]); // eslint-disable-line react-hooks/exhaustive-deps
