@@ -97,6 +97,13 @@ const desktopCancel = (at: number): ActionView => ({
   signerRole: 'owner-desktop',
 });
 
+/** The owner desktop's cancel with the signed `decline` flag: the person declined it on that computer. */
+const computerDecline = (at: number, signerLabel = 'Studio Mac'): ActionView => ({
+  ...desktopCancel(at),
+  signerLabel,
+  decline: true,
+});
+
 const base: ListQuery = { sort: 'due', query: '', project: null, computer: null };
 const ids = (list: { id: string }[]) => list.map((v) => v.id);
 const needs = (list: QuestionView[], q: ListQuery = base) =>
@@ -321,6 +328,57 @@ describe('History', () => {
     // A refused follow-up never puts a declined question back in Needs you.
     const sections = homeSections([declined], { ...base, refused: new Set(['d']) }, NOW);
     expect(sections.find((x) => x.kind === 'needs')!.items).toEqual([]);
+  });
+
+  it('files a question declined on the computer as declined by the person there, never as withdrawn', () => {
+    const phone = q('p', { status: 'cancelled', actions: [act('cancel', NOW - H)] });
+    const computer = q('c', {
+      status: 'cancelled',
+      machine: 'Build Box',
+      actions: [computerDecline(NOW - 2 * H)],
+    });
+    const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 3 * H)] });
+    const list = [phone, computer, withdrawn];
+    for (const mode of ['decisions', 'all'] as const) {
+      expect(
+        historyEntries(list, mode, '', NOW).map((e) => [
+          e.v.id,
+          e.status,
+          closedLine(e.status, e.v),
+          e.at,
+        ]),
+      ).toEqual([
+        ['p', 'declined', 'Declined by you', iso(NOW - H)],
+        // Named from the signing computer's certificate, not the computer that asked.
+        ['c', 'declined', 'Declined by you on Studio Mac', iso(NOW - 2 * H)],
+        ['w', 'withdrawn', 'Withdrawn on MacBook', iso(NOW - 3 * H)],
+      ]);
+    }
+    // A name that is no name, or none at all, reads as the person's computer; control characters never show.
+    for (const label of ['', '   ', 'host_abcdef12'])
+      expect(closedLine('declined', { ...computer, actions: [computerDecline(NOW, label)] })).toBe(
+        'Declined by you on your computer',
+      );
+    expect(
+      closedLine('declined', {
+        ...computer,
+        actions: [computerDecline(NOW, 'Studio\u202e\nMac\u0007')],
+      }),
+    ).toBe('Declined by you on Studio Mac');
+    // Nothing about it waits on the person: not an old failed delivery, not a refused follow-up.
+    const stuck = {
+      ...computer,
+      messages: [
+        { side: 'human', verified: true, delivery: { status: 'needs-attention' } },
+      ] as unknown as QuestionView['messages'],
+    };
+    expect(principalStatus(stuck, NOW)).toBe('declined');
+    expect(needs([stuck], { ...base, refused: new Set(['c']) })).toEqual([]);
+    // The flag counts only on a verified owner-desktop cancel.
+    const unverified = { ...computer, actions: [{ ...computerDecline(NOW - H), verified: false }] };
+    expect(principalStatus(unverified, NOW)).toBe('withdrawn');
+    const byHost = { ...computer, actions: [{ ...computerDecline(NOW - H), signerRole: 'desktop-host' as const }] };
+    expect(principalStatus(byHost, NOW)).toBe('withdrawn');
   });
 
   it('groups by Today, Yesterday, then dates, in local time', () => {

@@ -75,7 +75,7 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
 export function closedLine(status: RowStatus, v: QuestionView): string | null {
   if (status === 'expired') return 'Expired without an answer';
   if (status === 'withdrawn') return withdrawnLabel(v);
-  if (status === 'declined') return declinedLabel(v);
+  if (status === 'declined') return declinedLabel(v) ?? 'Declined by you';
   if (status === 'unreadable') return 'This device holds no key for it';
   if (status === 'unverified') return 'Could not be verified';
   return null;

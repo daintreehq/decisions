@@ -45,7 +45,7 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
  * with the `decline` flag in its record) rather than a desktop withdrawing the question. Decided only from what was
  * verified: the certified role and the signed flag.
  */
-export const isDecline = (a: Pick<ActionView, 'action' | 'signerRole' | 'decline' | 'verified'>) =>
+const isDecline = (a: Pick<ActionView, 'action' | 'signerRole' | 'decline' | 'verified'>) =>
   a.verified && a.signerRole !== null && isPersonDecline(a.action, a.signerRole, a.decline);
 
 /** The cancel that closed this question: the last verified one, when it is cancelled and verified. */
@@ -63,10 +63,7 @@ function closingCancel(v: QuestionView): ActionView | null {
  * the owner desktop with the signed `decline` flag (its certificate checked when the event was verified). A desktop's
  * cancel without the flag is a withdrawal instead.
  */
-export function declinedByPerson(v: QuestionView): boolean {
-  const a = closingCancel(v);
-  return !!a && isDecline(a);
-}
+export const declinedByPerson = (v: QuestionView): boolean => declinedLabel(v) !== null;
 
 /**
  * Who declined, in the words every surface uses: "Declined by you" from a phone or tablet, "Declined by you on
@@ -82,10 +79,13 @@ export function declineBy(
   return { computer, label: `Declined by you on ${computer}` };
 }
 
-/** The closed line of a question the person declined (`declinedByPerson`), naming the computer when it was there. */
-export function declinedLabel(v: QuestionView): string {
+/**
+ * The closed line of a question the person declined, naming the computer when they declined it there; null when the
+ * cancel in force is not a verified decline.
+ */
+export function declinedLabel(v: QuestionView): string | null {
   const a = closingCancel(v);
-  return (a && declineBy(a)?.label) || 'Declined by you';
+  return a ? (declineBy(a)?.label ?? null) : null;
 }
 
 /** A question that can still be answered: open, verified and not past its deadline. */

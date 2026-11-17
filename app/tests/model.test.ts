@@ -161,6 +161,35 @@ describe('question store', () => {
     expect(statusLabel('cancelled', w2)).toBe('Withdrawn');
   });
 
+  it('keeps the first close, and declines on the computer only a question still waiting on the person', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const s = store(w);
+    const [declined, withdrawn, proxied] = await Promise.all([
+      questionEvent(w),
+      questionEvent(w),
+      questionEvent(w, { requirement: 'proxy-ok' }),
+    ]);
+    await s.ingestAll([declined, withdrawn, proxied]);
+    const cancel = (questionId: string, decline?: true, expectedRevision = 0) =>
+      actionEvent(w, { questionId, action: 'cancel', signer: w.desktop, decline, expectedRevision });
+    // A decline then a withdrawal, and a withdrawal then a decline: the later cancel changes nothing.
+    await s.ingest(await cancel(declined.question_id!, true));
+    await s.ingest(await cancel(declined.question_id!));
+    await s.ingest(await cancel(withdrawn.question_id!));
+    await s.ingest(await cancel(withdrawn.question_id!, true));
+    expect(declinedLabel(s.get(declined.question_id!)!)).toBe('Declined by you on Studio Mac');
+    expect(declinedByPerson(s.get(withdrawn.question_id!)!)).toBe(false);
+    for (const id of [declined.question_id!, withdrawn.question_id!])
+      expect(s.get(id)!.integrityIssues.join()).toMatch(/repeats a transition/);
+    // A model answer is confirmed or overruled, never declined; the desktop may still withdraw it.
+    await s.ingest(await actionEvent(w, { questionId: proxied.question_id!, action: 'proxy-answer' }));
+    await s.ingest(await cancel(proxied.question_id!, true, 1));
+    const v = s.get(proxied.question_id!)!;
+    expect(v.status).toBe('proxy-answered');
+    expect(v.integrityIssues.join()).toMatch(/cannot decline a proxy-answered question/);
+    expect(declinedByPerson(v)).toBe(false);
+  });
+
   it('never labels a decline the app cannot verify as the person’s', async () => {
     const w = await makeWorld({ ownerLabel: 'Studio Mac' });
     const s = store(w);

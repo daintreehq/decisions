@@ -6,11 +6,18 @@ import type {
 } from '@daintreehq/decisions-protocol';
 import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
-import { agentName, answerBy, originParts, type FollowUpBy } from '../../domain/selectors.js';
+import {
+  agentName,
+  answerBy,
+  declineBy,
+  originParts,
+  withdrawnLabel,
+  type FollowUpBy,
+} from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
-import { CheckIcon, ModelIcon } from '../Icons.js';
+import { CheckIcon, ModelIcon, UndoIcon } from '../Icons.js';
 import { AnswerBody } from './DecisionArea.js';
 import { PhotoGrid, type PhotoUpload } from './Photos.js';
 
@@ -480,6 +487,28 @@ export function ModelMessage({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A cancel in the thread: the person declining it (on a phone or tablet, or on the computer, named) or the computer
+ * withdrawing it, classified only from the verified record (`declineBy`).
+ */
+export function CancelLine({ view, a, now }: { view: QuestionView; a: ActionView; now: number }) {
+  const declined = declineBy(a);
+  return (
+    <SystemLine
+      now={now}
+      at={a.createdAt}
+      icon={<UndoIcon size={14} />}
+      detail={
+        declined
+          ? 'You chose not to answer it, so nothing was approved.'
+          : 'No answer is needed, and nothing was approved here.'
+      }
+    >
+      {declined ? declined.label : withdrawnLabel(view)}
+    </SystemLine>
   );
 }
 

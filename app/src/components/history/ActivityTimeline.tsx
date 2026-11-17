@@ -7,7 +7,6 @@ import {
   answerBy,
   currentAnswer,
   declineBy,
-  declinedByPerson,
   declinedLabel,
   effectiveStatus,
   followUpBy,
@@ -354,9 +353,7 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
       s === 'expired'
         ? 'Expired without an answer'
         : s === 'cancelled'
-          ? declinedByPerson(v)
-            ? declinedLabel(v)
-            : withdrawnLabel(v)
+          ? (declinedLabel(v) ?? withdrawnLabel(v))
           : s === 'open'
             ? 'Not answered yet'
             : 'No answer this device can show';
