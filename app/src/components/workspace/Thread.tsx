@@ -6,11 +6,18 @@ import type {
 } from '@daintreehq/decisions-protocol';
 import { preparationLine } from '../../domain/involvement.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
-import { agentName, answerBy, originParts } from '../../domain/selectors.js';
+import {
+  agentName,
+  answerBy,
+  declineBy,
+  originParts,
+  withdrawnLabel,
+  type FollowUpBy,
+} from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { absoluteLabel, momentLabel } from '../../lib/time.js';
 import { SafeText } from '../SafeText.js';
-import { CheckIcon, ModelIcon } from '../Icons.js';
+import { CheckIcon, ModelIcon, UndoIcon } from '../Icons.js';
 import { AnswerBody } from './DecisionArea.js';
 import { PhotoGrid, type PhotoUpload } from './Photos.js';
 
@@ -340,6 +347,58 @@ export function HumanAnswer({
 }
 
 /**
+ * One of the person's follow-ups, as their outgoing reply: "Follow-up" from a phone or tablet, "Follow-up on Studio
+ * Mac" for one sent on the computer (`followUpBy`), with its own receipt. The same component, under the same key,
+ * while it is on its way from this device and once committed, so its photos (and a viewer open on one) stay put.
+ */
+export function HumanFollowUp({
+  view,
+  by,
+  text,
+  images,
+  at,
+  now,
+  receipt,
+  flagged,
+  tone,
+  upload,
+  extra,
+  id,
+}: {
+  view: QuestionView;
+  by: FollowUpBy;
+  text: string;
+  images: ThreadMessage['images'];
+  at: string;
+  now: number;
+  receipt?: ReactNode;
+  flagged?: boolean;
+  /** Still on this device (queued or sending). */
+  tone?: 'pending';
+  /** Its photos' progress while they upload. */
+  upload?: PhotoUpload;
+  /** What follows the words while it is on its way (an upload that stopped). */
+  extra?: ReactNode;
+  id?: string;
+}) {
+  return (
+    <OutgoingMessage
+      label={by.label}
+      at={at}
+      now={now}
+      receipt={receipt}
+      flagged={flagged}
+      tone={tone}
+      id={id}
+    >
+      <PhotoGrid view={view} images={images} upload={upload} />
+      {text.trim() && <SafeText text={text} className="answer-text" />}
+      {extra}
+    </OutgoingMessage>
+  );
+}
+
+/**
  * The decision model's answer, as an incoming message that always says so: the violet mark and the words "Model
  * answer", the model, its reported confidence and how many earlier decisions it drew on, then where it has reached.
  * While it awaits review it carries Confirm answer and Overrule.
@@ -428,6 +487,28 @@ export function ModelMessage({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A cancel in the thread: the person declining it (on a phone or tablet, or on the computer, named) or the computer
+ * withdrawing it, classified only from the verified record (`declineBy`).
+ */
+export function CancelLine({ view, a, now }: { view: QuestionView; a: ActionView; now: number }) {
+  const declined = declineBy(a);
+  return (
+    <SystemLine
+      now={now}
+      at={a.createdAt}
+      icon={<UndoIcon size={14} />}
+      detail={
+        declined
+          ? 'You chose not to answer it, so nothing was approved.'
+          : 'No answer is needed, and nothing was approved here.'
+      }
+    >
+      {declined ? declined.label : withdrawnLabel(view)}
+    </SystemLine>
   );
 }
 

@@ -6,7 +6,7 @@ import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridg
 import type { InvolvementView } from './involvement.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
@@ -85,6 +85,7 @@ function decisionResult(v: DecisionView) {
             message_id: t.messageId,
             message_seq: t.messageSeq,
             side: t.side,
+            sent_from: t.sentFrom,
             expects_reply: t.expectsReply,
             text: t.text,
             images: t.images.map((i) => ({
@@ -349,7 +350,7 @@ export const TOOLS = [
         thread: {
           type: 'array',
           description:
-            'Answers and follow-up messages in order. side agent: yours; side human: the person, with delivery. A message never changes the answer.',
+            'Answers and follow-up messages in order. side agent: yours; side human: the person, with delivery and sent_from (phone, or computer when they wrote it on their own computer; still their message). A message never changes the answer.',
           items: {
             type: 'object',
             properties: {
@@ -361,6 +362,7 @@ export const TOOLS = [
               message_id: { type: 'string' },
               message_seq: { type: 'integer' },
               side: { type: 'string', enum: ['agent', 'human'] },
+              sent_from: { type: ['string', 'null'], enum: ['phone', 'computer', null] },
               expects_reply: { type: 'boolean' },
               text: { type: 'string' },
               images: {

@@ -33,8 +33,16 @@ export interface ActionView {
   seq: number;
   signerDeviceId: string;
   signerRole: Role | null;
-  /** The signer's certified name, once verified: names the computer an answer made there (`human-desktop`) came from. */
+  /**
+   * The signer's certified name, once verified: names the computer an answer made there (`human-desktop`), or a
+   * decline made there, came from.
+   */
   signerLabel?: string;
+  /**
+   * The signed record's `decline` flag, set only on a verified `cancel` the owner desktop signed for the person
+   * (docs/protocol.md section 6.1). Never taken from a relay-supplied field.
+   */
+  decline?: true;
   content: AnswerContent | null;
   verified: boolean;
   error?: string;
@@ -69,6 +77,13 @@ export interface ThreadMessage {
   createdAt: string;
   committedAt: string;
   signerDeviceId: string;
+  /**
+   * The signer's certified role, once verified (null until then): a human message from the `owner-desktop` was sent
+   * on the computer, one from a `phone` or `tablet` on a phone (`humanMessageSentOn`).
+   */
+  signerRole: Role | null;
+  /** The signer's certified name, once verified: names the computer a follow-up sent there came from. */
+  signerLabel?: string;
   /** Verified, decrypted text; empty when it could not be verified. */
   text: string;
   /** Human only: the photos it carries, verified against its signed record (their bytes are checked when shown). */
@@ -365,6 +380,7 @@ export class QuestionStore {
             rec.action,
             v.value.signerRole,
             rec.expected_revision,
+            v.value.record.decline,
           );
         } catch (e) {
           reject(e instanceof Error ? e.message : 'illegal transition');
@@ -389,6 +405,7 @@ export class QuestionStore {
           provenance: v.value.provenance,
           signerRole: v.value.signerRole,
           signerLabel: v.value.signerLabel,
+          ...(v.value.record.decline === true ? { decline: true as const } : {}),
           content: v.value.content,
           verified: true,
           imagesOk: v.value.imagesOk,
@@ -423,6 +440,7 @@ export class QuestionStore {
           createdAt: entry.record.created_at,
           committedAt: entry.committed_at,
           signerDeviceId: entry.record.signer_device_id,
+          signerRole: null,
           delivery: null,
         };
         const v = view.verification.ok
@@ -438,6 +456,8 @@ export class QuestionStore {
           const c = v.value.content;
           view.messages.push({
             ...base,
+            signerRole: v.value.signerRole,
+            signerLabel: v.value.signerLabel,
             text: c.text,
             images: c.side === 'human' ? c.images : [],
             verified: true,

@@ -68,6 +68,8 @@ const SNAPSHOT_BACKFILL_PREF = 'snapshot-backfill-v1';
 const THREAD_FEATURE: ProtocolFeature = 'thread-messages-v1';
 /** Set once this device has read every question's thread after first declaring the feature. */
 const THREAD_BACKFILL_PREF = 'thread-backfill-v1';
+/** How long `GET /info` may take before it counts as failed (a later `ensureInfo()` asks again). */
+const INFO_TIMEOUT_MS = 10_000;
 /** Phone images: photos the person attaches to an answer or a follow-up (docs/protocol.md section 17). */
 const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
 /** Declines: the asking desktop files the person's dismissal of its question (docs/protocol.md section 6.1). */
@@ -175,9 +177,16 @@ export class AppController {
 
   /** Settles once `GET /info` has answered or failed; boot waits for it briefly so the first socket is right. */
   private infoLoaded: Promise<void> = Promise.resolve();
+  /** The `GET /info` still on its way, which anyone waiting for the answer joins instead of asking again. */
+  private infoPending: Promise<void> | null = null;
 
-  private loadInfo() {
-    this.infoLoaded = publicJson<InfoResponse>(this.origin, 'GET', '/api/v1/info')
+  private loadInfo(): Promise<void> {
+    // A relay that never answers must not keep anyone waiting on it (dictation waits to know it is set up).
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), INFO_TIMEOUT_MS);
+    const loading: Promise<void> = publicJson<InfoResponse>(this.origin, 'GET', '/api/v1/info', {
+      signal: abort.signal,
+    })
       .then((info) => {
         const before = this.declaredFeatures().join(',');
         this.patch({ info });
@@ -188,7 +197,23 @@ export class AppController {
           void this.backfillThreads();
         }
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(deadline);
+        if (this.infoPending === loading) this.infoPending = null;
+      });
+    this.infoPending = loading;
+    this.infoLoaded = loading;
+    return loading;
+  }
+
+  /**
+   * Settles once the relay has said what it serves: at once when it already has, else with the request on its way, or
+   * a new one when the last failed (the request at launch is otherwise never repeated). `info` stays null if it fails.
+   */
+  ensureInfo(): Promise<void> {
+    if (this.snap.info) return Promise.resolve();
+    return this.infoPending ?? this.loadInfo();
   }
 
   /** Whether the relay advertises pane snapshots (`GET /info`); until it does, the app never asks for them. */
@@ -361,6 +386,7 @@ export class AppController {
           verifyInvolvementResponse(raw, {
             installationId: config.installationId,
             trust: this.trust!,
+            deviceId: config.deviceId,
           });
         const r = await check();
         if (r.ok || r.reason !== 'unknown signer') return r;
@@ -629,6 +655,7 @@ export class AppController {
         status: 'idle',
         record: null,
         receivedAt: null,
+        setBy: null,
         revision: 0,
         problem: null,
       }

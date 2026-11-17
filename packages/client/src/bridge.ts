@@ -15,10 +15,28 @@ import {
 import { DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
-import { InvolvementSync, type InvolvementView } from './involvement.js';
+import {
+  InvolvementSync,
+  SetInvolvementInput,
+  type InvolvementPreference,
+  type InvolvementView,
+  type SetInvolvementResult,
+} from './involvement.js';
+import { PresenceReporter } from './presence.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
+import {
+  DeclineQuestionInput,
+  ownerDeclineItemId,
+  type OwnerDeclineResult,
+} from './owner-decline.js';
+import {
+  OWNER_MESSAGE_FEATURE,
+  SendFollowUpInput,
+  ownerMessageItemId,
+  type OwnerFollowUpResult,
+} from './owner-message.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -26,7 +44,7 @@ import {
   openQuestionContent,
   sealStoredContent,
 } from './at-rest.js';
-import { parseMessages, type LocalMessageStatus } from './messages.js';
+import { messageSentOn, parseMessages, type LocalMessageStatus } from './messages.js';
 import { RelayError } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
@@ -110,24 +128,27 @@ export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
  * hint that the person's involvement preference changed (section 20). `owner-desktop-answers-v1` says this desktop
  * accepts the person's answer signed by the owner desktop (section 2), which the relay commits to its questions
  * only once declared; it needs nothing from the host. `person-declines-v1` says it files a phone's or tablet's
- * decline (section 6.1); the relay refuses a decline of a question whose desktop has not declared it.
+ * decline, and `owner-desktop-declines-v1` the owner desktop's signed `decline` (section 6.1); the relay refuses
+ * either decline of a question whose desktop has not declared it.
  */
 export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
   'phone-images-v1',
   'involvement-v1',
   'owner-desktop-answers-v1',
   'person-declines-v1',
+  'owner-desktop-declines-v1',
 ];
 
 /**
- * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` when it delivers follow-ups and
- * `pane-snapshots-v1` when snapshots are on.
+ * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
+ * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
+ * `sent_from: computer`), and `pane-snapshots-v1` when snapshots are on.
  */
 export function bridgeFeatures(
   o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
 ): readonly ProtocolFeature[] {
   const extra: ProtocolFeature[] = [
-    ...(o.followUps ? (['thread-messages-v1'] as const) : []),
+    ...(o.followUps ? (['thread-messages-v1', OWNER_MESSAGE_FEATURE] as const) : []),
     ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
   ];
   return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
@@ -152,8 +173,13 @@ export type ThreadEntryView =
       messageId: string;
       /** The relay's order of the question's messages, from 1. */
       messageSeq: number;
-      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up from their phone. */
+      /** `agent`: posted from this pane (`send_followup`). `human`: the person's follow-up. */
       side: 'agent' | 'human';
+      /**
+       * Where the person sent a human follow-up from: `computer` (the owner desktop signed it; still the person's
+       * own message) or `phone` (a phone or tablet). Null for the agent's own.
+       */
+      sentFrom: 'computer' | 'phone' | null;
       expectsReply: boolean;
       /** The whole text ('' for a message of images only, or one whose content can't be opened now). */
       text: string;
@@ -195,9 +221,9 @@ export interface DecisionView {
    */
   answeredOn: 'computer' | 'phone' | null;
   /**
-   * Why a closed question is closed without an answer: `declined` when the person dismissed it from a phone or
-   * tablet, `withdrawn` when a desktop cancelled it, `expired` when its deadline passed. Null otherwise. None of
-   * them authorises anything.
+   * Why a closed question is closed without an answer: `declined` when the person dismissed it (from a phone or
+   * tablet, or on the computer through the owner desktop's signed decline), `withdrawn` when a desktop cancelled it,
+   * `expired` when its deadline passed. Null otherwise. None of them authorises anything.
    */
   closedReason: 'declined' | 'withdrawn' | 'expired' | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
@@ -281,6 +307,10 @@ type Listener = {
   error: (e: Error) => void;
   /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
   answer: (result: OwnerAnswerResult) => void;
+  /** A decline from `declineQuestion` reached its outcome (anything but `queued`), however it was sent. */
+  decline: (result: OwnerDeclineResult) => void;
+  /** A follow-up from `sendFollowUp` reached its outcome (anything but `queued`), however it was sent. */
+  followUp: (result: OwnerFollowUpResult) => void;
 };
 
 /**
@@ -297,9 +327,13 @@ export class DecisionsBridge {
   readonly snapshots: SnapshotPublisher;
   /** The person's involvement preference, as this desktop last verified it (`getInvolvement`). */
   readonly involvement: InvolvementSync;
+  /** Keeps the relay's presence lease current while the host reports the person is here (`reportPresence`). */
+  readonly presence: PresenceReporter;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
+  /** Bumped by every start, stop and revocation: a start still recovering when one comes starts nothing more. */
+  private lifecycle = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
@@ -308,6 +342,8 @@ export class DecisionsBridge {
     delivered: [],
     error: [],
     answer: [],
+    decline: [],
+    followUp: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -336,19 +372,14 @@ export class DecisionsBridge {
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
     this.publisher = new Publisher(this.ctx, {
-      onOwnerAnswer: (r) => {
-        for (const l of [...this.listeners.answer]) {
-          try {
-            l(r);
-          } catch (e) {
-            this.emitError(e as Error);
-          }
-        }
-      },
+      onOwnerAnswer: (r) => this.notify('answer', r),
+      onOwnerDecline: (r) => this.notify('decline', r),
+      onOwnerFollowUp: (r) => this.notify('followUp', r),
     });
-    this.verifier = new EventVerifier(this.ctx);
+    this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
+    this.presence = new PresenceReporter(this.ctx, (e) => this.emitError(e));
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -395,6 +426,20 @@ export class DecisionsBridge {
 
   private emitError(e: Error): void {
     this.listeners.error.forEach((l) => l(e));
+  }
+
+  /** Tell the host an owner-desktop answer, decline or follow-up settled; a listener that throws is reported on `error`. */
+  private notify<K extends 'answer' | 'decline' | 'followUp'>(
+    event: K,
+    r: Parameters<Listener[K]>[0],
+  ): void {
+    for (const l of [...(this.listeners[event] as ((x: typeof r) => void)[])]) {
+      try {
+        l(r);
+      } catch (e) {
+        this.emitError(e as Error);
+      }
+    }
   }
 
   /** A Host without a persistent key store keeps the epochs it fetches here, seeded from its identity. */
@@ -451,6 +496,7 @@ export class DecisionsBridge {
   /** Reconcile interrupted injections, connect the socket, start the retry timer. */
   async start(opts: { socket?: boolean } = {}): Promise<void> {
     if (this.state === 'running') return;
+    const run = ++this.lifecycle;
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
@@ -458,8 +504,11 @@ export class DecisionsBridge {
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
+    // Stopped or revoked while recovering: nothing may start sending in the background now.
+    if (run !== this.lifecycle) return;
     this.snapshots.start();
     this.involvement.start();
+    this.presence.start();
     if (opts.socket !== false) this.socket.start();
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
@@ -473,11 +522,13 @@ export class DecisionsBridge {
   }
 
   async stop(): Promise<void> {
+    this.lifecycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -485,11 +536,13 @@ export class DecisionsBridge {
 
   private markRevoked(): void {
     if (this.state === 'revoked') return;
+    this.lifecycle++;
     this.state = 'revoked';
     this.delivery.stopped = true;
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
+    this.presence.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -509,6 +562,10 @@ export class DecisionsBridge {
     return r;
   }
 
+  /**
+   * Withdraw a question this desktop asked: the desktop calls it off, which tells its agent nothing. The person
+   * declining it on the owner desktop is `declineQuestion`.
+   */
   async cancelQuestion(questionId: string, pane?: PaneIdentity): Promise<void> {
     await this.owned(questionId, pane);
     await this.publisher.enqueueCancel(questionId);
@@ -526,8 +583,9 @@ export class DecisionsBridge {
    * it stands: `sent`; `already-answered` (another answer won); `changed` (the question is open at another revision);
    * `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer
    * that asked (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when it is not settled yet
-   * (the relay could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in
-   * which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
+   * (the relay could not be reached, it waits behind its question's create or withdrawal or the person's earlier
+   * follow-up or decline on it, or the bridge is stopped), in which case the outbox keeps sending it and its outcome
+   * arrives on `answer` (and from `getAnswerResult`). Every
    * outcome is reported on `answer` by the process that settles it, this one included. Pass `answerId` to make a
    * repeated submission the same answer.
    *
@@ -554,10 +612,9 @@ export class DecisionsBridge {
     if (settled) return settled;
     // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create
     // or cancellation, and is called off if the bridge stops or is revoked while it waits its turn.
-    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
-    if (running()) {
+    if (this.running()) {
       await this.publisher
-        .flush({ only: ownerAnswerItemId(answerId), proceed: running })
+        .flush({ only: ownerAnswerItemId(answerId), proceed: this.running })
         .catch((e) => this.emitError(e as Error));
     }
     return (
@@ -576,6 +633,130 @@ export class DecisionsBridge {
    */
   getAnswerResult(answerId: string): Promise<OwnerAnswerResult | null> {
     return this.publisher.ownerAnswerResult(answerId);
+  }
+
+  /**
+   * Decline an open question for the person, from the host app's own UI on the owner desktop: a `cancel` signed with
+   * its key and carrying `decline: true` (protocol section 6.1). Every desktop files it as the person's decline, as it
+   * would a phone's: `get_decision` reports `closed_reason: declined`, and a listening agent is told it was declined.
+   * It declines the owner's own questions and a Remote Host's alike, and needs no local copy of the question: the host
+   * passes the revision the person saw, and the decline is signed against it and never moved to a later one.
+   * Withdrawing a question is `cancelQuestion`, a different action.
+   *
+   * The decline is committed to the outbox, and one send is tried at once, in the outbox's order. The result says where
+   * it stands: `declined`; `already-answered`; `changed` (the question is open at another revision); `closed` (expired,
+   * withdrawn or declined first, or unknown to the relay); `unsupported` by the relay or by the computer that asked
+   * (which has not declared `owner-desktop-declines-v1`); `rejected`; or `queued` when it is not settled yet (the relay
+   * could not be reached, it waits behind its question's create or withdrawal or the person's earlier follow-up or
+   * answer on it, or the bridge is stopped), in which case the outbox keeps sending it and its outcome arrives on
+   * `decline` (and from `getDeclineResult`). Every outcome is
+   * reported on `decline` by the process that settles it, this one included. Pass `declineId` to make a repeated
+   * submission the same decline.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is not
+   * an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async declineQuestion(input: DeclineQuestionInput): Promise<OwnerDeclineResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop declines for the person; a Remote Host never signs the person's decline",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = DeclineQuestionInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { declineId, settled } = await this.publisher.enqueueOwnerDecline(parsed.data);
+    if (settled) return settled;
+    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
+    if (running()) {
+      await this.publisher
+        .flush({ only: ownerDeclineItemId(declineId), proceed: running })
+        .catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerDeclineResult(declineId)) ?? {
+        declineId,
+        questionId: parsed.data.questionId,
+        expectedRevision: parsed.data.expectedRevision,
+        status: 'queued',
+      }
+    );
+  }
+
+  /**
+   * Where a decline from `declineQuestion` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
+  getDeclineResult(declineId: string): Promise<OwnerDeclineResult | null> {
+    return this.publisher.ownerDeclineResult(declineId);
+  }
+
+  /**
+   * Publish the person's follow-up on a question's thread, written in the host app's own UI on the owner desktop and
+   * signed with its key as the person's message (protocol section 16): the asking desktop types it into the pane as
+   * a follow-up `sent_from: computer`, and `get_decision` shows it as the person's, sent from the computer. It goes
+   * to the owner's own questions and a Remote Host's alike, open or answered, and needs no local copy of the
+   * question. As from a phone, it is text only, never expects a reply and never answers or changes the answer.
+   *
+   * The follow-up is committed to the outbox, and one send is tried at once, in the outbox's order (after its
+   * question's create, a queued withdrawal and the person's earlier follow-ups, answers and declines on it). The result says where it
+   * stands: `sent`; `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or
+   * by the computer that asked (which has not declared `owner-desktop-messages-v1`); `rejected` (a thread at its
+   * message limit is `invalid_state`); or `queued` when it is not settled yet (the relay could not be reached, it
+   * waits its turn, or the bridge is stopped), in which case the outbox keeps sending it and its outcome arrives on
+   * `followUp` (and from `getFollowUpResult`). Every outcome is reported on `followUp` by the process that settles
+   * it, this one included. Pass `messageId` to make a repeated submission the same follow-up.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is
+   * not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async sendFollowUp(input: SendFollowUpInput): Promise<OwnerFollowUpResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop sends the person's follow-up; a Remote Host never speaks for the person",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    const parsed = SendFollowUpInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const { messageId, settled } = await this.publisher.enqueueOwnerMessage(parsed.data);
+    if (settled) return settled;
+    // The same ordered outbox send as the pump's, for this follow-up alone, called off if the bridge stops or is
+    // revoked while it waits its turn.
+    if (this.running()) {
+      await this.publisher
+        .flush({ only: ownerMessageItemId(messageId), proceed: this.running })
+        .catch((e) => this.emitError(e as Error));
+    }
+    return (
+      (await this.publisher.ownerMessageResult(messageId)) ?? {
+        messageId,
+        questionId: parsed.data.questionId,
+        status: 'queued',
+      }
+    );
+  }
+
+  /**
+   * Where a follow-up from `sendFollowUp` stands, by its id; null for an id this store never took, or one a crash
+   * kept from being queued (submit it again with the same id).
+   */
+  getFollowUpResult(messageId: string): Promise<OwnerFollowUpResult | null> {
+    return this.publisher.ownerMessageResult(messageId);
   }
 
   /**
@@ -645,6 +826,91 @@ export class DecisionsBridge {
       lastSyncedAt: v.lastSyncedAt,
       stale: true,
     };
+  }
+
+  /**
+   * The whole involvement preference, for the host app's own settings screen: the normal mode, the consult count, the
+   * temporary mode and its end, the revision a save replaces, and where the person set it (`computer` or `phone`, from
+   * the signer's certificate). From the same verified copy as `getInvolvement`, so it never touches the network.
+   * Agents never see where it was set. This is a host API: it is not an MCP tool, and a pane's bearer token never
+   * reaches it.
+   */
+  async getInvolvementPreference(): Promise<InvolvementPreference> {
+    const p = await this.involvement.preference();
+    if (this.state !== 'revoked') return p;
+    return {
+      status: 'unavailable',
+      reason: 'device-revoked',
+      revision: p.revision,
+      lastSyncedAt: p.lastSyncedAt,
+      stale: true,
+    };
+  }
+
+  /**
+   * Set the person's involvement preference from the host app's own UI on the owner desktop, signed with its key
+   * (protocol section 20). `expectedRevision` is the revision the person reviewed (`getInvolvementPreference`): the
+   * relay compare-and-swaps on it, so a phone's save made meanwhile comes back as a `conflict` to show, never
+   * overwritten. A saved preference reaches this desktop's agents at once, and every other device on the relay's hint.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed, as is a revoked desktop, and
+   * the bridge must be started (`invalid_state`). Input the relay would refuse is a `validation_error`. This is a host
+   * API: it is not an MCP tool, and a pane's bearer token never reaches it.
+   */
+  async setInvolvementPreference(input: SetInvolvementInput): Promise<SetInvolvementResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        "only the owner desktop sets the person's involvement preference; a Remote Host never signs it",
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (this.state !== 'running')
+      throw new BridgeError(
+        'invalid_state',
+        'start the bridge before setting the involvement preference',
+      );
+    const parsed = SetInvolvementInput.safeParse(input);
+    if (!parsed.success) {
+      throw new BridgeError(
+        'validation_error',
+        parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      );
+    }
+    const issue = this.involvement.inputIssue(parsed.data);
+    if (issue) throw new BridgeError('validation_error', issue);
+    return this.involvement.save(parsed.data);
+  }
+
+  /**
+   * Say whether the person is at the owner desktop (protocol section 11), so the relay holds a new question's phone
+   * push briefly while they are. The host reports `true` when the person is active (again every 30 s or so while they
+   * stay, and at once when they come back) and `false` when they leave, lock the screen or the computer sleeps. Each
+   * `true` counts for `PRESENCE_REPORT_MS` (two minutes): while one does, the bridge keeps the relay's 60-second lease
+   * current in the background; `false` ends it. Once reports stop, renewal stops when the last one goes stale, and when
+   * the bridge stops it stops at once: either way the lease lapses 60 seconds after its last renewal. Returns at once,
+   * without waiting for the relay.
+   *
+   * Only the flag is sent: nothing about questions, panes or content. A relay that does not advertise `presence-v1` is
+   * never sent it, and reporting to one does nothing, without an error. Before `start()` the latest report is kept and
+   * acted on when the bridge starts, if still fresh; `stop()` forgets it.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`). This is a host API: it is not an MCP tool, and a
+   * pane's bearer token never reaches it.
+   */
+  reportPresence(present: boolean): void {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        'only the owner desktop reports that the person is at the computer; a Remote Host never does',
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (typeof present !== 'boolean')
+      throw new BridgeError('validation_error', 'present must be true or false');
+    this.presence.report(present);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
@@ -785,6 +1051,7 @@ export class DecisionsBridge {
           messageId: m.message_id,
           messageSeq: m.message_seq,
           side: m.side,
+          sentFrom: messageSentOn(m),
           expectsReply: m.expects_reply,
           text,
           images: images.map((i) => ({
@@ -821,16 +1088,20 @@ export class DecisionsBridge {
 
   /* ---------------- pump ---------------- */
 
+  /** Neither stopped nor revoked: an outbox send waiting its turn goes ahead only while this holds. */
+  private readonly running = () => this.state !== 'stopped' && this.state !== 'revoked';
+
   /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
   pump(): Promise<void> {
-    if (this.state === 'revoked' || this.state === 'stopped') return Promise.resolve();
+    if (!this.running()) return Promise.resolve();
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
-        const flushed = await this.publisher.flush();
+        // A flush that waits behind another, or is still sending when the bridge stops, sends nothing more.
+        const flushed = await this.publisher.flush({ proceed: this.running });
         if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
-        if (flushed.created.length > 0) await this.publisher.flush();
+        if (flushed.created.length > 0) await this.publisher.flush({ proceed: this.running });
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();

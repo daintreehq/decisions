@@ -9,7 +9,14 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
 import { NO_EPOCH_KEY, verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
-import { actionEvent, makeWorld, otherDesktop, questionEvent, type World } from './helpers.js';
+import {
+  actionEvent,
+  makeWorld,
+  otherDesktop,
+  otherHuman,
+  questionEvent,
+  type World,
+} from './helpers.js';
 
 const ctx = (w: World) => ({
   installationId: w.installationId,
@@ -160,6 +167,49 @@ describe('action verification and provenance', () => {
       expect(r.value.signerLabel).toBe('Studio Mac');
       expect(r.value.content).toMatchObject({ selected_option_ids: ['yes'], text: 'go ahead' });
     }
+  });
+
+  it("accepts the owner desktop's signed decline, with no provenance a relay can relabel", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const q = await questionEvent(w);
+    const ev = await actionEvent(w, {
+      questionId: q.question_id!,
+      action: 'cancel',
+      signer: w.desktop,
+      decline: true,
+    });
+    const r = await verifyActionEvent(ev.data, NOW, ctx(w), ev.question_id!);
+    expect(r.ok && r.value).toMatchObject({
+      record: { action: 'cancel', decline: true },
+      provenance: null,
+      signerRole: 'owner-desktop',
+      signerLabel: 'Studio Mac',
+      content: null,
+    });
+    // A decline carries no provenance: a relay that claims the person's is refused.
+    const relabelled = await actionEvent(w, {
+      questionId: q.question_id!,
+      action: 'cancel',
+      signer: w.desktop,
+      decline: true,
+      provenance: 'human-desktop',
+    });
+    expect(await verifyActionEvent(relabelled.data, NOW, ctx(w), q.question_id!)).toEqual({
+      ok: false,
+      reason: 'relay provenance disagrees with the signed action',
+    });
+    // A tablet declines by its role alone; it never signs the owner desktop's flag.
+    const tablet = await otherHuman(w, 'tablet');
+    const flagged = await actionEvent(w, {
+      questionId: q.question_id!,
+      action: 'cancel',
+      signer: tablet,
+      decline: true,
+    });
+    expect(await verifyActionEvent(flagged.data, NOW, ctx(w), q.question_id!)).toEqual({
+      ok: false,
+      reason: 'a tablet cannot sign a decline',
+    });
   });
 
   it('rejects a relay relabelling who made a human answer', async () => {

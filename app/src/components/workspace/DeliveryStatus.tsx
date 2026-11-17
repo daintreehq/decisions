@@ -5,6 +5,7 @@ import {
   DELIVERY_LABELS,
   type DeliveryProgress,
   type DeliveryStep,
+  type FollowUpBy,
 } from '../../domain/selectors.js';
 import { CheckIcon, ChevronDown, ClockIcon, WarningIcon } from '../Icons.js';
 
@@ -174,6 +175,35 @@ export function Receipt({
 export function AnswerReceipt({ a, progress }: { a: ActionView; progress: DeliveryProgress }) {
   const by = answerBy(a);
   return <Receipt progress={progress} fromPhone={!by.model && !by.computer} subject={by.subject} />;
+}
+
+/**
+ * The receipt under one of the person's follow-ups, said as where it was sent from: one from a phone or tablet starts
+ * on the phone, one sent on the computer never passed through one and starts at the relay. The same component while
+ * it is on its way from this device and once committed, so an open stepper stays open when the relay confirms it.
+ */
+export function FollowUpReceipt({
+  by,
+  progress,
+  label,
+  note,
+}: {
+  by: FollowUpBy;
+  progress: DeliveryProgress;
+  /** Words for a stage the steps don't name (photos still uploading). */
+  label?: string;
+  /** A quiet extra after the label (sends once back online). */
+  note?: string;
+}) {
+  return (
+    <Receipt
+      progress={progress}
+      fromPhone={!by.computer}
+      subject={by.subject}
+      label={label}
+      note={note}
+    />
+  );
 }
 
 /**

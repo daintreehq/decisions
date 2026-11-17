@@ -19,9 +19,22 @@ export const DESKTOP_ROLES: readonly Role[] = ['owner-desktop', 'desktop-host'];
 export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
 /**
  * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
- * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`.
+ * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`, but for thread messages,
+ * which have their own list, `HUMAN_MESSAGE_ROLES`, a decline: the owner desktop signs one as a `cancel` that
+ * carries `decline: true` (`isPersonDecline` in `state.ts`), and setting the involvement preference
+ * (`INVOLVEMENT_SETTER_ROLES`).
  */
 export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
+/**
+ * Who may sign the person's thread message (docs/protocol.md section 16): a phone or tablet, or the owner desktop,
+ * which certifies every other device. Never a `desktop-host`. Phone images, voice and push stay with `HUMAN_ROLES`.
+ */
+export const HUMAN_MESSAGE_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
+/**
+ * Who may sign the involvement preference (docs/protocol.md section 20): a phone or tablet, or the owner desktop.
+ * Never a `desktop-host`. A separate permission from answering, which happens to name the same roles.
+ */
+export const INVOLVEMENT_SETTER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 
 export const QuestionStatus = z.enum([
   'open',
@@ -62,6 +75,9 @@ export const ProtocolFeature = z.enum([
   'owner-desktop-answers-v1',
   'involvement-v1',
   'person-declines-v1',
+  'owner-desktop-messages-v1',
+  'owner-desktop-declines-v1',
+  'presence-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -201,10 +217,22 @@ export const ActionRecord = z
      * default, so a record signed without it parses, canonicalises and verifies exactly as before.
      */
     attachment_ids: z.array(Id).max(LIMITS.phoneImagesPerContent).optional(),
+    /**
+     * cancel by the owner desktop only: the person declined the question on the computer, rather than the desktop
+     * withdrawing it (section 6.1). Optional with no default, so every other record signs exactly as before.
+     */
+    decline: z.literal(true).optional(),
     signer_device_id: Id,
     signature: SigB64,
   })
   .superRefine((r, ctx) => {
+    if (r.decline !== undefined && r.action !== 'cancel') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['decline'],
+        message: 'only a cancel can be a decline',
+      });
+    }
     if (r.attachment_ids !== undefined) {
       if (r.action !== 'answer' && r.action !== 'override') {
         ctx.addIssue({
@@ -640,6 +668,16 @@ export const SettingsBody = z.object({
   attachment_retention_days: z.number().int().min(1).max(365).optional(),
 });
 export type SettingsBody = z.infer<typeof SettingsBody>;
+
+/**
+ * `PUT /presence` (owner desktop, `presence-v1`, section 11): `present: true` starts or renews the lease that says
+ * the person is at the computer, `false` ends it. It carries nothing about questions, panes or content.
+ */
+export const PresenceBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  present: z.boolean(),
+});
+export type PresenceBody = z.infer<typeof PresenceBody>;
 
 export const VoiceSessionBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),

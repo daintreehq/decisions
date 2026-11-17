@@ -1,12 +1,14 @@
 import {
   DESKTOP_ROLES,
   EventData,
+  HUMAN_MESSAGE_ROLES,
   HUMAN_ROLES,
   HumanAnswerContentV1,
   MESSAGE_RECORD_TYPE,
   MessageContentV1,
   ProxyAnswerContentV1,
   imagesMatchRecord,
+  involvementSetOn,
   messageEnvelopeIssues,
   provenanceForAction,
   provenanceForSigner,
@@ -17,6 +19,7 @@ import {
   type DeviceCert,
   type EnvelopePurpose,
   type InvolvementRecord,
+  type InvolvementSetOn,
   type LedgerEvent,
   type MessageEntry,
   type Provenance,
@@ -88,13 +91,24 @@ export const revokedKey = (deviceId: string): string => `revoked:${deviceId}`;
  * a relay cannot introduce a device (and neither can a Host). Exactly one `owner-desktop` is accepted: the
  * pinned one. Used to verify record signatures, roles and provenance.
  */
+export interface EventVerifierOptions {
+  /**
+   * Take the person's thread message signed by the pinned owner desktop (`owner-desktop-messages-v1`, protocol
+   * section 16), as the bridge declares with follow-ups on. Off, only a phone or tablet speaks for the person.
+   */
+  ownerMessages?: boolean;
+}
+
 export class EventVerifier {
   private dir = new Map<string, DirEntry>();
   private loadedAt = 0;
   /** Set by any device/key event: the next lookup MUST re-fetch even for already known signers. */
   private dirty = true;
 
-  constructor(private readonly ctx: BridgeContext) {}
+  constructor(
+    private readonly ctx: BridgeContext,
+    private readonly opts: EventVerifierOptions = {},
+  ) {}
 
   invalidate(): void {
     this.dirty = true;
@@ -219,19 +233,22 @@ export class EventVerifier {
 
     const role = signer.cert.role;
     // The shared role table: a phone or tablet signs the person's actions, and the pinned owner desktop may also
-    // sign the person's first `answer` (never an override or a confirmation); a `desktop-host` never signs one.
-    if (!roleMaySign(action, role)) {
+    // sign the person's first `answer` (never an override or a confirmation) and a `cancel` that declines for the
+    // person with the signed `decline` flag; a `desktop-host` never signs one.
+    if (!roleMaySign(action, role, record.decline)) {
       const kind = provenanceForAction(action);
       return {
         ok: false,
         reason:
-          kind === 'human'
-            ? 'human-action-by-non-human-device'
-            : kind === 'proxy'
-              ? 'proxy-action-by-non-desktop-device'
-              : action === 'reopen' && DESKTOP_ROLES.includes(role)
-                ? 'reopen-by-non-owner'
-                : 'desktop-action-by-non-desktop-device',
+          record.decline === true
+            ? 'decline-by-non-owner-desktop'
+            : kind === 'human'
+              ? 'human-action-by-non-human-device'
+              : kind === 'proxy'
+                ? 'proxy-action-by-non-desktop-device'
+                : action === 'reopen' && DESKTOP_ROLES.includes(role)
+                  ? 'reopen-by-non-owner'
+                  : 'desktop-action-by-non-desktop-device',
       };
     }
     const prov = provenanceForSigner(action, role);
@@ -279,7 +296,8 @@ export class EventVerifier {
   /**
    * Verify a `decision.message.posted` event (protocol section 16): the signed record and its envelope, bound to
    * each other and to this installation and question; a signer the pinned directory knows and has not revoked;
-   * a human message signed by a phone or tablet, and an agent message only by this desktop, which published every
+   * a human message signed by a phone or tablet, or by the pinned owner desktop once this desktop takes those
+   * (`ownerMessages`), never with phone images; an agent message only by this desktop, which published every
    * question it holds live; and decrypted content of the same side referencing exactly the signed images.
    * The relay's `target_host_id` is never trusted for routing: the question's own origin is.
    */
@@ -299,8 +317,14 @@ export class EventVerifier {
     const signer = await this.signer(record.signer_device_id, record.created_at, ev.seq);
     if ('reason' in signer) return signer;
     const role = signer.cert.role;
-    if (record.side === 'human' && !HUMAN_ROLES.includes(role))
+    if (
+      record.side === 'human' &&
+      !(this.opts.ownerMessages ? HUMAN_MESSAGE_ROLES : HUMAN_ROLES).includes(role)
+    )
       return { ok: false, reason: 'human-message-by-non-human-device' };
+    // Phone images come from a phone or tablet: the relay refuses them on the owner desktop's message, and so does this.
+    if (record.side === 'human' && role === 'owner-desktop' && record.attachment_ids.length > 0)
+      return { ok: false, reason: 'images-on-desktop-message' };
     if (record.side === 'agent' && record.signer_device_id !== ctx.identity.config.deviceId)
       return { ok: false, reason: 'agent-message-by-another-device' };
     if (!(await verifyRecordAndEnvelope(record, envelope, signer.pub)))
@@ -331,22 +355,26 @@ export class EventVerifier {
 
   /**
    * Verify the person's involvement preference (protocol section 20) as it stands now, not as of a ledger
-   * position: this installation's, signed by a phone or tablet the pinned directory knows, and not revoked by the
-   * directory or by any revocation seen in the ledger. A directory that cannot be read throws `TransientError`.
+   * position: this installation's, signed by a phone, a tablet or the owner desktop the pinned directory knows
+   * (`INVOLVEMENT_SETTER_ROLES`, never a `desktop-host`), and not revoked by the directory or by any revocation seen in
+   * the ledger. Where it was set comes from the signer's certified role, never from the relay. A directory that cannot
+   * be read throws `TransientError`.
    */
-  async verifyInvolvement(r: InvolvementRecord): Promise<{ ok: true } | Rejection> {
+  async verifyInvolvement(
+    r: InvolvementRecord,
+  ): Promise<{ ok: true; setOn: InvolvementSetOn } | Rejection> {
     if (r.installation_id !== this.ctx.identity.config.installationId)
       return { ok: false, reason: 'wrong-installation' };
     const signer = await this.lookup(r.signer_device_id);
     if (!signer) return { ok: false, reason: 'unknown-signer' };
-    if (!HUMAN_ROLES.includes(signer.cert.role))
-      return { ok: false, reason: 'set-by-non-human-device' };
+    const setOn = involvementSetOn(signer.cert.role);
+    if (!setOn) return { ok: false, reason: 'set-by-disallowed-device' };
     if (!(await verifyObject(signer.pub, r))) return { ok: false, reason: 'bad-signature' };
     if (
       signer.revokedAt !== null ||
       (await this.ctx.store.getMeta(revokedKey(r.signer_device_id))) !== null
     )
       return { ok: false, reason: 'signer-revoked' };
-    return { ok: true };
+    return { ok: true, setOn };
   }
 }

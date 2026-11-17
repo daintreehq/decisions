@@ -21,6 +21,7 @@ import {
   preparationLine,
   recordMatches,
   servedRevision,
+  setByLine,
   toLocalInput,
   verifyInvolvementResponse,
   type InvolvementDraft,
@@ -60,7 +61,13 @@ const served = (r: InvolvementRecord | null) => ({
   received_at: r ? iso(T0) : null,
 });
 
-const ctx = (w: World) => ({ installationId: w.installationId, trust: w.trust });
+const ctx = (w: World) => ({
+  installationId: w.installationId,
+  trust: w.trust,
+  deviceId: w.phone.id,
+});
+
+const HERE = { on: 'phone', computer: null, here: true } as const;
 
 describe('verifying the preference the relay serves', () => {
   it('shows a record this installation’s phone signed', async () => {
@@ -72,45 +79,107 @@ describe('verifying the preference the relay serves', () => {
     );
     expect(r.revision).toBe(3);
     const v = await verifyInvolvementResponse(served(r), ctx(w));
-    expect(v).toEqual({ ok: true, value: { record: r, receivedAt: iso(T0) } });
+    expect(v).toEqual({ ok: true, value: { record: r, receivedAt: iso(T0), setBy: HERE } });
   });
 
   it('reads "nobody has set one" as an empty preference', async () => {
     const w = await makeWorld();
     expect(await verifyInvolvementResponse(served(null), ctx(w))).toEqual({
       ok: true,
-      value: { record: null, receivedAt: null },
+      value: { record: null, receivedAt: null, setBy: null },
     });
   });
 
-  it('refuses a record the relay changed, whatever field it touched', async () => {
+  it('refuses a record the relay changed, whatever field it touched or whoever signed it', async () => {
     const w = await makeWorld();
-    const r = await sign(w, draft({ override: { mode: 'involve-early', until: iso(T0 + HOUR) } }));
-    for (const tampered of [
-      { ...r, normal_mode: 'involve-early' },
-      { ...r, consult_count: 5 },
-      { ...r, revision: 9 },
-      { ...r, override: null },
-      { ...r, override: { mode: 'involve-early', until: iso(T0 + 2 * HOUR) } },
-    ]) {
-      const v = await verifyInvolvementResponse(served(tampered as InvolvementRecord), ctx(w));
-      expect(v, JSON.stringify(tampered)).toEqual({
-        ok: false,
-        reason: 'preference signature does not match',
+    for (const signer of [w.phone, w.owner]) {
+      const r = await sign(
+        w,
+        draft({ override: { mode: 'involve-early', until: iso(T0 + HOUR) } }),
+        0,
+        signer,
+      );
+      for (const tampered of [
+        { ...r, normal_mode: 'involve-early' },
+        { ...r, consult_count: 5 },
+        { ...r, revision: 9 },
+        { ...r, override: null },
+        { ...r, override: { mode: 'involve-early', until: iso(T0 + 2 * HOUR) } },
+        { ...r, created_at: iso(T0 + HOUR) },
+      ]) {
+        const v = await verifyInvolvementResponse(served(tampered as InvolvementRecord), ctx(w));
+        expect(v, JSON.stringify(tampered)).toEqual({
+          ok: false,
+          reason: 'preference signature does not match',
+        });
+      }
+    }
+  });
+
+  it('shows a record the owner computer signed, naming the computer from its certificate', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const r = await sign(
+      w,
+      draft({ override: { mode: 'involve-early', until: iso(T0 + HOUR) } }),
+      1,
+      w.owner,
+    );
+    const v = await verifyInvolvementResponse(served(r), ctx(w));
+    expect(v).toEqual({
+      ok: true,
+      value: {
+        record: r,
+        receivedAt: iso(T0),
+        setBy: { on: 'computer', computer: 'Studio Mac', here: false },
+      },
+    });
+  });
+
+  it('names a computer without a usable name "your computer", and never shows its control characters', async () => {
+    for (const [label, computer] of [
+      ['host_8f2k4j', 'your computer'],
+      ['Studio\u001b[31m\nMac', 'Studio Mac'],
+    ] as const) {
+      const w = await makeWorld({ ownerLabel: label });
+      const r = await sign(w, draft(), 0, w.owner);
+      expect(await verifyInvolvementResponse(served(r), ctx(w)), label).toMatchObject({
+        ok: true,
+        value: { setBy: { on: 'computer', computer } },
       });
     }
   });
 
-  it('only a phone or tablet speaks for the person: a desktop’s record is refused', async () => {
+  it('a tablet’s record was set on another phone or tablet, not here', async () => {
     const w = await makeWorld();
-    const desktop = await otherDesktop(w);
-    for (const signer of [w.owner, desktop]) {
-      const r = await sign(w, draft(), 0, signer);
-      expect(await verifyInvolvementResponse(served(r), ctx(w))).toEqual({
-        ok: false,
-        reason: 'only a phone or tablet sets the involvement preference',
-      });
-    }
+    const tablet = await otherHuman(w);
+    const r = await sign(w, draft(), 0, tablet);
+    expect(await verifyInvolvementResponse(served(r), ctx(w))).toMatchObject({
+      ok: true,
+      value: { setBy: { on: 'phone', computer: null, here: false } },
+    });
+  });
+
+  it('says where it was set in words', () => {
+    expect(setByLine({ on: 'computer', computer: 'Studio Mac', here: false })).toBe(
+      'Set on Studio Mac.',
+    );
+    expect(setByLine({ on: 'computer', computer: 'your computer', here: false })).toBe(
+      'Set on your computer.',
+    );
+    expect(setByLine(HERE)).toBe('Set on this device.');
+    expect(setByLine({ on: 'phone', computer: null, here: false })).toBe(
+      'Set on another phone or tablet.',
+    );
+  });
+
+  it('a desktop host never speaks for the person: its record is refused', async () => {
+    const w = await makeWorld();
+    const host = await otherDesktop(w);
+    const r = await sign(w, draft(), 0, host);
+    expect(await verifyInvolvementResponse(served(r), ctx(w))).toEqual({
+      ok: false,
+      reason: 'a desktop host never sets the involvement preference',
+    });
   });
 
   it('refuses a revoked phone’s record, another installation’s and an unknown signer’s', async () => {
@@ -319,6 +388,45 @@ describe('the involvement store', () => {
     expect(relay.puts[0]!.revision).toBe(2);
   });
 
+  it('a save on top of the computer’s change is refused and reported, never re-signed over it', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0)); // this phone's revision 1, read and shown
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    expect(s.get().setBy).toEqual(HERE);
+    const theirs = await sign(w, draft({ normalMode: 'involve-early' }), 1, w.owner);
+    relay.setCurrent(theirs);
+    expect(await s.save(draft({ consultCount: 5 }), 1)).toEqual({ kind: 'conflict' });
+    expect(relay.deps.put).toHaveBeenCalledTimes(1); // the one refused attempt, never a re-signed retry
+    expect(relay.puts).toHaveLength(0);
+    expect(relay.current).toBe(theirs);
+    expect(s.get()).toMatchObject({
+      status: 'ready',
+      record: theirs,
+      revision: 2,
+      setBy: { on: 'computer', computer: 'Studio Mac', here: false },
+    });
+    // Saving again, over what is now shown, is the person's deliberate choice.
+    expect(await s.save(draft({ consultCount: 5 }), 2)).toEqual({ kind: 'saved' });
+    expect(relay.puts[0]!.revision).toBe(3);
+    expect(s.get()).toMatchObject({ revision: 3, setBy: HERE });
+  });
+
+  it('edits begun before a hint brought the computer’s change still conflict, even when it chose the same', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load(); // the edits start from revision 0
+    relay.setCurrent(await sign(w, draft(), 0, w.owner));
+    s.noteEvents([hint()]);
+    await vi.waitFor(() => expect(s.get().revision).toBe(1));
+    expect(s.get().setBy).toMatchObject({ on: 'computer' });
+    // The same choice the computer made: signed by another device, so not this save landing late.
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
+    expect(relay.puts).toHaveLength(0);
+  });
+
   it('edits begun before a hint brought another device’s change still conflict', async () => {
     const w = await makeWorld();
     const tablet = await otherHuman(w);
@@ -349,6 +457,15 @@ describe('the involvement store', () => {
     await s.load();
     relay.setCurrent(await sign(w, draft(), 0)); // the first attempt landed; its answer never came back
     expect(await s.save(draft(), 0)).toEqual({ kind: 'saved' });
+  });
+
+  it('this phone’s own record at the revision it asked for, saying something else, is a conflict', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    relay.setCurrent(await sign(w, draft({ consultCount: 4 }), 0)); // an earlier, different save from here
+    expect(await s.save(draft({ consultCount: 5 }), 0)).toEqual({ kind: 'conflict' });
   });
 
   it('this phone’s own matching record at another revision is a conflict', async () => {
@@ -423,6 +540,18 @@ describe('the involvement store', () => {
     relay.failWith(new RelayError('network', 0, 'Could not reach the relay'));
     await expect(save(s, draft())).rejects.toThrow(/reach the relay/);
     expect(s.get()).toMatchObject({ status: 'ready', revision: 0 });
+  });
+
+  it('a record it cannot verify replaces where the one before it was set', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0, w.owner));
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    expect(s.get().setBy).toMatchObject({ on: 'computer', computer: 'Studio Mac' });
+    relay.setCurrent({ ...(await sign(w, draft(), 1, w.owner)), consult_count: 8 }); // revision 2, tampered
+    await s.load();
+    expect(s.get()).toMatchObject({ status: 'invalid', record: null, revision: 2, setBy: null });
   });
 
   it('shows nothing from a record it cannot verify, but can replace it', async () => {

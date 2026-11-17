@@ -17,8 +17,10 @@ import { PROTOCOL_VERSION } from './version.js';
 /**
  * `details.reason` of the `409 invalid_state` the relay returns for a command the question's publishing desktop has
  * not declared it can take (`details.required_feature` names the feature): today an owner-desktop `answer` without
- * `owner-desktop-answers-v1`, and a phone or tablet `cancel` (the person declining) without `person-declines-v1`. A
- * client tells this refusal apart by the reason, never by the message.
+ * `owner-desktop-answers-v1`, an owner-desktop human thread message without `owner-desktop-messages-v1`, a phone or
+ * tablet `cancel` (the person declining) without `person-declines-v1`, and an owner-desktop `cancel` with
+ * `decline: true` without `owner-desktop-declines-v1`. A client tells this refusal apart by the reason, never by the
+ * message.
  */
 export const CREATOR_MISSING_FEATURE = 'creator-missing-feature';
 

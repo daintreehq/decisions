@@ -35,22 +35,33 @@ const ROLE_ALLOWED: Record<ActionKind, readonly Role[]> = {
   'confirm-proxy': HUMAN_ROLES,
   'proxy-answer': DESKTOP_ROLES,
   'proxy-abstain': DESKTOP_ROLES,
-  /** A desktop withdraws its question; a phone or tablet declines to answer it (open questions only). */
+  /**
+   * A desktop withdraws its question; a phone or tablet declines to answer it, and so does the owner desktop with a
+   * signed `decline: true` (open questions only).
+   */
   cancel: [...DESKTOP_ROLES, ...HUMAN_ROLES],
   reopen: ['owner-desktop'],
 };
 
-/** Whether a device of `role` may sign `action` at all. Receivers check signers with it, as the relay does. */
-export function roleMaySign(action: ActionKind, role: Role): boolean {
+/**
+ * Whether a device of `role` may sign `action` at all, given the record's signed `decline` flag. Receivers check
+ * signers with it, as the relay does. Only the owner desktop signs a `decline`, and only on a `cancel`: a phone or
+ * tablet declines by its role alone, and a `desktop-host` never declines.
+ */
+export function roleMaySign(action: ActionKind, role: Role, decline?: true): boolean {
+  if (decline === true) return action === 'cancel' && role === 'owner-desktop';
   return ROLE_ALLOWED[action].includes(role);
 }
 
 /**
- * True when a `cancel` signed by `role` means the person declined to answer, rather than the desktop withdrawing
- * the question. Only meaningful for a cancel whose signer certificate has been verified.
+ * True when a `cancel` means the person declined to answer, rather than the desktop withdrawing the question: signed
+ * by a phone or tablet, or by the owner desktop with `decline: true` in the signed record. `decline` must come from
+ * that record, never from a relay-supplied field. Only meaningful for a cancel whose signature and signer certificate
+ * have been verified and whose signer passed `roleMaySign`.
  */
-export const isPersonDecline = (action: ActionKind, role: Role): boolean =>
-  action === 'cancel' && HUMAN_ROLES.includes(role);
+export const isPersonDecline = (action: ActionKind, role: Role, decline?: true): boolean =>
+  action === 'cancel' &&
+  (HUMAN_ROLES.includes(role) || (role === 'owner-desktop' && decline === true));
 
 /**
  * The provenance an action implies when a phone or tablet signs the human actions and a desktop the rest. It cannot
@@ -69,9 +80,14 @@ export function provenanceForAction(action: ActionKind): 'human' | 'proxy' | 'no
   }
 }
 
-function assertRoleAllowed(action: ActionKind, role: Role): void {
-  if (!roleMaySign(action, role)) {
-    throw new ApiError('forbidden', `role ${role} may not perform ${action}`);
+function assertRoleAllowed(action: ActionKind, role: Role, decline?: true): void {
+  if (!roleMaySign(action, role, decline)) {
+    throw new ApiError(
+      'forbidden',
+      decline === true
+        ? `role ${role} may not sign a decline`
+        : `role ${role} may not perform ${action}`,
+    );
   }
 }
 
@@ -88,15 +104,16 @@ export function provenanceForSigner(action: ActionKind, role: Role): Provenance 
 
 /**
  * Pure, authoritative transition table (spec section 7). Throws ApiError on any illegal move.
- * `expectedRevision` is compare-and-swap input from the signer.
+ * `expectedRevision` is compare-and-swap input from the signer, and `decline` the signed record's `decline` flag.
  */
 export function applyAction(
   state: QuestionState,
   action: ActionKind,
   role: Role,
   expectedRevision: number,
+  decline?: true,
 ): Transition {
-  assertRoleAllowed(action, role);
+  assertRoleAllowed(action, role, decline);
   const conflict = () =>
     new ApiError('revision_conflict', 'question changed since you last saw it', {
       details: { latest_revision: state.revision, status: state.status },
@@ -194,7 +211,7 @@ export function applyAction(
         throw new ApiError('invalid_state', `cannot cancel a ${state.status} question`);
       }
       // A person declines only a question still waiting on them; a proxy answer is confirmed or overridden instead.
-      if (state.status !== 'open' && HUMAN_ROLES.includes(role)) {
+      if (state.status !== 'open' && isPersonDecline(action, role, decline)) {
         throw new ApiError('invalid_state', `cannot decline a ${state.status} question`);
       }
       return {

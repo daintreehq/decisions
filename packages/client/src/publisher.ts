@@ -1,6 +1,7 @@
 import {
   AgentMessageContentV1,
   HumanAnswerContentV1,
+  HumanMessageContentV1,
   LIMITS,
   MESSAGE_RECORD_TYPE,
   canonicalize,
@@ -60,6 +61,34 @@ import {
   type OwnerAnswerResult,
   type SettledOwnerAnswer,
 } from './owner-answer.js';
+import {
+  OWNER_DECLINE_FEATURE,
+  OWNER_DECLINE_TIMEOUT_MS,
+  ownerDeclineFromDetail,
+  ownerDeclineItemId,
+  ownerDeclineKey,
+  ownerDeclineRefusal,
+  parseOwnerDeclineRecord,
+  type DeclineQuestionRequest,
+  type OwnerDeclinePayload,
+  type OwnerDeclineRecord,
+  type OwnerDeclineResult,
+  type SettledOwnerDecline,
+} from './owner-decline.js';
+import {
+  OWNER_MESSAGE_FEATURE,
+  OWNER_MESSAGE_TIMEOUT_MS,
+  ownerMessageCountKey,
+  ownerMessageItemId,
+  ownerMessageKey,
+  ownerMessageRefusal,
+  parseOwnerMessageRecord,
+  type OwnerFollowUpResult,
+  type OwnerMessagePayload,
+  type OwnerMessageRecord,
+  type SendFollowUpRequest,
+  type SettledOwnerFollowUp,
+} from './owner-message.js';
 import { backoffMs } from './relay.js';
 import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
 
@@ -106,6 +135,14 @@ const FEATURES_TTL_MS = 60_000;
 /** Agent messages committed for one question, ever: the local share of `LIMITS.messagesPerQuestion`. */
 const messageCountKey = (questionId: string) => `thread-messages:${questionId}`;
 const messageSeq = (o: OutboxItem) => (o.payload as MessagePayload).seq;
+/** The person's follow-ups, answers and declines on the owner desktop: sent in the order they were made. */
+const isPersonItem = (o: OutboxItem) =>
+  o.kind === 'owner-answer' || o.kind === 'owner-decline' || o.kind === 'owner-message';
+/** A person item's place on its question; an answer queued before the order was kept counts as first. */
+const personSeq = (o: OutboxItem) => (o.payload as { seq?: number }).seq ?? 0;
+/** A relay takes the owner desktop's follow-ups when it advertises threads and the feature itself. */
+const takesOwnerMessages = (set: ReadonlySet<ProtocolFeature>) =>
+  set.has(THREAD_FEATURE) && set.has(OWNER_MESSAGE_FEATURE);
 /** Items one flush sends at most, and how many due rows it reads to find them. */
 const OUTBOX_BATCH = 20;
 const OUTBOX_SCAN = 1_000;
@@ -125,6 +162,10 @@ export interface PublisherHooks {
    * answer, from the send that settled it; an exception it throws is ignored.
    */
   onOwnerAnswer?(result: OwnerAnswerResult): void;
+  /** As `onOwnerAnswer`, for a decline from `enqueueOwnerDecline`. */
+  onOwnerDecline?(result: OwnerDeclineResult): void;
+  /** As `onOwnerAnswer`, for the person's follow-up sent from the owner desktop. */
+  onOwnerFollowUp?(result: OwnerFollowUpResult): void;
 }
 
 export class Publisher {
@@ -590,7 +631,7 @@ export class Publisher {
         result: null,
       };
       await ctx.store.setMeta(key, JSON.stringify(reserved));
-      const payload: OwnerAnswerPayload = { signed };
+      const payload: OwnerAnswerPayload = { signed, seq: await this.nextPersonSeq(qid) };
       await ctx.store.putOutbox({
         id: itemId,
         kind: 'owner-answer',
@@ -650,6 +691,229 @@ export class Publisher {
         expectedRevision: r.expected_revision,
         status: 'queued',
       };
+    });
+  }
+
+  /**
+   * Commit the person's decline, made on the owner desktop, and return. NOTHING here touches the network: the decline is
+   * signed now, a `cancel` carrying `decline: true` against the revision the person saw (section 6.1), and the outbox
+   * posts it, replaying the same body on every retry. It needs no local row, so a Remote Host's question is declined the
+   * same way. A decline id seen before returns that submission (with its outcome once it has one) instead of signing a
+   * second decline, and is refused for any other question or revision. Runs under `ctx.lock`, as settling does.
+   */
+  enqueueOwnerDecline(
+    input: DeclineQuestionRequest,
+  ): Promise<{ declineId: string; settled: OwnerDeclineResult | null }> {
+    return this.ctx.lock.run(async () => {
+      const { ctx } = this;
+      if (ctx.identity.role !== 'owner-desktop') {
+        throw new BridgeError(
+          'forbidden',
+          "only the owner desktop declines for the person; a Remote Host never signs the person's decline",
+        );
+      }
+      const qid = input.questionId;
+      const declineId = input.declineId ?? newId(ctx.now());
+      const key = ownerDeclineKey(declineId);
+      const itemId = ownerDeclineItemId(declineId);
+      const record = parseOwnerDeclineRecord(await ctx.store.getMeta(key));
+      if (record) {
+        if (record.question_id !== qid || record.expected_revision !== input.expectedRevision) {
+          throw new BridgeError(
+            'validation_error',
+            'this decline id was already used for a different question or revision',
+          );
+        }
+        if (record.result) return { declineId, settled: record.result };
+        if ((await ctx.store.outboxFor(qid)).some((o) => o.id === itemId))
+          return { declineId, settled: null };
+        // Reserved but never queued: nothing was sent, so it is signed again below.
+      }
+      const signed = await buildSignedAction({
+        installationId: ctx.identity.config.installationId,
+        questionId: qid,
+        action: 'cancel',
+        signerDeviceId: ctx.identity.config.deviceId,
+        signingKey: ctx.identity.keys.signing.privateKey,
+        expectedRevision: input.expectedRevision,
+        decline: true,
+        actionId: declineId,
+      });
+      const now = ctx.now();
+      // The id is reserved before the item exists, so a crash in between leaves a record that is signed again.
+      const reserved: OwnerDeclineRecord = {
+        question_id: qid,
+        expected_revision: input.expectedRevision,
+        result: null,
+      };
+      await ctx.store.setMeta(key, JSON.stringify(reserved));
+      const payload: OwnerDeclinePayload = { signed, seq: await this.nextPersonSeq(qid) };
+      await ctx.store.putOutbox({
+        id: itemId,
+        kind: 'owner-decline',
+        question_id: qid,
+        payload,
+        attempts: 0,
+        next_attempt_at: now,
+        created_at: now,
+        last_error: null,
+      });
+      await ctx.audit.log({ event: 'owner-decline.queued', question_id: qid, result: 'queued' });
+      return { declineId, settled: null };
+    });
+  }
+
+  /** Where an owner-desktop decline stands, by its id; null for an id never submitted (or never queued) on this store. */
+  ownerDeclineResult(declineId: string): Promise<OwnerDeclineResult | null> {
+    return this.ctx.lock.run(async () => {
+      const r = parseOwnerDeclineRecord(await this.ctx.store.getMeta(ownerDeclineKey(declineId)));
+      if (!r) return null;
+      if (r.result) return r.result;
+      const itemId = ownerDeclineItemId(declineId);
+      if (!(await this.ctx.store.outboxFor(r.question_id)).some((o) => o.id === itemId))
+        return null;
+      return {
+        declineId,
+        questionId: r.question_id,
+        expectedRevision: r.expected_revision,
+        status: 'queued',
+      };
+    });
+  }
+
+  /**
+   * Commit the person's follow-up, written on the owner desktop, and return. NOTHING here touches the network: the
+   * message is encrypted and signed now as the person's (`side: human`, no images, never expecting a reply, as a phone
+   * sends it), and the outbox posts it, replaying the same body on every retry. It needs no local row, so a Remote
+   * Host's question takes one the same way. A follow-up id seen before returns that submission (with its outcome once
+   * it has one) instead of signing a second message, and is refused for any other text or question. Runs under
+   * `ctx.lock`, as settling does, so the two never interleave.
+   */
+  enqueueOwnerMessage(
+    input: SendFollowUpRequest,
+  ): Promise<{ messageId: string; settled: OwnerFollowUpResult | null }> {
+    return this.ctx.lock.run(async () => {
+      const { ctx } = this;
+      if (ctx.identity.role !== 'owner-desktop') {
+        throw new BridgeError(
+          'forbidden',
+          "only the owner desktop sends the person's follow-up; a Remote Host never speaks for the person",
+        );
+      }
+      const qid = input.questionId;
+      const parsed = HumanMessageContentV1.safeParse({
+        content_version: 1,
+        side: 'human',
+        text: input.text,
+        images: [],
+      });
+      if (!parsed.success) {
+        throw new BridgeError(
+          'validation_error',
+          parsed.error.issues
+            .map((i) => `${[...i.path].join('.') || 'text'}: ${i.message}`)
+            .join('; '),
+        );
+      }
+      const content = parsed.data;
+      const messageId = input.messageId ?? newId(ctx.now());
+      const key = ownerMessageKey(messageId);
+      const record = parseOwnerMessageRecord(await ctx.store.getMeta(key));
+      if (record) {
+        if (record.question_id !== qid || !(await this.sameOwnerMessage(record, content))) {
+          throw new BridgeError(
+            'validation_error',
+            'this follow-up id was already used for a different follow-up',
+          );
+        }
+        if (record.result) return { messageId, settled: record.result };
+        // Reserved but never queued (the record is written first and the item deleted only once settled): queue the
+        // message that was signed then, so a retry is the same message.
+        if (!(await ctx.store.outboxFor(qid)).some((o) => o.id === ownerMessageItemId(messageId)))
+          await this.queueOwnerMessage(record);
+        return { messageId, settled: null };
+      }
+
+      const now = ctx.now();
+      const envelope = await encryptEnvelope({
+        epochKey: currentEpochKey(ctx.identity),
+        installationId: ctx.identity.config.installationId,
+        questionId: qid,
+        recordId: messageId,
+        recordType: MESSAGE_RECORD_TYPE,
+        revision: 0,
+        senderDeviceId: ctx.identity.config.deviceId,
+        purpose: 'message-content',
+        plaintext: content,
+      });
+      const signed = await buildSignedMessage({
+        installationId: ctx.identity.config.installationId,
+        questionId: qid,
+        messageId,
+        side: 'human',
+        expectsReply: false,
+        attachmentIds: [],
+        signerDeviceId: ctx.identity.config.deviceId,
+        signingKey: ctx.identity.keys.signing.privateKey,
+        envelope,
+        createdAt: nowIso(now),
+      });
+      const seq = await this.nextPersonSeq(qid);
+      // The id is reserved with its signed message before the item exists: a crash in between queues that message.
+      const reserved: OwnerMessageRecord = { question_id: qid, signed, seq, result: null };
+      await ctx.store.setMeta(key, JSON.stringify(reserved));
+      await this.queueOwnerMessage(reserved);
+      await ctx.audit.log({
+        event: 'owner-message.queued',
+        question_id: qid,
+        provenance: 'human-desktop',
+        result: 'queued',
+      });
+      return { messageId, settled: null };
+    });
+  }
+
+  private async queueOwnerMessage(r: OwnerMessageRecord): Promise<void> {
+    const now = this.ctx.now();
+    const payload: OwnerMessagePayload = { signed: r.signed, seq: r.seq };
+    await this.ctx.store.putOutbox({
+      id: ownerMessageItemId(r.signed.record.message_id),
+      kind: 'owner-message',
+      question_id: r.question_id,
+      payload,
+      attempts: 0,
+      next_attempt_at: now,
+      created_at: now,
+      last_error: null,
+    });
+  }
+
+  /** Whether a stored follow-up says the same as this one, once its ciphertext is opened. */
+  private async sameOwnerMessage(record: OwnerMessageRecord, content: unknown): Promise<boolean> {
+    try {
+      const prior = await decryptEnvelope(record.signed.envelope, this.ctx.identity.epochs, {
+        installationId: this.ctx.identity.config.installationId,
+        questionId: record.question_id,
+        recordType: MESSAGE_RECORD_TYPE,
+        revision: 0,
+      });
+      return canonicalize(prior) === canonicalize(content);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Where a follow-up from the owner desktop stands, by its id; null for an id never submitted (or never queued). */
+  ownerMessageResult(messageId: string): Promise<OwnerFollowUpResult | null> {
+    // Under `ctx.lock`, so it never sees a follow-up between its reservation and its item, or its outcome and removal.
+    return this.ctx.lock.run(async () => {
+      const r = parseOwnerMessageRecord(await this.ctx.store.getMeta(ownerMessageKey(messageId)));
+      if (!r) return null;
+      if (r.result) return r.result;
+      const itemId = ownerMessageItemId(messageId);
+      if (!(await this.ctx.store.outboxFor(r.question_id)).some((o) => o.id === itemId))
+        return null;
+      return { messageId, questionId: r.question_id, status: 'queued' };
     });
   }
 
@@ -789,6 +1053,17 @@ export class Publisher {
     return this.featuresRead;
   }
 
+  /**
+   * The next place among the person's follow-ups, answers and declines from this computer on a question, whatever
+   * the clock says. Call under `ctx.lock`.
+   */
+  private async nextPersonSeq(questionId: string): Promise<number> {
+    const key = ownerMessageCountKey(questionId);
+    const seq = (Number(await this.ctx.store.getMeta(key)) || 0) + 1;
+    await this.ctx.store.setMeta(key, String(seq));
+    return seq;
+  }
+
   private async dropSpool(p: CreatePayload): Promise<void> {
     for (const a of p.attachments) await this.ctx.spool.delete(a.attachment_id);
   }
@@ -804,12 +1079,13 @@ export class Publisher {
     return this.flushing.run(() =>
       opts.proceed && !opts.proceed()
         ? Promise.resolve({ sent: 0, failed: 0, created: [] })
-        : this.flushDue(opts.only),
+        : this.flushDue(opts.only, opts.proceed),
     );
   }
 
   private async flushDue(
     only: string | undefined,
+    proceed?: () => boolean,
   ): Promise<{ sent: number; failed: number; created: string[] }> {
     const { ctx } = this;
     let sent = 0;
@@ -887,6 +1163,50 @@ export class Publisher {
         })
         .catch(() => undefined);
     };
+    /** Drop a settled follow-up's item and tell the host, as `finish` does for an answer. */
+    const finishMessage = async (item: OutboxItem, result: OwnerFollowUpResult) => {
+      await ctx.lock.run(() => remove(item));
+      try {
+        this.hooks.onOwnerFollowUp?.(result);
+      } catch {
+        /* the host's listener; the outcome is stored either way */
+      }
+    };
+    /** Store a follow-up's outcome, then drop its item and tell the host, as `settle` does for an answer. */
+    const settleMessage = async (item: OutboxItem, outcome: SettledOwnerFollowUp) => {
+      const { signed, seq } = item.payload as OwnerMessagePayload;
+      const result = {
+        messageId: signed.record.message_id,
+        questionId: item.question_id,
+        ...outcome,
+      } as OwnerFollowUpResult;
+      const record: OwnerMessageRecord = { question_id: item.question_id, signed, seq, result };
+      await ctx.lock.run(async () => {
+        await ctx.store.setMeta(ownerMessageKey(result.messageId), JSON.stringify(record));
+        await remove(item);
+      });
+      try {
+        this.hooks.onOwnerFollowUp?.(result);
+      } catch {
+        /* the host's listener; the outcome is stored either way */
+      }
+      await ctx.audit
+        .log({
+          event:
+            outcome.status === 'sent' ? 'question.owner-message' : 'outbox.owner-message.rejected',
+          question_id: item.question_id,
+          provenance: 'human-desktop',
+          result:
+            outcome.status === 'closed'
+              ? `closed:${outcome.reason}`
+              : outcome.status === 'unsupported'
+                ? `unsupported:${outcome.by}`
+                : outcome.status === 'rejected'
+                  ? outcome.code
+                  : outcome.status,
+        })
+        .catch(() => undefined);
+    };
     // Read well past the batch: items that must wait their turn are skipped without counting, so a long thread
     // queued behind a backed-off create never crowds other questions out of the batch.
     for (const item of await ctx.store.dueOutbox(ctx.now(), OUTBOX_SCAN)) {
@@ -895,19 +1215,18 @@ export class Publisher {
       if (item.kind !== 'create') {
         // Per-question ordering: an action must never overtake its own (possibly backed-off) create, a message
         // never overtakes an earlier message in its thread, or a later "no reply needed" could land before the
-        // question it settles, and the person's answer never overtakes a withdrawal already queued.
+        // question it settles, and the person's answer, decline or follow-up never overtakes a withdrawal already queued
+        // or one of their own made before it (a clarification queued offline reaches the agent before the approval).
         const pending = await pendingOf(item.question_id);
         if (!pending.some((o) => o.id === item.id)) continue; // dropped earlier in this flush
-        if (
-          pending.some(
-            (o) => o.kind === 'create' || (item.kind === 'owner-answer' && o.kind === 'cancel'),
-          )
-        )
-          continue;
+        const person = isPersonItem(item);
+        if (pending.some((o) => o.kind === 'create' || (person && o.kind === 'cancel'))) continue;
         if (
           item.kind === 'message' &&
           pending.some((o) => o.kind === 'message' && messageSeq(o) < messageSeq(item))
         )
+          continue;
+        if (person && pending.some((o) => isPersonItem(o) && personSeq(o) < personSeq(item)))
           continue;
       }
       attempted++;
@@ -957,6 +1276,18 @@ export class Publisher {
           continue;
         }
       }
+      if (item.kind === 'owner-decline') {
+        const step = await this.flushOwnerDecline(
+          item,
+          () => (features ??= this.relayFeatures()),
+          remove,
+          proceed,
+        );
+        if (step === 'declined') sent++;
+        else failed++;
+        if (step === 'stop') break;
+        continue;
+      }
       if (item.kind === 'owner-answer') {
         // Settled before a crash kept it from being dropped: its outcome stands, and it is never sent again.
         const { signed } = item.payload as OwnerAnswerPayload;
@@ -986,6 +1317,37 @@ export class Publisher {
           continue;
         }
       }
+      if (item.kind === 'owner-message') {
+        // Settled before a crash kept it from being dropped: its outcome stands, and it is never sent again.
+        const { signed } = item.payload as OwnerMessagePayload;
+        const stored = parseOwnerMessageRecord(
+          await ctx.store.getMeta(ownerMessageKey(signed.record.message_id)),
+        );
+        if (stored?.result) {
+          await finishMessage(item, stored.result);
+          continue;
+        }
+        // A relay that does not advertise threads and the owner desktop's follow-ups would refuse it: never sent one.
+        let set: ReadonlySet<ProtocolFeature>;
+        try {
+          set = await (features ??= this.relayFeatures());
+        } catch (e) {
+          failed++;
+          await ctx.store.recordOutboxFailure(
+            item.id,
+            e instanceof RelayError ? e.code : 'network_error',
+            ctx.now() + backoffMs(item.attempts + 1, 2000, 300_000),
+          );
+          continue;
+        }
+        if (!takesOwnerMessages(set)) {
+          failed++;
+          await settleMessage(item, { status: 'unsupported', by: 'relay' });
+          continue;
+        }
+      }
+      // A bridge stopped while this flush read the relay's features sends nothing more.
+      if (proceed && !proceed()) break;
       try {
         if (item.kind === 'create') {
           const receipt = await this.sendCreate(item);
@@ -1000,6 +1362,11 @@ export class Publisher {
         } else if (item.kind === 'owner-answer') {
           await this.sendOwnerAnswer(item);
           await settle(item, { status: 'sent' });
+          sent++;
+          continue;
+        } else if (item.kind === 'owner-message') {
+          await this.sendOwnerMessage(item);
+          await settleMessage(item, { status: 'sent' });
           sent++;
           continue;
         } else {
@@ -1030,6 +1397,17 @@ export class Publisher {
               outcome = { status: 'unsupported', by: 'relay' };
           }
           await settle(item, outcome);
+          continue;
+        }
+        if (item.kind === 'owner-message') {
+          let outcome = ownerMessageRefusal(err);
+          if (err.status === 403) {
+            // The role refused: a relay that stopped advertising the owner desktop's follow-ups no longer takes them.
+            this.features = null;
+            const set = await this.relayFeatures().catch(() => null);
+            if (set && !takesOwnerMessages(set)) outcome = { status: 'unsupported', by: 'relay' };
+          }
+          await settleMessage(item, outcome ?? (await this.diagnoseOwnerMessage(item.question_id)));
           continue;
         }
         // Permanent rejection: surface on the question and stop retrying it.
@@ -1118,6 +1496,176 @@ export class Publisher {
   }
 
   /**
+   * One flush's turn for an owner-desktop decline. It is posted exactly as it was signed, never signed again. Once the
+   * relay has answered the post, it is settled from the question's action log (`ownerDeclineFromDetail`), because a
+   * cancel the relay takes, a retry of one it took and a cancel of a question already closed all answer alike. A
+   * transient failure keeps the item for the outbox's retries: `stop` when the flush should stop there, as for every
+   * other item, and `retry` when only this item backs off.
+   */
+  private async flushOwnerDecline(
+    item: OutboxItem,
+    features: () => Promise<ReadonlySet<ProtocolFeature>>,
+    remove: (it: OutboxItem) => Promise<void>,
+    proceed?: () => boolean,
+  ): Promise<'declined' | 'settled' | 'retry' | 'stop'> {
+    const { ctx } = this;
+    const payload = item.payload as OwnerDeclinePayload;
+    const { signed } = payload;
+    const declineId = signed.record.action_id;
+    const backOff = (e: unknown) => {
+      const err = e instanceof RelayError ? e : null;
+      return ctx.store.recordOutboxFailure(
+        item.id,
+        err?.code ?? 'network_error',
+        ctx.now() + Math.max(err?.retryAfterMs ?? 0, backoffMs(item.attempts + 1, 2000, 300_000)),
+      );
+    };
+    const tell = (result: OwnerDeclineResult) => {
+      try {
+        this.hooks.onOwnerDecline?.(result);
+      } catch {
+        /* the host's listener; the outcome is stored either way */
+      }
+    };
+    /** Store the outcome, then drop the item and tell the host, under `ctx.lock` like `enqueueOwnerDecline`. */
+    const settle = async (outcome: SettledOwnerDecline) => {
+      const result = {
+        declineId,
+        questionId: item.question_id,
+        expectedRevision: signed.record.expected_revision,
+        ...outcome,
+      } as OwnerDeclineResult;
+      const record: OwnerDeclineRecord = {
+        question_id: item.question_id,
+        expected_revision: result.expectedRevision,
+        result,
+      };
+      await ctx.lock.run(async () => {
+        await ctx.store.setMeta(ownerDeclineKey(declineId), JSON.stringify(record));
+        await remove(item);
+      });
+      tell(result);
+      await ctx.audit
+        .log({
+          event:
+            outcome.status === 'declined'
+              ? 'question.owner-decline'
+              : 'outbox.owner-decline.rejected',
+          question_id: item.question_id,
+          result:
+            outcome.status === 'closed'
+              ? `closed:${outcome.reason}`
+              : outcome.status === 'unsupported'
+                ? `unsupported:${outcome.by}`
+                : outcome.status === 'rejected'
+                  ? outcome.code
+                  : outcome.status,
+        })
+        .catch(() => undefined);
+      return outcome.status === 'declined' ? ('declined' as const) : ('settled' as const);
+    };
+
+    // Settled before a crash kept it from being dropped: its outcome stands, and it is never sent again.
+    const stored = parseOwnerDeclineRecord(await ctx.store.getMeta(ownerDeclineKey(declineId)));
+    if (stored?.result) {
+      await ctx.lock.run(() => remove(item));
+      tell(stored.result);
+      return stored.result.status === 'declined' ? 'declined' : 'settled';
+    }
+
+    // Set when the relay no longer takes declines but this one was sent before and may have been taken then (its answer
+    // lost): only the question can say, and anything but finding it there is `unsupported`.
+    let unsupported = false;
+    if (!payload.confirming) {
+      const wasSent = payload.sent === true;
+      // A relay that does not advertise owner-desktop declines would refuse the flag: it is never sent one.
+      let set: ReadonlySet<ProtocolFeature>;
+      try {
+        set = await features();
+      } catch (e) {
+        await backOff(e);
+        return 'retry';
+      }
+      if (!set.has(OWNER_DECLINE_FEATURE)) {
+        if (!wasSent) return settle({ status: 'unsupported', by: 'relay' });
+        unsupported = true;
+      } else {
+        // A bridge stopped while this flush read the relay's features sends nothing more, as for every other item.
+        if (proceed && !proceed()) return 'stop';
+        if (!wasSent) {
+          // Marked before the first post, so a send whose answer is lost is never taken for one that never went.
+          payload.sent = true;
+          await ctx.store.putOutbox({ ...item, payload });
+          if (proceed && !proceed()) return 'stop';
+        }
+        try {
+          await ctx.client.postAction('cancel', item.question_id, declineId, signed, {
+            retry: false,
+            timeoutMs: OWNER_DECLINE_TIMEOUT_MS,
+          });
+        } catch (e) {
+          const err =
+            e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
+          if (err.retryable) {
+            await backOff(err);
+            return 'stop';
+          }
+          let outcome = ownerDeclineRefusal(err);
+          if (err.status === 403) {
+            // The flag refused: a relay that stopped advertising owner-desktop declines no longer takes them.
+            this.features = null;
+            const now = await this.relayFeatures().catch(() => null);
+            if (now && !now.has(OWNER_DECLINE_FEATURE))
+              outcome = { status: 'unsupported', by: 'relay' };
+            else if (!now && wasSent) {
+              // Whether it took this decline before it stopped taking them can wait until it can be asked.
+              await backOff(err);
+              return 'retry';
+            }
+          }
+          if (outcome?.status === 'unsupported' && outcome.by === 'relay' && wasSent)
+            unsupported = true;
+          else if (outcome) return settle(outcome);
+          // Otherwise refused for a state the error does not name: the question says which.
+        }
+        if (!unsupported) {
+          // From here on it is settled from the question alone, and never posted again.
+          payload.confirming = true;
+          await ctx.store.putOutbox({ ...item, payload });
+        }
+      }
+    }
+
+    if (proceed && !proceed()) return 'stop';
+    let detail: unknown;
+    try {
+      detail = await ctx.client.getQuestion(item.question_id, {
+        retry: false,
+        timeoutMs: OWNER_DECLINE_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const err =
+        e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
+      if (err.retryable) {
+        await backOff(err);
+        return 'stop';
+      }
+      return settle(
+        err.code === 'not_found'
+          ? { status: 'closed', reason: 'not-found' }
+          : { status: 'rejected', code: err.code },
+      );
+    }
+    const found = ownerDeclineFromDetail(detail, signed) ?? {
+      status: 'rejected' as const,
+      code: 'malformed_question',
+    };
+    return settle(
+      unsupported && found.status !== 'declined' ? { status: 'unsupported', by: 'relay' } : found,
+    );
+  }
+
+  /**
    * Post the owner desktop's answer exactly as it was signed. It is never signed again: a conflict means the question
    * moved on from what the person reviewed, which only they can answer again. The outbox retries a transient failure,
    * so the request itself does not.
@@ -1128,6 +1676,37 @@ export class Publisher {
       retry: false,
       timeoutMs: OWNER_ANSWER_TIMEOUT_MS,
     });
+  }
+
+  /**
+   * Post the person's follow-up exactly as it was signed. A message never moves the revision, so there is nothing to
+   * sign again; the outbox retries a transient failure, so the request itself does not.
+   */
+  private async sendOwnerMessage(item: OutboxItem): Promise<void> {
+    const { signed } = item.payload as OwnerMessagePayload;
+    await this.ctx.client.postMessage(item.question_id, signed.record.message_id, signed, {
+      retry: false,
+      timeoutMs: OWNER_MESSAGE_TIMEOUT_MS,
+    });
+  }
+
+  /**
+   * Tell a bare `invalid_state` refusal of a follow-up apart by reading the question: closed when the relay now
+   * reports it cancelled or expired, and otherwise (a thread at its message limit, a desktop that takes no messages,
+   * or a question that cannot be read) `rejected` with that code. Never by the refusal's message.
+   */
+  private async diagnoseOwnerMessage(questionId: string): Promise<SettledOwnerFollowUp> {
+    try {
+      const q = await this.ctx.client.getQuestion(questionId, {
+        retry: false,
+        timeoutMs: OWNER_MESSAGE_TIMEOUT_MS,
+      });
+      if (q?.status === 'cancelled') return { status: 'closed', reason: 'cancelled' };
+      if (q?.status === 'expired') return { status: 'closed', reason: 'expired' };
+    } catch {
+      /* unreadable now: the refusal stands as it was */
+    }
+    return { status: 'rejected', code: 'invalid_state' };
   }
 
   private async sendAction(item: OutboxItem): Promise<void> {

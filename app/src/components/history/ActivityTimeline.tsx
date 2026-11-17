@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import { isPersonDecline } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import type { ActionView, QuestionView, ThreadMessage } from '../../domain/model.js';
 import { answerSummary, correctionCount, decidedAt, optionLabels } from '../../domain/lists.js';
@@ -7,8 +6,10 @@ import {
   agentName,
   answerBy,
   currentAnswer,
-  declinedByPerson,
+  declineBy,
+  declinedLabel,
   effectiveStatus,
+  followUpBy,
   withdrawnLabel,
 } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
@@ -177,14 +178,19 @@ interface Entry {
 }
 
 function messageEntry(v: QuestionView, m: ThreadMessage): Entry {
-  const mine = m.side !== 'agent';
+  const by = followUpBy(m);
+  const mine = !!by;
   const photos = m.images.length;
   return {
     key: `m-${m.messageId}`,
     kind: 'message',
     mine,
     at: m.createdAt,
-    title: mine ? 'You sent a follow-up' : `${agentName(v)} replied`,
+    title: by
+      ? by.computer
+        ? `You sent a follow-up on ${by.computer}`
+        : 'You sent a follow-up'
+      : `${agentName(v)} replied`,
     body: (
       <>
         {m.text.trim() && <SafeText text={m.text} className="tl-message" />}
@@ -213,8 +219,11 @@ function entries(v: QuestionView, now: number): Entry[] {
   const current = currentAnswer(v);
   let prev: ActionView | null = null;
   let answers = 0;
-  // Actions and messages share the ledger's order; a message lands between the decisions it came between.
-  const messages = v.messages.filter((m) => m.verified);
+  // Actions and messages share the ledger's order; a message lands between the decisions it came between. A human
+  // message is listed only as the person's (`followUpBy`), never as anything else.
+  const messages = v.messages.filter(
+    (m) => m.verified && (m.side === 'agent' || followUpBy(m) !== null),
+  );
   let mi = 0;
   const flushMessages = (beforeSeq: number) => {
     while (mi < messages.length && messages[mi]!.seq < beforeSeq)
@@ -308,12 +317,12 @@ function entries(v: QuestionView, now: number): Entry[] {
         ) : undefined,
       });
     else if (a.action === 'cancel') {
-      const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+      const declined = declineBy(a);
       out.push({
         key: a.actionId,
         kind: declined ? 'declined' : 'withdrawn',
         at: a.createdAt,
-        title: declined ? 'Declined by you' : withdrawnLabel(v),
+        title: declined ? declined.label : withdrawnLabel(v),
       });
     } else if (a.action === 'reopen')
       out.push({
@@ -344,9 +353,7 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
       s === 'expired'
         ? 'Expired without an answer'
         : s === 'cancelled'
-          ? declinedByPerson(v)
-            ? 'Declined by you'
-            : withdrawnLabel(v)
+          ? (declinedLabel(v) ?? withdrawnLabel(v))
           : s === 'open'
             ? 'Not answered yet'
             : 'No answer this device can show';

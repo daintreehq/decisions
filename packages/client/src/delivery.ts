@@ -21,6 +21,7 @@ import { messageDeliveryKey } from '@daintreehq/decisions-protocol';
 import {
   isPendingMessage,
   isUndeliveredMessage,
+  messageSentOn,
   parseMessages,
   receiptId,
   serializeMessages,
@@ -570,6 +571,7 @@ export class DeliveryEngine {
         messageId: i.message.message_id,
         ...(i.question ? { question: i.question } : {}),
         text: i.content.text,
+        ...(messageSentOn(i.message) === 'computer' ? { onComputer: true } : {}),
         answered: i.answered,
         ...(i.images?.length ? { images: i.images } : {}),
         injectionId: i.intentId,

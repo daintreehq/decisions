@@ -148,8 +148,10 @@ export interface DictationDeps {
     onFailure?: (error: MicUnavailableError) => void,
   ): Promise<Capture>;
   prefs(): LocalPrefs;
-  /** Which providers the relay has keys for. */
+  /** Which providers the relay has keys for, or null until the relay has said. */
   info(): { xai: boolean; openai: boolean; anthropic: boolean } | null;
+  /** Settles once the relay has answered (or failed to answer) what `info()` reads, asking again after a failure. */
+  ensureInfo(): Promise<void>;
   relayOrigin(): string | null;
   relay(): {
     json<T>(method: string, path: string, opts: { body: unknown }): Promise<T>;
@@ -208,13 +210,16 @@ export class DictationController {
 
   /* ---------- availability ---------- */
 
-  /** Why dictation cannot start here, or null when it can. */
-  unavailable(): 'unconfigured' | 'offline' | null {
+  /**
+   * Why dictation cannot start here, or null when it can. `unknown` is a relay that hasn't said yet whether it is set
+   * up (its `/info` is still on the way, or failed): never a reason to say it isn't.
+   */
+  unavailable(): 'unconfigured' | 'offline' | 'unknown' | null {
     const info = this.deps.info();
     const v = this.deps.prefs().voice;
-    if (!info || !(v.transcription === 'xai' ? info.xai : info.openai)) return 'unconfigured';
+    if (info && !(v.transcription === 'xai' ? info.xai : info.openai)) return 'unconfigured';
     if (!this.deps.online()) return 'offline';
-    return null;
+    return info ? null : 'unknown';
   }
 
   /** Capture or its cleanup has not settled: Send must wait. */
@@ -237,6 +242,10 @@ export class DictationController {
   /** Dictate was tapped: the disclosure first if consent was never given, then the microphone. */
   request(binding: Binding): void {
     const why = this.unavailable();
+    if (why === 'unknown') {
+      void this.whenKnown(binding);
+      return;
+    }
     if (why) {
       this.set({
         message: { text: MESSAGES[why], tone: 'info' },
@@ -250,6 +259,29 @@ export class DictationController {
       return;
     }
     void this.start(binding);
+  }
+
+  /**
+   * Dictate was tapped before the relay said whether dictation is set up here (a question opened from this device's
+   * copy shows before `/info` answers). The mic shows as starting while the app asks, so letting go of a hold, Cancel,
+   * leaving or hiding retires the request through the same paths as a microphone that is starting; once the relay has
+   * answered, it carries on exactly as the tap would have.
+   */
+  private async whenKnown(binding: Binding): Promise<void> {
+    if (this.isActive()) return;
+    const d = drafts.get(binding.key);
+    if (!d || d.epoch !== binding.epoch || d.revision !== binding.revision) return;
+    const gen = ++this.gen;
+    this.clearTimers();
+    // No passage yet: an earlier one's span must not be what Escape takes back out.
+    this.region = null;
+    this.set({ ...IDLE, phase: 'starting', binding });
+    await this.deps.ensureInfo();
+    if (this.gen !== gen) return;
+    this.set({ ...IDLE, binding });
+    if (this.unavailable() === 'unknown')
+      this.set({ message: { text: MESSAGES.service, tone: 'error', retry: true } });
+    else this.request(binding);
   }
 
   /** "Enable and start dictation": consent is recorded only by this. */
@@ -494,12 +526,9 @@ export class DictationController {
   private async doStop(note?: string, opts: { cleanup?: boolean } = {}): Promise<void> {
     const session = this.session;
     const b = this.state.binding;
-    if (!session || !b) {
-      if (this.state.phase === 'consent') this.declineConsent();
-      return;
-    }
-    const gen = this.gen;
-    if (session.phase === 'starting') {
+    // A session still starting, or none yet while the app asks the relay whether dictation is set up: nothing was
+    // recorded, so this is a cancel.
+    if (b && (session ? session.phase === 'starting' : this.state.phase === 'starting')) {
       this.cancelCapture();
       // Keep the binding, so a note about why (the question changed, the app was hidden) reaches its composer.
       this.set({ ...IDLE, binding: b, message: note ? { text: note, tone: 'info' } : null });
@@ -507,6 +536,11 @@ export class DictationController {
       if (!note) announce('Dictation cancelled.');
       return;
     }
+    if (!session || !b) {
+      if (this.state.phase === 'consent') this.declineConsent();
+      return;
+    }
+    const gen = this.gen;
     this.clearTimers();
     this.set({ phase: 'finishing', capWarning: false, escArmed: false });
     announce('Recording stopped.');
@@ -872,6 +906,7 @@ export const dictation = new DictationController({
   startMic: realStartMic,
   prefs: () => app.getSnapshot().prefs,
   info: () => app.getSnapshot().info?.voice ?? null,
+  ensureInfo: () => app.ensureInfo(),
   relayOrigin: () => app.getSnapshot().config?.relayOrigin ?? null,
   relay: () => app.getRelay(),
   online: () => app.getSnapshot().online && (globalThis.navigator?.onLine ?? true),

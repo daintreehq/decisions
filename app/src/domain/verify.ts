@@ -3,6 +3,7 @@ import {
   CryptoEnvelope,
   DecisionContentV1,
   EventData,
+  HUMAN_MESSAGE_ROLES,
   HumanAnswerContentV1,
   MESSAGE_RECORD_TYPE,
   MessageContentV1,
@@ -40,7 +41,6 @@ export interface VerifyCtx {
 }
 
 const DESKTOP: readonly Role[] = ['owner-desktop', 'desktop-host'];
-const HUMAN: readonly Role[] = ['phone', 'tablet'];
 const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
 
 export interface VerifiedQuestion {
@@ -103,12 +103,15 @@ export async function verifyQuestionEvent(
 export interface VerifiedMessage {
   record: MessageRecord;
   signerRole: Role;
+  /** The signer's certified name: names the computer a human message from the owner desktop was sent on. */
+  signerLabel: string;
   content: MessageContentV1;
 }
 
 /**
- * A thread message (docs/protocol.md section 16): a human one signed by a paired phone or tablet, an agent one
- * signed by the desktop that published the question (`publisherDeviceId`) and by no other. Its content is opened
+ * A thread message (docs/protocol.md section 16): a human one signed by a paired phone or tablet, or by the owner
+ * desktop for the person on the computer (never a `desktop-host`), an agent one signed by the desktop that published
+ * the question (`publisherDeviceId`) and by no other. Its content is opened
  * only once the signature, the envelope's bindings and the signer's role all hold, and it is shown only when the
  * content says the same side and lists the same images as the signed record.
  */
@@ -130,7 +133,7 @@ export async function verifyMessageEvent(
   if (messageEnvelopeIssues(record, envelope).length > 0) return fail('envelope binding mismatch');
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
-  if (record.side === 'human' && !HUMAN.includes(signer.role))
+  if (record.side === 'human' && !HUMAN_MESSAGE_ROLES.includes(signer.role))
     return fail(`a ${signer.role} cannot sign a human message`);
   if (
     record.side === 'agent' &&
@@ -162,7 +165,15 @@ export async function verifyMessageEvent(
   const images = content.data.side === 'human' ? content.data.images : [];
   if (!imagesMatchRecord(record.attachment_ids, images))
     return fail('message images disagree with its record');
-  return { ok: true, value: { record, signerRole: signer.role, content: content.data } };
+  return {
+    ok: true,
+    value: {
+      record,
+      signerRole: signer.role,
+      signerLabel: signer.cert.label,
+      content: content.data,
+    },
+  };
 }
 
 export type AnswerContent = HumanAnswerContentV1 | ProxyAnswerContentV1;
@@ -203,9 +214,12 @@ export async function verifyActionEvent(
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
   // The certified role decides, never the relay: the owner desktop may sign the person's first answer (made on the
-  // computer, `human-desktop`), a `desktop-host` never answers for them.
-  if (!roleMaySign(record.action, signer.role)) {
-    return fail(`a ${signer.role} cannot sign ${record.action}`);
+  // computer, `human-desktop`) and their decline (a `cancel` with the signed `decline` flag); a `desktop-host` never
+  // acts for them, and a phone or tablet declines by its role alone.
+  if (!roleMaySign(record.action, signer.role, record.decline)) {
+    return fail(
+      `a ${signer.role} cannot sign ${record.decline === true ? 'a decline' : record.action}`,
+    );
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
     return fail('signed by a device after it was revoked');

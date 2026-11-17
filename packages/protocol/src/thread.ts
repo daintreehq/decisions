@@ -6,7 +6,7 @@ import { LIMITS } from './limits.js';
 import {
   CryptoEnvelope,
   DESKTOP_ROLES,
-  HUMAN_ROLES,
+  HUMAN_MESSAGE_ROLES,
   Id,
   IsoTime,
   PhoneImageReferences,
@@ -21,7 +21,8 @@ import { PROTOCOL_VERSION } from './version.js';
 
 /*
  * Thread messages (docs/protocol.md section 16): follow-ups on one existing question, from the human (signed by a
- * paired phone or tablet) or from the agent (signed by the desktop that published the question). A message is its
+ * paired phone or tablet, or by the owner desktop for the person on the computer) or from the agent (signed by the
+ * desktop that published the question). A message is its
  * own signed record, never an action: it never changes the answer in force, the revision, `deliverable` or any
  * gate outcome, and it never counts as approval.
  */
@@ -256,13 +257,15 @@ export interface MessageTransition {
 /**
  * Pure acceptance rule for a new message. Throws `ApiError` when the message must be refused; otherwise returns
  * the question state untouched. `signerIsPublisher` is true when the signer is the question's
- * `originating_device_id`. `messageCount` is the question's lifetime message count before this one.
+ * `originating_device_id`. `messageCount` is the question's lifetime message count before this one. A human message
+ * may come from the owner desktop (`HUMAN_MESSAGE_ROLES`); the relay also checks that the question's desktop
+ * declared `owner-desktop-messages-v1` for one, which this rule cannot see.
  */
 export function applyMessage(
   state: QuestionState,
   m: { side: MessageSide; role: Role; signerIsPublisher: boolean; messageCount: number },
 ): MessageTransition {
-  if (m.side === 'human' && !HUMAN_ROLES.includes(m.role)) {
+  if (m.side === 'human' && !HUMAN_MESSAGE_ROLES.includes(m.role)) {
     throw new ApiError('forbidden', `role ${m.role} may not send a human message`);
   }
   if (m.side === 'agent' && !(DESKTOP_ROLES.includes(m.role) && m.signerIsPublisher)) {
@@ -284,6 +287,19 @@ export function applyMessage(
     approval: false,
     deliverToHost: m.side === 'human',
   };
+}
+
+/**
+ * Where the person sent a human message from, by its signer's certified role: `computer` for the owner desktop,
+ * `phone` for a phone or tablet. There is no relay claim to trust: a client passes the role from the signer's
+ * verified certificate, and shows the message as the person's either way. Throws `forbidden` for a role that never
+ * sends a human message (a `desktop-host`), as `applyMessage` does.
+ */
+export function humanMessageSentOn(role: Role): 'computer' | 'phone' {
+  if (!HUMAN_MESSAGE_ROLES.includes(role)) {
+    throw new ApiError('forbidden', `role ${role} may not send a human message`);
+  }
+  return role === 'owner-desktop' ? 'computer' : 'phone';
 }
 
 /**

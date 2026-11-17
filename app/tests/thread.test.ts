@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { bytesToBase64Url } from '@daintreehq/decisions-protocol';
+import { randomBytes } from '@daintreehq/decisions-crypto';
 import { Db } from '../src/data/db.js';
 import { Outbox, type Poster } from '../src/data/outbox.js';
 import { RelayError } from '../src/data/relay.js';
 import { generateCacheKey } from '../src/data/seal.js';
-import { QuestionStore } from '../src/domain/model.js';
+import { homeSections, rowSummary } from '../src/domain/lists.js';
+import { QuestionStore, type QuestionView } from '../src/domain/model.js';
 import {
   awaitingReply,
   canOverrule,
@@ -61,16 +64,42 @@ describe('thread message verification', () => {
     expect(a).toMatchObject({ ok: true, value: { record: { expects_reply: true } } });
   });
 
-  it('refuses a human message signed by a desktop, and an agent message signed by a phone', async () => {
+  it("opens a follow-up the owner desktop signed as the person's, named by its certificate", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const id = (await questionEvent(w)).question_id!;
+    const fromComputer = await messageEvent(w, {
+      questionId: id,
+      side: 'human',
+      signer: w.owner,
+      text: 'Use the staging branch.',
+    });
+    const fromPhone = await messageEvent(w, { questionId: id, side: 'human' });
+    expect(
+      await verifyMessageEvent(fromComputer.data, NOW, ctx(w), id, w.desktop.id),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        signerRole: 'owner-desktop',
+        signerLabel: 'Studio Mac',
+        content: { side: 'human', text: 'Use the staging branch.' },
+      },
+    });
+    expect(await verifyMessageEvent(fromPhone.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject({
+      ok: true,
+      value: { signerRole: 'phone' },
+    });
+  });
+
+  it('refuses a human message signed by a Host, and an agent message signed by a phone', async () => {
     const w = await makeWorld();
     const id = (await questionEvent(w)).question_id!;
-    const fromDesktop = await messageEvent(w, { questionId: id, side: 'human', signer: w.desktop });
+    const host = await otherDesktop(w);
+    const fromDesktop = await messageEvent(w, { questionId: id, side: 'human', signer: host });
     const fromPhone = await messageEvent(w, { questionId: id, side: 'agent', signer: w.phone });
-    expect(await verifyMessageEvent(fromDesktop.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject(
-      {
-        ok: false,
-      },
-    );
+    expect(await verifyMessageEvent(fromDesktop.data, NOW, ctx(w), id, w.desktop.id)).toEqual({
+      ok: false,
+      reason: 'a desktop-host cannot sign a human message',
+    });
     expect(await verifyMessageEvent(fromPhone.data, NOW, ctx(w), id, w.desktop.id)).toMatchObject({
       ok: false,
     });
@@ -149,6 +178,113 @@ describe('a thread in the question store', () => {
     await s.ingest(await messageEvent(w, { questionId: id, side: 'human', text: 'v3.' }));
     expect(awaitingReply(s.get(id)!)).toBe(false);
     expect(needsYou(s.get(id)!)).toBe(false);
+  });
+
+  it('stops needing the person on every phone when they reply from the computer', async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    // Asked from a Remote Host: the reply is the owner desktop's, named by its own certificate.
+    const host = await otherDesktop(w);
+    const q = await questionEvent(w, { signer: host });
+    const id = q.question_id!;
+    // In ledger order: answered, then the agent asks, then the person replies on the computer.
+    const answer = await actionEvent(w, { questionId: id, action: 'answer' });
+    const ask = await messageEvent(w, {
+      questionId: id,
+      side: 'agent',
+      signer: host,
+      expectsReply: true,
+    });
+    const reply = await messageEvent(w, {
+      questionId: id,
+      side: 'human',
+      signer: w.owner,
+      text: 'v3.',
+    });
+    const query = { sort: 'due' as const, query: '', project: null, computer: null };
+    const needsSection = (v: QuestionView) =>
+      homeSections([v], query, Date.now()).find((x) => x.key === 'needs')!.items;
+    // Two phones, each reading the same ledger on its own.
+    for (const s of [store(w), store(w)]) {
+      await s.ingest(q);
+      await s.ingest(answer);
+      await s.ingest(ask);
+      expect(needsYou(s.get(id)!)).toBe(true);
+      expect(needsSection(s.get(id)!)).toHaveLength(1);
+      expect(rowSummary(s.get(id)!, Date.now())).toMatchObject({ ask: true });
+      await s.ingest(reply);
+      const v = s.get(id)!;
+      expect(v.messages.at(-1)).toMatchObject({
+        side: 'human',
+        verified: true,
+        text: 'v3.',
+        signerRole: 'owner-desktop',
+        signerLabel: 'Studio Mac',
+      });
+      expect(awaitingReply(v)).toBe(false);
+      expect(pendingAsk(v)).toBeNull();
+      expect(needsYou(v)).toBe(false);
+      expect(needsSection(v)).toHaveLength(0);
+      // The row goes back to the answer in force; the follow-up never stands in for it.
+      expect(rowSummary(v, Date.now())).toMatchObject({ author: 'You', text: 'Yes — go ahead' });
+      expect(v).toMatchObject({ status: 'human-answered', revision: 1 });
+      // A new question from the agent needs the person again.
+      await s.ingest(
+        await messageEvent(w, { questionId: id, side: 'agent', signer: host, expectsReply: true }),
+      );
+      expect(needsYou(s.get(id)!)).toBe(true);
+    }
+  });
+
+  it('keeps needing the person when a Host signs a reply for them, and never shows it as theirs', async () => {
+    const w = await makeWorld();
+    const { s, id } = await answered(w);
+    const host = await otherDesktop(w);
+    await s.ingest(await messageEvent(w, { questionId: id, side: 'agent', expectsReply: true }));
+    await s.ingest(
+      await messageEvent(w, { questionId: id, side: 'human', signer: host, text: 'v3.' }),
+    );
+    const v = s.get(id)!;
+    expect(v.messages.at(-1)).toMatchObject({ side: 'human', verified: false, text: '' });
+    expect(awaitingReply(v)).toBe(true);
+    expect(needsYou(v)).toBe(true);
+  });
+
+  it("never counts a follow-up it cannot verify as the person's reply", async () => {
+    const w = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const stranger = await makeWorld({ ownerLabel: 'Studio Mac' });
+    const { s, id } = await answered(w);
+    await s.ingest(await messageEvent(w, { questionId: id, side: 'agent', expectsReply: true }));
+    // A desktop this phone has no certificate for, a computer reply whose signature was swapped, and a phone's
+    // reply after that phone was revoked.
+    const unknown = await messageEvent(w, {
+      questionId: id,
+      side: 'human',
+      signer: stranger.owner,
+    });
+    const tampered = await messageEvent(w, { questionId: id, side: 'human', signer: w.owner });
+    (tampered.data as { record: { signature: string } }).record.signature = bytesToBase64Url(
+      randomBytes(64),
+    );
+    w.trust.markRevoked(w.phone.id, '2026-01-01T00:00:00.000Z');
+    const revoked = await messageEvent(w, { questionId: id, side: 'human', signer: w.phone });
+    for (const e of [unknown, tampered, revoked]) await s.ingest(e);
+    const v = s.get(id)!;
+    expect(v.messages.filter((m) => m.side === 'human')).toEqual([
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+      expect.objectContaining({ verified: false, text: '', signerRole: null }),
+    ]);
+    expect(
+      v.messages.filter((m) => m.side === 'human').every((m) => m.signerLabel === undefined),
+    ).toBe(true);
+    expect(v.integrityIssues).toEqual(
+      expect.arrayContaining([
+        'message: signature or ciphertext does not match',
+        'message: signed by a device after it was revoked',
+      ]),
+    );
+    expect(awaitingReply(v)).toBe(true);
+    expect(needsYou(v)).toBe(true);
   });
 
   it('stops waiting when the agent says something that asks nothing, or the question is withdrawn', async () => {

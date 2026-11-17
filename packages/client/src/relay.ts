@@ -14,6 +14,8 @@ import {
   type Diagnostics,
   type EpochGrant,
   type InfoResponse,
+  type InvolvementBody,
+  type InvolvementRecord,
   type MessageBody,
   type MessageReceipt,
   type PaneSnapshotBody,
@@ -265,8 +267,11 @@ export class RelayClient {
       body: { protocol_version: PROTOCOL_VERSION, idempotency_key: idempotencyKey, question },
     });
   }
-  getQuestion(id: string): Promise<QuestionDetail> {
-    return this.request('GET', `${API_PREFIX}/questions/${id}`);
+  getQuestion(
+    id: string,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
+  ): Promise<QuestionDetail> {
+    return this.request('GET', `${API_PREFIX}/questions/${id}`, opts);
   }
   listQuestions(q: { status?: string; cursor?: string; limit?: number } = {}) {
     return this.request<{ questions: unknown[]; next_cursor: string | null }>(
@@ -292,6 +297,7 @@ export class RelayClient {
     }
     const send = () => this.sendAction(kind, questionId, idempotencyKey, action, opts);
     if (kind === 'answer') return this.ownerOnly('answering for the person', send);
+    if (action.record.decline === true) return this.ownerOnly('declining for the person', send);
     return kind === 'reopen' ? this.ownerOnly('reopening a question', send) : send();
   }
   private sendAction(
@@ -311,28 +317,30 @@ export class RelayClient {
       ...opts,
     });
   }
-  /** Post an agent message into a question's thread (docs/protocol.md section 16). */
+  /**
+   * Post a message into a question's thread (docs/protocol.md section 16): the agent's, from the desktop that
+   * published the question, or the person's follow-up written on the owner desktop, which only the owner desktop
+   * signs (a Remote Host never speaks for the person).
+   */
   postMessage(
     questionId: string,
     idempotencyKey: string,
     message: SignedMessage,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
   ): Promise<MessageReceipt> {
-    // A desktop speaks only for its agent: a human message is a phone's or tablet's, like a human answer.
-    if (message.record.side !== 'agent') {
-      return Promise.reject(
-        new RelayError(
-          'forbidden',
-          'a desktop never signs a human message: only a phone or tablet speaks for the person',
-          403,
-        ),
-      );
-    }
     const body: MessageBody = {
       protocol_version: PROTOCOL_VERSION,
       idempotency_key: idempotencyKey,
       message,
     };
-    return this.request('POST', `${API_PREFIX}/questions/${questionId}/messages`, { body });
+    const send = () =>
+      this.request<MessageReceipt>('POST', `${API_PREFIX}/questions/${questionId}/messages`, {
+        body,
+        ...opts,
+      });
+    return message.record.side === 'agent'
+      ? send()
+      : this.ownerOnly("sending the person's follow-up", send);
   }
   deleteQuestion(id: string): Promise<unknown> {
     return this.ownerOnly('deleting a question', () =>
@@ -392,6 +400,45 @@ export class RelayClient {
       retry: false,
       ...(timeoutMs ? { timeoutMs } : {}),
     });
+  }
+
+  /**
+   * Replace the person's involvement preference with `preference`, signed by this owner desktop. The relay
+   * compare-and-swaps on its revision (`409 revision_conflict` with `details.latest_revision`), and a retry with the
+   * same key and body returns the original receipt, so a reply lost in transit is safe to resend unchanged. A Host
+   * never sets it: refused before anything is sent.
+   */
+  putInvolvement(
+    idempotencyKey: string,
+    preference: InvolvementRecord,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
+  ): Promise<unknown> {
+    return this.ownerOnly('setting the involvement preference', () =>
+      this.request('PUT', `${API_PREFIX}/involvement`, {
+        body: {
+          protocol_version: PROTOCOL_VERSION,
+          idempotency_key: idempotencyKey,
+          preference,
+        } satisfies InvolvementBody,
+        ...opts,
+      }),
+    );
+  }
+
+  /* ---- presence (section 11) ---- */
+  /**
+   * Owner only: start or renew (`true`) or end (`false`) the lease saying the person is at the computer. The body
+   * carries the flag alone. Never retried here: the presence reporter owns the timing, so a stopped bridge leaves no
+   * sleeping retry behind. Unparsed.
+   */
+  putPresence(present: boolean, timeoutMs?: number): Promise<unknown> {
+    return this.ownerOnly('reporting that the person is at the computer', () =>
+      this.request('PUT', `${API_PREFIX}/presence`, {
+        body: { protocol_version: PROTOCOL_VERSION, present },
+        retry: false,
+        ...(timeoutMs ? { timeoutMs } : {}),
+      }),
+    );
   }
 
   /* ---- pairing ---- */

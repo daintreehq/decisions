@@ -88,14 +88,54 @@ describe('setting the involvement preference', () => {
     expect((await put(tablet, await sign(w, tablet))).status).toBe(200);
   });
 
-  it('desktops cannot set it: only the person does', async () => {
+  it('the owner desktop sets it and overrides it, and every device reads its record', async () => {
     const w = await claimRelay();
-    await pairDevice(w);
-    const res = await put(w.owner, await sign(w, w.owner));
-    expect(res.status).toBe(403);
+    const phone = await pairDevice(w);
+    const host = await enrollHost(w);
+
+    const first = await sign(w, w.owner, { normal: 'recommend', consult: 2 });
+    const set = await put(w.owner, first);
+    expect(set.status).toBe(200);
+    expect(set.json).toEqual({ revision: 1, event_seq: expect.any(Number) });
+
+    const override = await sign(w, w.owner, {
+      revision: 2,
+      normal: 'recommend',
+      consult: 2,
+      override: { mode: 'involve-early', until: inAnHour() },
+    });
+    const res = await put(w.owner, override);
+    expect(res.status).toBe(200);
+    expect(res.json.revision).toBe(2);
+    for (const reader of [w.owner, phone, host]) {
+      const got = await get(reader);
+      expect(got.preference).toEqual(override);
+      expect(got.preference!.signer_device_id).toBe(w.owner.id);
+    }
+  });
+
+  it('a Daintree Host never may, whatever it signs', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
     const host = await enrollHost(w);
     expect((await put(host, await sign(w, host))).status).toBe(403);
-    expect((await get(w.owner)).preference).toBeNull();
+    // Nor by carrying the owner's own record.
+    expect((await put(host, await sign(w, w.owner))).status).toBe(403);
+    expect((await get(phone)).preference).toBeNull();
+  });
+
+  it("the owner desktop can only send its own record, not a phone's", async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    expect((await put(w.owner, await sign(w, phone))).status).toBe(400);
+    expect((await put(phone, await sign(w, w.owner))).status).toBe(400);
+    // Signed with the owner's own key, so it verifies, but naming the phone as its signer.
+    expect((await put(w.owner, await sign(w, w.owner, { signerId: phone.id }))).status).toBe(400);
+    const elsewhere = await sign(w, w.owner, { installationId: newId() });
+    expect((await put(w.owner, elsewhere)).status).toBe(400);
+    const forged = { ...(await sign(w, w.owner)), consult_count: 5 };
+    expect((await put(w.owner, forged)).status).toBe(400);
+    expect((await get(phone)).preference).toBeNull();
   });
 
   it('refuses a record signed by another key, for another device or for another installation', async () => {
@@ -139,6 +179,26 @@ describe('setting the involvement preference', () => {
     expect((await put(phone, far)).status).toBe(400);
     expect((await get(phone)).preference).toBeNull();
   });
+
+  it("holds the owner desktop's temporary mode to the same limit", async () => {
+    const w = await claimRelay();
+    const ended = await sign(w, w.owner, {
+      override: { mode: 'involve-early', until: new Date(Date.now() - 1000).toISOString() },
+    });
+    expect((await put(w.owner, ended)).status).toBe(400);
+    const far = await sign(w, w.owner, {
+      override: {
+        mode: 'involve-early',
+        until: new Date(
+          Date.now() + LIMITS.involvementOverrideMaxMs + LIMITS.requestSkewMs + 60_000,
+        ).toISOString(),
+      },
+    });
+    const res = await put(w.owner, far);
+    expect(res.status).toBe(400);
+    expect(res.json.message).toMatch(/too far ahead/);
+    expect((await get(w.owner)).preference).toBeNull();
+  });
 });
 
 describe('compare-and-swap on the revision', () => {
@@ -171,6 +231,64 @@ describe('compare-and-swap on the revision', () => {
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const winner = a.status === 200 ? phone : tablet;
     expect((await get(phone)).preference!.signer_device_id).toBe(winner.id);
+  });
+
+  it('the owner desktop and a phone conflict as two phones do', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+
+    // The owner desktop cannot skip a revision either.
+    const skipped = await put(w.owner, await sign(w, w.owner, { revision: 2 }));
+    expect(skipped.status).toBe(409);
+    expect(skipped.json.details).toEqual({ latest_revision: 0 });
+    expect((await put(phone, await sign(w, phone, { revision: 1 }))).status).toBe(200);
+    const ahead = await put(w.owner, await sign(w, w.owner, { revision: 3 }));
+    expect(ahead.status).toBe(409);
+    expect(ahead.json.details).toEqual({ latest_revision: 1 });
+    // The owner desktop still holds nothing and signs revision 1: refused, with what is current.
+    const stale = await put(w.owner, await sign(w, w.owner, { revision: 1 }));
+    expect(stale.status).toBe(409);
+    expect(stale.json.code).toBe('revision_conflict');
+    expect(stale.json.details).toEqual({ latest_revision: 1 });
+
+    const r2 = await sign(w, w.owner, { revision: 2, normal: 'involve-early' });
+    expect((await put(w.owner, r2)).status).toBe(200);
+    // Now the phone is the one behind.
+    const behind = await put(phone, await sign(w, phone, { revision: 2 }));
+    expect(behind.status).toBe(409);
+    expect(behind.json.details).toEqual({ latest_revision: 2 });
+    expect((await get(phone)).preference).toEqual(r2);
+    // And a phone record replaces the owner's like any other.
+    const r3 = await sign(w, phone, { revision: 3 });
+    expect((await put(phone, r3)).status).toBe(200);
+    expect((await get(w.owner)).preference).toEqual(r3);
+  });
+
+  it('the owner desktop and a phone racing for the same revision: exactly one wins', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    // Both signed first, so the two writes are in flight together.
+    const fromOwner = await sign(w, w.owner, { normal: 'recommend' });
+    const fromPhone = await sign(w, phone, { normal: 'involve-early' });
+    const [a, b] = await Promise.all([put(w.owner, fromOwner), put(phone, fromPhone)]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const winner = a.status === 200 ? w.owner : phone;
+    expect((await get(phone)).preference!.signer_device_id).toBe(winner.id);
+  });
+
+  it("the owner desktop's retry returns its original receipt and changes nothing", async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const key = newId();
+    const record = await sign(w, w.owner);
+    const first = await put(w.owner, record, key);
+    expect(first.status).toBe(200);
+    expect((await put(phone, await sign(w, phone, { revision: 2 }))).status).toBe(200);
+    const again = await put(w.owner, record, key);
+    expect(again.status).toBe(200);
+    expect(again.json).toEqual(first.json);
+    expect((await get(w.owner)).preference!.signer_device_id).toBe(phone.id);
+    expect((await put(w.owner, await sign(w, w.owner, { revision: 3 }), key)).status).toBe(409);
   });
 
   it('a retry returns the original receipt, even after the temporary mode ended or a later write', async () => {

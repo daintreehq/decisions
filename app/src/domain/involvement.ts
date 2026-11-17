@@ -1,21 +1,24 @@
 import {
+  INVOLVEMENT_SETTER_ROLES,
   InvolvementResponse,
   LIMITS,
   effectiveInvolvement,
+  involvementSetOn,
   type EffectiveInvolvement,
   type InvolvementMode,
   type InvolvementRecord,
+  type InvolvementSetOn,
   type PreparationReport,
-  type Role,
 } from '@daintreehq/decisions-protocol';
 import { buildSignedInvolvement, verifyObject } from '@daintreehq/decisions-crypto';
+import { computerName } from './computer-name.js';
 import type { TrustStore } from './trust.js';
 import type { Verified } from './verify.js';
 
 /*
  * The involvement preference (docs/protocol.md section 20): how involved the person wants agents to make them right
- * now. This phone signs it; the relay keeps only the latest and compare-and-swaps on its revision. It never changes
- * what an agent may do, and nothing here touches a question.
+ * now. A phone, a tablet or the owner computer signs it; the relay keeps only the latest and compare-and-swaps on its
+ * revision. It never changes what an agent may do, and nothing here touches a question.
  */
 
 export const INVOLVEMENT_MODES: readonly InvolvementMode[] = ['involve-early', 'recommend'];
@@ -48,37 +51,62 @@ export interface InvolvementDraft {
   override: { mode: InvolvementMode; until: string } | null;
 }
 
-/** A verified `GET /involvement`: the record (null when nobody has set one) and when the relay accepted it. */
+/**
+ * Where the person set a verified record, read from the certificate that verified it, never from the relay. For
+ * display only: a preference steers agents the same way wherever it was set.
+ */
+export interface InvolvementSetBy {
+  /** `computer` for the owner desktop, `phone` for a phone or tablet (`involvementSetOn`). */
+  on: InvolvementSetOn;
+  /** The computer's name (`computerName`) when it was set on the computer; null on a phone or tablet. */
+  computer: string | null;
+  /** This device signed it. */
+  here: boolean;
+}
+
+/** A verified `GET /involvement`: the record (null when nobody has set one), when the relay accepted it, and where. */
 export interface InvolvementState {
   record: InvolvementRecord | null;
   receivedAt: string | null;
+  /** Where `record` was set; null with no record. */
+  setBy: InvolvementSetBy | null;
 }
-
-const HUMAN: readonly Role[] = ['phone', 'tablet'];
 
 /**
  * Checks a `GET /involvement` response before anything in it is shown: the record is for this installation, its
- * signer is a phone or tablet the pinned owner certified and that is not revoked, and the signature covers every
- * field. The relay is never believed about what the person chose.
+ * signer is the pinned owner computer, or a phone or tablet it certified that is not revoked (never a desktop host),
+ * and the signature covers every field. The relay is never believed about what the person chose, nor about where.
  */
 export async function verifyInvolvementResponse(
   raw: unknown,
-  ctx: { installationId: string; trust: TrustStore },
+  ctx: { installationId: string; trust: TrustStore; deviceId: string },
 ): Promise<Verified<InvolvementState>> {
   const parsed = InvolvementResponse.safeParse(raw);
   if (!parsed.success) return { ok: false, reason: 'malformed involvement response' };
   const { preference: record, received_at } = parsed.data;
-  if (!record) return { ok: true, value: { record: null, receivedAt: null } };
+  if (!record) return { ok: true, value: { record: null, receivedAt: null, setBy: null } };
   if (record.installation_id !== ctx.installationId)
     return { ok: false, reason: 'preference belongs to another installation' };
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return { ok: false, reason: 'unknown signer' };
-  if (!HUMAN.includes(signer.role))
-    return { ok: false, reason: 'only a phone or tablet sets the involvement preference' };
+  const on = involvementSetOn(signer.role);
+  if (!INVOLVEMENT_SETTER_ROLES.includes(signer.role) || !on)
+    return { ok: false, reason: 'a desktop host never sets the involvement preference' };
   if (signer.revokedAt) return { ok: false, reason: 'preference signer was revoked' };
   if (!(await verifyObject(signer.signingKey, record)))
     return { ok: false, reason: 'preference signature does not match' };
-  return { ok: true, value: { record, receivedAt: received_at } };
+  const setBy: InvolvementSetBy = {
+    on,
+    computer: on === 'computer' ? computerName(signer.cert.label) : null,
+    here: record.signer_device_id === ctx.deviceId,
+  };
+  return { ok: true, value: { record, receivedAt: received_at, setBy } };
+}
+
+/** Where a preference was set, as the section says it: "Set on Studio Mac.", "Set on this device." */
+export function setByLine(s: InvolvementSetBy): string {
+  if (s.on === 'computer') return `Set on ${s.computer ?? 'your computer'}.`;
+  return s.here ? 'Set on this device.' : 'Set on another phone or tablet.';
 }
 
 /**

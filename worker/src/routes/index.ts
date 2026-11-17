@@ -1,5 +1,10 @@
 import type { Role } from '@daintreehq/decisions-protocol';
-import { DESKTOP_ROLES, HUMAN_ANSWER_ROLES, HUMAN_ROLES } from '@daintreehq/decisions-protocol';
+import {
+  DESKTOP_ROLES,
+  HUMAN_ANSWER_ROLES,
+  HUMAN_ROLES,
+  INVOLVEMENT_SETTER_ROLES,
+} from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import * as admin from './admin.js';
 import * as attachments from './attachments.js';
@@ -9,6 +14,7 @@ import * as events from './events.js';
 import * as involvement from './involvement.js';
 import * as messages from './messages.js';
 import * as pairing from './pairing.js';
+import * as presence from './presence.js';
 import * as push from './push.js';
 import * as questions from './questions.js';
 import * as setup from './setup.js';
@@ -66,10 +72,12 @@ export const ROUTES: Route[] = [
   r('POST', `/questions/${ID}/confirm-proxy`, 'signed', questions.confirmProxy, HUMAN_ROLES),
   r('POST', `/questions/${ID}/proxy-answer`, 'signed', questions.proxyAnswer, DESKTOP_ROLES),
   r('POST', `/questions/${ID}/proxy-abstain`, 'signed', questions.proxyAbstain, DESKTOP_ROLES),
-  // A desktop withdraws its question; a phone or tablet declines an open one (state.ts checks which).
+  // A desktop withdraws its question; a phone or tablet, or the owner desktop with a signed `decline`, declines an
+  // open one (state.ts checks which).
   r('POST', `/questions/${ID}/cancel`, 'signed', questions.cancel, ANY),
   r('POST', `/questions/${ID}/reopen`, 'signed', questions.reopen, OWNER),
-  // Human messages need a phone or tablet and agent messages the publishing desktop; the handler checks which.
+  // Human messages need a phone, a tablet or the owner desktop and agent messages the publishing desktop; the
+  // handler checks which.
   r('POST', `/questions/${ID}/messages`, 'signed', messages.postMessage, ANY),
   r('GET', `/questions/${ID}/messages`, 'signed', messages.listMessages, ANY),
   r('PUT', `/questions/${ID}/snapshot`, 'signed', snapshots.putSnapshot, DESKTOP_ROLES),
@@ -106,7 +114,8 @@ export const ROUTES: Route[] = [
   r('GET', '/settings', 'signed', push.getSettings, ANY),
   r('PUT', '/settings', 'signed', push.putSettings, ANY),
   r('GET', '/involvement', 'signed', involvement.getInvolvement, ANY),
-  r('PUT', '/involvement', 'signed', involvement.putInvolvement, HUMAN_ROLES),
+  r('PUT', '/involvement', 'signed', involvement.putInvolvement, INVOLVEMENT_SETTER_ROLES),
+  r('PUT', '/presence', 'signed', presence.putPresence, OWNER),
 
   r('POST', '/voice/session', 'signed', voice.voiceSession, HUMAN_ROLES),
 

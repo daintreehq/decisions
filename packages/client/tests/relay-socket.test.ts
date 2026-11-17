@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_VERSION, parseAuthHeader, type LedgerEvent } from '@daintreehq/decisions-protocol';
+import {
+  PROTOCOL_VERSION,
+  parseAuthHeader,
+  type LedgerEvent,
+} from '@daintreehq/decisions-protocol';
 import { verifyRequestSignature, importSigningPublicKey } from '@daintreehq/decisions-crypto';
 import {
   RelayClient,

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Role } from './schema.js';
 import {
+  INVOLVEMENT_SETTER_ROLES,
   ActionBody,
   AttachmentCompleteBody,
   AttachmentReserveBody,
@@ -18,6 +19,7 @@ import {
   PairingInvitationBody,
   PairingRejectBody,
   PhoneImageReserveBody,
+  PresenceBody,
   PushSubscribeBody,
   RevokeDeviceBody,
   RotateEpochBody,
@@ -37,6 +39,7 @@ import {
   PairingCandidateResponse,
   PairingStatusResponse,
   PendingPairing,
+  PresenceResponse,
   PushConfig,
   PushSubscriptionInfo,
   PushTestResponse,
@@ -264,7 +267,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     auth: 'signed',
     roles: 'any',
     summary:
-      "Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one (the question's desktop must declare person-declines-v1)",
+      "Cancel an unanswered question (idempotent): a desktop withdraws it, a phone or tablet declines an open one (the question's desktop must declare person-declines-v1), and the owner desktop declines one for the person with a signed decline: true (the question's desktop must declare owner-desktop-declines-v1)",
     request: ActionBody,
     response: CommandReceipt,
     status: 201,
@@ -312,7 +315,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     auth: 'signed',
     roles: 'any',
     summary:
-      'Post a thread message: human from a phone or tablet, agent from the publishing desktop (thread-messages-v1)',
+      "Post a thread message: human from a phone, a tablet or the owner desktop, agent from the publishing desktop (thread-messages-v1; an owner-desktop human message needs the question's desktop to declare owner-desktop-messages-v1)",
     request: MessageBody,
     response: MessageReceipt,
     status: 201,
@@ -520,10 +523,20 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'PUT',
     path: '/involvement',
     auth: 'signed',
-    roles: HUMANS,
+    roles: INVOLVEMENT_SETTER_ROLES,
     summary: 'Replace the involvement preference (compare-and-swap on its revision)',
     request: InvolvementBody,
     response: InvolvementReceipt,
+  },
+  {
+    method: 'PUT',
+    path: '/presence',
+    auth: 'signed',
+    roles: OWNER,
+    summary:
+      "Start, renew or end the lease saying the person is at the computer; while it is current a new question's push is held briefly",
+    request: PresenceBody,
+    response: PresenceResponse,
   },
   {
     method: 'POST',

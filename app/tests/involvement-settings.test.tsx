@@ -8,12 +8,15 @@ import type { InvolvementRecord } from '@daintreehq/decisions-protocol';
 
 /*
  * The section against the real store over a fake relay: reads, compare-and-swap saves and conflicts behave as they
- * do on a phone. Signatures are the domain tests' business; here a record is "signed" by naming its device.
+ * do on a phone. Signatures are the domain tests' business; here a record is "signed" by naming its device, and the
+ * owner computer (`OWNER`) is called Studio Mac.
  */
 const relay = vi.hoisted(() => ({
   current: null as InvolvementRecord | null,
   puts: [] as InvolvementRecord[],
   failNext: null as Error | null,
+  /** The next read fails, as one cut off by a lost connection does. */
+  failReadNext: false,
 }));
 
 const store = vi.hoisted(() => ({ s: null as unknown }));
@@ -36,6 +39,25 @@ const { RelayError } = await import('../src/data/relay.js');
 const { endLabel } = await import('../src/domain/involvement.js');
 
 const HOUR = 3_600_000;
+const OWNER = 'owner_000001';
+const THIS_PHONE = 'this_phone01';
+
+/** Where the fake verifier says a record was set, as the real one reads it from the signer's certificate. */
+const setBy = (r: InvolvementRecord | null) =>
+  !r
+    ? null
+    : r.signer_device_id === OWNER
+      ? { on: 'computer' as const, computer: 'Studio Mac', here: false }
+      : { on: 'phone' as const, computer: null, here: r.signer_device_id === THIS_PHONE };
+
+/** The relay's answer, read the way the controller's verifier reads it. */
+const verified = async (raw: unknown) => {
+  const r = raw as { preference: InvolvementRecord | null; received_at: string | null };
+  return {
+    ok: true as const,
+    value: { record: r.preference, receivedAt: r.received_at, setBy: setBy(r.preference) },
+  };
+};
 
 function record(o: Partial<InvolvementRecord>): InvolvementRecord {
   return {
@@ -71,9 +93,12 @@ function newStore() {
       relay.current = r;
       return { revision: r.revision, event_seq: 1 };
     },
-    verify: async (raw) => {
-      const r = raw as { preference: InvolvementRecord | null; received_at: string | null };
-      return { ok: true, value: { record: r.preference, receivedAt: r.received_at } };
+    verify: (raw) => {
+      if (relay.failReadNext) {
+        relay.failReadNext = false;
+        throw new Error('offline');
+      }
+      return verified(raw);
     },
     sign: async (d, rev) =>
       record({
@@ -81,7 +106,7 @@ function newStore() {
         normal_mode: d.normalMode,
         consult_count: d.consultCount,
         override: d.override,
-        signer_device_id: 'this_phone01',
+        signer_device_id: THIS_PHONE,
       }),
   });
 }
@@ -117,6 +142,7 @@ beforeEach(() => {
   relay.current = null;
   relay.puts = [];
   relay.failNext = null;
+  relay.failReadNext = false;
   store.s = newStore();
 });
 afterEach(() => {
@@ -145,7 +171,78 @@ describe('the involvement section', () => {
     });
     expect(text()).toContain('Saved on your relay');
     expect(text()).toContain('Bring me a recommendation');
-    expect(text()).toContain('Your normal mode.');
+    expect(text()).toContain('Your normal mode. Set on this device.');
+  });
+
+  it('shows a preference set on the computer, and says so', async () => {
+    const until = new Date(Date.now() + 2 * HOUR).toISOString();
+    relay.current = record({
+      revision: 3,
+      normal_mode: 'involve-early',
+      override: { mode: 'recommend', until },
+      signer_device_id: OWNER,
+    });
+    await mount();
+    expect(text()).not.toContain('couldn’t be verified');
+    expect(text()).toContain(
+      `Until ${endLabel(until, Date.now())}, then back to Involve me early. Set on Studio Mac.`,
+    );
+    expect(radio(0, 'involve-early').checked).toBe(true);
+    expect(radio(1, 'recommend').checked).toBe(true);
+    // Saving from the phone replaces it, over the computer's revision.
+    await act(async () => radio(0, 'recommend').click());
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts[0]).toMatchObject({ revision: 4, normal_mode: 'recommend' });
+    expect(text()).toContain('Set on this device.');
+    expect(text()).not.toContain('Studio Mac');
+  });
+
+  it('a preference another phone or tablet set says so', async () => {
+    relay.current = record({ revision: 2, signer_device_id: 'tablet_00001' });
+    await mount();
+    expect(text()).toContain('Your normal mode. Set on another phone or tablet.');
+  });
+
+  it('tells you when the computer saved first, keeps your edits, and saves over it only when asked', async () => {
+    relay.current = record({ revision: 2, normal_mode: 'involve-early' });
+    await mount();
+    await act(async () => radio(0, 'recommend').click());
+    // Meanwhile the person changes it on the computer.
+    relay.current = record({ revision: 3, consult_count: 6, signer_device_id: OWNER });
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts).toHaveLength(0);
+    expect(text()).toContain('Changed on Studio Mac while you were editing');
+    expect(text()).toContain('It’s now set to Involve me early.');
+    expect(text()).toContain('Your changes weren’t saved');
+    expect(text()).toContain('Set on Studio Mac.');
+    expect(radio(0, 'recommend').checked).toBe(true);
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts[0]).toMatchObject({
+      revision: 4,
+      normal_mode: 'recommend',
+      consult_count: 3,
+    });
+    expect(text()).not.toContain('while you were editing');
+    expect(text()).toContain('Set on this device.');
+  });
+
+  it('a conflict it could not read back never names the computer it showed before', async () => {
+    relay.current = record({ revision: 2, normal_mode: 'involve-early', signer_device_id: OWNER });
+    await mount();
+    expect(text()).toContain('Set on Studio Mac.');
+    await act(async () => radio(0, 'recommend').click());
+    // A tablet saves, and the read after the refused save is cut off.
+    relay.current = record({ revision: 3, consult_count: 6, signer_device_id: 'tablet_00001' });
+    relay.failReadNext = true;
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts).toHaveLength(0);
+    expect(text()).toContain('Another device changed this while you were editing');
+    expect(text()).not.toContain('Changed on Studio Mac');
+    expect(radio(0, 'recommend').checked).toBe(true);
   });
 
   it('shows a temporary mode with when it ends and what comes after', async () => {
@@ -246,10 +343,7 @@ describe('the involvement section', () => {
         return { preference: record({ normal_mode: 'recommend' }), received_at: null };
       },
       put: async () => ({}),
-      verify: async (raw) => {
-        const r = raw as { preference: InvolvementRecord | null; received_at: string | null };
-        return { ok: true, value: { record: r.preference, receivedAt: r.received_at } };
-      },
+      verify: verified,
       sign: async () => record({}),
     });
     await mount();

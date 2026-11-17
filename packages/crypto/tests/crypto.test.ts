@@ -323,6 +323,33 @@ describe('envelopes', () => {
     expect(await verifyRecordAndEnvelope(a.record, null, pub)).toBe(true);
     expect(await envelopeDigest(env)).toHaveLength(64);
   });
+  it("signs the owner desktop's decline flag, and leaves it out of every other action", async () => {
+    const w = await world();
+    const pub = w.ownerKeys.signing.publicKey;
+    const sign = (decline?: true) =>
+      buildSignedAction({
+        installationId: INST,
+        questionId: 'question01',
+        action: 'cancel',
+        signerDeviceId: w.ownerId,
+        signingKey: w.ownerKeys.signing.privateKey,
+        expectedRevision: 0,
+        ...(decline ? { decline } : {}),
+      });
+    const withdrawal = await sign();
+    expect('decline' in withdrawal.record).toBe(false);
+    const decline = await sign(true);
+    expect(decline.record.decline).toBe(true);
+    // The flag is signed: it survives the schema and verifies, and adding or removing it breaks the signature.
+    const parsed = SignedAction.parse(decline);
+    expect(parsed.record.decline).toBe(true);
+    expect(await verifyRecordAndEnvelope(parsed.record, null, pub)).toBe(true);
+    const { decline: _drop, ...stripped } = decline.record;
+    expect(await verifyRecordAndEnvelope(stripped, null, pub)).toBe(false);
+    expect(await verifyRecordAndEnvelope({ ...withdrawal.record, decline: true }, null, pub)).toBe(
+      false,
+    );
+  });
   it('signed thread messages carry the side and expects_reply and bind the envelope', async () => {
     const w = await world();
     const messageId = newId();

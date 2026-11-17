@@ -2,13 +2,16 @@ import {
   ApiError,
   CREATOR_MISSING_FEATURE,
   EventData,
+  LIMITS,
   applyAction,
+  applyMessage,
   type QuestionStatus,
   PROTOCOL_VERSION,
   type ActionKind,
   type CryptoEnvelope,
   type DeviceCert,
   type EpochGrant,
+  type InvolvementRecord,
   type LedgerEvent,
   type Provenance,
   type SignedAction,
@@ -149,8 +152,13 @@ export class FakeRelay {
   failInfo = 0;
   /** Thread messages the relay committed, in commit order. */
   messages: { idem: string; message: SignedMessage }[] = [];
-  /** The status and code every upcoming message POST is refused with, until cleared. */
-  rejectMessage: { status: number; code: string } | null = null;
+  /** The status, code and details every upcoming message POST is refused with, until cleared. */
+  rejectMessage: { status: number; code: string; details?: Record<string, unknown> } | null = null;
+  /**
+   * Publishing desktops that have not declared `owner-desktop-messages-v1`: their questions refuse the person's
+   * message from the owner desktop, as the relay does.
+   */
+  undeclaredMessages = new Set<string>();
   /** Number of upcoming message POSTs the relay COMMITS but whose reply is lost. */
   dropMessageReply = 0;
   /** While set, message POSTs wait for it before the relay looks at them (a slow relay). */
@@ -169,13 +177,47 @@ export class FakeRelay {
   snapshots: { questionId: string; body: unknown }[] = [];
   /** Replies for upcoming snapshot PUTs, in order; when empty the relay accepts. */
   snapshotReplies: { status: number; body: Record<string, unknown> }[] = [];
-  /** What `GET /involvement` serves; null makes the route unknown (404), like a relay from before it. */
+  /** What `GET /involvement` serves; null makes both routes unknown (404), like a relay from before them. */
   involvement: { preference: unknown; received_at: string | null } | null = {
     preference: null,
     received_at: null,
   };
   /** While set, `GET /involvement` waits for it before answering (a slow relay). */
   holdInvolvement: Promise<void> | null = null;
+  /** Every `PUT /involvement` body, retries included, in order. */
+  involvementPuts: { idem: string; preference: InvolvementRecord }[] = [];
+  /**
+   * Each committed `PUT /involvement` receipt and the record it took, by idempotency key: returned unchanged for a
+   * retry of the same record, and a collision for a different one, as the relay does.
+   */
+  involvementReceipts = new Map<string, { record: string; receipt: unknown }>();
+  /** While set, a committed `PUT /involvement` waits for it before replying (a slow reply). */
+  holdInvolvementReply: Promise<void> | null = null;
+  /** Bodies sent with HTTP 200 in place of the receipt for upcoming committed `PUT /involvement` (raw text as given). */
+  involvementReplyBodies: string[] = [];
+  /** Number of upcoming `PUT /involvement` the relay COMMITS but whose reply is lost. */
+  dropInvolvementReply = 0;
+  /** Refusals for upcoming `PUT /involvement`, in order; when empty the relay compare-and-swaps as it does. */
+  rejectInvolvement: { status: number; code: string; details?: Record<string, unknown> }[] = [];
+  /** Called as each `PUT /involvement` arrives, before the relay looks at it. */
+  onInvolvementPut: (() => void | Promise<void>) | null = null;
+  /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
+  holdDevices: Promise<void> | null = null;
+  /**
+   * Whether `PUT /presence` exists; false makes it unknown (404), like a relay from before `presence-v1`. Advertising
+   * the feature is `features`' job, so a test can make the two disagree.
+   */
+  presenceRoute = true;
+  /** When the presence lease ends (relay epoch ms), or null when none was started or it was ended. */
+  presenceUntil: number | null = null;
+  /** The relay's clock for presence leases. */
+  presenceNow: () => number = Date.now;
+  /** Replies for upcoming presence PUTs, in order; when empty the relay accepts. */
+  presenceReplies: { status: number; body: Record<string, unknown> }[] = [];
+  /** While set, presence PUTs wait for it before the relay looks at them (a slow relay). */
+  holdPresence: Promise<void> | null = null;
+  /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
+  dropPresenceReply = 0;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -197,6 +239,20 @@ export class FakeRelay {
   holdAnswers: Promise<void> | null = null;
   /** Each committed answer's receipt, by action id, returned unchanged for a retry. */
   answerReceipts = new Map<string, unknown>();
+  /** Every flagged `POST /questions/{id}/cancel` body (an owner-desktop decline), retries included, in order. */
+  declines: { idem: string; action: SignedAction }[] = [];
+  /** Refusals for upcoming decline POSTs, in order; when empty the relay decides from the question's state. */
+  rejectDecline: { status: number; code: string; details?: Record<string, unknown> }[] = [];
+  /** Publishing desktops that have not declared `owner-desktop-declines-v1`: their questions refuse the decline. */
+  undeclaredDeclines = new Set<string>();
+  /** Number of upcoming decline POSTs the relay COMMITS but whose reply is lost. */
+  dropDeclineReply = 0;
+  /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
+  failDetail = 0;
+  /** The signature each committed answer or decline carried, by action id. */
+  committedSignatures = new Map<string, string>();
+  /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
+  cancelLog = new Map<string, { action_id: string; action: 'cancel'; record: unknown }[]>();
 
   constructor(private readonly owner: Identity) {}
 
@@ -259,9 +315,64 @@ export class FakeRelay {
     if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/messages$/))) {
       if (this.holdMessages) await this.holdMessages;
       if (this.rejectMessage)
-        return json(this.rejectMessage.status, { code: this.rejectMessage.code, message: 'no' });
+        return json(this.rejectMessage.status, {
+          code: this.rejectMessage.code,
+          message: 'no',
+          ...(this.rejectMessage.details ? { details: this.rejectMessage.details } : {}),
+        });
       const b = body as { idempotency_key: string; message: SignedMessage };
       const id = b.message.record.message_id;
+      // The person's message is held to the question's state and its desktop's features, as the relay does, in the
+      // relay's order; a retry of a committed one is recognised first, and a refusal commits nothing.
+      if (b.message.record.side === 'human' && !this.messageReceipts.has(id)) {
+        const qid = m[1]!;
+        const q = this.questions.get(qid);
+        if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+        const signer = b.message.record.signer_device_id;
+        const role =
+          signer === this.owner.config.deviceId
+            ? ('owner-desktop' as const)
+            : (this.devices.find((d) => d.device_id === signer)?.role ?? 'phone');
+        try {
+          applyMessage(
+            {
+              ...(this.answerState.get(qid) ?? { status: 'open' as const, revision: 0 }),
+              requirement: q.signed.record.requirement,
+              proxyAbstained: false,
+            },
+            {
+              side: 'human',
+              role,
+              signerIsPublisher: signer === q.signed.record.originating_device_id,
+              messageCount: this.messages.filter((x) => x.message.record.question_id === qid)
+                .length,
+            },
+          );
+          if (
+            role === 'owner-desktop' &&
+            this.undeclaredMessages.has(q.signed.record.originating_device_id)
+          )
+            throw new ApiError(
+              'invalid_state',
+              "the question's desktop does not accept messages from the computer",
+              {
+                details: {
+                  reason: CREATOR_MISSING_FEATURE,
+                  required_feature: 'owner-desktop-messages-v1',
+                },
+              },
+            );
+          if (role === 'owner-desktop' && b.message.record.attachment_ids.length > 0)
+            throw new ApiError('forbidden', `role ${role} may not attach phone images`);
+        } catch (e) {
+          const err = e as ApiError;
+          return json(err.status, {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          });
+        }
+      }
       let i = this.messages.findIndex((x) => x.message.record.message_id === id);
       if (i >= 0 && JSON.stringify(this.messages[i]!.message) !== JSON.stringify(b.message))
         return json(409, { code: 'idempotency_collision', message: 'different message' });
@@ -392,6 +503,7 @@ export class FakeRelay {
       });
       const receipt = { question_id: qid, revision, status: 'human-answered', event_seq: ev.seq };
       this.answerReceipts.set(b.action.record.action_id, receipt);
+      this.committedSignatures.set(b.action.record.action_id, b.action.record.signature);
       if (this.dropAnswerReply > 0) {
         this.dropAnswerReply--;
         throw new TypeError('connection reset after the relay committed the answer');
@@ -399,16 +511,40 @@ export class FakeRelay {
       return json(201, receipt);
     }
     if (
+      method === 'POST' &&
+      (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/cancel$/)) &&
+      (body as { action: SignedAction }).action.record.decline === true
+    ) {
+      return this.decline(m[1]!, body as { idempotency_key: string; action: SignedAction });
+    }
+    if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
+      if (this.failDetail > 0) {
+        this.failDetail--;
+        throw new TypeError('fetch failed');
+      }
+      const q = this.questions.get(m[1]!);
+      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+      const state = this.answerState.get(m[1]!) ?? { status: 'open' as const, revision: 0 };
+      return json(200, {
+        question_id: m[1],
+        status: state.status,
+        revision: state.revision,
+        actions: this.cancelLog.get(m[1]!) ?? [],
+      });
+    }
+    if (
       (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/(cancel|proxy-answer|proxy-abstain)$/)) &&
       method === 'POST'
     ) {
       const b = body as { idempotency_key: string; action: SignedAction };
       // A cancellation closes the question to answers that come after it.
-      if (m[2] === 'cancel')
+      if (m[2] === 'cancel') {
         this.answerState.set(m[1]!, {
           status: 'cancelled',
           revision: b.action.record.expected_revision,
         });
+        this.logCancel(m[1]!, b.action);
+      }
       return json(201, {
         question_id: m[1],
         revision: b.action.record.expected_revision,
@@ -417,6 +553,7 @@ export class FakeRelay {
       });
     }
     if (method === 'GET' && p === '/api/v1/devices') {
+      if (this.holdDevices) await this.holdDevices;
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,
@@ -498,10 +635,71 @@ export class FakeRelay {
       this.snapshots.push({ questionId: m[1]!, body });
       return json(200, { ok: true });
     }
+    if (method === 'PUT' && p === '/api/v1/presence' && this.presenceRoute) {
+      if (this.holdPresence) await this.holdPresence;
+      const reply = this.presenceReplies.shift();
+      if (reply) return json(reply.status, reply.body);
+      const present = (body as { present?: unknown } | undefined)?.present === true;
+      const now = this.presenceNow();
+      this.presenceUntil = present ? now + LIMITS.presenceLeaseMs : null;
+      if (this.dropPresenceReply > 0) {
+        this.dropPresenceReply--;
+        throw new TypeError('connection reset after the relay committed');
+      }
+      return json(200, {
+        present,
+        until: present ? new Date(this.presenceUntil!).toISOString() : null,
+      });
+    }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
       const served = this.involvement;
       if (this.holdInvolvement) await this.holdInvolvement;
       return json(200, served);
+    }
+    if (method === 'PUT' && p === '/api/v1/involvement' && this.involvement) {
+      const b = body as { idempotency_key: string; preference: InvolvementRecord };
+      this.involvementPuts.push({ idem: b.idempotency_key, preference: b.preference });
+      await this.onInvolvementPut?.();
+      const prior = this.involvementReceipts.get(b.idempotency_key);
+      if (prior) {
+        if (prior.record !== JSON.stringify(b.preference))
+          return json(409, { code: 'idempotency_collision', message: 'key reused' });
+        return json(200, prior.receipt);
+      }
+      const reject = this.rejectInvolvement.shift();
+      if (reject)
+        return json(reject.status, {
+          code: reject.code,
+          message: 'no',
+          ...(reject.details ? { details: reject.details } : {}),
+        });
+      // The relay's compare-and-swap: exactly one more than the revision it holds.
+      const held = (this.involvement?.preference as InvolvementRecord | null)?.revision ?? 0;
+      if (b.preference.revision !== held + 1)
+        return json(409, {
+          code: 'revision_conflict',
+          message: 'the involvement preference changed',
+          details: { latest_revision: held },
+        });
+      this.involvement = { preference: b.preference, received_at: new Date().toISOString() };
+      const ev = this.push('involvement.updated', null, null, { revision: b.preference.revision });
+      const receipt = { revision: b.preference.revision, event_seq: ev.seq };
+      this.involvementReceipts.set(b.idempotency_key, {
+        record: JSON.stringify(b.preference),
+        receipt,
+      });
+      if (this.holdInvolvementReply) await this.holdInvolvementReply;
+      if (this.dropInvolvementReply > 0) {
+        this.dropInvolvementReply--;
+        throw new TypeError('connection reset after the relay committed');
+      }
+      const replaced = this.involvementReplyBodies.shift();
+      if (replaced !== undefined)
+        return new Response(replaced, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      return json(200, receipt);
     }
     if (method === 'POST' && p === '/api/v1/socket-ticket') {
       return json(200, {
@@ -530,6 +728,103 @@ export class FakeRelay {
       signingPub: o.signingPub,
       exchangePub: o.exchangePub,
     });
+  }
+
+  private logCancel(questionId: string, action: SignedAction): void {
+    const log = this.cancelLog.get(questionId) ?? [];
+    log.push({ action_id: action.record.action_id, action: 'cancel', record: action.record });
+    this.cancelLog.set(questionId, log);
+  }
+
+  /**
+   * The owner desktop's decline (a `cancel` with `decline: true`), as the relay takes it (section 6.1): the same
+   * signed body again gets its receipt, a cancel of a question already cancelled at that revision is a no-op `200`,
+   * the publishing desktop must have declared `owner-desktop-declines-v1`, and a committed decline is a
+   * `decision.cancelled` in the ledger and in the question's action log.
+   */
+  private decline(qid: string, b: { idempotency_key: string; action: SignedAction }): Response {
+    this.declines.push({ idem: b.idempotency_key, action: b.action });
+    const record = b.action.record;
+    // The very same signed command again gets the receipt it was first given (its `201`); an action id an answer or
+    // another decline committed under any other signature is a collision.
+    const prior = this.answerReceipts.get(record.action_id);
+    if (prior) {
+      return this.committedSignatures.get(record.action_id) === record.signature
+        ? json(201, prior)
+        : json(409, { code: 'idempotency_collision', message: 'different command' });
+    }
+    const reject = this.rejectDecline.shift();
+    if (reject)
+      return json(reject.status, {
+        code: reject.code,
+        message: 'no',
+        ...(reject.details ? { details: reject.details } : {}),
+      });
+    const q = this.questions.get(qid);
+    if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+    const state = this.answerState.get(qid) ?? { status: 'open' as const, revision: 0 };
+    const role =
+      record.signer_device_id === this.owner.config.deviceId
+        ? ('owner-desktop' as const)
+        : (this.devices.find((d) => d.device_id === record.signer_device_id)?.role ?? 'phone');
+    let noop: boolean;
+    try {
+      noop = applyAction(
+        { ...state, requirement: q.signed.record.requirement, proxyAbstained: false },
+        'cancel',
+        role,
+        record.expected_revision,
+        record.decline,
+      ).noop;
+      if (!noop && this.undeclaredDeclines.has(q.signed.record.originating_device_id))
+        throw new ApiError('invalid_state', "the question's desktop does not take them", {
+          details: {
+            reason: CREATOR_MISSING_FEATURE,
+            required_feature: 'owner-desktop-declines-v1',
+          },
+        });
+    } catch (e) {
+      const err = e as ApiError;
+      return json(err.status, {
+        code: err.code,
+        message: err.message,
+        ...(err.details ? { details: err.details } : {}),
+      });
+    }
+    if (noop)
+      return json(200, {
+        question_id: qid,
+        revision: state.revision,
+        status: 'cancelled',
+        event_seq: this.seqCounter,
+      });
+    this.answerState.set(qid, { status: 'cancelled', revision: state.revision });
+    this.logCancel(qid, b.action);
+    const ev = this.push('decision.cancelled', qid, state.revision, {
+      ...EventData.action.parse({
+        action: 'cancel',
+        record,
+        envelope: null,
+        provenance: null,
+        status: 'cancelled',
+        revision: state.revision,
+        target_host_id: q.signed.record.target_host_id,
+        deliverable: false,
+      }),
+    });
+    const receipt = {
+      question_id: qid,
+      revision: state.revision,
+      status: 'cancelled',
+      event_seq: ev.seq,
+    };
+    this.answerReceipts.set(record.action_id, receipt);
+    this.committedSignatures.set(record.action_id, record.signature);
+    if (this.dropDeclineReply > 0) {
+      this.dropDeclineReply--;
+      throw new TypeError('connection reset after the relay committed the decline');
+    }
+    return json(201, receipt);
   }
 
   push(
@@ -720,6 +1015,8 @@ export class FakeRelay {
     revision?: number;
     eventType?: LedgerEvent['event_type'];
     provenance?: 'human' | 'proxy' | null;
+    /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
+    decline?: true;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -730,6 +1027,7 @@ export class FakeRelay {
       signerDeviceId: opts.signer.deviceId,
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
+      ...(opts.decline ? { decline: true as const } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

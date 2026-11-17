@@ -9,7 +9,10 @@ import type { PhoneImageReference, Role } from '@daintreehq/decisions-protocol';
  */
 export interface AnswerEntry {
   entry_id: string;
-  /** `declined`: the person dismissed the question from a phone or tablet (a human-signed cancel); no content. */
+  /**
+   * `declined`: the person dismissed the question, from a phone or tablet (a human-signed cancel) or on the owner
+   * desktop (its cancel with the signed `decline` flag); no content.
+   */
   kind: 'answer' | 'expired' | 'declined';
   action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;
@@ -19,9 +22,10 @@ export interface AnswerEntry {
    */
   source: 'human' | 'proxy' | 'system';
   /**
-   * The device that signed the action, and its certified role when it was verified. Absent on entries that no
-   * device signed (an expiry or decline notice) and on answers stored before signers were kept, which were all a
-   * phone's or tablet's when human: an earlier library refused every other signer.
+   * The device that signed the action, and its certified role when it was verified: on a decline, a phone's or
+   * tablet's, or the owner desktop's. Absent on an expiry, which no device signed, on a decline stored before
+   * declines kept their signer, and on answers stored before signers were kept, which were all a phone's or tablet's
+   * when human: an earlier library refused every other signer.
    */
   signer_device_id?: string;
   signer_role?: Role;

@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { isPersonDecline, type HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
@@ -32,14 +32,15 @@ import {
   DELIVERY_LABELS,
   deliveryProgress,
   effectiveStatus,
+  followUpBy,
   lastProxyAction,
   messageProgress,
   originParts,
   pendingAsk,
+  PHONE_FOLLOW_UP,
   proxyNeedsReview,
   submitKind,
   unreadableHere,
-  withdrawnLabel,
 } from '../../domain/selectors.js';
 import { drafts, readyPhotos, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
@@ -62,14 +63,13 @@ import {
   ClockIcon,
   PersonIcon,
   RefreshIcon,
-  UndoIcon,
   WarningIcon,
 } from '../Icons.js';
 import { AnswerDock } from './AnswerDock.js';
 import { Composer } from './Composer.js';
 import { ConsentSheet } from './ConsentSheet.js';
 import { AnswerBody, ConflictCard, CopyButton, OptionCards } from './DecisionArea.js';
-import { AnswerReceipt, Receipt } from './DeliveryStatus.js';
+import { AnswerReceipt, FollowUpReceipt, Receipt } from './DeliveryStatus.js';
 import { DraftPhotoStrip, PhotoGrid, type PhotoUpload } from './Photos.js';
 import { nextQuestion } from './nextQuestion.js';
 import { WorkspaceOpening } from './Opening.js';
@@ -77,7 +77,9 @@ import { Sheet } from './Sheet.js';
 import {
   AgentMessage,
   AgentNote,
+  CancelLine,
   HumanAnswer,
+  HumanFollowUp,
   MessageContext,
   ModelMessage,
   OutgoingMessage,
@@ -1025,7 +1027,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
       }
       if ('m' in t) {
         const m = t.m;
-        if (!m.verified) {
+        // The person's only when its signer's verified role says so; anything else is never shown as theirs.
+        const by = followUpBy(m);
+        if (!m.verified || (m.side === 'human' && !by)) {
           items.push(
             <SystemLine key={m.messageId} now={now} tone="warn" icon={<WarningIcon size={14} />}>
               A message could not be verified and was ignored
@@ -1046,22 +1050,23 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             />,
           );
           lastNote = m;
-        } else {
+        } else if (by) {
           const p = messageProgress(m);
           items.push(
-            <OutgoingMessage
+            <HumanFollowUp
               key={m.messageId}
               id={`ws-msg-${m.messageId}`}
+              view={view}
+              // "Follow-up", or "Follow-up on Studio Mac" for one the person sent on the computer.
+              by={by}
+              text={m.text}
+              images={m.images}
               at={m.createdAt}
               now={now}
-              label="Follow-up"
               flagged={p.step === 'attention'}
               // Every follow-up keeps its own receipt: each is typed (or held) on its own.
-              receipt={<Receipt progress={p} fromPhone subject="Your follow-up" />}
-            >
-              <PhotoGrid view={view} images={m.images} />
-              {m.text.trim() && <SafeText text={m.text} className="answer-text" />}
-            </OutgoingMessage>,
+              receipt={<FollowUpReceipt by={by} progress={p} />}
+            />,
           );
         }
         continue;
@@ -1128,22 +1133,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </OutgoingMessage>,
         );
       } else if (a.action === 'cancel') {
-        const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
-        items.push(
-          <SystemLine
-            key={a.actionId}
-            now={now}
-            at={a.createdAt}
-            icon={<UndoIcon size={14} />}
-            detail={
-              declined
-                ? 'You chose not to answer it, so nothing was approved.'
-                : 'No answer is needed, and nothing was approved here.'
-            }
-          >
-            {declined ? 'Declined by you' : withdrawnLabel(view)}
-          </SystemLine>,
-        );
+        items.push(<CancelLine key={a.actionId} view={view} a={a} now={now} />);
       } else if (a.action === 'reopen') {
         items.push(
           <SystemLine key={a.actionId} now={now} at={a.createdAt} icon={<RefreshIcon size={14} />}>
@@ -1209,29 +1199,30 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     for (const e of pendingMessages) {
       const queuedOffline = e.state === 'queued' && !navigator.onLine;
       items.push(
-        <OutgoingMessage
+        <HumanFollowUp
           key={messageKey(e)}
+          view={view}
+          // Sent from this phone or tablet.
+          by={PHONE_FOLLOW_UP}
+          text={e.text}
+          images={entryImages(e)}
+          upload={uploadOf(e)}
           at={new Date(e.createdAt).toISOString()}
           now={now}
           tone="pending"
-          label="Follow-up"
           receipt={
-            <Receipt
+            <FollowUpReceipt
+              by={PHONE_FOLLOW_UP}
               progress={messageProgress(
                 null,
                 e.state === 'committed' ? undefined : (e.state as 'queued' | 'sending'),
               )}
-              fromPhone
-              subject="Your follow-up"
               label={uploadLabel(e)}
               note={queuedOffline ? 'Sends when you’re back online' : undefined}
             />
           }
-        >
-          <PhotoGrid view={view} images={entryImages(e)} upload={uploadOf(e)} />
-          {e.text.trim() && <SafeText text={e.text} className="answer-text" />}
-          <UploadTrouble entry={e} subject="follow-up" />
-        </OutgoingMessage>,
+          extra={<UploadTrouble entry={e} subject="follow-up" />}
+        />,
       );
     }
     for (const e of failedMessages) {
@@ -1408,7 +1399,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const pendingAnswerKey = pendingEntry ? `ans-${pendingEntry.recordId ?? pendingEntry.id}` : null;
   const keysKey = itemKeys.join('|');
   const lastKey = itemKeys[itemKeys.length - 1] ?? '';
-  const sentFollowUps = view.messages.filter((m) => m.verified && m.side === 'human');
+  // The person's follow-ups as the thread shows them: from a phone, a tablet or the computer.
+  const sentFollowUps = view.messages.filter((m) => followUpBy(m) !== null);
   const latestFollowUp = sentFollowUps.at(-1);
   // Every follow-up's step counts: one further up needing attention is activity too.
   const deliveryKey = `${progress?.step ?? ''}/${pendingProgress?.step ?? ''}/${sentFollowUps
@@ -1562,7 +1554,10 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     lastFollow.current = followKey;
     if (!followKey || followKey === prev || !latestFollowUp) return;
     const p = messageProgress(latestFollowUp);
-    if (p.step === 'terminal') announce('Your follow-up was typed into the terminal.');
+    if (p.step === 'terminal')
+      announce(
+        `${(followUpBy(latestFollowUp) ?? PHONE_FOLLOW_UP).subject} was typed into the terminal.`,
+      );
     else if (p.step === 'attention')
       announce(`${p.label}. Open Daintree on your computer to see what happened.`);
   }, [followKey]); // eslint-disable-line react-hooks/exhaustive-deps

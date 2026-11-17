@@ -1,10 +1,13 @@
 import {
+  HUMAN_MESSAGE_ROLES,
+  humanMessageSentOn,
   isPersonDecline,
   threadAwaitsHuman,
   type ActionKind,
 } from '@daintreehq/decisions-protocol';
 import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
 import { sanitizeText } from '../lib/safe-text.js';
+import { computerName } from './computer-name.js';
 import { NO_EPOCH_KEY } from './verify.js';
 
 export type EffectiveStatus =
@@ -20,10 +23,14 @@ export function effectiveStatus(v: QuestionView, now = Date.now()): EffectiveSta
   return v.status;
 }
 
-/** The answer currently in force (last verified answer-bearing action). */
+/**
+ * The answer currently in force (last verified answer-bearing action). None survives a reopen: a question is reopened
+ * only once it was withdrawn or expired, and the only answer either leaves behind is a model answer they voided.
+ */
 export function currentAnswer(v: QuestionView): ActionView | null {
   for (let i = v.actions.length - 1; i >= 0; i--) {
     const a = v.actions[i]!;
+    if (a.verified && a.action === 'reopen') return null;
     if (a.verified && ANSWER_KINDS.includes(a.action) && a.content) return a;
   }
   return null;
@@ -38,17 +45,51 @@ export function lastProxyAction(v: QuestionView): ActionView | null {
 }
 
 /**
- * The person dismissed this question from a phone or tablet: it is cancelled, and the cancel in force was signed by
- * a human device (its certificate checked when the event was verified). A desktop's cancel is a withdrawal instead.
+ * Whether a verified `cancel` is the person declining (a phone or tablet signed it, or the owner desktop signed it
+ * with the `decline` flag in its record) rather than a desktop withdrawing the question. Decided only from what was
+ * verified: the certified role and the signed flag.
  */
-export function declinedByPerson(v: QuestionView): boolean {
-  if (v.status !== 'cancelled' || !v.verification.ok) return false;
+const isDecline = (a: Pick<ActionView, 'action' | 'signerRole' | 'decline' | 'verified'>) =>
+  a.verified && a.signerRole !== null && isPersonDecline(a.action, a.signerRole, a.decline);
+
+/** The cancel that closed this question: the last verified one, when it is cancelled and verified. */
+function closingCancel(v: QuestionView): ActionView | null {
+  if (v.status !== 'cancelled' || !v.verification.ok) return null;
   for (let i = v.actions.length - 1; i >= 0; i--) {
     const a = v.actions[i]!;
-    if (a.verified && a.action === 'cancel')
-      return a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
+    if (a.verified && a.action === 'cancel') return a;
   }
-  return false;
+  return null;
+}
+
+/**
+ * The person declined this question: it is cancelled, and the cancel in force was signed by a phone or tablet, or by
+ * the owner desktop with the signed `decline` flag (its certificate checked when the event was verified). A desktop's
+ * cancel without the flag is a withdrawal instead.
+ */
+export const declinedByPerson = (v: QuestionView): boolean => declinedLabel(v) !== null;
+
+/**
+ * Who declined, in the words every surface uses: "Declined by you" from a phone or tablet, "Declined by you on
+ * Studio Mac" from the owner desktop, named from its certificate (`computerName`) as `answerBy` names an answer made there. Null for a
+ * cancel that is not a verified decline.
+ */
+export function declineBy(
+  a: Pick<ActionView, 'action' | 'signerRole' | 'signerLabel' | 'decline' | 'verified'>,
+): { computer: string | null; label: string } | null {
+  if (!isDecline(a)) return null;
+  if (a.signerRole !== 'owner-desktop') return { computer: null, label: 'Declined by you' };
+  const computer = computerName(a.signerLabel);
+  return { computer, label: `Declined by you on ${computer}` };
+}
+
+/**
+ * The closed line of a question the person declined, naming the computer when they declined it there; null when the
+ * cancel in force is not a verified decline.
+ */
+export function declinedLabel(v: QuestionView): string | null {
+  const a = closingCancel(v);
+  return a ? (declineBy(a)?.label ?? null) : null;
 }
 
 /** A question that can still be answered: open, verified and not past its deadline. */
@@ -94,6 +135,16 @@ export const needsYou = (v: QuestionView, now = Date.now()): boolean =>
 /** Open questions, plus answered ones whose delivery needs the owner to look at their computer. */
 export const needsAction = (v: QuestionView, now = Date.now()): boolean =>
   needsYou(v, now) || deliveryNeedsAttention(v);
+
+/**
+ * What the action count (the badge) counts: `needsAction`, or a follow-up from this device the relay refused, unless
+ * the person declined the question, on a phone or tablet or on the computer: then nothing about it waits on them.
+ */
+export const countsForAction = (
+  v: QuestionView,
+  now: number,
+  refused: ReadonlySet<string>,
+): boolean => needsAction(v, now) || (refused.has(v.id) && !declinedByPerson(v));
 
 /** One display vocabulary for every status, shared by the inbox, the detail page and History. */
 /**
@@ -202,17 +253,48 @@ export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): Ans
     return { model: true, computer: null, author: 'Model', subject: 'The model answer' };
   if (a.provenance !== 'human-desktop')
     return { model: false, computer: null, author: 'You', subject: 'Your answer' };
-  // The owner chose the name and its key signed it, but it is still shown as text: drop control and escape
-  // characters and fold line breaks, as for the asking computer's name.
-  const name = sanitizeText(a.signerLabel ?? '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const computer = name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
+  const computer = computerName(a.signerLabel);
   return {
     model: false,
     computer,
     author: `You on ${computer}`,
     subject: `Your answer on ${computer}`,
+  };
+}
+
+/**
+ * Where the person sent a follow-up from, in the words every surface uses: a phone or tablet, or the computer (the
+ * owner desktop signed it), named from its certificate. Decided by the signer's verified role
+ * (`humanMessageSentOn`), never by anything the relay says. Null for anything that is not the person's: an agent
+ * message, one that could not be verified, or a signer that never sends a human message.
+ */
+export interface FollowUpBy {
+  /** The computer the person sent it on, or null when they sent it on a phone or tablet. */
+  computer: string | null;
+  /** The bubble's label: "Follow-up", "Follow-up on Studio Mac". */
+  label: string;
+  /** As a sentence's subject: "Your follow-up", "Your follow-up on Studio Mac". */
+  subject: string;
+}
+
+/** A follow-up sent on a phone or tablet: this device's own, or another one's. */
+export const PHONE_FOLLOW_UP: FollowUpBy = {
+  computer: null,
+  label: 'Follow-up',
+  subject: 'Your follow-up',
+};
+
+export function followUpBy(
+  m: Pick<ThreadMessage, 'side' | 'verified' | 'signerRole' | 'signerLabel'>,
+): FollowUpBy | null {
+  if (m.side !== 'human' || !m.verified || !m.signerRole) return null;
+  if (!HUMAN_MESSAGE_ROLES.includes(m.signerRole)) return null;
+  if (humanMessageSentOn(m.signerRole) === 'phone') return PHONE_FOLLOW_UP;
+  const computer = computerName(m.signerLabel);
+  return {
+    computer,
+    label: `Follow-up on ${computer}`,
+    subject: `Your follow-up on ${computer}`,
   };
 }
 

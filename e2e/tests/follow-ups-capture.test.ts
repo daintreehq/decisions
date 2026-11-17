@@ -24,7 +24,8 @@ import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from
 /**
  * Captures a question's thread after it is answered, for design review: follow-ups from the phone with their receipts,
  * the agent's messages (one waiting on a reply), the follow-up composer, a follow-up queued offline, one that needs
- * attention, Home and the sidebar showing a question that needs a reply, and a model answer (Confirm and Overrule):
+ * attention, Home and the sidebar showing a question that needs a reply, a model answer (Confirm and Overrule), and
+ * a thread mixing the person's follow-ups from the phone and from the computer with the agent's:
  *   pnpm build && DESIGN_CAPTURE_DIR=/some/dir pnpm --filter @daintreehq/decisions-e2e test follow-ups-capture
  * Skipped unless DESIGN_CAPTURE_DIR is set. Everything goes through the real seams: a real relay, the real desktop
  * bridge with follow-ups on (it types them into the sink and posts the agent's messages), and the PWA paired through
@@ -163,6 +164,16 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     );
     await bridge.pump();
   };
+  /**
+   * The person's follow-up sent on the computer: the owner desktop signs a human message for them (docs/protocol.md
+   * section 16) through the host API Daintree's own UI calls. This bridge asked the question and has follow-ups on,
+   * so it types the follow-up into the pane too.
+   */
+  const computerSays = async (key: string, text: string) => {
+    const sent = await bridge.sendFollowUp({ questionId: ids[key]!, text });
+    if (sent.status !== 'sent') throw new Error(`follow-up from the computer: ${sent.status}`);
+    await bridge.pump();
+  };
 
   beforeAll(async () => {
     mkdirSync(OUT!, { recursive: true });
@@ -295,6 +306,14 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
         { id: 'no', label: 'Not yet' },
       ],
     });
+    await ask('mixed', origin('p8', 'daintree'), {
+      question: 'Run the staging database migration before tonight’s deploy?',
+      kind: 'approval',
+      options: [
+        { id: 'yes', label: 'Run it' },
+        { id: 'no', label: 'Wait until tomorrow' },
+      ],
+    });
     await bridge.pump();
     expect(await bridge.runProxy(ids.proxy!)).toBe('answered');
     await bridge.pump();
@@ -363,6 +382,58 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     await page
       .locator('.ws .msg.out.flagged', { hasText: 'Squash the commits' })
       .waitFor({ timeout: 30_000 });
+
+    // One thread, three voices: the person on the phone, the agent asking back, and the person replying on the
+    // computer, which takes the question out of Needs you.
+    await openId('mixed');
+    await page
+      .getByRole('radio', { name: /Run it/ })
+      .first()
+      .check();
+    await page.locator('.dock').getByRole('button', { name: 'Send decision' }).click();
+    await sees('Typed into the terminal');
+    await sendFollowUp('Take a snapshot of the staging database first.');
+    await until(
+      async () => sink.typed.some((t) => t.text.includes('Take a snapshot')),
+      30_000,
+      'the phone follow-up typed',
+    );
+    await agentSays(
+      'mixed',
+      'Snapshot taken. Should I also pause the nightly import while the migration runs?',
+      true,
+    );
+    await openId('mixed');
+    await sees('Waiting for your reply');
+    const inNeedsYou = () =>
+      page
+        .locator('main section[data-section="needs"] a.qrow', {
+          hasText: 'Run the staging database migration',
+        })
+        .count();
+    await go('/');
+    await page
+      .locator('main a.qrow', { hasText: 'Run the staging database migration' })
+      .waitFor({ timeout: 30_000 });
+    await until(async () => (await inNeedsYou()) === 1, 30_000, 'the question in Needs you');
+    await computerSays('mixed', 'Yes, pause it, and turn it back on once the migration finishes.');
+    // The reply from the computer, on its own, answers the agent: before the agent says anything more.
+    await openId('mixed');
+    await page
+      .locator('.ws .msg.out .bubble-label', { hasText: 'Follow-up on Greg’s MacBook Pro' })
+      .waitFor({ timeout: 30_000 });
+    expect(await page.locator('.ws').getByText('Waiting for your reply').count()).toBe(0);
+    await go('/');
+    await page
+      .locator('main a.qrow', { hasText: 'Run the staging database migration' })
+      .waitFor({ timeout: 30_000 });
+    // Synced after the reload: its row leaves Needs you once the reply from the computer is read.
+    await until(async () => (await inNeedsYou()) === 0, 30_000, 'the question out of Needs you');
+    await agentSays(
+      'mixed',
+      'Paused. I’ll turn the nightly import back on after the migration and let you know.',
+      false,
+    );
   });
 
   it('captures each state on a phone, in both themes', async () => {
@@ -487,6 +558,81 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
     await shot('f-open-light');
   });
 
+  it('captures a thread mixing phone, computer and agent follow-ups', async () => {
+    await openId('mixed');
+    await sees('Paused. I’ll turn the nightly import back on');
+    const labels = () => page.locator('.ws .msg.out .bubble-label').allTextContents();
+    await until(
+      async () => (await labels()).includes('Follow-up on Greg’s MacBook Pro'),
+      15_000,
+      'the follow-up from the computer, as the person’s',
+    );
+    // Each voice as itself: the answer and a follow-up from the phone, one from the computer, the agent's twice.
+    expect(await labels()).toEqual(['Your answer', 'Follow-up', 'Follow-up on Greg’s MacBook Pro']);
+    expect(await page.locator('.ws .msg.out', { hasText: 'Yes, pause it' }).count()).toBe(1);
+    // Never shown as unverified, and the reply from the computer answered the agent: no longer waiting on the person.
+    expect(await page.locator('.ws').getByText('could not be verified').count()).toBe(0);
+    expect(await page.locator('.ws').getByText('Waiting for your reply').count()).toBe(0);
+    await page
+      .locator('.dock textarea[placeholder="Add a follow-up"]')
+      .waitFor({ timeout: 15_000 });
+    await toEnd();
+    await shot('f-mixed-light');
+    await theme('dark');
+    await toEnd();
+    await shot('f-mixed-dark');
+    await theme('light');
+
+    // Its receipt starts at the relay: it never passed through a phone.
+    const computerReceipt = page
+      .locator('.ws .msg.out', { hasText: 'Yes, pause it' })
+      .locator('.receipt-button');
+    await computerReceipt.click();
+    const steps = await page
+      .locator('.ws .msg.out', { hasText: 'Yes, pause it' })
+      .locator('.stepper li')
+      .allTextContents();
+    expect(steps[0]).toMatch(/^Saved on your relay/);
+    expect(steps.some((s) => s.startsWith('Queued on this device'))).toBe(false);
+    await toEnd();
+    await shot('f-mixed-receipt-light');
+    await computerReceipt.click();
+
+    // The activity names where each follow-up came from.
+    await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
+    await page.getByRole('menuitem', { name: 'View activity' }).click();
+    const fromComputer = page.getByText('You sent a follow-up on Greg’s MacBook Pro').first();
+    await fromComputer.waitFor({ timeout: 15_000 });
+    await page.getByText('You sent a follow-up', { exact: true }).first().waitFor();
+    // From the phone's follow-up and the agent's question down to the reply from the computer.
+    await page.getByText('You sent a follow-up', { exact: true }).first().scrollIntoViewIfNeeded();
+    await fromComputer.scrollIntoViewIfNeeded();
+    await shot('f-mixed-activity-light');
+    await page.keyboard.press('Escape');
+    await settle(300);
+
+    // Home: answered and replied to, so it is not in Needs you.
+    await go('/');
+    await page
+      .locator('main a.qrow', { hasText: 'Run the staging database migration' })
+      .waitFor({ timeout: 30_000 });
+    expect(
+      await page
+        .locator('main section[data-section="needs"] a.qrow', {
+          hasText: 'Run the staging database migration',
+        })
+        .count(),
+    ).toBe(0);
+    await shot('f-mixed-home-light');
+
+    await page.setViewportSize(WIDE);
+    await openId('mixed');
+    await sees('Paused. I’ll turn the nightly import back on');
+    await toEnd();
+    await shot('w-mixed-light');
+    await page.setViewportSize(PHONE);
+  });
+
   it('captures the wide layout', async () => {
     await page.setViewportSize(WIDE);
     await openId('thread');
@@ -517,11 +663,17 @@ describe.skipIf(!OUT || !chromiumPath)('captures of follow-ups in a question thr
       'f-queued-offline-light',
       'f-model-review-light',
       'f-open-light',
+      'f-mixed-light',
+      'f-mixed-dark',
+      'f-mixed-receipt-light',
+      'f-mixed-activity-light',
+      'f-mixed-home-light',
+      'w-mixed-light',
       'w-thread-light',
       'w-asking-dark',
     ];
     const missing = expected.filter((n) => !existsSync(join(OUT!, `${n}.png`)));
     expect(missing).toEqual([]);
-    expect(written.length).toBe(expected.length);
+    expect([...written].sort()).toEqual([...expected].sort());
   });
 });
