@@ -160,7 +160,7 @@ function HistoryRow({
       </span>,
     );
   const match = searchMatch(e, query);
-  const closed = closedLine(e.status);
+  const closed = closedLine(e.status, v);
   const model = answer && answer.author !== 'You';
   return (
     <li className="qrow-item">

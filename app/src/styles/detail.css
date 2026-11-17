@@ -812,6 +812,8 @@
 }
 .sys-text {
   font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .sys-detail {
   max-width: 44ch;

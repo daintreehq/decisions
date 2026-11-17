@@ -556,7 +556,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the conversation thread', ()
     await shot('p-expired-light');
 
     await openId('withdrawn');
-    await sees('Withdrawn by your agent');
+    await sees('Withdrawn on Greg’s MacBook Pro');
     await theme('dark');
     await shot('p-withdrawn-dark');
     await theme('light');

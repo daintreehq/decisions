@@ -8,6 +8,7 @@ import {
   currentAnswer,
   declinedByPerson,
   effectiveStatus,
+  withdrawnLabel,
 } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
 import { SuccessIcon, WarningIcon } from '../Icons.js';
@@ -310,7 +311,7 @@ function entries(v: QuestionView, now: number): Entry[] {
         key: a.actionId,
         kind: declined ? 'declined' : 'withdrawn',
         at: a.createdAt,
-        title: declined ? 'Declined by you' : 'Withdrawn by your agent',
+        title: declined ? 'Declined by you' : withdrawnLabel(v),
       });
     } else if (a.action === 'reopen')
       out.push({
@@ -343,7 +344,7 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
         : s === 'cancelled'
           ? declinedByPerson(v)
             ? 'Declined by you'
-            : 'Withdrawn by your agent'
+            : withdrawnLabel(v)
           : s === 'open'
             ? 'Not answered yet'
             : 'No answer this device can show';

@@ -157,8 +157,8 @@ A person who will not answer an open question dismisses it from a phone or table
 - **Attribution.** "Declined by the person" versus "withdrawn by the desktop" is derived only from the signed record:
   the signer's owner-certified role (`isPersonDecline` in `state.ts`), never from a relay-supplied field. Receivers
   verify the signature and certificate before classifying it, so a relay cannot forge a decline.
-- **Phones and tablets** show a declined question as "Declined by you" in History, distinct from "Withdrawn by your
-  agent" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
+- **Phones and tablets** show a declined question as "Declined by you" in History, distinct from "Withdrawn on
+  {computer}" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
 - **Desktops** that verify a human-signed cancel record a content-free decline entry and, if the asking agent is still
   listening, type a notice with `status: declined` and `authorised: no`. An agent that has gone is never resumed, nor
   flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with
