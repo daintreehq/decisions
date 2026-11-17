@@ -382,6 +382,12 @@ describe.skipIf(!chromiumPath)(
       await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
       await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
       await page.getByRole('button', { name: 'Dismiss question' }).click();
+      // The sheet closes once the decline is sent and synced, and the question reads as declined. Wait for both, as a
+      // person would before moving on: the sheet's history entry is unwound asynchronously when it closes.
+      await page
+        .getByRole('dialog', { name: 'Dismiss this question?' })
+        .waitFor({ state: 'hidden', timeout: 30_000 });
+      await page.getByText('Declined by you').first().waitFor({ timeout: 30_000 });
 
       await until(
         async () => (await relayClient.getQuestion(id)).status === 'cancelled',
