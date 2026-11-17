@@ -184,11 +184,23 @@ describe.skipIf(!chromiumPath)(
     const call = async (c: Client, name: string, args: Record<string, unknown>) =>
       (await c.callTool({ name, arguments: args })) as ToolResult;
 
-    /** Opens a question from the inbox, as a person would the first time. */
+    /**
+     * Opens a question from the inbox, as a person would the first time. Home can render from its cache before the
+     * question syncs, and then holds it behind "N new questions" (rows never reshuffle): take it the way a person would.
+     */
     const openFromInbox = async (text: string) => {
       await page.goto(`${relay.origin}/`);
-      await page.getByText(text).first().waitFor({ timeout: 30_000 });
-      await page.getByText(text).first().click();
+      const row = page.locator('main').getByText(text).first();
+      await until(
+        async () => {
+          const pill = page.locator('main .nav-new');
+          if (await pill.isVisible().catch(() => false)) await pill.click();
+          return row.isVisible().catch(() => false);
+        },
+        30_000,
+        `"${text}" listed on Home`,
+      );
+      await row.click();
     };
 
     it('negotiates with the SDK client and lists the five tools with their annotations', async () => {
