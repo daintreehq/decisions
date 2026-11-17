@@ -51,7 +51,9 @@ certified role implies (`provenanceForSigner`). The phone app accepts an owner-d
 `label`. The desktop library accepts one on the owner desktop and on a Remote Host, refuses one that lists phone
 images, and declares `owner-desktop-answers-v1` on every bridge's socket ticket. It keeps the answer as the person's
 with its signer, types it with `source: human` and `answered_on: computer`, and `get_decision` reports
-`provenance: human` with `answered_on: computer` (`phone` for a phone or tablet).
+`provenance: human` with `answered_on: computer` (`phone` for a phone or tablet). A host app publishes one with
+`DecisionsBridge.answerQuestion`, on the owner desktop only: the library signs it against the revision the person
+reviewed, sends it through its outbox, and never moves it to a later revision.
 
 The question's publishing desktop types the answer, and a desktop that predates owner-desktop answers rejects one. So
 the relay commits an owner-desktop `answer` only when the publishing desktop (its `originating_device_id`) declared

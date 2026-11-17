@@ -37,8 +37,11 @@ export type MessageReceiptInput = MessageReceiptBody extends infer B
     : never
   : never;
 
-/** Actions only a human device signs (human provenance). No desktop ever signs one. */
-const HUMAN_ACTIONS: ReadonlySet<ActionKind> = new Set(['answer', 'override', 'confirm-proxy']);
+/**
+ * Actions only a phone or tablet signs: no desktop ever overrides an answer or confirms a proxy answer. The person's
+ * `answer` is a phone's or the owner desktop's (`human-desktop` provenance, protocol section 2), never a Host's.
+ */
+const PHONE_ACTIONS: ReadonlySet<ActionKind> = new Set(['override', 'confirm-proxy']);
 
 export interface RelayClientOptions {
   identity: Identity;
@@ -277,16 +280,18 @@ export class RelayClient {
     questionId: string,
     idempotencyKey: string,
     action: SignedAction,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {},
   ): Promise<CommandReceipt> {
-    // A desktop signs only proxy provenance: answers, overrides and confirmations are a human's, from a phone.
-    if (HUMAN_ACTIONS.has(kind)) {
+    // Overrides and confirmations are the person's, from a phone or tablet only.
+    if (PHONE_ACTIONS.has(kind)) {
       throw new RelayError(
         'forbidden',
-        `a desktop never signs "${kind}": only a phone or tablet answers as a human`,
+        `a desktop never signs "${kind}": only a phone or tablet corrects or confirms an answer`,
         403,
       );
     }
-    const send = () => this.sendAction(kind, questionId, idempotencyKey, action);
+    const send = () => this.sendAction(kind, questionId, idempotencyKey, action, opts);
+    if (kind === 'answer') return this.ownerOnly('answering for the person', send);
     return kind === 'reopen' ? this.ownerOnly('reopening a question', send) : send();
   }
   private sendAction(
@@ -294,13 +299,17 @@ export class RelayClient {
     questionId: string,
     idempotencyKey: string,
     action: SignedAction,
+    opts: Pick<RequestOptions, 'retry' | 'timeoutMs'>,
   ): Promise<CommandReceipt> {
     const body: ActionBodyShape = {
       protocol_version: PROTOCOL_VERSION,
       idempotency_key: idempotencyKey,
       action,
     };
-    return this.request('POST', `${API_PREFIX}/questions/${questionId}/${kind}`, { body });
+    return this.request('POST', `${API_PREFIX}/questions/${questionId}/${kind}`, {
+      body,
+      ...opts,
+    });
   }
   /** Post an agent message into a question's thread (docs/protocol.md section 16). */
   postMessage(

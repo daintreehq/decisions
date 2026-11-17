@@ -1,5 +1,9 @@
 import {
+  ApiError,
+  CREATOR_MISSING_FEATURE,
   EventData,
+  applyAction,
+  type QuestionStatus,
   PROTOCOL_VERSION,
   type ActionKind,
   type CryptoEnvelope,
@@ -174,6 +178,25 @@ export class FakeRelay {
   holdInvolvement: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
+  /** Every `POST /questions/{id}/answer` body, retries included, in order. */
+  answers: { idem: string; action: SignedAction }[] = [];
+  /** Refusals for upcoming answer POSTs, in order; when empty the relay decides from the question's state. */
+  rejectAnswer: { status: number; code: string; details?: Record<string, unknown> }[] = [];
+  /**
+   * Each question's status and revision as an answer POST sees them, by question id (open at revision 0 until set
+   * or answered). Answer POSTs move them through `applyAction`, as the relay does.
+   */
+  answerState = new Map<string, { status: QuestionStatus; revision: number }>();
+  /** Publishing desktops that have not declared `owner-desktop-answers-v1`: their questions refuse the owner. */
+  undeclared = new Set<string>();
+  /** Called as each answer POST arrives, before the relay looks at it. */
+  onAnswer: (() => void) | null = null;
+  /** Number of upcoming answer POSTs the relay COMMITS but whose reply is lost. */
+  dropAnswerReply = 0;
+  /** While set, answer POSTs wait for it before the relay looks at them (a slow relay). */
+  holdAnswers: Promise<void> | null = null;
+  /** Each committed answer's receipt, by action id, returned unchanged for a retry. */
+  answerReceipts = new Map<string, unknown>();
 
   constructor(private readonly owner: Identity) {}
 
@@ -304,11 +327,88 @@ export class FakeRelay {
       }
       return json(201, receipt);
     }
+    if (method === 'POST' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/answer$/))) {
+      this.onAnswer?.();
+      if (this.holdAnswers) await this.holdAnswers;
+      const b = body as { idempotency_key: string; action: SignedAction };
+      const qid = m[1]!;
+      this.answers.push({ idem: b.idempotency_key, action: b.action });
+      // A retry of the very same signed answer gets the receipt it was given, as the relay does; the same action id
+      // on any other body is a collision.
+      const prior = this.answerReceipts.get(b.action.record.action_id);
+      if (prior) {
+        const first = this.answers.find(
+          (a) => a.action.record.action_id === b.action.record.action_id,
+        )!;
+        return first.action.record.signature === b.action.record.signature
+          ? json(200, prior)
+          : json(409, { code: 'idempotency_collision', message: 'different command' });
+      }
+      const reject = this.rejectAnswer.shift();
+      if (reject)
+        return json(reject.status, {
+          code: reject.code,
+          message: 'no',
+          ...(reject.details ? { details: reject.details } : {}),
+        });
+      const q = this.questions.get(qid);
+      if (!q) return json(404, { code: 'not_found', message: 'no such question' });
+      const state = this.answerState.get(qid) ?? { status: 'open' as const, revision: 0 };
+      try {
+        applyAction(
+          { ...state, requirement: q.signed.record.requirement, proxyAbstained: false },
+          'answer',
+          'owner-desktop',
+          b.action.record.expected_revision,
+        );
+        if (this.undeclared.has(q.signed.record.originating_device_id))
+          throw new ApiError('invalid_state', "the question's desktop does not take them", {
+            details: {
+              reason: CREATOR_MISSING_FEATURE,
+              required_feature: 'owner-desktop-answers-v1',
+            },
+          });
+      } catch (e) {
+        const err = e as ApiError;
+        return json(err.status, {
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {}),
+        });
+      }
+      const revision = b.action.record.expected_revision + 1;
+      this.answerState.set(qid, { status: 'human-answered', revision });
+      const ev = this.push('decision.answer.committed', qid, revision, {
+        ...EventData.action.parse({
+          action: 'answer',
+          record: b.action.record,
+          envelope: b.action.envelope,
+          provenance: 'human-desktop',
+          status: 'human-answered',
+          revision,
+          target_host_id: q.signed.record.target_host_id,
+          deliverable: true,
+        }),
+      });
+      const receipt = { question_id: qid, revision, status: 'human-answered', event_seq: ev.seq };
+      this.answerReceipts.set(b.action.record.action_id, receipt);
+      if (this.dropAnswerReply > 0) {
+        this.dropAnswerReply--;
+        throw new TypeError('connection reset after the relay committed the answer');
+      }
+      return json(201, receipt);
+    }
     if (
       (m = p.match(/^\/api\/v1\/questions\/([^/]+)\/(cancel|proxy-answer|proxy-abstain)$/)) &&
       method === 'POST'
     ) {
       const b = body as { idempotency_key: string; action: SignedAction };
+      // A cancellation closes the question to answers that come after it.
+      if (m[2] === 'cancel')
+        this.answerState.set(m[1]!, {
+          status: 'cancelled',
+          revision: b.action.record.expected_revision,
+        });
       return json(201, {
         question_id: m[1],
         revision: b.action.record.expected_revision,
