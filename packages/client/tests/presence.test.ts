@@ -294,6 +294,20 @@ describe('while the person is present', () => {
     expect(w.leaseCurrent()).toBe(true);
   });
 
+  it('lets a report go stale over a sleep that follows the clock being set back', async () => {
+    const w = await world();
+    await w.start();
+    w.bridge.reportPresence(true);
+    await w.pass(30 * SECOND);
+    vi.setSystemTime(Date.now() - HOUR);
+    await w.pass(15 * SECOND);
+    expect(w.puts()).toEqual([true, true, true]);
+    // Asleep for ten minutes after the step: the report is eleven minutes old, whatever the wall clock says.
+    vi.setSystemTime(Date.now() + 10 * 60 * SECOND);
+    await w.pass(30 * SECOND);
+    expect(w.puts()).toEqual([true, true, true]);
+  });
+
   it('keeps a relay that refused left alone when the clock steps back', async () => {
     const w = await world();
     await w.start();
