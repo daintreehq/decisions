@@ -57,7 +57,12 @@ export async function publicJson<T>(
   origin: string,
   method: string,
   path: string,
-  opts: { body?: unknown; headers?: Record<string, string>; fetchImpl?: typeof fetch } = {},
+  opts: {
+    body?: unknown;
+    headers?: Record<string, string>;
+    fetchImpl?: typeof fetch;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<T> {
   const f = opts.fetchImpl ?? fetch;
   let res: Response;
@@ -72,6 +77,7 @@ export async function publicJson<T>(
       credentials: 'omit',
       cache: 'no-store',
       referrerPolicy: 'no-referrer',
+      signal: opts.signal,
     });
   } catch {
     throw new RelayError('network', 0, 'Could not reach the relay');
