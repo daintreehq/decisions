@@ -9,6 +9,7 @@ import {
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForAction,
+  provenanceForSigner,
   roleMaySign,
   type ActionKind,
   type ActionRecord,
@@ -18,6 +19,7 @@ import {
   type InvolvementRecord,
   type LedgerEvent,
   type MessageEntry,
+  type Provenance,
   type Role,
 } from '@daintreehq/decisions-protocol';
 import {
@@ -59,7 +61,8 @@ export interface VerifiedAnswer {
   ok: true;
   action: ActionKind;
   record: ActionRecord;
-  provenance: 'human' | 'proxy' | null;
+  /** From the signer's certified role: `human-desktop` for the person's answer signed by the owner desktop. */
+  provenance: Provenance | null;
   signerDeviceId: string;
   signerRole: Role;
   content:
@@ -215,23 +218,31 @@ export class EventVerifier {
     if ('reason' in signer) return signer;
 
     const role = signer.cert.role;
-    const prov = provenanceForAction(action);
-    if (prov === 'human' && !HUMAN_ROLES.includes(role))
-      return { ok: false, reason: 'human-action-by-non-human-device' };
-    if (prov === 'proxy' && !DESKTOP_ROLES.includes(role))
-      return { ok: false, reason: 'proxy-action-by-non-desktop-device' };
-    if (prov === 'none' && !roleMaySign(action, role))
+    // The shared role table: a phone or tablet signs the person's actions, and the pinned owner desktop may also
+    // sign the person's first `answer` (never an override or a confirmation); a `desktop-host` never signs one.
+    if (!roleMaySign(action, role)) {
+      const kind = provenanceForAction(action);
       return {
         ok: false,
         reason:
-          action === 'reopen' && DESKTOP_ROLES.includes(role)
-            ? 'reopen-by-non-owner'
-            : 'desktop-action-by-non-desktop-device',
+          kind === 'human'
+            ? 'human-action-by-non-human-device'
+            : kind === 'proxy'
+              ? 'proxy-action-by-non-desktop-device'
+              : action === 'reopen' && DESKTOP_ROLES.includes(role)
+                ? 'reopen-by-non-owner'
+                : 'desktop-action-by-non-desktop-device',
       };
-    // Relay-declared provenance is only a claim; it must match what the signed action implies.
+    }
+    const prov = provenanceForSigner(action, role);
+    // Relay-declared provenance is only a claim; it must match what the signed action and its signer imply, so an
+    // owner-desktop answer never passes as a phone's, nor a phone's as one made on the computer.
     const declared = parsed.data.provenance;
     if (prov === 'none' ? declared !== null : declared !== prov)
       return { ok: false, reason: 'provenance-mismatch' };
+    // Phone images come from a phone or tablet: the relay refuses them on an owner-desktop answer, and so does this.
+    if (prov === 'human-desktop' && (record.attachment_ids?.length ?? 0) > 0)
+      return { ok: false, reason: 'images-on-desktop-answer' };
     if (!(await verifyRecordAndEnvelope(record, envelope as CryptoEnvelope | null, signer.pub))) {
       return { ok: false, reason: 'bad-signature-or-digest' };
     }

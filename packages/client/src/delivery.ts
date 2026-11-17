@@ -4,7 +4,13 @@ import {
   formatFollowupNotice,
   noticeChunk,
 } from './notice.js';
-import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
+import {
+  answeredOn,
+  parseAnswers,
+  serializeAnswers,
+  type AnswerContent,
+  type AnswerEntry,
+} from './answers.js';
 import { openAnswerContent, openMessageContent, openQuestionContent } from './at-rest.js';
 import { RelayError } from './errors.js';
 import { TransientError } from './mutex.js';
@@ -577,6 +583,7 @@ export class DeliveryEngine {
       revision: e.revision,
       ...(i.question ? { question: i.question } : {}),
       source: e.source === 'proxy' ? 'proxy' : 'human',
+      ...(answeredOn(e) === 'computer' ? { onComputer: true } : {}),
       choices: e.choices,
       comment: e.text,
       correction: e.correction,

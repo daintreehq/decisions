@@ -478,6 +478,8 @@ export class Inbox {
     }
     // Null provenance is never human: answer-like actions always carry an explicit human/proxy provenance.
     if (v.provenance === null) return this.reject(row, 'missing-provenance');
+    // The person's answer, from a phone, a tablet or the owner desktop; which one is kept as the signer's role.
+    const human = v.provenance === 'human' || v.provenance === 'human-desktop';
     const labelOf = (id: string) => opts.find((o) => o.id === id)?.label;
     const content: AnswerContent = {
       choices: chosen.map((id) => ({ id, ...(labelOf(id) ? { label: labelOf(id)! } : {}) })),
@@ -497,7 +499,9 @@ export class Inbox {
       kind: 'answer',
       action: v.action as AnswerEntry['action'],
       revision: t.revision,
-      source: v.provenance,
+      source: human ? 'human' : 'proxy',
+      signer_device_id: v.signerDeviceId,
+      signer_role: v.signerRole,
       correction: v.action === 'override',
       created_at: v.record.created_at,
       event_seq: ev.seq,
@@ -522,10 +526,10 @@ export class Inbox {
       event: entry.deliver ? 'answer.received' : 'answer.confirmed',
       question_id: row.question_id,
       requirement: row.requirement,
-      provenance: entry.source,
+      provenance: v.provenance,
       result: 'verified',
     });
-    if (v.provenance === 'human' && (v.action === 'answer' || v.action === 'override')) {
+    if (human && (v.action === 'answer' || v.action === 'override')) {
       await this.learn(row, question, content, entry);
     }
     return entry.deliver;
