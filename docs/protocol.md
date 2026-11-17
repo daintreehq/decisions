@@ -631,7 +631,8 @@ are ignored (`knownFeatures`).
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
 answers to its questions (section 2), and the relay checks that desktop's latest socket-ticket declaration before
 committing one; a `GET /events` declaration is not recorded and does not count. The committed answer is sent to every
-client, so every phone learns the question is answered.
+client whatever it declared, so no client's cursor passes over it unseen; whether a client accepts it is the signer
+check of section 2.
 
 **Declaring.** A client declares its features on `POST /socket-ticket` (`SocketTicketBody.features`, for that socket)
 and on `GET /events` as the signed query parameter `features`: sorted and comma-separated (`formatFeatures`). No
