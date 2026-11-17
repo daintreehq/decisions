@@ -1085,7 +1085,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // answer reads as a changed one.
             changed={a.action === 'override' && replaced?.provenance !== 'proxy'}
             now={now}
-            receipt={isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined}
+            receipt={
+              isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined
+            }
             flagged={isCurrent && progress?.step === 'attention'}
           />,
         );
@@ -1105,7 +1107,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             error={confirmError}
             onConfirm={() => void confirmModel()}
             onOverrule={canCorrect ? startCorrection : undefined}
-            receipt={isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined}
+            receipt={
+              isCurrent && progress ? <AnswerReceipt a={a} progress={progress} /> : undefined
+            }
           />,
         );
       } else if (a.action === 'proxy-abstain') {

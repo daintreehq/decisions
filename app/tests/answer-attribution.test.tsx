@@ -125,7 +125,11 @@ describe("an answer made on the computer, as the person's", () => {
     const host = render(
       createElement(AnswerReceipt, {
         a,
-        progress: { step: 'attention', label: 'Needs attention on your computer', detail: 'pane_gone' },
+        progress: {
+          step: 'attention',
+          label: 'Needs attention on your computer',
+          detail: 'pane_gone',
+        },
       }),
     );
     expect(host.querySelector('[role="status"]')!.textContent).toBe(

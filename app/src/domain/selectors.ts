@@ -204,9 +204,16 @@ export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): Ans
     return { model: false, computer: null, author: 'You', subject: 'Your answer' };
   // The owner chose the name and its key signed it, but it is still shown as text: drop control and escape
   // characters and fold line breaks, as for the asking computer's name.
-  const name = sanitizeText(a.signerLabel ?? '').replace(/\s+/g, ' ').trim();
+  const name = sanitizeText(a.signerLabel ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
   const computer = name && !/^host_[0-9a-z]{6,}$/i.test(name) ? name : 'your computer';
-  return { model: false, computer, author: `You on ${computer}`, subject: `Your answer on ${computer}` };
+  return {
+    model: false,
+    computer,
+    author: `You on ${computer}`,
+    subject: `Your answer on ${computer}`,
+  };
 }
 
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {

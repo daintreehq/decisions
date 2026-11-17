@@ -101,9 +101,7 @@ export function Receipt({
   // The receipt itself stays quiet; this one status says the milestones that matter (saved, typed, a problem) when
   // they change, never the steps in between. It is mounted with the receipt, so an old reply announces nothing.
   const milestone =
-    tone !== 'progress' || progress.step === 'confirmed'
-      ? `${subject}: ${label}`
-      : '';
+    tone !== 'progress' || progress.step === 'confirmed' ? `${subject}: ${label}` : '';
   const spoken = (
     <span className="sr-only" role="status">
       {milestone}
@@ -175,9 +173,7 @@ export function Receipt({
  */
 export function AnswerReceipt({ a, progress }: { a: ActionView; progress: DeliveryProgress }) {
   const by = answerBy(a);
-  return (
-    <Receipt progress={progress} fromPhone={!by.model && !by.computer} subject={by.subject} />
-  );
+  return <Receipt progress={progress} fromPhone={!by.model && !by.computer} subject={by.subject} />;
 }
 
 /**

@@ -384,9 +384,9 @@ describe('answers made on the computer', () => {
       text: 'Keep Canopy — ship it',
       confirmed: false,
     });
-    expect(
-      historyEntries([answered], 'decisions', '', NOW).map((e) => [e.v.id, e.status]),
-    ).toEqual([['c', 'answered']]);
+    expect(historyEntries([answered], 'decisions', '', NOW).map((e) => [e.v.id, e.status])).toEqual(
+      [['c', 'answered']],
+    );
     // The computer filter still means the computer that asked.
     expect(every([answered], { ...base, computer: 'MacBook' })).toEqual(['c']);
   });
