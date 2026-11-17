@@ -187,7 +187,11 @@ describe('Home sections, sorting and filtering', () => {
     ]);
     expect(principalStatus(model, now)).toBe('review');
     expect(principalStatus(confirmed, now)).toBe('answered');
-    expect(answerSummary(confirmed)).toMatchObject({ author: 'Model', confirmed: true });
+    expect(answerSummary(confirmed)).toMatchObject({
+      author: 'Model',
+      model: true,
+      confirmed: true,
+    });
   });
 
   it('filters by project and computer separately, and searches every section', () => {
@@ -396,6 +400,9 @@ describe('answers made on the computer', () => {
     expect(by('Studio\u001b[31m\nMac\u202e')).toMatchObject({ author: 'You on Studio Mac' });
     expect(by('  \n ')).toMatchObject({ computer: 'your computer' });
     expect(by('host_8f3k2j9q')).toMatchObject({ subject: 'Your answer on your computer' });
+    expect(answerBy({ provenance: 'human-desktop' })).toMatchObject({
+      subject: 'Your answer on your computer',
+    });
     // A name that reads like the model is still the person's answer: callers decide by the flag, not the words.
     expect(by('Model')).toEqual({
       model: false,

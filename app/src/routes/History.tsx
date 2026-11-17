@@ -128,7 +128,7 @@ function searchMatch(e: HistoryEntry, query: string): Match | null {
   return { label: best.label, excerpt: emphasise(text, terms) };
 }
 
-function HistoryRow({
+export function HistoryRow({
   e,
   query,
   selected,

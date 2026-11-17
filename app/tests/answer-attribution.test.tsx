@@ -4,10 +4,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { OutboxEntry } from '../src/data/outbox.js';
 import type { ActionView, QuestionView } from '../src/domain/model.js';
+import { historyEntries } from '../src/domain/lists.js';
 import { ActivityTimeline } from '../src/components/history/ActivityTimeline.js';
 import { ConflictCard } from '../src/components/workspace/DecisionArea.js';
 import { AnswerReceipt } from '../src/components/workspace/DeliveryStatus.js';
 import { HumanAnswer } from '../src/components/workspace/Thread.js';
+import { WorkspaceHeader } from '../src/components/workspace/WorkspaceHeader.js';
+import { HistoryRow } from '../src/routes/History.js';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -138,6 +141,17 @@ describe("an answer made on the computer, as the person's", () => {
     expect(host.querySelector('.callout-text')!.textContent).toContain(
       'Your answer on Studio Mac is saved on your relay',
     );
+    act(() => mounted!.root.unmount());
+    mounted = null;
+    const uncertain = render(
+      createElement(AnswerReceipt, {
+        a,
+        progress: { step: 'attention', label: 'Delivery couldn’t be confirmed' },
+      }),
+    );
+    expect(uncertain.querySelector('.callout-text')!.textContent).toMatch(
+      /^Your answer on Studio Mac is saved on your relay\. Your computer can’t tell whether it was typed/,
+    );
   });
 
   it('keeps the phone steps for an answer from a phone, and the model its own words', () => {
@@ -159,6 +173,42 @@ describe("an answer made on the computer, as the person's", () => {
     expect(other.querySelector('[role="status"]')!.textContent).toBe(
       'The model answer: Typed into the terminal',
     );
+    act(() => other.querySelector<HTMLButtonElement>('.receipt-button')!.click());
+    expect(texts(other, '.stepper li')).toEqual([
+      'Saved on your relay (done)',
+      'Received by your computer (done)',
+      'Typed into the terminal (done)',
+    ]);
+  });
+
+  it('lists it in History as the person on the computer, without the model mark', () => {
+    const a = answer();
+    const [entry] = historyEntries([view(a)], 'decisions', '', NOW);
+    const host = render(
+      createElement(
+        'ul',
+        null,
+        createElement(HistoryRow, { e: entry!, query: '', selected: false, onOpen: () => {} }),
+      ),
+    );
+    expect(host.querySelector('.hrow .who')!.textContent).toBe('You on Studio Mac:');
+    expect(host.querySelector('.hrow .who.model')).toBeNull();
+  });
+
+  it('keeps it in the header as the person on the computer, without the model mark', () => {
+    const host = render(
+      createElement(WorkspaceHeader, {
+        project: 'daintree',
+        machine: 'build-box',
+        excerpt: 'Keep the name?',
+        answer: { author: 'You on Studio Mac', model: false, text: 'Keep Canopy' },
+        showExcerpt: true,
+        back: false,
+      }),
+    );
+    expect(host.querySelector('.ws-sub-who')!.textContent).toBe('You on Studio Mac:');
+    expect(host.querySelector('.ws-sub-answer')!.getAttribute('data-author')).toBe('You');
+    expect(host.querySelector('.ws-model-mark')).toBeNull();
   });
 
   it('lists it in the activity timeline as the person answering on the computer', () => {
