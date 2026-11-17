@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { exports } from 'cloudflare:workers';
 import { LEGACY_EVENT_TYPES, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import {
+  LEGACY_DESKTOP_INVOLVEMENT_START,
+  LEGACY_PHONE_INVOLVEMENT_START,
   legacyDesktopCatchUp,
+  legacyDesktopInvolvementRead,
+  legacyDesktopInvolvementSteering,
   legacyPhoneCatchUp,
+  legacyPhoneInvolvementRead,
   legacySocketReceive,
+  type LegacyInvolvementContext,
 } from '@daintreehq/decisions-protocol/fixtures';
-import { newId } from '@daintreehq/decisions-crypto';
+import { buildSignedInvolvement, newId, verifyObject } from '@daintreehq/decisions-crypto';
 import {
   act,
   ask,
@@ -19,6 +25,7 @@ import {
   say,
   uploadPhoneImage,
   type Actor,
+  type World,
 } from './helpers.js';
 import {
   SNAPSHOTS,
@@ -411,5 +418,97 @@ describe('a client pinned to 0.3.0 (docs/protocol.md section 19)', () => {
     ).json.events as { seq: number }[];
     expect(threadsOnly.map((e) => e.seq)).not.toContain(answered.res.json.event_seq);
     expect(threadsOnly.map((e) => e.seq)).not.toContain(said.res.json.event_seq);
+  });
+});
+
+describe('involvement readers from 0.7.0 (issue #117)', () => {
+  /** What a 0.7.0 reader knows of these devices from the owner-signed directory. */
+  const directory = (w: World, devices: Actor[]): LegacyInvolvementContext => ({
+    installationId: w.installationId,
+    signer: (id) => {
+      const a = devices.find((d) => d.id === id);
+      return a
+        ? { role: a.role, revoked: false, verify: (r) => verifyObject(a.keys.signing.publicKey, r) }
+        : null;
+    },
+  });
+  const set = async (w: World, a: Actor, revision: number) => {
+    const record = await buildSignedInvolvement({
+      installationId: w.installationId,
+      signerDeviceId: a.id,
+      signingKey: a.keys.signing.privateKey,
+      revision,
+      normalMode: revision % 2 ? 'recommend' : 'involve-early',
+      consultCount: 3,
+      override: null,
+    });
+    const res = await a.call('PUT', '/api/v1/involvement', {
+      protocol_version: PROTOCOL_VERSION,
+      idempotency_key: newId(),
+      preference: record,
+    });
+    expect(res.status).toBe(200);
+    return record;
+  };
+  const served = async (a: Actor) => (await a.call('GET', '/api/v1/involvement')).json;
+
+  it('never steer by a record set on the owner desktop, and take the next phone record', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const ctx = directory(w, [w.owner, phone]);
+
+    const r1 = await set(w, phone, 1);
+    const desktop1 = await legacyDesktopInvolvementRead(
+      LEGACY_DESKTOP_INVOLVEMENT_START,
+      await served(w.owner),
+      ctx,
+    );
+    expect(desktop1.refused).toBeNull();
+    const handset1 = await legacyPhoneInvolvementRead(
+      LEGACY_PHONE_INVOLVEMENT_START,
+      await served(phone),
+      ctx,
+    );
+    expect(handset1).toMatchObject({ status: 'ready', record: r1, revision: 1 });
+
+    // The owner sets revision 2 on the computer. The 0.7.0 desktop refuses it and keeps steering by revision 1;
+    // the 0.7.0 phone shows nothing from it, but knows the revision it would replace.
+    await set(w, w.owner, 2);
+    const desktop2 = await legacyDesktopInvolvementRead(desktop1.copy, await served(w.owner), ctx);
+    expect(desktop2.refused).toBe('set-by-non-human-device');
+    expect(desktop2.copy).toEqual(desktop1.copy);
+    expect(legacyDesktopInvolvementSteering(desktop2.copy, ctx)).toEqual(r1);
+    const handset2 = await legacyPhoneInvolvementRead(handset1, await served(phone), ctx);
+    expect(handset2).toMatchObject({ status: 'invalid', record: null, revision: 2 });
+
+    // That phone saves over it with the revision it was served, and both readers take the result.
+    const r3 = await set(w, phone, handset2.revision + 1);
+    const desktop3 = await legacyDesktopInvolvementRead(desktop2.copy, await served(w.owner), ctx);
+    expect(desktop3.refused).toBeNull();
+    expect(legacyDesktopInvolvementSteering(desktop3.copy, ctx)).toEqual(r3);
+    const handset3 = await legacyPhoneInvolvementRead(handset2, await served(phone), ctx);
+    expect(handset3).toMatchObject({ status: 'ready', record: r3, revision: 3 });
+  });
+
+  it('a desktop that verified nothing yet stays without a preference, then takes a phone record', async () => {
+    const w = await claimRelay();
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    const { host } = await enrollHost(w);
+    const ctx = directory(w, [w.owner, tablet, host]);
+
+    await set(w, w.owner, 1);
+    const before = await legacyDesktopInvolvementRead(
+      LEGACY_DESKTOP_INVOLVEMENT_START,
+      await served(host),
+      ctx,
+    );
+    expect(before.refused).toBe('set-by-non-human-device');
+    expect(before.copy).toEqual(LEGACY_DESKTOP_INVOLVEMENT_START);
+    expect(legacyDesktopInvolvementSteering(before.copy, ctx)).toBeNull();
+
+    const r2 = await set(w, tablet, 2);
+    const after = await legacyDesktopInvolvementRead(before.copy, await served(host), ctx);
+    expect(after.refused).toBeNull();
+    expect(legacyDesktopInvolvementSteering(after.copy, ctx)).toEqual(r2);
   });
 });

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Role } from './schema.js';
 import {
+  INVOLVEMENT_SETTER_ROLES,
   ActionBody,
   AttachmentCompleteBody,
   AttachmentReserveBody,
@@ -520,7 +521,7 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     method: 'PUT',
     path: '/involvement',
     auth: 'signed',
-    roles: HUMANS,
+    roles: INVOLVEMENT_SETTER_ROLES,
     summary: 'Replace the involvement preference (compare-and-swap on its revision)',
     request: InvolvementBody,
     response: InvolvementReceipt,

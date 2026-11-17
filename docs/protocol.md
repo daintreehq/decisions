@@ -29,9 +29,10 @@ All binary values are unpadded base64url. All timestamps on the wire are ISO-860
 | `phone`, `tablet` | Paired human devices                             | answer, override, confirm-proxy, decline (cancel an open question), settings, push, voice                                                                                 |
 
 With the extensions in sections 16 to 18 and 20, a phone or tablet also sends human messages, attaches phone images,
-asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its `originating_device_id`, whatever its role)
-publishes that question's agent messages and pane snapshots and reports delivery of its human messages. The owner
-desktop may also send the person's human messages (section 16).
+asks for pane snapshots and sets the involvement preference, and the desktop that published a question (its
+`originating_device_id`, whatever its role) publishes that question's agent messages and pane snapshots and reports
+delivery of its human messages. The owner desktop may also send the person's human messages (section 16) and set
+the involvement preference (section 20).
 
 A role is part of the owner-signed **device certificate**; the relay and every client check it. Provenance follows
 the signer (`provenanceForSigner` in `state.ts`):
@@ -40,8 +41,9 @@ the signer (`provenanceForSigner` in `state.ts`):
 - the `owner-desktop` may also sign `answer` on an open question, `human-required` ones included: **human-desktop**
   provenance, the person's answer made on the computer. The owner desktop certifies every other device, so this gives
   it nothing it could not get by pairing a phone of its own. It never signs `override` or `confirm-proxy`. Its other
-  human actions are the person's thread message (section 16) and a decline, signed as a `cancel` that carries
-  `decline: true` (section 6.1); phone images, snapshot refresh, push and voice keep their roles;
+  human actions are the person's thread message (section 16), a decline, signed as a `cancel` that carries
+  `decline: true` (section 6.1), and setting the involvement preference (section 20); phone images, snapshot
+  refresh, push and voice keep their roles;
 - a `desktop-host` never signs `answer`, `override` or `confirm-proxy`;
 - desktops sign `proxy-answer`: **proxy** provenance. A `human-required` question can never be satisfied by a proxy.
 
@@ -756,7 +758,8 @@ desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` run
 
 ## 20. Involvement preference (`involvement-v1`)
 
-How involved the person wants to be right now, set on a phone or tablet and read by agents through their desktop.
+How involved the person wants to be right now, set on a phone, a tablet or the owner desktop and read by agents through
+their desktop.
 There is one per installation. It describes how the person wants to take part, never what an agent may do: no
 requirement, workflow gate, proxy rule or approval reads it (`enforceRequirement` and `applyAction` take nothing from
 it), and a consensus among agents is a recommendation, never an answer. A `human-required` question still goes to the
@@ -769,9 +772,9 @@ person, and a preparation must not stop or indefinitely delay it.
 | `involve-early` | ask while exploring the options, rather than waiting for a finished recommendation                                                                                           |
 | `recommend`     | consult `consult_count` other agents first, try to agree, then bring the recommendation and its reasoning; if they cannot agree, bring the disagreement and the alternatives |
 
-`InvolvementRecord` (signed by the phone or tablet that sets it, not encrypted): `{v, type: "involvement.preference",
-installation_id, revision, normal_mode, consult_count, override, created_at, signer_device_id, signature}`.
-`consult_count` is 1 to 8 (`involvementConsultMax`) other agents, the asking agent excluded, and applies to
+`InvolvementRecord` (signed by the phone, tablet or owner desktop that sets it, not encrypted): `{v, type:
+"involvement.preference", installation_id, revision, normal_mode, consult_count, override, created_at, signer_device_id,
+signature}`. `consult_count` is 1 to 8 (`involvementConsultMax`) other agents, the asking agent excluded, and applies to
 `recommend`. `override` is null or `{mode, until}`: a temporary mode in force while `now < until`, after which the
 normal mode applies again. `created_at` is the signer's clock: shown, never used to order records.
 
@@ -779,16 +782,23 @@ normal mode applies again. `created_at` is the signer's clock: shown, never used
 from `until` on. Nothing is written when a temporary mode ends: no timer, event or new revision. A reader that only
 compares revisions therefore misses the end of a temporary mode; it compares the mode and `until` too.
 
-**Setting.** `PUT /involvement` (phone, tablet) `InvolvementBody {protocol_version, idempotency_key, preference}` →
-`200 InvolvementReceipt {revision, event_seq}`. The record must name this installation and the authenticated device as
-its signer, and its signature must verify (`400 validation_error`). Its `revision` must be exactly one more than the
-stored one (0 when there is none); anything else is `409 revision_conflict {details.latest_revision}`, so two phones
-saving at once cannot both win, and a phone that lost reads the preference again rather than re-signing over the
-other's choice. A temporary mode must end after relay time and at most 30 days (`involvementOverrideMaxMs`) plus the
-request skew ahead (`involvementWriteIssue`, `400 validation_error`). The revision, the end time and the device's
-standing are checked again in the final transaction. A retry with the same `idempotency_key` and body returns the
-original receipt and changes nothing, even after a later write or after its temporary mode ended; the receipt holds
-the revision and event sequence only, never the preference.
+**Setting.** `PUT /involvement` (phone, tablet, owner desktop; never a `desktop-host`) `InvolvementBody
+{protocol_version, idempotency_key, preference}` → `200 InvolvementReceipt {revision, event_seq}`. The record must name
+this installation and the authenticated device as its signer, and its signature must verify (`400 validation_error`).
+Its `revision` must be exactly one more than the stored one (0 when there is none); anything else is `409
+revision_conflict {details.latest_revision}`, so two devices saving at once cannot both win, the owner desktop included,
+and the one that lost reads the preference again rather than re-signing over the other's choice. A temporary mode must
+end after relay time and at most 30 days (`involvementOverrideMaxMs`) plus the request skew ahead
+(`involvementWriteIssue`, `400 validation_error`). The revision, the end time and the device's standing are checked
+again in the final transaction. A retry with the same `idempotency_key` and body returns the original receipt and
+changes nothing, even after a later write or after its temporary mode ended; the receipt holds the revision and event
+sequence only, never the preference.
+
+**Where it was set.** The signer's certified role says where the person set the preference (`involvementSetOn`):
+`computer` for the owner desktop, `phone` for a phone or tablet. A reader takes it from the certificate it verified the
+record with, never from the relay. It is for display only: a preference steers agents the same way wherever it was
+set, and changes nothing an agent may do or what needs approval. The owner desktop certifies every other device, so
+setting the preference gives it nothing it could not get by pairing a phone of its own.
 
 **Reading.** `GET /involvement` (any paired device) → `InvolvementResponse {preference, received_at}`: the latest
 signed record and when the relay accepted it, or nulls. The relay keeps no older record. Reading creates nothing: no
@@ -799,20 +809,29 @@ event, job or notification.
 to clients that declared `involvement-v1`. It only says "read again": its revision is the relay's word and is never
 trusted on its own. Setting the preference never triggers a push.
 
-**Verifying.** Readers verify the record before using it: this installation's, signed by a phone or tablet whose
-certificate chains to the pinned owner, with a signature covering every field. A record whose signer is revoked (in
-the device directory, or by a `device.revoked` the reader saw) steers nothing. A desktop keeps the highest revision it
-has verified and refuses a lower one, a different record at the same revision, and no record at all once it has
-verified one, so a relay cannot roll the preference back or swap it. A signature proves who set a record, not that it
-is the newest: a relay can still withhold a newer one, which is why readers report when they last confirmed it.
+**Verifying.** Readers verify the record before using it: this installation's, signed by the pinned owner desktop or by
+a phone or tablet whose certificate chains to it, never by a `desktop-host`, with a signature covering every field. A
+record whose signer is revoked (in the device directory, or by a `device.revoked` the reader saw) steers nothing. A
+desktop keeps the highest revision it has verified and refuses a lower one, a different record at the same revision, and
+no record at all once it has verified one, so a relay cannot roll the preference back or swap it. A signature proves who
+set a record, not that it is the newest: a relay can still withhold a newer one, which is why readers report when they
+last confirmed it.
+
+**Readers from before the owner desktop could set it** (0.7.0 and earlier) take a record only from a phone or tablet.
+A desktop refuses an owner-desktop record and keeps the copy it last verified, so the record never steers its agents;
+it reads again each time it retries until a phone or tablet replaces the record. A phone shows nothing from it and
+never presents it as the person's, and can replace it, since it knows the served revision. A refusal sets no revision
+floor, so either takes the next phone- or tablet-signed record. `@daintreehq/decisions-protocol/fixtures` freezes both
+readers (`legacyDesktopInvolvementRead`, `legacyPhoneInvolvementRead`) and `worker/tests/legacy-client.test.ts` runs
+them against the relay.
 
 **Storage and deletion.** The relay keeps the latest record and when it accepted it. A questions wipe
 (`POST /admin/delete-data {scope: "questions"}`) keeps it; `scope: "everything"` removes it.
 
-| Route              | Role          | Notes                                                                      |
-| ------------------ | ------------- | -------------------------------------------------------------------------- |
-| `GET /involvement` | any           | `InvolvementResponse`; nulls when nobody has set one                       |
-| `PUT /involvement` | phone, tablet | `InvolvementBody` → `200 InvolvementReceipt`; compare-and-swap on revision |
+| Route              | Role                         | Notes                                                                      |
+| ------------------ | ---------------------------- | -------------------------------------------------------------------------- |
+| `GET /involvement` | any                          | `InvolvementResponse`; nulls when nobody has set one                       |
+| `PUT /involvement` | owner-desktop, phone, tablet | `InvolvementBody` → `200 InvolvementReceipt`; compare-and-swap on revision |
 
 ### 20.1 Preparation reports
 

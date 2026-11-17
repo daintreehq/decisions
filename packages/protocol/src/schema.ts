@@ -20,8 +20,9 @@ export const HUMAN_ROLES: readonly Role[] = ['phone', 'tablet'];
 /**
  * Who may sign the person's first `answer`: a phone or tablet, or the owner desktop, which certifies every other
  * device. Never a `desktop-host`. Everything else a human does stays with `HUMAN_ROLES`, but for thread messages,
- * which have their own list, `HUMAN_MESSAGE_ROLES`, and a decline: the owner desktop signs one as a `cancel` that
- * carries `decline: true` (`isPersonDecline` in `state.ts`).
+ * which have their own list, `HUMAN_MESSAGE_ROLES`, a decline: the owner desktop signs one as a `cancel` that
+ * carries `decline: true` (`isPersonDecline` in `state.ts`), and setting the involvement preference
+ * (`INVOLVEMENT_SETTER_ROLES`).
  */
 export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 /**
@@ -29,6 +30,11 @@ export const HUMAN_ANSWER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 't
  * which certifies every other device. Never a `desktop-host`. Phone images, voice and push stay with `HUMAN_ROLES`.
  */
 export const HUMAN_MESSAGE_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
+/**
+ * Who may sign the involvement preference (docs/protocol.md section 20): a phone or tablet, or the owner desktop.
+ * Never a `desktop-host`. A separate permission from answering, which happens to name the same roles.
+ */
+export const INVOLVEMENT_SETTER_ROLES: readonly Role[] = ['owner-desktop', 'phone', 'tablet'];
 
 export const QuestionStatus = z.enum([
   'open',

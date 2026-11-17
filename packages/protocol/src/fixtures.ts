@@ -14,6 +14,20 @@ export {
   legacySocketReceive,
 } from './legacy-0.3.0.js';
 export type { LegacyCatchUp } from './legacy-0.3.0.js';
+export {
+  LEGACY_DESKTOP_INVOLVEMENT_START,
+  LEGACY_PHONE_INVOLVEMENT_START,
+  legacyDesktopInvolvementRead,
+  legacyDesktopInvolvementSteering,
+  legacyPhoneInvolvementRead,
+} from './legacy-involvement-0.7.0.js';
+export type {
+  LegacyDesktopInvolvement,
+  LegacyInvolvementContext,
+  LegacyInvolvementRecord,
+  LegacyInvolvementSigner,
+  LegacyPhoneInvolvement,
+} from './legacy-involvement-0.7.0.js';
 
 /*
  * Shared test data for thread messages, phone images and pane snapshots (docs/protocol.md sections 16-18), so

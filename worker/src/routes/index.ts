@@ -1,5 +1,10 @@
 import type { Role } from '@daintreehq/decisions-protocol';
-import { DESKTOP_ROLES, HUMAN_ANSWER_ROLES, HUMAN_ROLES } from '@daintreehq/decisions-protocol';
+import {
+  DESKTOP_ROLES,
+  HUMAN_ANSWER_ROLES,
+  HUMAN_ROLES,
+  INVOLVEMENT_SETTER_ROLES,
+} from '@daintreehq/decisions-protocol';
 import type { Handler } from '../room/types.js';
 import * as admin from './admin.js';
 import * as attachments from './attachments.js';
@@ -108,7 +113,7 @@ export const ROUTES: Route[] = [
   r('GET', '/settings', 'signed', push.getSettings, ANY),
   r('PUT', '/settings', 'signed', push.putSettings, ANY),
   r('GET', '/involvement', 'signed', involvement.getInvolvement, ANY),
-  r('PUT', '/involvement', 'signed', involvement.putInvolvement, HUMAN_ROLES),
+  r('PUT', '/involvement', 'signed', involvement.putInvolvement, INVOLVEMENT_SETTER_ROLES),
 
   r('POST', '/voice/session', 'signed', voice.voiceSession, HUMAN_ROLES),
 

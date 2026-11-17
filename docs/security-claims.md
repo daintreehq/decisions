@@ -15,7 +15,7 @@ This page says what Decisions protects, and just as importantly what it does not
 
 Ids, timestamps, requirement level (needed to enforce policy), question status, revision numbers, ciphertext sizes, which device acted, when you were notified, device labels you chose, push endpoints, IP addresses and ordinary request metadata. This reveals _activity patterns_ (for example that you answered something at 02:00), not content.
 
-Your notification settings (quiet hours and reminders) and your involvement preference are stored in plaintext: the relay sees whether you want agents to involve you early or bring you a recommendation, how many agents they should consult, and when a temporary setting ends. The involvement preference is signed by your phone, so the relay cannot change it or attribute it to another device. An agent's report of how it prepared a question travels inside the encrypted question.
+Your notification settings (quiet hours and reminders) and your involvement preference are stored in plaintext: the relay sees whether you want agents to involve you early or bring you a recommendation, how many agents they should consult, and when a temporary setting ends. The involvement preference is signed by the phone, tablet or computer you set it on, so the relay cannot change it or attribute it to another device. An agent's report of how it prepared a question travels inside the encrypted question.
 
 ## What is authenticated
 

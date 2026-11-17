@@ -191,7 +191,10 @@ export interface BuildInvolvementInput {
   createdAt?: string;
 }
 
-/** A signed `InvolvementRecord` (docs/protocol.md section 20), signed by the phone or tablet that sets it. */
+/**
+ * A signed `InvolvementRecord` (docs/protocol.md section 20), signed by the phone, tablet or owner desktop that
+ * sets it.
+ */
 export async function buildSignedInvolvement(i: BuildInvolvementInput): Promise<InvolvementRecord> {
   return (await signObject(i.signingKey, {
     v: PROTOCOL_VERSION,
