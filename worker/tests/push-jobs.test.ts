@@ -11,6 +11,7 @@ import {
 import { newId } from '@daintreehq/decisions-crypto';
 import { PRESENCE_META, presenceHold } from '../src/room/presence.js';
 import { PROXY_GRACE_MS } from '../src/routes/questions.js';
+import type { Room } from '../src/room/types.js';
 import {
   act,
   ask,
@@ -772,8 +773,7 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
   let w: World;
   let phone: Actor;
   const calls: { url: string; init: RequestInit }[] = [];
-  /** Pushes to this endpoint fail transiently. */
-  let failing: string | null = null;
+  let first: Awaited<ReturnType<typeof subscribe>>;
   /**
    * The least time left on a hold a test checks: the room's own alarm fires a due job by itself, so a hold that
    * ends sooner could send while the test still expects nothing.
@@ -782,14 +782,13 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
 
   beforeEach(async () => {
     calls.length = 0;
-    failing = null;
     vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
       calls.push({ url: String(url), init });
-      return new Response(null, { status: String(url) === failing ? 503 : 201 });
+      return new Response(null, { status: 201 });
     }) as never);
     w = await claimRelay();
     phone = await pairDevice(w);
-    await subscribe(phone);
+    first = await subscribe(phone);
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -880,26 +879,25 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
     expect(calls).toEqual([]);
   });
 
-  it('reads only a current, well-formed lease', async () => {
-    const holds = (value: string | null) =>
-      inRoom((room) => {
-        if (value === null) room.run(`DELETE FROM meta WHERE key = ?`, PRESENCE_META);
-        else room.setMeta(PRESENCE_META, value);
-        const now = Date.now();
-        return presenceHold(room, { question_id: 'q_presence01', created_at: now }, now);
-      });
-    for (const v of [null, '', 'soon', 'NaN', 'Infinity', String(Date.now() - 1)])
-      expect(await holds(v), String(v)).toBeNull();
-    // A lease ending exactly now has lapsed.
-    expect(
-      await inRoom((room) => {
-        const now = Date.now();
-        room.setMeta(PRESENCE_META, String(now));
-        return presenceHold(room, { question_id: 'q_presence01', created_at: now }, now);
-      }),
-    ).toBeNull();
-    const until = Date.now() + 30_000;
-    expect(await holds(String(until))).toBe(until);
+  it('reads only a current, well-formed lease, and nothing else without one', () => {
+    const now = 1_800_000_000_000;
+    const q = { question_id: 'q_presence01', created_at: now };
+    /** A room holding `lease`, whose question history must not be read unless the lease is current. */
+    const room = (lease: string | undefined, history = false) =>
+      ({
+        getMeta: (key: string) => (key === PRESENCE_META ? lease : undefined),
+        q1: () => {
+          if (!history) throw new Error('read the question history without a current lease');
+          return undefined;
+        },
+      }) as unknown as Room;
+    // Absent, malformed, lapsed, or ending exactly now: no hold.
+    for (const v of [undefined, '', 'soon', 'NaN', 'Infinity', String(now - 1), String(now)])
+      expect(presenceHold(room(v), q, now), String(v)).toBeNull();
+    expect(presenceHold(room(String(now + 30_000), true), q, now)).toBe(now + 30_000);
+    expect(presenceHold(room(String(now + 600_000), true), q, now)).toBe(
+      now + LIMITS.presenceHoldMs,
+    );
   });
 
   it('holds a human-required question while the lease is current, and sends once it lapses', async () => {
@@ -1037,23 +1035,21 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
 
   it("keeps a retry's attempts and finished sends while it is held", async () => {
     const second = await subscribe(phone);
-    failing = second.endpoint;
-    const { questionId } = await ask(w);
-    // No lease yet: the push goes at once, reaching one subscription and failing on the other.
-    await vi.waitFor(async () => expect((await heldPush(questionId))?.attempt_count).toBe(1), {
-      timeout: 5000,
-      interval: 20,
-    });
-    const { payload } = (await heldPush(questionId))!;
-    expect(JSON.parse(payload).done).toHaveLength(1);
-
     await present(w.owner);
-    calls.length = 0;
+    const { questionId } = await ask(w);
+    // A retry, as a transient failure leaves it: the first subscription got the push, the second did not.
+    const payload = JSON.stringify({ done: [first.id] });
+    await inRoom((room) =>
+      room.run(
+        `UPDATE scheduled_jobs SET attempt_count = 1, payload = ? WHERE kind = 'notify_new' AND question_id = ?`,
+        payload,
+        questionId,
+      ),
+    );
     await runDue('notify_new');
     expect(calls).toEqual([]);
     expect(await heldPush(questionId)).toMatchObject({ attempt_count: 1, payload });
 
-    failing = null;
     await leaseEnds(Date.now() - 1);
     await runDue('notify_new');
     expect(calls.map((c) => c.url)).toEqual([second.endpoint]);
