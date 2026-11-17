@@ -101,16 +101,26 @@ describe('verifying the preference the relay serves', () => {
     }
   });
 
-  it('only a phone or tablet speaks for the person: a desktop’s record is refused', async () => {
+  it('shows a record the owner computer signed', async () => {
     const w = await makeWorld();
-    const desktop = await otherDesktop(w);
-    for (const signer of [w.owner, desktop]) {
-      const r = await sign(w, draft(), 0, signer);
-      expect(await verifyInvolvementResponse(served(r), ctx(w))).toEqual({
-        ok: false,
-        reason: 'only a phone or tablet sets the involvement preference',
-      });
-    }
+    const r = await sign(
+      w,
+      draft({ override: { mode: 'involve-early', until: iso(T0 + HOUR) } }),
+      1,
+      w.owner,
+    );
+    const v = await verifyInvolvementResponse(served(r), ctx(w));
+    expect(v).toMatchObject({ ok: true, value: { record: r, receivedAt: iso(T0) } });
+  });
+
+  it('a desktop host never speaks for the person: its record is refused', async () => {
+    const w = await makeWorld();
+    const host = await otherDesktop(w);
+    const r = await sign(w, draft(), 0, host);
+    expect(await verifyInvolvementResponse(served(r), ctx(w))).toEqual({
+      ok: false,
+      reason: 'a desktop host never sets the involvement preference',
+    });
   });
 
   it('refuses a revoked phone’s record, another installation’s and an unknown signer’s', async () => {

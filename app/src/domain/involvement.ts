@@ -1,4 +1,5 @@
 import {
+  INVOLVEMENT_SETTER_ROLES,
   InvolvementResponse,
   LIMITS,
   effectiveInvolvement,
@@ -6,7 +7,6 @@ import {
   type InvolvementMode,
   type InvolvementRecord,
   type PreparationReport,
-  type Role,
 } from '@daintreehq/decisions-protocol';
 import { buildSignedInvolvement, verifyObject } from '@daintreehq/decisions-crypto';
 import type { TrustStore } from './trust.js';
@@ -54,8 +54,6 @@ export interface InvolvementState {
   receivedAt: string | null;
 }
 
-const HUMAN: readonly Role[] = ['phone', 'tablet'];
-
 /**
  * Checks a `GET /involvement` response before anything in it is shown: the record is for this installation, its
  * signer is a phone or tablet the pinned owner certified and that is not revoked, and the signature covers every
@@ -73,8 +71,8 @@ export async function verifyInvolvementResponse(
     return { ok: false, reason: 'preference belongs to another installation' };
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return { ok: false, reason: 'unknown signer' };
-  if (!HUMAN.includes(signer.role))
-    return { ok: false, reason: 'only a phone or tablet sets the involvement preference' };
+  if (!INVOLVEMENT_SETTER_ROLES.includes(signer.role))
+    return { ok: false, reason: 'a desktop host never sets the involvement preference' };
   if (signer.revokedAt) return { ok: false, reason: 'preference signer was revoked' };
   if (!(await verifyObject(signer.signingKey, record)))
     return { ok: false, reason: 'preference signature does not match' };
