@@ -1,6 +1,7 @@
 import {
   CREATOR_MISSING_FEATURE,
   Id,
+  type CryptoEnvelope,
   type ProtocolFeature,
   type SignedAction,
 } from '@daintreehq/decisions-protocol';
@@ -47,10 +48,12 @@ export type AnswerQuestionRequest = z.output<typeof AnswerQuestionInput>;
 
 /**
  * Where an answer stands, for a UI to show:
- * - `queued`: committed locally and not yet accepted; the outbox keeps sending it.
+ * - `queued`: committed locally and not settled yet: the relay could not be reached, the answer waits behind its
+ *   question's unsent create or cancellation, or the bridge is stopped. The outbox keeps sending it.
  * - `sent`: the relay committed it. The asking desktop types it, as it would a phone's.
  * - `already-answered`: another answer (from a phone, the decision model or this computer) was committed first.
- * - `changed`: the question moved on from the revision the person reviewed (it was reopened); review it again.
+ * - `changed`: the question is open at another revision than the one the person reviewed (it was reopened); review
+ *   it again.
  * - `closed`: it expired, was cancelled or declined, or the relay has no such question (`not-found`).
  * - `unsupported`: the relay, or the computer that asked the question, does not take answers made on a computer yet.
  * - `rejected`: any other refusal, with the relay's error code.
@@ -73,28 +76,42 @@ export type OwnerAnswerResult = {
   expectedRevision: number;
 } & OwnerAnswerOutcome;
 
-/** The outbox payload of an `owner-answer` item: signed once, replayed byte for byte on every retry. */
+/**
+ * The outbox payload of an `owner-answer` item: signed once, replayed byte for byte on every retry. The signed
+ * action id is the answer id, and also the relay idempotency key.
+ */
 export interface OwnerAnswerPayload {
   signed: SignedAction;
-  /** SHA-256 of the canonical answer submitted, so a reused answer id is recognised as the same answer or refused. */
-  digest: string;
 }
 
-/** What is kept for each answer id: the submission, and its outcome once it has one. */
+/**
+ * What is kept for each answer id, written before its outbox item and kept after it: the submission, as the relay
+ * ciphertext it was signed with (so a reused id is compared by opening it, and nothing derived from the answer is
+ * stored in the clear), and its outcome once it has one.
+ */
 export interface OwnerAnswerRecord {
   question_id: string;
   expected_revision: number;
-  digest: string;
+  envelope: CryptoEnvelope;
   result: OwnerAnswerResult | null;
 }
 
+/** The meta key of an answer id's record. */
 export const ownerAnswerKey = (answerId: string) => `owner-answer:${answerId}`;
+/** The outbox id of an answer, kept apart from every other item's id whatever id the host chose. */
+export const ownerAnswerItemId = (answerId: string) => `owner-answer:${answerId}`;
 
 export function parseOwnerAnswerRecord(raw: string | null): OwnerAnswerRecord | null {
   if (!raw) return null;
   try {
     const r = JSON.parse(raw) as OwnerAnswerRecord;
-    return r && typeof r.question_id === 'string' && typeof r.digest === 'string' ? r : null;
+    return r &&
+      typeof r.question_id === 'string' &&
+      typeof r.expected_revision === 'number' &&
+      r.envelope &&
+      typeof r.envelope === 'object'
+      ? r
+      : null;
   } catch {
     return null;
   }

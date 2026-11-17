@@ -223,6 +223,29 @@ describe('HTTP MCP: protocol', () => {
     ).toBe(-32602);
     expect((await raw(mcp, { body: '[]' })).status).toBe(400);
   });
+  it("a pane's bearer token cannot reach answerQuestion, as a tool or as a method", async () => {
+    const { mcp, relay, bridge } = await boot();
+    relay.features = ['thread-messages-v1', 'owner-desktop-answers-v1'];
+    const asked = await call(mcp, 'ask_human', { question: 'Ship it?' });
+    const questionId = asked.structuredContent.question_id as string;
+    const args = { questionId, question_id: questionId, expectedRevision: 0, text: 'yes' };
+    for (const name of ['answer_question', 'answerQuestion']) {
+      const r = await raw(mcp, { body: rpc('tools/call', { name, arguments: args }) });
+      expect(JSON.parse(r.body).error.code).toBe(-32602);
+    }
+    for (const method of ['answerQuestion', 'answer_question']) {
+      expect(JSON.parse((await raw(mcp, { body: rpc(method, args) })).body).error.code).toBe(
+        -32601,
+      );
+    }
+    await bridge.pump();
+    expect(relay.answers).toEqual([]);
+    expect(
+      (await bridge.ctx.store.dueOutbox(Number.MAX_SAFE_INTEGER, 100)).filter(
+        (o) => o.kind === 'owner-answer',
+      ),
+    ).toEqual([]);
+  });
   it('GET/DELETE/OPTIONS are 405 without CORS headers', async () => {
     const { mcp } = await boot();
     for (const method of ['GET', 'DELETE', 'OPTIONS']) {

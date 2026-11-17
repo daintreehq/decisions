@@ -17,6 +17,7 @@ import {
   buildSignedAction,
   buildSignedMessage,
   buildSignedQuestion,
+  decryptEnvelope,
   encryptAttachment,
   encryptEnvelope,
   newId,
@@ -49,6 +50,7 @@ import { Mutex } from './mutex.js';
 import {
   OWNER_ANSWER_FEATURE,
   OWNER_ANSWER_TIMEOUT_MS,
+  ownerAnswerItemId,
   ownerAnswerKey,
   ownerAnswerRefusal,
   parseOwnerAnswerRecord,
@@ -478,7 +480,8 @@ export class Publisher {
    * encrypted and signed now, against the revision the person reviewed, and the outbox posts it, replaying the same
    * body on every retry. It needs no local row, so a Remote Host's question is answered the same way; the owner's own
    * question is first checked against its rules, so an answer its desktop would refuse is not sent. An answer id seen
-   * before returns that submission (with its outcome once it has one) instead of signing a second answer.
+   * before returns that submission (with its outcome once it has one) instead of signing a second answer, and is
+   * refused for any other answer. Runs under `ctx.lock`, as settling does, so the two never interleave.
    */
   enqueueOwnerAnswer(
     input: AnswerQuestionRequest,
@@ -512,54 +515,43 @@ export class Publisher {
         );
       }
       const content = parsed.data;
-      const digest = await sha256Hex(
-        canonicalize({ question_id: qid, expected_revision: input.expectedRevision, content }),
-      );
       const answerId = input.answerId ?? newId(ctx.now());
       const key = ownerAnswerKey(answerId);
-      const pending: OwnerAnswerRecord = {
-        question_id: qid,
-        expected_revision: input.expectedRevision,
-        digest,
-        result: null,
-      };
+      const itemId = ownerAnswerItemId(answerId);
       const record = parseOwnerAnswerRecord(await ctx.store.getMeta(key));
-      const queued = (await ctx.store.outboxFor(qid)).find((o) => o.id === answerId);
-      if (record || queued) {
-        const same = record
-          ? record.question_id === qid && record.digest === digest
-          : queued!.kind === 'owner-answer' &&
-            (queued!.payload as OwnerAnswerPayload).digest === digest;
-        if (!same) {
+      if (record) {
+        if (!(await this.sameOwnerAnswer(record, qid, input.expectedRevision, content))) {
           throw new BridgeError(
             'validation_error',
             'this answer id was already used for a different answer',
           );
         }
-        if (record?.result) return { answerId, settled: record.result };
-        if (queued) {
-          if (!record) await ctx.store.setMeta(key, JSON.stringify(pending));
+        if (record.result) return { answerId, settled: record.result };
+        if ((await ctx.store.outboxFor(qid)).some((o) => o.id === itemId))
           return { answerId, settled: null };
-        }
-        // A record with neither an item nor an outcome was never sent (the item is written first and deleted
-        // last): sign it again below.
+        // Reserved but never queued (the record is written first and the item deleted only once settled): nothing
+        // was sent, so it is signed again below.
       }
 
-      // The owner's own question: hold the answer to the rules its desktop checks it against (inbox.ts).
+      // The owner's own question: hold the answer to the rules its desktop checks it against (inbox.ts). Content it
+      // cannot open here, its desktop cannot open either, and would refuse the answer for.
       const row = await ctx.store.getQuestion(qid);
       if (row && !row.history_only) {
-        const question = await openQuestionContent(ctx, row).then(
-          (q) => q ?? {},
-          () => null,
-        );
-        const broken =
-          question &&
-          answerRuleViolation(
-            question,
-            ctx.policy.get(row.origin.workflow_gate_id),
-            content.selected_option_ids,
-            content.text ?? '',
+        let question: Partial<DecisionContentV1>;
+        try {
+          question = (await openQuestionContent(ctx, row)) ?? {};
+        } catch {
+          throw new BridgeError(
+            'invalid_state',
+            "this question's content cannot be opened on this computer, so it cannot be answered here",
           );
+        }
+        const broken = answerRuleViolation(
+          question,
+          ctx.policy.get(row.origin.workflow_gate_id),
+          content.selected_option_ids,
+          content.text ?? '',
+        );
         if (broken) {
           throw new BridgeError(
             'validation_error',
@@ -590,9 +582,17 @@ export class Publisher {
         actionId: answerId,
       });
       const now = ctx.now();
-      const payload: OwnerAnswerPayload = { signed, digest };
+      // The id is reserved before the item exists, so a crash in between leaves a record that is signed again.
+      const reserved: OwnerAnswerRecord = {
+        question_id: qid,
+        expected_revision: input.expectedRevision,
+        envelope,
+        result: null,
+      };
+      await ctx.store.setMeta(key, JSON.stringify(reserved));
+      const payload: OwnerAnswerPayload = { signed };
       await ctx.store.putOutbox({
-        id: answerId,
+        id: itemId,
         kind: 'owner-answer',
         question_id: qid,
         payload,
@@ -601,7 +601,6 @@ export class Publisher {
         created_at: now,
         last_error: null,
       });
-      await ctx.store.setMeta(key, JSON.stringify(pending));
       await ctx.audit.log({
         event: 'owner-answer.queued',
         question_id: qid,
@@ -610,6 +609,28 @@ export class Publisher {
       });
       return { answerId, settled: null };
     });
+  }
+
+  /** Whether a stored submission is this answer: the same question and revision, and the same content once opened. */
+  private async sameOwnerAnswer(
+    record: OwnerAnswerRecord,
+    questionId: string,
+    expectedRevision: number,
+    content: unknown,
+  ): Promise<boolean> {
+    if (record.question_id !== questionId || record.expected_revision !== expectedRevision)
+      return false;
+    try {
+      const prior = await decryptEnvelope(record.envelope, this.ctx.identity.epochs, {
+        installationId: this.ctx.identity.config.installationId,
+        questionId,
+        recordType: 'answer',
+        revision: expectedRevision + 1,
+      });
+      return canonicalize(prior) === canonicalize(content);
+    } catch {
+      return false;
+    }
   }
 
   /** Where an owner-desktop answer stands, by its id; null for an id never submitted on this store. */
@@ -768,12 +789,17 @@ export class Publisher {
 
   /**
    * Send everything that is due, or with `only` that one item if it is due and nothing it must wait for is pending.
-   * Stops at the first transient failure so ordering is preserved. One flush runs at a time.
+   * Stops at the first transient failure so ordering is preserved. One flush runs at a time; `proceed`, asked once
+   * this flush's turn comes, can call it off (a bridge stopped while it waited).
    */
   flush(
-    opts: { only?: string } = {},
+    opts: { only?: string; proceed?: () => boolean } = {},
   ): Promise<{ sent: number; failed: number; created: string[] }> {
-    return this.flushing.run(() => this.flushDue(opts.only));
+    return this.flushing.run(() =>
+      opts.proceed && !opts.proceed()
+        ? Promise.resolve({ sent: 0, failed: 0, created: [] })
+        : this.flushDue(opts.only),
+    );
   }
 
   private async flushDue(
@@ -802,41 +828,58 @@ export class Publisher {
           p.filter((o) => o.id !== it.id),
         );
     };
-    /** Store an owner-desktop answer's outcome, then drop its item and tell the host (`PublisherHooks`). */
+    /** Drop a settled owner-desktop answer's item and tell the host (`PublisherHooks`). */
+    const finish = async (item: OutboxItem, result: OwnerAnswerResult) => {
+      await ctx.lock.run(() => remove(item));
+      try {
+        this.hooks.onOwnerAnswer?.(result);
+      } catch {
+        /* the host's listener; the outcome is stored either way */
+      }
+    };
+    /**
+     * Store an owner-desktop answer's outcome, then drop its item and tell the host. Under `ctx.lock`, like
+     * `enqueueOwnerAnswer`, so a repeated submission never sees the item gone without its outcome.
+     */
     const settle = async (item: OutboxItem, outcome: SettledOwnerAnswer) => {
-      const p = item.payload as OwnerAnswerPayload;
+      const { signed } = item.payload as OwnerAnswerPayload;
       const result = {
-        answerId: item.id,
+        answerId: signed.record.action_id,
         questionId: item.question_id,
-        expectedRevision: p.signed.record.expected_revision,
+        expectedRevision: signed.record.expected_revision,
         ...outcome,
       } as OwnerAnswerResult;
       const record: OwnerAnswerRecord = {
         question_id: item.question_id,
         expected_revision: result.expectedRevision,
-        digest: p.digest,
+        envelope: signed.envelope!,
         result,
       };
-      await ctx.store.setMeta(ownerAnswerKey(item.id), JSON.stringify(record));
-      await remove(item);
-      await ctx.audit.log({
-        event: outcome.status === 'sent' ? 'question.owner-answer' : 'outbox.owner-answer.rejected',
-        question_id: item.question_id,
-        provenance: 'human-desktop',
-        result:
-          outcome.status === 'closed'
-            ? `closed:${outcome.reason}`
-            : outcome.status === 'unsupported'
-              ? `unsupported:${outcome.by}`
-              : outcome.status === 'rejected'
-                ? outcome.code
-                : outcome.status,
+      await ctx.lock.run(async () => {
+        await ctx.store.setMeta(ownerAnswerKey(result.answerId), JSON.stringify(record));
+        await remove(item);
       });
       try {
         this.hooks.onOwnerAnswer?.(result);
       } catch {
         /* the host's listener; the outcome is stored either way */
       }
+      await ctx.audit
+        .log({
+          event:
+            outcome.status === 'sent' ? 'question.owner-answer' : 'outbox.owner-answer.rejected',
+          question_id: item.question_id,
+          provenance: 'human-desktop',
+          result:
+            outcome.status === 'closed'
+              ? `closed:${outcome.reason}`
+              : outcome.status === 'unsupported'
+                ? `unsupported:${outcome.by}`
+                : outcome.status === 'rejected'
+                  ? outcome.code
+                  : outcome.status,
+        })
+        .catch(() => undefined);
     };
     // Read well past the batch: items that must wait their turn are skipped without counting, so a long thread
     // queued behind a backed-off create never crowds other questions out of the batch.
@@ -844,12 +887,17 @@ export class Publisher {
       if (only !== undefined && item.id !== only) continue;
       if (attempted >= OUTBOX_BATCH) break;
       if (item.kind !== 'create') {
-        // Per-question ordering: an action must never overtake its own (possibly backed-off) create, and a
-        // message never overtakes an earlier message in its thread, or a later "no reply needed" could land
-        // before the question it settles.
+        // Per-question ordering: an action must never overtake its own (possibly backed-off) create, a message
+        // never overtakes an earlier message in its thread, or a later "no reply needed" could land before the
+        // question it settles, and the person's answer never overtakes a withdrawal already queued.
         const pending = await pendingOf(item.question_id);
         if (!pending.some((o) => o.id === item.id)) continue; // dropped earlier in this flush
-        if (pending.some((o) => o.kind === 'create')) continue;
+        if (
+          pending.some(
+            (o) => o.kind === 'create' || (item.kind === 'owner-answer' && o.kind === 'cancel'),
+          )
+        )
+          continue;
         if (
           item.kind === 'message' &&
           pending.some((o) => o.kind === 'message' && messageSeq(o) < messageSeq(item))
@@ -904,6 +952,15 @@ export class Publisher {
         }
       }
       if (item.kind === 'owner-answer') {
+        // Settled before a crash kept it from being dropped: its outcome stands, and it is never sent again.
+        const { signed } = item.payload as OwnerAnswerPayload;
+        const stored = parseOwnerAnswerRecord(
+          await ctx.store.getMeta(ownerAnswerKey(signed.record.action_id)),
+        );
+        if (stored?.result) {
+          await finish(item, stored.result);
+          continue;
+        }
         // A relay that does not advertise owner-desktop answers would refuse the role: it is never sent one.
         let set: ReadonlySet<ProtocolFeature>;
         try {
@@ -1060,8 +1117,8 @@ export class Publisher {
    * so the request itself does not.
    */
   private async sendOwnerAnswer(item: OutboxItem): Promise<void> {
-    const p = item.payload as OwnerAnswerPayload;
-    await this.ctx.client.postAction('answer', item.question_id, item.id, p.signed, {
+    const { signed } = item.payload as OwnerAnswerPayload;
+    await this.ctx.client.postAction('answer', item.question_id, signed.record.action_id, signed, {
       retry: false,
       timeoutMs: OWNER_ANSWER_TIMEOUT_MS,
     });

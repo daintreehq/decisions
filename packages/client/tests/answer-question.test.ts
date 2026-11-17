@@ -13,9 +13,18 @@ import {
   type Identity,
   type LocalStore,
   type OwnerAnswerResult,
+  type WorkflowGate,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
-import { FakeRelay, FakeSink, makeHost, makeIdentity, origin, setupBridge } from './helpers.js';
+import {
+  FakeRelay,
+  FakeSink,
+  makeHost,
+  makeIdentity,
+  origin,
+  setupBridge,
+  tick,
+} from './helpers.js';
 
 /*
  * Issue #99: a host app publishes the person's answer from the owner desktop (`answerQuestion`), for the owner's own
@@ -41,6 +50,13 @@ function results(bridge: DecisionsBridge): OwnerAnswerResult[] {
 
 const answerPosts = (relay: FakeRelay) =>
   relay.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/answer'));
+
+const infoReads = (relay: FakeRelay) =>
+  relay.calls.filter((c) => c.method === 'GET' && c.path === '/api/v1/info').length;
+
+/** A relay client that retries transient failures itself, as a default `RelayClient` does. */
+const retryingClient = (identity: Identity, relay: FakeRelay) =>
+  new RelayClient({ identity, fetch: relay.fetch, sleep: async () => {}, maxRetries: 3 });
 
 const ownerAnswers = async (store: LocalStore) =>
   (await store.dueOutbox(Number.MAX_SAFE_INTEGER, 100)).filter((o) => o.kind === 'owner-answer');
@@ -184,6 +200,116 @@ describe('answerQuestion on the owner’s own question', () => {
     expect(answerPosts(relay)).toEqual([]);
   });
 
+  it('holds the answer to the question’s gate: its choices, one at most, no text, and its allowed options', async () => {
+    const SHIP: WorkflowGate = {
+      gateId: 'ship/final',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+      choices: OPTIONS,
+    };
+    const LIMITED: WorkflowGate = {
+      gateId: 'ship/limited',
+      minRequirement: 'human-required',
+      policyVersion: 1,
+    };
+    const policy = new PolicyRegistry();
+    policy.register(SHIP);
+    policy.register(LIMITED);
+    const env = await setupBridge({ policy });
+    env.relay.features = [...FEATURES];
+    const ask = async (gate: string) =>
+      (
+        await env.bridge.registerQuestion({
+          origin: origin({ workflow_gate_id: gate }),
+          input: { question: 'Ship it?', options: OPTIONS },
+        })
+      ).questionId;
+    const ship = await ask(SHIP.gateId);
+    const limited = await ask(LIMITED.gateId);
+    await env.bridge.pump();
+    // Tightened after the question was asked: its desktop checks the answer against the gate as it is now.
+    policy.register({ ...LIMITED, policyVersion: 2, allowedOptionIds: ['approve'] });
+    const refused: [{ questionId: string; selectedOptionIds: string[]; text?: string }, RegExp][] =
+      [
+        [
+          { questionId: ship, selectedOptionIds: ['approve'], text: 'and a note' },
+          /text not allowed/,
+        ],
+        [{ questionId: ship, selectedOptionIds: ['approve', 'reject'] }, /too many choices/],
+        [{ questionId: limited, selectedOptionIds: ['reject'] }, /unknown option/],
+      ];
+    for (const [input, message] of refused) {
+      await expect(
+        env.bridge.answerQuestion({ ...input, expectedRevision: 0 }),
+      ).rejects.toMatchObject({ code: 'validation_error', message });
+    }
+    expect(await ownerAnswers(env.store)).toEqual([]);
+    expect(answerPosts(env.relay)).toEqual([]);
+    // What the gates do allow goes through.
+    expect(
+      await env.bridge.answerQuestion({
+        questionId: limited,
+        expectedRevision: 0,
+        selectedOptionIds: ['approve'],
+        text: 'Fine',
+      }),
+    ).toMatchObject({ status: 'sent' });
+  });
+
+  it('keeps an explicit approval of false and takes a text-only answer', async () => {
+    const { bridge, relay, identity, qid } = await ownQuestion();
+    const r = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      text: 'Neither: hold it until Monday',
+      explicitApproval: false,
+    });
+    expect(r.status).toBe('sent');
+    const content = await decryptEnvelope(relay.answers[0]!.action.envelope!, identity.epochs);
+    expect(content).toMatchObject({
+      selected_option_ids: [],
+      text: 'Neither: hold it until Monday',
+      explicit_approval: false,
+    });
+  });
+
+  it('refuses when the question’s own content cannot be opened, which its desktop would refuse too', async () => {
+    const { bridge, relay, store, qid } = await ownQuestion();
+    await store.updateQuestion(qid, { content_sealed: '{"not":"an envelope"}' });
+    await expect(
+      bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['approve'],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_state' });
+    expect(await ownerAnswers(store)).toEqual([]);
+    expect(answerPosts(relay)).toEqual([]);
+  });
+
+  it('never overtakes a withdrawal already queued for the question', async () => {
+    let t = Date.now();
+    const { bridge, relay, qid, seen } = await ownQuestion({ now: () => t });
+    relay.status5xx = 1; // the cancellation backs off
+    await bridge.cancelQuestion(qid);
+    await bridge.pump();
+    const r = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+    });
+    expect(r.status).toBe('queued');
+    expect(answerPosts(relay)).toEqual([]);
+
+    t += 10 * 60_000;
+    await bridge.pump();
+    const posts = relay.calls
+      .filter((c) => c.method === 'POST' && /\/(cancel|answer)$/.test(c.path))
+      .map((c) => c.path.split('/').at(-1));
+    expect(posts).toEqual(['cancel', 'answer']);
+    expect(seen).toEqual([{ ...r, status: 'closed', reason: 'cancelled' }]);
+  });
+
   it('waits behind its question’s unsent create, then follows it', async () => {
     let t = Date.now();
     const env = await setupBridge({ now: () => t });
@@ -240,6 +366,18 @@ describe('answerQuestion on a Remote Host’s question', () => {
       provenance: 'human',
       answeredOn: 'computer',
     });
+  });
+
+  it('reports a Host that has not declared desktop answers as the asking computer not supporting them', async () => {
+    const { relay, host, ownerSide, qid } = await hostQuestion();
+    relay.undeclared.add(host.identity.config.deviceId);
+    const r = await ownerSide.bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+    });
+    expect(r).toMatchObject({ status: 'unsupported', by: 'asking-desktop' });
+    expect(answerPosts(relay)).toHaveLength(1);
   });
 
   it('is refused on a Remote Host before anything is signed, queued or sent', async () => {
@@ -377,20 +515,67 @@ describe('answerQuestion results a UI can show', () => {
   it('a relay that stopped advertising them since it was last read refuses as unsupported', async () => {
     const { bridge, relay, qid } = await ownQuestion();
     relay.rejectAnswer = [{ status: 403, code: 'forbidden' }];
-    relay.holdAnswers = Promise.resolve().then(() => {
+    // Withdrawn once the answer is on its way, after the feature was read.
+    relay.onAnswer = () => {
       relay.features = ['thread-messages-v1'];
-    });
+    };
     const r = await bridge.answerQuestion({
       questionId: qid,
       expectedRevision: 0,
       selectedOptionIds: ['approve'],
     });
     expect(r).toMatchObject({ status: 'unsupported', by: 'relay' });
+    expect(answerPosts(relay)).toHaveLength(1);
+    expect(relay.rejectAnswer).toEqual([]);
+    expect(infoReads(relay)).toBe(2);
+  });
+
+  it('settles by the question’s state: a second answer finds it answered, a stale revision finds it changed', async () => {
+    const { bridge, relay, identity, qid } = await ownQuestion();
+    expect(
+      await bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['approve'],
+      }),
+    ).toMatchObject({ status: 'sent' });
+    expect(
+      await bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['reject'],
+      }),
+    ).toMatchObject({ status: 'already-answered' });
+
+    // Reopened at revision 2: the answer to revision 0 is not moved onto it; one to revision 2 is taken.
+    relay.answerState.set(qid, { status: 'open', revision: 2 });
+    expect(
+      await bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 0,
+        selectedOptionIds: ['reject'],
+      }),
+    ).toMatchObject({ status: 'changed' });
+    expect(
+      await bridge.answerQuestion({
+        questionId: qid,
+        expectedRevision: 2,
+        selectedOptionIds: ['reject'],
+      }),
+    ).toMatchObject({ status: 'sent', expectedRevision: 2 });
+    const last = relay.answers.at(-1)!.action;
+    expect(last.record.expected_revision).toBe(2);
+    expect(last.envelope!.aad.revision).toBe(3);
+    expect(
+      await decryptEnvelope(last.envelope!, identity.epochs, { questionId: qid, revision: 3 }),
+    ).toMatchObject({ selected_option_ids: ['reject'] });
   });
 
   it('an unreachable relay leaves it queued; the outbox resends the same signed body and reports the outcome', async () => {
     let t = Date.now();
-    const { bridge, relay, store, qid, seen } = await ownQuestion({ now: () => t });
+    const { bridge, relay, store, qid, seen, identity } = await ownQuestion({ now: () => t });
+    // A client that retries by itself: the answer's send must still be one attempt, left to the outbox.
+    bridge.ctx.client = retryingClient(identity, relay);
     relay.rejectAnswer = [{ status: 503, code: 'temporarily_unavailable' }];
     const r = await bridge.answerQuestion({
       questionId: qid,
@@ -398,6 +583,7 @@ describe('answerQuestion results a UI can show', () => {
       selectedOptionIds: ['approve'],
     });
     expect(r.status).toBe('queued');
+    expect(answerPosts(relay)).toHaveLength(1);
     expect(seen).toEqual([]);
     expect(await ownerAnswers(store)).toHaveLength(1);
 
@@ -416,7 +602,8 @@ describe('answerQuestion results a UI can show', () => {
 
   it('a reply lost after the relay committed it resolves as sent on the retry', async () => {
     let t = Date.now();
-    const { bridge, relay, qid, seen } = await ownQuestion({ now: () => t });
+    const { bridge, relay, qid, seen, identity } = await ownQuestion({ now: () => t });
+    bridge.ctx.client = retryingClient(identity, relay);
     relay.dropAnswerReply = 1;
     const r = await bridge.answerQuestion({
       questionId: qid,
@@ -424,6 +611,7 @@ describe('answerQuestion results a UI can show', () => {
       selectedOptionIds: ['approve'],
     });
     expect(r.status).toBe('queued');
+    expect(answerPosts(relay)).toHaveLength(1);
     // The committed answer arrives before the retry; it changes nothing about the outcome.
     await bridge.catchUp();
     expect((await bridge.getDecision(qid)).status).toBe('human-answered');
@@ -457,6 +645,55 @@ describe('answerQuestion results a UI can show', () => {
       code: 'validation_error',
       message: /already used/,
     });
+  });
+
+  it('an outcome stored before a crash kept its item from being dropped stands: the answer is not sent again', async () => {
+    let t = Date.now();
+    const { bridge, relay, store, qid, seen } = await ownQuestion({ now: () => t });
+    relay.rejectAnswer = [{ status: 503, code: 'temporarily_unavailable' }];
+    const r = await bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+    });
+    expect(r.status).toBe('queued');
+    // The crash: the outcome was stored, the item never deleted.
+    const key = `owner-answer:${r.answerId}`;
+    const settled = { ...r, status: 'unsupported' as const, by: 'asking-desktop' as const };
+    await store.setMeta(
+      key,
+      JSON.stringify({ ...JSON.parse((await store.getMeta(key))!), result: settled }),
+    );
+
+    t += 10 * 60_000;
+    await bridge.pump();
+    expect(answerPosts(relay)).toHaveLength(1);
+    expect(await ownerAnswers(store)).toEqual([]);
+    expect(await bridge.getAnswerResult(r.answerId)).toEqual(settled);
+    expect(seen).toEqual([settled]);
+  });
+
+  it('an answer waiting its turn when the bridge stops is not sent', async () => {
+    const { bridge, relay, store, qid } = await ownQuestion();
+    let release!: () => void;
+    relay.holdAnswers = new Promise<void>((r) => (release = r));
+    const first = bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['approve'],
+    });
+    while (answerPosts(relay).length === 0) await tick(1);
+    const second = bridge.answerQuestion({
+      questionId: qid,
+      expectedRevision: 0,
+      selectedOptionIds: ['reject'],
+    });
+    while ((await ownerAnswers(store)).length < 2) await tick(1);
+    await bridge.stop();
+    release();
+    expect(await first).toMatchObject({ status: 'sent' });
+    expect(await second).toMatchObject({ status: 'queued' });
+    expect(answerPosts(relay)).toHaveLength(1);
   });
 
   it('a queued answer survives a restart and is sent by the next bridge on the same store', async () => {

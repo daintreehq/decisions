@@ -18,7 +18,7 @@ import { Inbox } from './inbox.js';
 import { InvolvementSync, type InvolvementView } from './involvement.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
-import { AnswerQuestionInput, type OwnerAnswerResult } from './owner-answer.js';
+import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
 import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
 import {
   openAnswers,
@@ -520,12 +520,14 @@ export class DecisionsBridge {
    * question: the host passes the revision the person reviewed, and the answer is signed against it and never moved
    * to a later one. The owner's own question is checked against its options, text rule and gate first.
    *
-   * The answer is committed to the outbox, then sent once at once. The result says where it stands: `sent`;
-   * `already-answered` (another answer won); `changed` (the question moved past the reviewed revision); `closed`
-   * (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer that asked
-   * (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when the relay could not be reached,
-   * in which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
-   * outcome is reported on `answer`, this one included. Pass `answerId` to make a repeated submission the same answer.
+   * The answer is committed to the outbox, and one send is tried at once, in the outbox's order. The result says where
+   * it stands: `sent`; `already-answered` (another answer won); `changed` (the question is open at another revision);
+   * `closed` (expired, cancelled or declined, or unknown to the relay); `unsupported` by the relay or by the computer
+   * that asked (which has not declared `owner-desktop-answers-v1`); `rejected`; or `queued` when it is not settled yet
+   * (the relay could not be reached, it waits behind its question's create or withdrawal, or the bridge is stopped), in
+   * which case the outbox keeps sending it and its outcome arrives on `answer` (and from `getAnswerResult`). Every
+   * outcome is reported on `answer` by the process that settles it, this one included. Pass `answerId` to make a
+   * repeated submission the same answer.
    *
    * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed. This is a host API: it is
    * not an MCP tool, and a pane's bearer token never reaches it.
@@ -548,9 +550,13 @@ export class DecisionsBridge {
     }
     const { answerId, settled } = await this.publisher.enqueueOwnerAnswer(parsed.data);
     if (settled) return settled;
-    if (this.state !== 'stopped') {
-      // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create.
-      await this.publisher.flush({ only: answerId }).catch((e) => this.emitError(e as Error));
+    // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create
+    // or cancellation, and is called off if the bridge stops or is revoked while it waits its turn.
+    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
+    if (running()) {
+      await this.publisher
+        .flush({ only: ownerAnswerItemId(answerId), proceed: running })
+        .catch((e) => this.emitError(e as Error));
     }
     return (
       (await this.publisher.ownerAnswerResult(answerId)) ?? {
