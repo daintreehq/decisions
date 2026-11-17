@@ -163,7 +163,12 @@ function assertQuota(room: Room, originRef: string): void {
  * current presence lease holds it until the lease lapses or the round's bounded hold ends (section 11). The job
  * checks again when it runs, so this only saves an early wake-up.
  */
-function scheduleNewPush(room: Room, questionId: string, createdAt: number, earliest: number): void {
+function scheduleNewPush(
+  room: Room,
+  questionId: string,
+  createdAt: number,
+  earliest: number,
+): void {
   const hold = presenceHold(room, roundStartedAt(room, questionId, createdAt), nowMs());
   room.schedule({
     kind: 'notify_new',

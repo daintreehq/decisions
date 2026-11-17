@@ -813,9 +813,9 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
   it('takes presence from the owner desktop only, as a lease that keeps nothing else', async () => {
     const { host } = await enrollHost(w);
     for (const a of [phone, host]) expect((await present(a)).status).toBe(403);
-    expect(
-      (await w.owner.call('PUT', '/api/v1/presence', { protocol_version: 1 })).status,
-    ).toBe(400);
+    expect((await w.owner.call('PUT', '/api/v1/presence', { protocol_version: 1 })).status).toBe(
+      400,
+    );
     const jobs = (await pending()).length;
     const evs = (await events(w.owner)).length;
 
@@ -911,9 +911,9 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
 
     // The proxy abstains late in the hold: the push waits only until the hold that began with the question ends.
     await age(questionId, LIMITS.presenceHoldMs - 20_000);
-    expect((await act(w, w.owner, 'proxy-abstain', questionId, 0, { content: null })).res.status).toBe(
-      201,
-    );
+    expect(
+      (await act(w, w.owner, 'proxy-abstain', questionId, 0, { content: null })).res.status,
+    ).toBe(201);
     const held = await heldPush(questionId);
     expect(held!.run_at).toBe((await createdAt(questionId)) + LIMITS.presenceHoldMs);
     await runDue('notify_new');
