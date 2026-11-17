@@ -168,6 +168,18 @@ export function originParts(v: QuestionView): { project: string; machine: string
     machine: unnamed ? 'Unnamed computer' : machine,
   };
 }
+/**
+ * What the phone can observe of a cancelled question: it was withdrawn on the named computer. The cancel is signed by
+ * the computer's key whether an agent or the person at the keyboard asked for it, so this never says who did.
+ */
+export function withdrawnLabel(v: QuestionView): string {
+  const { machine } = originParts(v);
+  if (!machine) return 'Withdrawn on the computer';
+  return machine === 'Unnamed computer'
+    ? 'Withdrawn on an unnamed computer'
+    : `Withdrawn on ${machine}`;
+}
+
 export const proxyNeedsReview = (v: QuestionView, now = Date.now()): boolean => {
   if (effectiveStatus(v, now) !== 'proxy-answered') return false;
   return !v.actions.some(

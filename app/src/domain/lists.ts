@@ -14,6 +14,7 @@ import {
   proxyNeedsReview,
   sortNeedsYou,
   unreadableHere,
+  withdrawnLabel,
 } from './selectors.js';
 
 /**
@@ -69,9 +70,9 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
 }
 
 /** What a row says in place of an answer when a question closed without one (Home and History). */
-export function closedLine(status: RowStatus): string | null {
+export function closedLine(status: RowStatus, v: QuestionView): string | null {
   if (status === 'expired') return 'Expired without an answer';
-  if (status === 'withdrawn') return 'Withdrawn by your agent';
+  if (status === 'withdrawn') return withdrawnLabel(v);
   if (status === 'declined') return 'Declined by you';
   if (status === 'unreadable') return 'This device holds no key for it';
   if (status === 'unverified') return 'Could not be verified';

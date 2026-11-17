@@ -14,6 +14,7 @@ import {
   stableOrder,
   type ListQuery,
 } from '../src/domain/lists.js';
+import { withdrawnLabel } from '../src/domain/selectors.js';
 
 const NOW = Date.parse('2026-11-03T15:00:00Z');
 const H = 3_600_000;
@@ -295,8 +296,8 @@ describe('History', () => {
     const withdrawn = q('w', { status: 'cancelled', actions: [desktopCancel(NOW - 2 * H)] });
     expect(principalStatus(declined, NOW)).toBe('declined');
     expect(principalStatus(withdrawn, NOW)).toBe('withdrawn');
-    expect(closedLine('declined')).toBe('Declined by you');
-    expect(closedLine('withdrawn')).toBe('Withdrawn by your agent');
+    expect(closedLine('declined', declined)).toBe('Declined by you');
+    expect(closedLine('withdrawn', withdrawn)).toBe('Withdrawn on MacBook');
     const entries = historyEntries([declined, withdrawn], 'decisions', '', NOW);
     expect(entries.map((e) => [e.v.id, e.status])).toEqual([
       ['d', 'declined'],
@@ -332,6 +333,22 @@ describe('History', () => {
     expect(dayLabel(new Date(2025, 0, 5, 12).toISOString(), now, 'en-GB')).toMatch(
       /^Sun,? 5 Jan 2025$/,
     );
+  });
+});
+
+describe('withdrawn questions', () => {
+  const withdrawn = (machine: string) =>
+    q('w', { machine, status: 'cancelled', actions: [desktopCancel(NOW - 3 * H)] });
+
+  it('says where the question was withdrawn, never who withdrew it', () => {
+    const v = withdrawn('studio-mac');
+    expect(closedLine('withdrawn', v)).toBe('Withdrawn on studio-mac');
+    expect(withdrawnLabel(v)).not.toMatch(/agent/i);
+  });
+
+  it('reads a computer with no usable name as what it is', () => {
+    expect(withdrawnLabel(withdrawn(''))).toBe('Withdrawn on the computer');
+    expect(withdrawnLabel(withdrawn('host_01JC8Z4MQ7'))).toBe('Withdrawn on an unnamed computer');
   });
 });
 

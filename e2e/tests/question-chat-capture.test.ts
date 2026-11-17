@@ -443,7 +443,7 @@ describe.skipIf(!OUT || !chromiumPath)('captures of the question screen', () => 
     await theme('light');
 
     await openId('withdrawn');
-    await sees('Withdrawn by your agent');
+    await sees('Withdrawn on Greg’s MacBook Pro');
     await shot('p-withdrawn-light');
 
     await openId('rename');

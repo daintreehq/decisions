@@ -38,6 +38,7 @@ import {
   proxyNeedsReview,
   submitKind,
   unreadableHere,
+  withdrawnLabel,
 } from '../../domain/selectors.js';
 import { drafts, readyPhotos, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
@@ -1133,7 +1134,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 : 'No answer is needed, and nothing was approved here.'
             }
           >
-            {declined ? 'Declined by you' : 'Withdrawn by your agent'}
+            {declined ? 'Declined by you' : withdrawnLabel(view)}
           </SystemLine>,
         );
       } else if (a.action === 'reopen') {

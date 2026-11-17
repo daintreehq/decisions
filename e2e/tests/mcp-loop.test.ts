@@ -341,7 +341,10 @@ describe.skipIf(!chromiumPath)(
         'cancelled on the relay',
       );
       await page.goto(`${relay.origin}/q/${id}`);
-      await page.getByText('Withdrawn by your agent').first().waitFor({ timeout: 20_000 });
+      await page
+        .getByText(/^Withdrawn on /)
+        .first()
+        .waitFor({ timeout: 20_000 });
       // a withdrawn question is never typed into anyone's terminal, even once the desktop has caught up
       await bridge.catchUp();
       await bridge.delivery.drain();

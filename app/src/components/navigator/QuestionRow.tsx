@@ -80,7 +80,7 @@ export const QuestionRow = memo(function QuestionRow({
     pending?.kind === 'answer'
       ? { author: 'You', text: choiceLine(v, pending.selected, pending.text) }
       : rowSummary(v, now);
-  const closed = closedLine(status);
+  const closed = closedLine(status, v);
   const due =
     !pending && v.expiresAt && Date.parse(v.expiresAt) - now < DUE_SOON_MS
       ? dueLabel(v, now)
