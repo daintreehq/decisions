@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { LedgerEvent } from '@daintreehq/decisions-protocol';
 import {
   BRIDGE_FEATURES,
@@ -19,6 +19,7 @@ import {
 import {
   FakeRelay,
   FakeSink,
+  FakeSocket,
   makeHost,
   makeIdentity,
   makePhone,
@@ -61,6 +62,27 @@ describe('a desktop with follow-ups on takes the person’s follow-up sent from 
       'thread-messages-v1',
       'owner-desktop-messages-v1',
     ]);
+  });
+
+  it('declares it on catch-up and on its socket ticket with follow-ups on, and on neither with them off', async () => {
+    for (const followUps of [true, false]) {
+      FakeSocket.instances = [];
+      const env = await setupBridge({ followUps, webSocket: (u) => new FakeSocket(u) });
+      await env.bridge.catchUp();
+      const events = env.relay.calls.filter((c) => c.path === '/api/v1/events');
+      expect(events.length).toBeGreaterThan(0);
+      for (const c of events)
+        expect(decodeURIComponent(c.query).includes('owner-desktop-messages-v1')).toBe(followUps);
+      await env.bridge.start();
+      await vi.waitFor(() =>
+        expect(env.relay.calls.some((c) => c.path === '/api/v1/socket-ticket')).toBe(true),
+      );
+      const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket')!;
+      const declared = (ticket.body as { features?: string[] }).features ?? [];
+      expect(declared.includes('owner-desktop-messages-v1')).toBe(followUps);
+      expect(declared.includes('thread-messages-v1')).toBe(followUps);
+      await env.bridge.stop();
+    }
   });
 
   it('types it with sent_from: computer and reports it as the person’s, sent from the computer', async () => {

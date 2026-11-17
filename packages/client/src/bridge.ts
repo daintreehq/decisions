@@ -597,10 +597,9 @@ export class DecisionsBridge {
     if (settled) return settled;
     // The same ordered outbox send as the pump's, for this answer alone: it still waits behind its question's create
     // or cancellation, and is called off if the bridge stops or is revoked while it waits its turn.
-    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
-    if (running()) {
+    if (this.running()) {
       await this.publisher
-        .flush({ only: ownerAnswerItemId(answerId), proceed: running })
+        .flush({ only: ownerAnswerItemId(answerId), proceed: this.running })
         .catch((e) => this.emitError(e as Error));
     }
     return (
@@ -722,10 +721,9 @@ export class DecisionsBridge {
     if (settled) return settled;
     // The same ordered outbox send as the pump's, for this follow-up alone, called off if the bridge stops or is
     // revoked while it waits its turn.
-    const running = () => this.state !== 'stopped' && this.state !== 'revoked';
-    if (running()) {
+    if (this.running()) {
       await this.publisher
-        .flush({ only: ownerMessageItemId(messageId), proceed: running })
+        .flush({ only: ownerMessageItemId(messageId), proceed: this.running })
         .catch((e) => this.emitError(e as Error));
     }
     return (
@@ -1044,16 +1042,20 @@ export class DecisionsBridge {
 
   /* ---------------- pump ---------------- */
 
+  /** Neither stopped nor revoked: an outbox send waiting its turn goes ahead only while this holds. */
+  private readonly running = () => this.state !== 'stopped' && this.state !== 'revoked';
+
   /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
   pump(): Promise<void> {
-    if (this.state === 'revoked' || this.state === 'stopped') return Promise.resolve();
+    if (!this.running()) return Promise.resolve();
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
-        const flushed = await this.publisher.flush();
+        // A flush that waits behind another, or is still sending when the bridge stops, sends nothing more.
+        const flushed = await this.publisher.flush({ proceed: this.running });
         if (flushed.created.length > 0) this.snapshots.kick();
         for (const id of flushed.created) await this.maybeRunProxy(id);
-        if (flushed.created.length > 0) await this.publisher.flush();
+        if (flushed.created.length > 0) await this.publisher.flush({ proceed: this.running });
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();

@@ -509,10 +509,13 @@ describe('sendFollowUp is durable and idempotent', () => {
     while (messagePosts(relay).length === 0) await tick(1);
     const second = bridge.sendFollowUp({ questionId: qid, text: 'second' });
     while ((await ownerMessages(store)).length < 2) await tick(1);
+    // The background pump's flush waits its turn too, and must not send it either once the bridge stops.
+    const pumped = bridge.pump();
     await bridge.stop();
     release();
     expect(await first).toMatchObject({ status: 'sent' });
     expect(await second).toMatchObject({ status: 'queued' });
+    await pumped;
     expect(messagePosts(relay)).toHaveLength(1);
   });
 

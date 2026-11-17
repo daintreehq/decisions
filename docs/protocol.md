@@ -543,8 +543,8 @@ same pane are typed in thread order (ledger order), batched when they fit, and a
 an answer's delivery. The typed text is its own block, distinct from an answer block, saying that it is a message the
 reviewer sent about the question, from their phone or, for one the owner desktop signed, from the computer, and that
 it does not change the answer. The client library's format (`[DAINTREE DECISION FOLLOW-UP]`) is specified line by line
-in the [integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes; it names the
-phone only, since the library does not yet accept a message from the computer.
+in the [integration spec](./daintree-integration-spec.md) section 6.4, with fixtures of the exact bytes: its preface
+names no device, and a block for a message sent from the computer adds `sent_from: computer` after `source: human`.
 
 ### 16.4 Message receipts
 
