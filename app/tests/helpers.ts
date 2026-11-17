@@ -66,6 +66,13 @@ export async function otherDesktop(w: World): Promise<Actor> {
   return d;
 }
 
+/** Another paired phone or tablet, certified by the owner and trusted. */
+export async function otherHuman(w: World, role: 'phone' | 'tablet' = 'tablet'): Promise<Actor> {
+  const d = await actor(w.installationId, role, w.owner, false);
+  await w.trust.addCert(d.cert, null);
+  return d;
+}
+
 export async function makeWorld(): Promise<World> {
   const installationId = newId();
   const owner = await actor(installationId, 'owner-desktop', null);

@@ -275,6 +275,73 @@ describe('what the desktop refuses', () => {
   });
 });
 
+describe('what a hostile relay cannot do', () => {
+  it('a signer removed in the directory is caught on an unchanged record, without a ledger event', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 3 }));
+    await s.start();
+    expect((await s.view()).status).toBe('available');
+    s.relay.revokedAt.set(s.phone.deviceId, iso(T0));
+    s.bridge.verifier.invalidate();
+    await s.bridge.involvement.refresh(); // the same record again
+    expect(await s.view()).toMatchObject({ status: 'unavailable', reason: 'signer-revoked' });
+    await s.bridge.stop();
+  });
+
+  it('pretending to be an old relay does not let it swap the record at the same revision', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 2, normal: 'involve-early' }));
+    await s.start();
+    s.relay.involvement = null; // 404, like a relay from before the feature
+    await s.bridge.involvement.refresh();
+    expect(await s.view()).toMatchObject({ status: 'unavailable', reason: 'unsupported' });
+    s.serve(await s.sign({ revision: 2, normal: 'recommend' }));
+    await s.bridge.involvement.refresh();
+    expect(await s.view()).toMatchObject({ status: 'unavailable', reason: 'unsupported' });
+    expect(await s.refusals()).toContain('equivocation');
+    // The record it really holds comes back as it was.
+    s.serve(JSON.parse((await s.store.getMeta(INVOLVEMENT_META))!).record);
+    await s.bridge.involvement.refresh();
+    expect(available(await s.view())).toMatchObject({ revision: 2, mode: 'involve-early' });
+    await s.bridge.stop();
+  });
+
+  it('a record that cannot even be canonicalised is refused and leaves the copy stale', async () => {
+    const s = await setup();
+    s.serve(await s.sign({ revision: 1 }));
+    await s.start();
+    expect((await s.view()).stale).toBe(false);
+    s.serve({ ...(await s.sign({ revision: 2 })), note: '\ud800' } as InvolvementRecord);
+    const errors: Error[] = [];
+    s.bridge.on('error', (e) => errors.push(e));
+    await s.bridge.involvement.refresh();
+    expect(available(await s.view())).toMatchObject({ revision: 1, stale: true });
+    expect(await s.refusals()).toContain('unverifiable');
+    expect(errors).toEqual([]);
+    await s.bridge.stop();
+  });
+
+  it('a read that began before the socket dropped does not call the copy fresh', async () => {
+    const s = await setup();
+    await s.start();
+    let release!: () => void;
+    s.relay.holdInvolvement = new Promise<void>((r) => (release = r));
+    s.serve(await s.sign({ revision: 1 }));
+    const pending = s.bridge.involvement.refresh();
+    await tick(5);
+    s.bridge.involvement.socketState('backoff');
+    s.relay.holdInvolvement = null;
+    release();
+    await pending;
+    expect(available(await s.view())).toMatchObject({ revision: 1, stale: true });
+    // Live again: it reads again, even though nothing marked it as needing to.
+    s.bridge.involvement.socketState('live');
+    await s.bridge.involvement.refresh();
+    expect((await s.view()).stale).toBe(false);
+    await s.bridge.stop();
+  });
+});
+
 describe('when the relay cannot say', () => {
   it('a relay from before involvement preferences is unsupported', async () => {
     const s = await setup();

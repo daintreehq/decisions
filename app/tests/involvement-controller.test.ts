@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InfoResponse, InvolvementRecord } from '@daintreehq/decisions-protocol';
 import { AppController } from '../src/app/controller.js';
 import { InvolvementStore } from '../src/data/involvement.js';
@@ -50,6 +50,17 @@ async function withPreference(c: AppController) {
   await s.load();
   return s;
 }
+
+// `init` asks the relay for `GET /info`: offline here, so nothing leaves the test.
+beforeEach(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      throw new TypeError('offline');
+    }),
+  );
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe('the involvement preference in the controller', () => {
   it('is declared, offered and read only once the relay advertises it', async () => {

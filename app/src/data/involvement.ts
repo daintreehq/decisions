@@ -93,7 +93,13 @@ export class InvolvementStore {
       try {
         for (;;) {
           this.again = false;
-          await this.readOnce(gen);
+          try {
+            await this.readOnce(gen);
+          } catch (e) {
+            // A read asked for while this one was failing still happens: it may be the one that succeeds.
+            if (this.again && gen === this.generation) continue;
+            throw e;
+          }
           if (!this.again || gen !== this.generation) return this.snap;
         }
       } finally {
@@ -102,6 +108,15 @@ export class InvolvementStore {
     })();
     this.reading = run;
     return run;
+  }
+
+  /**
+   * Whether a response about `revision` may replace what is shown: never an older one than a record this device
+   * already holds (a slow read finishing after a save, or after a newer read).
+   */
+  private newerThanShown(revision: number): boolean {
+    const held = this.snap.status === 'ready' || this.snap.status === 'invalid';
+    return !held || revision >= this.snap.revision;
   }
 
   private async readOnce(gen: number): Promise<void> {
@@ -122,21 +137,19 @@ export class InvolvementStore {
     const v = await this.d.verify(raw);
     if (gen !== this.generation) return;
     if (v.ok) {
+      const revision = v.value.record?.revision ?? 0;
+      if (!this.newerThanShown(revision)) return;
       this.set({
         status: 'ready',
         record: v.value.record,
         receivedAt: v.value.receivedAt,
-        revision: v.value.record?.revision ?? 0,
+        revision,
         problem: null,
       });
     } else {
-      this.set({
-        status: 'invalid',
-        record: null,
-        receivedAt: null,
-        revision: servedRevision(raw),
-        problem: v.reason,
-      });
+      const revision = servedRevision(raw);
+      if (!this.newerThanShown(revision)) return;
+      this.set({ status: 'invalid', record: null, receivedAt: null, revision, problem: v.reason });
     }
   }
 
@@ -145,31 +158,46 @@ export class InvolvementStore {
     if (this.wanted) void this.load().catch(() => undefined);
   }
 
-  /** The relay's content-free hints: another device saved a new preference. */
+  /**
+   * The relay's content-free hints: another device saved a new preference. A removed device is read again too, so
+   * a preference it signed stops being shown (the question store has marked it revoked by now).
+   */
   noteEvents(events: readonly LedgerEvent[]): void {
-    if (events.some((e) => e.event_type === 'involvement.updated')) this.refresh();
+    if (
+      events.some(
+        (e) => e.event_type === 'involvement.updated' || e.event_type === 'device.revoked',
+      )
+    )
+      this.refresh();
   }
 
   /**
-   * Signs `draft` as the next revision of what this device last read and sends it. The relay refuses it if anyone
-   * saved in between (`conflict`): the preference is read again and nothing is re-signed over the other device's
-   * choice. Any other failure throws, and the draft is the caller's to keep.
+   * Signs `draft` as the revision after `baseRevision`, the one the person's edits started from, and sends it. The
+   * relay refuses it if anyone saved since (`conflict`): the preference is read again and nothing is re-signed over
+   * the other device's choice. Any other failure throws, and the draft is the caller's to keep.
    */
-  async save(draft: InvolvementDraft): Promise<InvolvementSaveResult> {
+  async save(draft: InvolvementDraft, baseRevision: number): Promise<InvolvementSaveResult> {
     const gen = this.generation;
-    const record = await this.d.sign(draft, this.snap.revision);
+    const record = await this.d.sign(draft, baseRevision);
     try {
       await this.d.put(record);
     } catch (e) {
       if (gen !== this.generation) throw e;
       if (e instanceof RelayError && e.status === 409 && e.code === 'revision_conflict') {
-        await this.load().catch(() => undefined);
-        // An earlier attempt of this same save may have landed before its answer was lost: that is not a conflict.
-        const now = this.snap;
+        let read: InvolvementSnapshot;
+        try {
+          read = await this.load();
+        } catch {
+          return { kind: 'conflict' };
+        }
+        // An earlier attempt of this same save may have landed before its answer was lost: the relay then holds
+        // exactly the revision this one asked for, signed here, saying the same. Anything else is a conflict.
+        const held = read.record;
         if (
-          now.status === 'ready' &&
-          recordMatches(now.record, draft) &&
-          now.record?.signer_device_id === record.signer_device_id
+          read.status === 'ready' &&
+          held?.revision === record.revision &&
+          held.signer_device_id === record.signer_device_id &&
+          recordMatches(held, draft)
         )
           return { kind: 'saved' };
         return { kind: 'conflict' };
@@ -177,13 +205,14 @@ export class InvolvementStore {
       throw e;
     }
     if (gen !== this.generation) throw new Error('this device was unpaired');
-    this.set({
-      status: 'ready',
-      record,
-      receivedAt: new Date().toISOString(),
-      revision: record.revision,
-      problem: null,
-    });
+    if (this.newerThanShown(record.revision))
+      this.set({
+        status: 'ready',
+        record,
+        receivedAt: new Date().toISOString(),
+        revision: record.revision,
+        problem: null,
+      });
     return { kind: 'saved' };
   }
 

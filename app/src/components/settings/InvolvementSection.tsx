@@ -37,8 +37,13 @@ function useBoundaryClock(until: string | null): number {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!until) return;
-    const wait = Date.parse(until) - Date.now();
-    if (!(wait > 0)) return;
+    const at = Date.parse(until);
+    const wait = at - Date.now();
+    if (!(wait > 0)) {
+      // Already over (it ended while the screen was loading): catch the clock up now.
+      if (now < at) setNow(Date.now());
+      return;
+    }
     // setTimeout holds at most ~24.8 days; a later end is re-armed when this one fires.
     const t = setTimeout(() => setNow(Date.now()), Math.min(wait + 50, 2_000_000_000));
     return () => clearTimeout(t);
@@ -88,6 +93,8 @@ export function InvolvementSection() {
   const state = useInvolvement();
   const id = useId();
   const [draft, setDraft] = useState<InvolvementDraft | null>(null);
+  /** The revision the edits started from: a save replaces exactly it, so another device's later save is a conflict. */
+  const [base, setBase] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -103,21 +110,29 @@ export function InvolvementSection() {
   const loaded = state.status === 'ready' || state.status === 'invalid';
   const record = state.status === 'ready' ? state.record : null;
   const effective = inForce(record, Date.now());
-  const now = useBoundaryClock(effective?.until ?? null);
+  // Re-render when the saved temporary mode ends, and when the one being edited does, so neither outlives its time.
+  const ends = [effective?.until, draft?.override?.until].filter((u): u is string => !!u).sort();
+  const now = useBoundaryClock(ends[0] ?? null);
   const baseline = draftOf(record, now);
 
   // The form starts from what is saved, and follows it while there is nothing unsaved (another device's save, or
-  // a temporary mode ending while the screen is open).
+  // a temporary mode ending while the screen is open). Following moves the revision the edits start from too.
   const lastBaseline = useRef<InvolvementDraft | null>(null);
   useEffect(() => {
     if (!loaded) return;
     const prev = lastBaseline.current;
     lastBaseline.current = baseline;
-    setDraft((d) => (d === null || (prev && draftsEqual(d, prev)) ? baseline : d));
+    if (draft === null || draftsEqual(draft, baseline) || (prev && draftsEqual(draft, prev))) {
+      setDraft(baseline);
+      setBase(state.revision);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, record, now]);
+  }, [loaded, record, now, state.revision]);
 
   const dirty = !!draft && !draftsEqual(draft, baseline);
+  /** Nothing usable is saved (none set, or one this device couldn't verify): what the form shows can be saved as is. */
+  const unsaved = loaded && record === null;
+  const canSave = dirty || unsaved;
   const invalid = draft ? draftError(draft, now) : null;
   const [settled, setSettled] = useState(false);
   useEffect(() => {
@@ -126,7 +141,7 @@ export function InvolvementSection() {
     const t = setTimeout(() => setSettled(true), 4000);
     return () => clearTimeout(t);
   }, [justSaved]);
-  const docked = dirty || saving || (justSaved && !settled) || !!saveError;
+  const docked = canSave || saving || (justSaved && !settled) || !!saveError;
   const guard = useLeaveGuard(dirty);
 
   const edit = (next: InvolvementDraft) => {
@@ -137,13 +152,21 @@ export function InvolvementSection() {
 
   const save = async (): Promise<boolean> => {
     if (!draft || invalid || saving) return false;
+    // The screen's clock moves only at boundaries: check the end time against now, as the relay will.
+    const late = draftError(draft, Date.now());
+    if (late) {
+      setSaveError(late);
+      return false;
+    }
     setSaving(true);
     setSaveError(null);
     try {
-      const r = await app.saveInvolvement(draft);
+      const r = await app.saveInvolvement(draft, base);
       if (r.kind === 'conflict') {
-        // The edits stay: the person sees what is set now and decides whether to save theirs over it.
+        // The edits stay: the person sees what is set now and decides whether to save theirs over it, which a
+        // second Save does, now over what they have seen.
         setConflict(true);
+        setBase(app.involvementState().revision);
         return false;
       }
       setConflict(false);
@@ -358,21 +381,23 @@ export function InvolvementSection() {
             </Callout>
           )}
           <div
-            className={`s-savebar${dirty && !saving && !invalid && !saveError ? ' dirty' : ''}${dirty && (invalid || saveError) ? ' failed' : ''}${justSaved && !dirty ? ' saved' : ''}`}
+            className={`s-savebar${canSave && !saving && !invalid && !saveError ? ' dirty' : ''}${canSave && (invalid || saveError) ? ' failed' : ''}${justSaved && !dirty ? ' saved' : ''}`}
             role="group"
             aria-label="Save changes"
           >
             <span className="s-savebar-status" role="status">
               {justSaved && !dirty && !saving && <SuccessIcon size={16} />}
-              {dirty && !saving && invalid && <ErrorIcon size={16} />}
+              {canSave && !saving && invalid && <ErrorIcon size={16} />}
               {saving
                 ? 'Saving to your relay…'
-                : dirty
+                : canSave
                   ? invalid
                     ? 'Fix the end time to save'
                     : saveError || conflict
                       ? 'Not saved yet'
-                      : 'Unsaved changes'
+                      : dirty
+                        ? 'Unsaved changes'
+                        : 'Not saved on your relay yet'
                   : justSaved
                     ? 'Saved on your relay'
                     : ''}
@@ -386,7 +411,7 @@ export function InvolvementSection() {
               <button
                 type="submit"
                 className="btn small primary"
-                disabled={!dirty || !!invalid}
+                disabled={!canSave || !!invalid}
                 aria-disabled={saving || undefined}
               >
                 {saveError && !saving ? 'Try again' : 'Save'}

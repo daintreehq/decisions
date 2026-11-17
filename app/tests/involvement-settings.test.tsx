@@ -25,7 +25,8 @@ vi.mock('../src/app/controller.js', () => ({
     onInvolvement: (l: () => void) =>
       (store.s as { subscribe(l: () => void): () => void }).subscribe(l),
     loadInvolvement: () => (store.s as { load(): Promise<unknown> }).load(),
-    saveInvolvement: (d: unknown) => (store.s as { save(d: unknown): Promise<unknown> }).save(d),
+    saveInvolvement: (d: unknown, base: number) =>
+      (store.s as { save(d: unknown, base: number): Promise<unknown> }).save(d, base),
   },
 }));
 
@@ -219,17 +220,71 @@ describe('the involvement section', () => {
     expect(button('Try again')).toBeTruthy();
   });
 
-  it('offers a retry when the first read fails', async () => {
+  it('offers a retry when the first read fails, and the retry loads the form', async () => {
+    let fails = 1;
     store.s = new InvolvementStore({
       fetch: async () => {
-        throw new Error('offline');
+        if (fails-- > 0) throw new Error('offline');
+        return { preference: record({ normal_mode: 'recommend' }), received_at: null };
       },
       put: async () => ({}),
-      verify: async () => ({ ok: true, value: { record: null, receivedAt: null } }),
+      verify: async (raw) => {
+        const r = raw as { preference: InvolvementRecord | null; received_at: string | null };
+        return { ok: true, value: { record: r.preference, receivedAt: r.received_at } };
+      },
       sign: async () => record({}),
     });
     await mount();
     expect(text()).toContain('Couldn’t load your involvement from your relay');
-    expect(button('Try again')).toBeTruthy();
+    await act(async () => button('Try again').click());
+    await flush();
+    expect(text()).not.toContain('Couldn’t load your involvement');
+    expect(radio(0, 'recommend').checked).toBe(true);
+  });
+
+  it('with nothing set, what it shows can be saved as it is', async () => {
+    await mount();
+    expect(text()).toContain('Not saved on your relay yet');
+    expect(button('Save').disabled).toBe(false);
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts[0]).toMatchObject({
+      revision: 1,
+      normal_mode: 'involve-early',
+      consult_count: 3,
+    });
+    expect(text()).toContain('Saved on your relay');
+  });
+
+  it('follows another device’s change while there is nothing unsaved', async () => {
+    relay.current = record({ revision: 2, normal_mode: 'involve-early' });
+    await mount();
+    relay.current = record({
+      revision: 3,
+      normal_mode: 'recommend',
+      signer_device_id: 'tablet_00001',
+    });
+    await act(async () => (store.s as InstanceType<typeof InvolvementStore>).refresh());
+    await flush();
+    expect(radio(0, 'recommend').checked).toBe(true);
+    expect(text()).not.toContain('Unsaved changes');
+  });
+
+  it('a change that arrives while you edit is a conflict when you save, never silently replaced', async () => {
+    relay.current = record({ revision: 2, normal_mode: 'involve-early' });
+    await mount();
+    await act(async () => radio(0, 'recommend').click());
+    // The tablet saves, and its hint reaches this phone while the edit is open.
+    relay.current = record({ revision: 3, consult_count: 6, signer_device_id: 'tablet_00001' });
+    await act(async () => (store.s as InstanceType<typeof InvolvementStore>).refresh());
+    await flush();
+    expect(radio(0, 'recommend').checked).toBe(true);
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts).toHaveLength(0);
+    expect(text()).toContain('Another device changed this while you were editing');
+    await act(async () => button('Save').click());
+    await flush();
+    expect(relay.puts[0]).toMatchObject({ revision: 4, normal_mode: 'recommend' });
   });
 });

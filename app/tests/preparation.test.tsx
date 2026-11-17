@@ -61,6 +61,7 @@ describe('the agent’s preparation report on a question', () => {
 
   it('an older question without one renders as before', async () => {
     const html = render(await asked(SAMPLE_CONTENT));
+    expect(html).toContain(SAMPLE_CONTENT.question);
     expect(html).not.toContain('msg-prep');
     expect(html).not.toContain('The agent’s account');
   });
@@ -72,6 +73,7 @@ describe('the agent’s preparation report on a question', () => {
     });
     expect(v.verification).toEqual({ ok: true });
     expect(v.content?.question).toBe(SAMPLE_CONTENT.question);
+    expect(render(v)).toContain(SAMPLE_CONTENT.question);
     expect(render(v)).not.toContain('msg-prep');
   });
 });

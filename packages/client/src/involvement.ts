@@ -27,7 +27,10 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const RETRY_MS = 15_000;
 
 interface Stored {
-  /** The latest verified record; null when the relay holds none, or the last one's signer was revoked. */
+  /**
+   * The authentic record at `high_water` (null when the relay holds none). Kept while it cannot be used (`status`),
+   * so a later record at the same revision is still compared with it.
+   */
   record: InvolvementRecord | null;
   /** The highest revision ever verified: a record below it is a rollback and is refused. */
   high_water: number;
@@ -81,7 +84,12 @@ export class InvolvementSync {
   private running = false;
   private inflight: Promise<void> | null = null;
   private again = false;
-  /** Confirmed with the relay since the last reconnect, hint or failure. In memory only: a restart is stale. */
+  /**
+   * Bumped by anything that may leave the copy out of date (a start, a stop, a hint, a dropped socket): only a read
+   * that began after the last bump may call the copy fresh.
+   */
+  private epoch = 0;
+  /** Confirmed with the relay since the last bump. In memory only: a restart is stale. */
   private fresh = false;
   private failedAt: number | null = null;
 
@@ -94,7 +102,7 @@ export class InvolvementSync {
   start(): void {
     this.generation++;
     this.running = true;
-    this.fresh = false;
+    this.invalidate();
     this.kick();
   }
 
@@ -102,20 +110,24 @@ export class InvolvementSync {
   stop(): void {
     this.generation++;
     this.running = false;
-    this.fresh = false;
     this.again = false;
+    this.invalidate();
+  }
+
+  private invalidate(): void {
+    this.epoch++;
+    this.fresh = false;
   }
 
   /** The socket moved: a dropped connection may have missed a hint, and a live one reads again. */
   socketState(s: SocketState): void {
-    if (s === 'live') {
-      if (!this.fresh) this.kick();
-    } else if (s !== 'syncing') this.fresh = false;
+    if (s === 'live') this.kick();
+    else if (s !== 'syncing') this.invalidate();
   }
 
   /** An `involvement.updated` hint. It is the relay's word only, so it just says to read again. */
   hint(): void {
-    this.fresh = false;
+    this.invalidate();
     this.kick();
   }
 
@@ -169,12 +181,21 @@ export class InvolvementSync {
   }
 
   private async readOnce(gen: number): Promise<void> {
+    const epoch = this.epoch;
     const live = () => this.running && gen === this.generation;
     const failed = async (result: string) => {
       if (!live()) return;
       this.fresh = false;
       this.failedAt = this.ctx.now();
       await this.ctx.audit.log({ event: 'involvement.refused', result });
+    };
+    /** Keep what this read established; it is fresh only if nothing invalidated the copy since the read began. */
+    const settle = async (next: Stored) => {
+      if (!live()) return;
+      await this.ctx.store.setMeta(INVOLVEMENT_META, JSON.stringify(next));
+      if (!live()) return;
+      this.failedAt = null;
+      if (epoch === this.epoch) this.fresh = true;
     };
     let body: InvolvementResponse;
     try {
@@ -185,16 +206,10 @@ export class InvolvementSync {
     } catch (e) {
       if (!live()) return;
       if (e instanceof RelayError && e.status === 404) {
-        // A relay from before involvement preferences: nothing to read until it is upgraded.
+        // A relay from before involvement preferences: nothing to read until it is upgraded. What was verified
+        // before is kept, so it still bars older and different records later.
         const prev = await this.stored();
-        if (!live()) return;
-        await this.save({
-          ...prev,
-          record: null,
-          synced_at: this.ctx.now(),
-          status: 'unsupported',
-        });
-        return this.succeeded();
+        return settle({ ...prev, synced_at: this.ctx.now(), status: 'unsupported' });
       }
       this.fresh = false;
       this.failedAt = this.ctx.now();
@@ -202,52 +217,53 @@ export class InvolvementSync {
       throw e;
     }
     if (!live()) return;
+    try {
+      await this.accept(body.preference, settle, failed, live);
+    } catch (e) {
+      if (e instanceof TransientError) return failed('directory-unavailable');
+      // A hostile record can make canonicalising or verifying throw: refused like any other bad record.
+      return failed('unverifiable');
+    }
+  }
+
+  private async accept(
+    r: InvolvementRecord | null,
+    settle: (s: Stored) => Promise<void>,
+    failed: (result: string) => Promise<void>,
+    live: () => boolean,
+  ): Promise<void> {
     const prev = await this.stored();
-    const r = body.preference;
+    if (!live()) return;
     if (!r) {
       // Nobody has set one, or a relay withholding the one we verified: the second is refused.
       if (prev.high_water > 0) return failed('withheld');
-      await this.save({ record: null, high_water: 0, synced_at: this.ctx.now() });
-      return this.succeeded();
+      return settle({ record: null, high_water: 0, synced_at: this.ctx.now() });
     }
     if (r.revision < prev.high_water) return failed('rollback');
-    if (r.revision === prev.high_water && prev.record) {
-      if (canonicalize(r) !== canonicalize(prev.record)) return failed('equivocation');
-      await this.save({ ...prev, synced_at: this.ctx.now() });
-      return this.succeeded();
-    }
-    let v: Awaited<ReturnType<EventVerifier['verifyInvolvement']>>;
-    try {
-      v = await this.verifier.verifyInvolvement(r);
-    } catch (e) {
-      if (e instanceof TransientError) return failed('directory-unavailable');
-      throw e;
-    }
+    if (
+      r.revision === prev.high_water &&
+      prev.record &&
+      canonicalize(r) !== canonicalize(prev.record)
+    )
+      return failed('equivocation');
+    // Verified on every read, not only when the revision moves: its signer may have been removed since.
+    const v = await this.verifier.verifyInvolvement(r);
     if (!live()) return;
     if (!v.ok) {
       if (v.reason !== 'signer-revoked') return failed(v.reason);
-      // Authentic but from a removed device: it still supersedes everything older, and steers nothing.
-      await this.save({
-        record: null,
-        high_water: Math.max(prev.high_water, r.revision),
+      // Authentic but from a removed device: kept to bar older and different records, and steers nothing.
+      if (prev.status !== 'signer-revoked' || prev.high_water !== r.revision)
+        await this.ctx.audit.log({ event: 'involvement.refused', result: 'signer-revoked' });
+      return settle({
+        record: r,
+        high_water: r.revision,
         synced_at: this.ctx.now(),
         status: 'signer-revoked',
       });
-      await this.ctx.audit.log({ event: 'involvement.refused', result: 'signer-revoked' });
-      return this.succeeded();
     }
-    await this.save({ record: r, high_water: r.revision, synced_at: this.ctx.now() });
-    await this.ctx.audit.log({ event: 'involvement.updated', result: `revision-${r.revision}` });
-    this.succeeded();
-  }
-
-  private async save(s: Stored): Promise<void> {
-    await this.ctx.store.setMeta(INVOLVEMENT_META, JSON.stringify(s));
-  }
-
-  private succeeded(): void {
-    this.failedAt = null;
-    this.fresh = true;
+    if (r.revision > prev.high_water)
+      await this.ctx.audit.log({ event: 'involvement.updated', result: `revision-${r.revision}` });
+    return settle({ record: r, high_water: r.revision, synced_at: this.ctx.now() });
   }
 
   /** The preference in force now, from the verified copy only. */

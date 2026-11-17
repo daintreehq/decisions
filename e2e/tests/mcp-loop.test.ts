@@ -399,6 +399,7 @@ describe.skipIf(!chromiumPath)(
 
       await page.goto(`${relay.origin}/settings/involvement`);
       await page.locator('input[type="radio"][value="recommend"]').first().check();
+      await page.getByLabel('Agents to consult').selectOption('2');
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await page.getByText('Saved on your relay').first().waitFor({ timeout: 20_000 });
 
@@ -414,7 +415,7 @@ describe.skipIf(!chromiumPath)(
       expect(after).toMatchObject({
         mode: 'recommend',
         normal_mode: 'recommend',
-        consult_count: 3,
+        consult_count: 2,
         revision: 1,
         override_active: false,
         until: null,

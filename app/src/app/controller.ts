@@ -624,11 +624,17 @@ export class AppController {
     return this.involvement.load();
   }
 
-  /** Signs `draft` on this device and saves it over the revision last read; a conflict is reported, not overwritten. */
-  async saveInvolvement(draft: InvolvementDraft): Promise<InvolvementSaveResult> {
+  /**
+   * Signs `draft` on this device and saves it over `baseRevision`, the revision the person's edits started from. If
+   * another device saved since, it is reported as a conflict, never overwritten.
+   */
+  async saveInvolvement(
+    draft: InvolvementDraft,
+    baseRevision: number,
+  ): Promise<InvolvementSaveResult> {
     if (!this.involvement || !this.involvementServed())
       throw new Error('this relay does not keep an involvement preference');
-    return this.involvement.save(draft);
+    return this.involvement.save(draft, baseRevision);
   }
 
   async setPrefs(p: Partial<LocalPrefs>): Promise<void> {

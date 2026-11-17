@@ -25,7 +25,14 @@ import {
   verifyInvolvementResponse,
   type InvolvementDraft,
 } from '../src/domain/involvement.js';
-import { makeWorld, otherDesktop, plainEvent, type Actor, type World } from './helpers.js';
+import {
+  makeWorld,
+  otherDesktop,
+  otherHuman,
+  plainEvent,
+  type Actor,
+  type World,
+} from './helpers.js';
 
 const T0 = Date.parse('2026-11-17T09:00:00.000Z');
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -273,6 +280,9 @@ function fakeRelay(w: World) {
 const hint = (): LedgerEvent => plainEvent('involvement.updated', null, { revision: 1 });
 
 describe('the involvement store', () => {
+  /** Saves `d` over the revision this store last showed, as the section does with clean edits. */
+  const save = (s: InvolvementStore, d: InvolvementDraft) => s.save(d, s.get().revision);
+
   it('reads on demand and saves over the revision it read', async () => {
     const w = await makeWorld();
     const relay = fakeRelay(w);
@@ -280,27 +290,56 @@ describe('the involvement store', () => {
     expect(s.get().status).toBe('idle');
     await s.load();
     expect(s.get()).toMatchObject({ status: 'ready', record: null, revision: 0 });
-    expect(await s.save(draft())).toEqual({ kind: 'saved' });
+    expect(await save(s, draft())).toEqual({ kind: 'saved' });
     expect(relay.puts[0]!.revision).toBe(1);
     expect(s.get()).toMatchObject({ status: 'ready', revision: 1, record: relay.puts[0] });
-    expect(await s.save(draft({ normalMode: 'involve-early' }))).toEqual({ kind: 'saved' });
+    expect(await save(s, draft({ normalMode: 'involve-early' }))).toEqual({ kind: 'saved' });
     expect(relay.puts[1]!.revision).toBe(2);
   });
 
   it('a save on top of another device’s change is refused and reported, never re-signed over it', async () => {
     const w = await makeWorld();
+    const tablet = await otherHuman(w);
     const relay = fakeRelay(w);
     const s = new InvolvementStore(relay.deps);
     await s.load();
-    const tablet = await sign(w, draft({ normalMode: 'involve-early', consultCount: 5 }), 0);
-    relay.setCurrent(tablet);
-    expect(await s.save(draft())).toEqual({ kind: 'conflict' });
+    const theirs = await sign(
+      w,
+      draft({ normalMode: 'involve-early', consultCount: 5 }),
+      0,
+      tablet,
+    );
+    relay.setCurrent(theirs);
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
     expect(relay.puts).toHaveLength(0);
-    expect(relay.current).toBe(tablet);
+    expect(relay.current).toBe(theirs);
     // What is set now has been read, so a deliberate save goes over it.
-    expect(s.get()).toMatchObject({ status: 'ready', record: tablet, revision: 1 });
-    expect(await s.save(draft())).toEqual({ kind: 'saved' });
+    expect(s.get()).toMatchObject({ status: 'ready', record: theirs, revision: 1 });
+    expect(await s.save(draft(), 1)).toEqual({ kind: 'saved' });
     expect(relay.puts[0]!.revision).toBe(2);
+  });
+
+  it('edits begun before a hint brought another device’s change still conflict', async () => {
+    const w = await makeWorld();
+    const tablet = await otherHuman(w);
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load(); // the edits start from revision 0
+    relay.setCurrent(await sign(w, draft({ normalMode: 'involve-early' }), 0, tablet));
+    s.noteEvents([hint()]);
+    await vi.waitFor(() => expect(s.get().revision).toBe(1));
+    expect(await s.save(draft({ consultCount: 2 }), 0)).toEqual({ kind: 'conflict' });
+    expect(relay.puts).toHaveLength(0);
+  });
+
+  it('the same choice saved by another device is a conflict, not this save', async () => {
+    const w = await makeWorld();
+    const tablet = await otherHuman(w);
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    relay.setCurrent(await sign(w, draft(), 0, tablet));
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
   });
 
   it('a retried save whose first attempt landed is not a conflict', async () => {
@@ -308,9 +347,50 @@ describe('the involvement store', () => {
     const relay = fakeRelay(w);
     const s = new InvolvementStore(relay.deps);
     await s.load();
-    const mine = await sign(w, draft(), 0);
-    relay.setCurrent(mine); // the first attempt landed; its answer never came back
-    expect(await s.save(draft())).toEqual({ kind: 'saved' });
+    relay.setCurrent(await sign(w, draft(), 0)); // the first attempt landed; its answer never came back
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'saved' });
+  });
+
+  it('this phone’s own matching record at another revision is a conflict', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    relay.setCurrent(await sign(w, draft(), 1)); // revision 2, after a change this phone has not seen
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
+  });
+
+  it('a conflict it could not read back is a conflict, whatever it showed before', async () => {
+    const w = await makeWorld();
+    const tablet = await otherHuman(w);
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0)); // this phone's revision 1, read and shown
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    relay.setCurrent(await sign(w, draft({ normalMode: 'involve-early' }), 1, tablet));
+    (relay.deps.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offline'));
+    // A retry of the save that made revision 1, over revision 0: the relay says 409 and cannot be read.
+    expect(await s.save(draft(), 0)).toEqual({ kind: 'conflict' });
+  });
+
+  it('a slow read never replaces a newer save', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0));
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    let release!: () => void;
+    const old = served(relay.current);
+    (relay.deps.fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((r) => (release = () => r(old))),
+    );
+    s.refresh();
+    expect(await save(s, draft({ normalMode: 'involve-early' }))).toEqual({ kind: 'saved' });
+    expect(s.get().revision).toBe(2);
+    release();
+    await vi.waitFor(() => expect(relay.deps.fetch).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.get()).toMatchObject({ revision: 2, record: { normal_mode: 'involve-early' } });
   });
 
   it('any other failure throws and leaves what was read in place', async () => {
@@ -319,7 +399,7 @@ describe('the involvement store', () => {
     const s = new InvolvementStore(relay.deps);
     await s.load();
     relay.failWith(new RelayError('network', 0, 'Could not reach the relay'));
-    await expect(s.save(draft())).rejects.toThrow(/reach the relay/);
+    await expect(save(s, draft())).rejects.toThrow(/reach the relay/);
     expect(s.get()).toMatchObject({ status: 'ready', revision: 0 });
   });
 
@@ -331,8 +411,20 @@ describe('the involvement store', () => {
     const s = new InvolvementStore(relay.deps);
     await s.load();
     expect(s.get()).toMatchObject({ status: 'invalid', record: null, revision: 4 });
-    expect(await s.save(draft())).toEqual({ kind: 'saved' });
+    expect(await save(s, draft())).toEqual({ kind: 'saved' });
     expect(relay.puts[0]!.revision).toBe(5);
+  });
+
+  it('stops showing a preference once its signer is removed', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft(), 0));
+    const s = new InvolvementStore(relay.deps);
+    await s.load();
+    expect(s.get().status).toBe('ready');
+    w.trust.markRevoked(w.phone.id, iso(T0));
+    s.noteEvents([plainEvent('device.revoked', null, { device_id: w.phone.id, key_epoch: 2 })]);
+    await vi.waitFor(() => expect(s.get()).toMatchObject({ status: 'invalid', record: null }));
   });
 
   it('a hint reads again only once something has read it here', async () => {
@@ -362,18 +454,37 @@ describe('the involvement store', () => {
     expect(s.get().record?.consult_count).toBe(7);
   });
 
+  it('a hint during a read that fails is still followed by one more read', async () => {
+    const w = await makeWorld();
+    const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft({ consultCount: 6 }), 0));
+    let fail!: () => void;
+    (relay.deps.fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((_, reject) => (fail = () => reject(new Error('offline')))),
+    );
+    const s = new InvolvementStore(relay.deps);
+    const first = s.load();
+    s.noteEvents([hint()]);
+    fail();
+    await first;
+    expect(relay.deps.fetch).toHaveBeenCalledTimes(2);
+    expect(s.get()).toMatchObject({ status: 'ready', record: { consult_count: 6 } });
+  });
+
   it('a first read that fails is an error; a later one keeps what was read', async () => {
     const w = await makeWorld();
     const relay = fakeRelay(w);
+    relay.setCurrent(await sign(w, draft({ consultCount: 4 }), 0));
     const s = new InvolvementStore(relay.deps);
     (relay.deps.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offline'));
     await expect(s.load()).rejects.toThrow('offline');
     expect(s.get()).toMatchObject({ status: 'error', problem: 'offline' });
     await s.load();
-    expect(s.get().status).toBe('ready');
+    const shown = s.get();
+    expect(shown).toMatchObject({ status: 'ready', record: { consult_count: 4 } });
     (relay.deps.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offline'));
     await expect(s.load()).rejects.toThrow('offline');
-    expect(s.get().status).toBe('ready');
+    expect(s.get()).toBe(shown);
   });
 
   it('clear forgets the preference and drops a read still on its way', async () => {
@@ -388,12 +499,14 @@ describe('the involvement store', () => {
     const heard = vi.fn();
     s.subscribe(heard);
     const late = s.load();
+    heard.mockClear();
     s.clear();
+    expect(heard).toHaveBeenCalledTimes(1);
     expect(s.get()).toMatchObject({ status: 'idle', record: null, revision: 0 });
     release();
     await late;
     expect(s.get()).toMatchObject({ status: 'idle', record: null });
-    expect(heard).toHaveBeenCalled();
+    expect(heard).toHaveBeenCalledTimes(1);
   });
 
   it('a save still on its way when the device is unpaired never lands in what comes after', async () => {
@@ -405,7 +518,7 @@ describe('the involvement store', () => {
     (relay.deps.put as ReturnType<typeof vi.fn>).mockImplementationOnce(
       () => new Promise((r) => (release = () => r({ revision: 1, event_seq: 1 }))),
     );
-    const saving = s.save(draft());
+    const saving = save(s, draft());
     await vi.waitFor(() => expect(release).toBeTypeOf('function'));
     s.clear();
     release();
