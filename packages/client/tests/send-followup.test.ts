@@ -15,7 +15,15 @@ import {
   type OwnerFollowUpResult,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
-import { FakeRelay, FakeSink, makeHost, makeIdentity, origin, setupBridge, tick } from './helpers.js';
+import {
+  FakeRelay,
+  FakeSink,
+  makeHost,
+  makeIdentity,
+  origin,
+  setupBridge,
+  tick,
+} from './helpers.js';
 
 /*
  * Issue #119: a host app publishes the person's follow-up from the owner desktop (`sendFollowUp`), on the owner's own
@@ -443,7 +451,10 @@ describe('sendFollowUp is durable and idempotent', () => {
       code: 'validation_error',
       message: /already used/,
     });
-    const other = await bridge.registerQuestion({ origin: origin(), input: { question: 'Other?' } });
+    const other = await bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Other?' },
+    });
     await bridge.pump();
     await expect(
       bridge.sendFollowUp({ ...input, questionId: other.questionId }),

@@ -107,7 +107,11 @@ describe('a desktop with follow-ups on takes the person’s follow-up sent from 
 
   it('keeps a phone’s follow-up as it was, sent from the phone', async () => {
     const env = await asked();
-    await env.relay.messageEvent({ questionId: env.qid, signer: env.phone, text: 'From the phone' });
+    await env.relay.messageEvent({
+      questionId: env.qid,
+      signer: env.phone,
+      text: 'From the phone',
+    });
     await env.bridge.catchUp();
     expect(env.sink.typed[0]!.text).not.toContain('sent_from');
     const view = await env.bridge.getDecision(env.qid);
