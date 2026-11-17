@@ -1,4 +1,6 @@
 import {
+  HUMAN_MESSAGE_ROLES,
+  humanMessageSentOn,
   isPersonDecline,
   threadAwaitsHuman,
   type ActionKind,
@@ -209,6 +211,42 @@ export function answerBy(a: Pick<ActionView, 'provenance' | 'signerLabel'>): Ans
     computer,
     author: `You on ${computer}`,
     subject: `Your answer on ${computer}`,
+  };
+}
+
+/**
+ * Where the person sent a follow-up from, in the words every surface uses: a phone or tablet, or the computer (the
+ * owner desktop signed it), named from its certificate. Decided by the signer's verified role
+ * (`humanMessageSentOn`), never by anything the relay says. Null for anything that is not the person's: an agent
+ * message, one that could not be verified, or a signer that never sends a human message.
+ */
+export interface FollowUpBy {
+  /** The computer the person sent it on, or null when they sent it on a phone or tablet. */
+  computer: string | null;
+  /** The bubble's label: "Follow-up", "Follow-up on Studio Mac". */
+  label: string;
+  /** As a sentence's subject: "Your follow-up", "Your follow-up on Studio Mac". */
+  subject: string;
+}
+
+/** A follow-up sent on a phone or tablet: this device's own, or another one's. */
+export const PHONE_FOLLOW_UP: FollowUpBy = {
+  computer: null,
+  label: 'Follow-up',
+  subject: 'Your follow-up',
+};
+
+export function followUpBy(
+  m: Pick<ThreadMessage, 'side' | 'verified' | 'signerRole' | 'signerLabel'>,
+): FollowUpBy | null {
+  if (m.side !== 'human' || !m.verified || !m.signerRole) return null;
+  if (!HUMAN_MESSAGE_ROLES.includes(m.signerRole)) return null;
+  if (humanMessageSentOn(m.signerRole) === 'phone') return PHONE_FOLLOW_UP;
+  const computer = computerName(m.signerLabel);
+  return {
+    computer,
+    label: `Follow-up on ${computer}`,
+    subject: `Your follow-up on ${computer}`,
   };
 }
 
