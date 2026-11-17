@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { CREATOR_MISSING_FEATURE, EventData, MessageReceipt } from '@daintreehq/decisions-protocol';
+import {
+  CREATOR_MISSING_FEATURE,
+  EventData,
+  MessageReceipt,
+  PROTOCOL_VERSION,
+} from '@daintreehq/decisions-protocol';
 import { newId } from '@daintreehq/decisions-crypto';
 import {
   act,
@@ -119,6 +124,11 @@ describe("the owner desktop sends the person's messages", () => {
       record: before.record,
       envelope: before.envelope,
     });
+    // The sending desktop reads its own messages back like any other, with nothing held back as an echo.
+    const ownSeen = await postedEvents(w.owner);
+    expect(ownSeen.map((e) => [e.seq, e.data.record.message_id])).toEqual(
+      posted.map((e) => [e.seq, e.data.record.message_id]),
+    );
     const listed = await thread(phone, questionId);
     expect(listed.map((m) => [m.record.side, m.record.signer_device_id])).toEqual([
       ['human', w.owner.id],
@@ -204,14 +214,64 @@ describe("the owner desktop sends the person's messages", () => {
     // Only the asking desktop's declaration counts: the writing owner needs none.
     await declare(w.owner, []);
     await declare(host, [THREADS, ACCEPTS]);
-    expect((await say(w, w.owner, questionId, { side: 'human' })).res.status).toBe(201);
+    const sent = await say(w, w.owner, questionId, { side: 'human' });
+    expect(sent.res.status).toBe(201);
     expect(await state(questionId)).toMatchObject({
       messages: [{ side: 'human', signer_device_id: w.owner.id }],
       deliveries: [{ status: 'relay-queued', target_host_id: 'host_bbbbbbbb' }],
     });
+    // The Host reads it and reports typing it into its pane, as it does for a phone's message; the owner cannot.
+    expect((await postedEvents(host)).map((e) => e.data.record.message_id)).toEqual([
+      sent.messageId,
+    ]);
+    const report = (a: Actor, status: string, extra: Record<string, unknown> = {}) =>
+      a.call('POST', '/api/v1/deliveries/messages', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: newId(),
+        question_id: questionId,
+        message_id: sent.messageId,
+        host_id: 'host_bbbbbbbb',
+        status,
+        ...extra,
+      });
+    expect((await report(w.owner, 'received')).status).toBe(403);
+    expect((await report(host, 'received')).status).toBe(200);
+    expect((await report(host, 'terminal-delivered', { injection_id: newId() })).status).toBe(200);
+    const [listed] = await thread(host, questionId);
+    expect(listed.delivery).toMatchObject({ status: 'terminal-delivered' });
+    expect(listed.delivery.received_at).not.toBeNull();
     // Still never the agent's side of another desktop's question.
     const agent = await say(w, w.owner, questionId, { side: 'agent' });
     expect(agent.res.status).toBe(403);
+  });
+
+  it("writes on a model-answered question without confirming or changing the model's answer", async () => {
+    const w = await claimRelay();
+    await pairDevice(w);
+    await declare(w.owner, [THREADS, ACCEPTS]);
+    const { questionId } = await ask(w, { requirement: 'proxy-ok' });
+    const proxy = await act(w, w.owner, 'proxy-answer', questionId, 0, {
+      content: {
+        selected_option_ids: ['approve'],
+        model_id: 'm',
+        prompt_template_version: '1',
+        confidence: 0.9,
+      },
+    });
+    expect(proxy.res.status).toBe(201);
+    const note = await say(w, w.owner, questionId, { side: 'human', text: 'approved' });
+    expect(note.res.status).toBe(201);
+    const s = await state(questionId);
+    expect(s.question).toEqual({ status: 'proxy-answered', revision: 1 });
+    expect(s.deliveries).toEqual([{ status: 'relay-queued', target_host_id: 'host_aaaaaaaa' }]);
+    // "approved" in a message is text: the model's answer stays the one in force, and still the model's.
+    const actions = await inRoom((room) =>
+      room.q<{ action: string; provenance: string | null }>(
+        `SELECT action, provenance FROM actions WHERE question_id = ? ORDER BY event_seq`,
+        questionId,
+      ),
+    );
+    expect(actions).toEqual([{ action: 'proxy-answer', provenance: 'proxy' }]);
   });
 
   it('keeps the usual checks ahead of the support check', async () => {
