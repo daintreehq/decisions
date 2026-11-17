@@ -45,11 +45,11 @@ the signer (`provenanceForSigner` in `state.ts`):
 - a `desktop-host` never signs `answer`, `override` or `confirm-proxy`;
 - desktops sign `proxy-answer`: **proxy** provenance. A `human-required` question can never be satisfied by a proxy.
 
-`cancel` has no provenance whoever signs it: signed by a desktop it **withdraws** the question; signed by a phone or
-tablet, or by the owner desktop with `decline: true` in the signed record, it records that the person **declined** to
-answer (section 6.1). `roleMaySign` in `state.ts` is the one role table the relay and every client check action signers
-against (thread messages have their own rule, `applyMessage` in section 16), and the relay's provenance claim must
-equal what the signer's certified role implies (`provenanceForSigner`). The phone app accepts an owner-desktop `answer` only with
+`cancel` has no provenance whoever signs it: signed by a phone or tablet, or by the owner desktop with `decline: true`
+in the signed record, it records that the person **declined** to answer (section 6.1); any other desktop-signed cancel
+**withdraws** the question. `roleMaySign` in `state.ts` is the one role table the relay and every client check action
+signers against (thread messages have their own rule, `applyMessage` in section 16), and the relay's provenance claim
+must equal what the signer's certified role implies (`provenanceForSigner`). The phone app accepts an owner-desktop `answer` only with
 `human-desktop` provenance, shows it as the person's and names the computer from the owner certificate's signed
 `label`. The desktop library accepts one on the owner desktop and on a Remote Host, refuses one that lists phone
 images, and declares `owner-desktop-answers-v1` on every bridge's socket ticket. It keeps the answer as the person's
@@ -193,23 +193,24 @@ withdrawal, as before, and the flag gives the owner desktop no other human actio
 - **Attribution.** "Declined by the person" versus "withdrawn by the desktop" is derived only from the signed record:
   the signer's owner-certified role and, for the owner desktop, the signed `decline` flag
   (`isPersonDecline(action, role, record.decline)` in `state.ts`), never from a relay-supplied field. Receivers verify
-  the signature and certificate, and check the signer with `roleMaySign(action, role, record.decline)`, before
-  classifying it. The flag is part of the signed bytes, so a relay can neither forge a decline nor turn one into a
+  the signature and certificate before classifying it; a reader that supports the owner desktop's decline also passes
+  the signed flag to `roleMaySign` and `applyAction`, and one that predates the flag reads a flagged owner cancel as a
+  withdrawal. The flag is part of the signed bytes, so a relay can neither forge a decline nor turn one into a
   withdrawal.
-- **Phones and tablets** show a declined question as "Declined by you" in History, distinct from "Withdrawn on
+- **Phones and tablets** show a decline made on a phone or tablet as "Declined by you" in History, distinct from "Withdrawn on
   {computer}" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
-- **Desktops** that verify a human-signed cancel record a content-free decline entry and, if the asking agent is still
+- **Desktops** that verify a phone's or tablet's cancel record a content-free decline entry and, if the asking agent is still
   listening, type a notice with `status: declined` and `authorised: no`. An agent that has gone is never resumed, nor
   flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with
   `closed_reason: declined` (`withdrawn` for a desktop cancel, `expired` for an expiry) and no provenance, choice or
   text. A decline never authorises anything.
 - **Older desktops.** A desktop that predates declines rejects a phone-signed cancel during verification and only
   audits it, so its copy of the question would stay open while everything else treated it as closed. So the relay
-  commits a person's decline only when the question's publishing desktop (its `originating_device_id`) declared
+  commits a phone's or tablet's decline only when the question's publishing desktop (its `originating_device_id`) declared
   `person-declines-v1` on its latest socket ticket (section 19). Otherwise it refuses with `409 invalid_state` and
   `details: {reason: "creator-missing-feature", required_feature: "person-declines-v1"}`, stores no receipt, and the
   question stays open until it is answered, withdrawn or expires. A revoked publishing desktop is sent nothing, so its
-  questions can always be declined. The check comes after the transition and revision checks. Phones and tablets
+  questions can always be declined from a phone or tablet. The check comes after the transition and revision checks. Phones and tablets
   offer Dismiss only where the publishing desktop declared it; the desktop library declares it on every bridge.
 - **The owner desktop's decline.** A desktop that knows a phone's decline but not the flag would verify an owner-desktop
   decline as an ordinary withdrawal. So the relay commits one only when the question's publishing desktop declared
@@ -218,7 +219,7 @@ withdrawal, as before, and the flag gives the owner desktop no other human actio
   above. The owner desktop's decline needs only this feature, not `person-declines-v1`. A revoked publishing desktop
   declares nothing, so the owner desktop can withdraw its questions but not decline them. A client that predates the
   flag still verifies the record and shows the question as withdrawn. The desktop library does not declare the feature
-  yet, so until it does the relay refuses every owner-desktop decline.
+  yet, so the relay refuses an owner-desktop decline of any question published through it.
 
 ## 7. Event ledger and sync
 

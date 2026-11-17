@@ -609,6 +609,8 @@ describe('cancel, expiry and reopen', () => {
     expect(
       (await act(w, w.owner, 'cancel', declined.questionId, 0, { decline: true })).res.status,
     ).toBe(201);
+    // A closed question stays closed whatever is declared now: every retry is a no-op before any feature check.
+    await declare(w.owner, []);
     expect((await act(w, w.owner, 'cancel', declined.questionId, 0)).res.status).toBe(200);
     expect((await act(w, phone, 'cancel', declined.questionId, 0)).res.status).toBe(200);
     expect(await stored(declined.questionId)).toEqual([
@@ -648,21 +650,28 @@ describe('cancel, expiry and reopen', () => {
     expect(reopen.res.status).toBe(400);
     expect(reopen.res.json.code).toBe('validation_error');
 
-    // The transition and revision checks come first: a proxy answer is withdrawn, never declined.
+    // The transition and revision checks come before the feature check, so they answer even for a desktop that
+    // declares nothing: a proxy answer is withdrawn, never declined.
     const p = await ask(w, { requirement: 'proxy-ok' });
     expect((await act(w, w.owner, 'proxy-answer', p.questionId, 0)).res.status).toBe(201);
+    const o = await ask(w);
+    const answered = await ask(w);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+    await declare(w.owner, []);
     const late = await act(w, w.owner, 'cancel', p.questionId, 1, { decline: true });
     expect(late.res.status).toBe(409);
     expect(late.res.json.code).toBe('invalid_state');
     expect(late.res.json.details?.reason).toBeUndefined();
-    const o = await ask(w);
     const stale = await act(w, w.owner, 'cancel', o.questionId, 3, { decline: true });
+    expect(stale.res.status).toBe(409);
     expect(stale.res.json.code).toBe('revision_conflict');
-    const answered = await ask(w);
-    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
-    expect(
-      (await act(w, w.owner, 'cancel', answered.questionId, 1, { decline: true })).res.status,
-    ).toBe(409);
+    const closed = await act(w, w.owner, 'cancel', answered.questionId, 1, { decline: true });
+    expect(closed.res.status).toBe(409);
+    expect(closed.res.json.code).toBe('invalid_state');
+    expect(closed.res.json.details?.reason).toBeUndefined();
+    // With nothing wrong but the declaration, the feature check is what refuses it.
+    const undeclared = await act(w, w.owner, 'cancel', o.questionId, 0, { decline: true });
+    expect(undeclared.res.json.details?.reason).toBe(CREATOR_MISSING_FEATURE);
   });
 
   it('refuses an owner decline until the asking desktop declares owner-desktop-declines-v1, and stores nothing', async () => {
@@ -690,12 +699,13 @@ describe('cancel, expiry and reopen', () => {
     });
     expectRefused(first.res);
     // A GET /events declaration is not recorded and does not count.
-    await host.call(
+    const polled = await host.call(
       'GET',
       '/api/v1/events',
       undefined,
       'after=0&features=owner-desktop-declines-v1&limit=100',
     );
+    expect(polled.status).toBe(200);
     const repost = (idempotencyKey: string) =>
       w.owner.call('POST', `/api/v1/questions/${a.questionId}/cancel`, {
         protocol_version: PROTOCOL_VERSION,
