@@ -234,7 +234,7 @@ describe("an answer made on the computer, as the person's", () => {
       selected: ['b'],
       text: '',
       reason: '',
-      state: 'conflict',
+      state: 'conflicted',
       attempts: 1,
       latestRevision: 1,
     };
