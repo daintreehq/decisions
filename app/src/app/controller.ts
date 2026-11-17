@@ -475,6 +475,8 @@ export class AppController {
     this.sync?.kick();
     void this.outbox?.flush();
     if (this.involvementServed()) this.involvement?.refresh();
+    // What each desktop declares gates Dismiss, photos and follow-ups, and a desktop may have upgraded meanwhile.
+    if (this.relay) void this.refreshDevices().catch(() => undefined);
   }
 
   /* ---------------- pairing ---------------- */

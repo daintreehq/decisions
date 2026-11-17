@@ -466,28 +466,62 @@ describe('cancel, expiry and reopen', () => {
   it('refuses a decline until the asking desktop declares person-declines-v1, and stores nothing', async () => {
     const { world: w, phone } = await setup();
     const a = await ask(w);
-    // A desktop that predates declines (it declares nothing, or only older features) would reject the event.
-    for (const declared of [[], ['thread-messages-v1', 'owner-desktop-answers-v1']]) {
-      await declare(w.owner, declared);
-      const r = await act(w, phone, 'cancel', a.questionId, 0);
-      expect(r.res.status).toBe(409);
-      expect(r.res.json).toMatchObject({
+    const repost = (action: unknown, idempotencyKey: string) =>
+      phone.call('POST', `/api/v1/questions/${a.questionId}/cancel`, {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        action,
+      });
+    const expectRefused = (res: { status: number; json: any }) => {
+      expect(res.status).toBe(409);
+      expect(res.json).toMatchObject({
         code: 'invalid_state',
         details: { reason: CREATOR_MISSING_FEATURE, required_feature: 'person-declines-v1' },
       });
-    }
+    };
+    // A desktop that predates declines (it declares nothing, or only older features) would reject the event.
+    const key = newId();
+    const first = await act(w, phone, 'cancel', a.questionId, 0, { idempotencyKey: key });
+    expectRefused(first.res);
+    await declare(w.owner, ['thread-messages-v1', 'owner-desktop-answers-v1']);
+    expectRefused(await repost(first.signed, key));
+    // Nothing was stored: no status change, no event, no receipt, no action, and its jobs still pending.
     expect((await phone.call('GET', `/api/v1/questions/${a.questionId}`)).json.status).toBe('open');
     expect(
       (await events(w.owner)).filter((e) => e.event_type === 'decision.cancelled'),
     ).toHaveLength(0);
+    const stored = await inRoom((room) => ({
+      receipts: room.q(`SELECT 1 FROM command_receipts WHERE idempotency_key = ?`, key).length,
+      actions: room.q(`SELECT 1 FROM actions WHERE question_id = ?`, a.questionId).length,
+      pendingJobs: room.q(
+        `SELECT 1 FROM scheduled_jobs WHERE question_id = ? AND status = 'pending' AND kind != 'delete_attachments'`,
+        a.questionId,
+      ).length,
+    }));
+    expect(stored).toMatchObject({ receipts: 0, actions: 0 });
+    expect(stored.pendingJobs).toBeGreaterThan(0);
     // The desktop withdrawing its own question is not a decline and needs nothing.
     const b = await ask(w);
     expect((await act(w, w.owner, 'cancel', b.questionId, 0, { content: null })).res.status).toBe(
       201,
     );
-    // Once declared, a decline commits; a refusal kept no receipt in the way.
+
+    // Once declared, the very same signed command commits.
     await declare(w.owner, ['person-declines-v1']);
-    expect((await act(w, phone, 'cancel', a.questionId, 0)).res.status).toBe(201);
+    const ok = await repost(first.signed, key);
+    expect(ok.status).toBe(201);
+    expect(ok.json).toMatchObject({ status: 'cancelled', revision: 0 });
+
+    // Retries stay idempotent after the declaration is withdrawn: the receipt, the same action id, a fresh no-op.
+    await declare(w.owner, []);
+    const replay = await repost(first.signed, key);
+    expect(replay.status).toBe(201);
+    expect(replay.json).toEqual(ok.json);
+    expect((await repost(first.signed, newId())).status).toBe(200);
+    expect((await act(w, phone, 'cancel', a.questionId, 0)).res.status).toBe(200);
+    expect(
+      (await events(w.owner)).filter((e) => e.event_type === 'decision.cancelled'),
+    ).toHaveLength(2); // a's decline and b's withdrawal, once each
   });
 
   it("checks the Host that asked, not the owner, and lets a revoked Host's questions be declined", async () => {

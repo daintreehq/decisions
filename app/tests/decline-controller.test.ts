@@ -18,6 +18,7 @@ type Inside = {
   relay: unknown;
   snap: { config: unknown };
   refreshDevices(): Promise<void>;
+  resume(): void;
 };
 const inside = (c: AppController) => c as unknown as Inside;
 
@@ -81,6 +82,18 @@ describe('dismissing a question (docs/protocol.md section 6.1)', () => {
     expect(c.declinesFor(view)).toBe(true);
     withDevices([]);
     expect(c.declinesFor(view)).toBe(true);
+  });
+
+  it('reads the device list again when the app comes back, so an upgraded desktop is offered Dismiss', () => {
+    const c = new AppController('https://relay.example');
+    const refresh = vi.fn(async () => undefined);
+    inside(c).refreshDevices = refresh;
+    // Not paired yet: there is no relay to ask.
+    inside(c).resume();
+    expect(refresh).not.toHaveBeenCalled();
+    inside(c).relay = {};
+    inside(c).resume();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("says plainly when the relay refuses because the asking desktop can't take one", async () => {
