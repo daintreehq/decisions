@@ -200,8 +200,11 @@ withdrawal, as before, and the flag gives the owner desktop no other human actio
   the signed flag to `roleMaySign` and `applyAction`, and one that predates the flag reads a flagged owner cancel as a
   withdrawal. The flag is part of the signed bytes, so a relay can neither forge a decline nor turn one into a
   withdrawal.
-- **Phones and tablets** show a decline made on a phone or tablet as "Declined by you" in History, distinct from "Withdrawn on
-  {computer}" and "Expired without an answer"; it leaves Needs you and the badge on every paired device once it syncs.
+- **Phones and tablets** show a decline made on a phone or tablet as "Declined by you" in History, and the owner desktop's
+  verified decline as "Declined by you on {computer}", named from the owner desktop's certificate, both distinct from
+  "Withdrawn on {computer}" and "Expired without an answer"; a decline leaves Needs you and the badge on every paired
+  device once it syncs. The phone app passes the signed flag to `roleMaySign` and `applyAction`: a flagged cancel from
+  any other signer, or one whose signature fails, is ignored and never shown as the person's.
 - **Desktops** that verify a phone's or tablet's cancel record a content-free decline entry and, if the asking agent is still
   listening, type a notice with `status: declined` and `authorised: no`. An agent that has gone is never resumed, nor
   flagged as a delivery failure, just to hear it. The bridge's `get_decision` reports `status: cancelled` with

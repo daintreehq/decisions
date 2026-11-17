@@ -214,9 +214,12 @@ export async function verifyActionEvent(
   const signer = ctx.trust.get(record.signer_device_id);
   if (!signer) return fail('unknown signer');
   // The certified role decides, never the relay: the owner desktop may sign the person's first answer (made on the
-  // computer, `human-desktop`), a `desktop-host` never answers for them.
-  if (!roleMaySign(record.action, signer.role)) {
-    return fail(`a ${signer.role} cannot sign ${record.action}`);
+  // computer, `human-desktop`) and their decline (a `cancel` with the signed `decline` flag); a `desktop-host` never
+  // acts for them, and a phone or tablet declines by its role alone.
+  if (!roleMaySign(record.action, signer.role, record.decline)) {
+    return fail(
+      `a ${signer.role} cannot sign ${record.decline === true ? 'a decline' : record.action}`,
+    );
   }
   if (signer.revokedAt && occurredAt > signer.revokedAt)
     return fail('signed by a device after it was revoked');

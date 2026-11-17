@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { isPersonDecline, type HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
+import type { HumanAnswerContentV1 } from '@daintreehq/decisions-protocol';
 import { app } from '../../app/controller.js';
 import { entryImages, type OutboxEntry } from '../../data/outbox.js';
 import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/photos.js';
@@ -41,7 +41,6 @@ import {
   proxyNeedsReview,
   submitKind,
   unreadableHere,
-  withdrawnLabel,
 } from '../../domain/selectors.js';
 import { drafts, readyPhotos, useDraft } from '../../features/compose/draftStore.js';
 import { dictation, MESSAGES, useDictation, type Binding } from '../../features/voice/dictation.js';
@@ -64,7 +63,6 @@ import {
   ClockIcon,
   PersonIcon,
   RefreshIcon,
-  UndoIcon,
   WarningIcon,
 } from '../Icons.js';
 import { AnswerDock } from './AnswerDock.js';
@@ -79,6 +77,7 @@ import { Sheet } from './Sheet.js';
 import {
   AgentMessage,
   AgentNote,
+  CancelLine,
   HumanAnswer,
   HumanFollowUp,
   MessageContext,
@@ -1134,22 +1133,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </OutgoingMessage>,
         );
       } else if (a.action === 'cancel') {
-        const declined = a.signerRole !== null && isPersonDecline(a.action, a.signerRole);
-        items.push(
-          <SystemLine
-            key={a.actionId}
-            now={now}
-            at={a.createdAt}
-            icon={<UndoIcon size={14} />}
-            detail={
-              declined
-                ? 'You chose not to answer it, so nothing was approved.'
-                : 'No answer is needed, and nothing was approved here.'
-            }
-          >
-            {declined ? 'Declined by you' : withdrawnLabel(view)}
-          </SystemLine>,
-        );
+        items.push(<CancelLine key={a.actionId} view={view} a={a} now={now} />);
       } else if (a.action === 'reopen') {
         items.push(
           <SystemLine key={a.actionId} now={now} at={a.createdAt} icon={<RefreshIcon size={14} />}>

@@ -207,6 +207,8 @@ export async function actionEvent(
     envelopeQuestionId?: string;
     confirms?: string | null;
     seq?: number;
+    /** A `cancel` signed with `decline: true` (the owner desktop's decline for the person). */
+    decline?: true;
   },
 ): Promise<LedgerEvent> {
   const human = o.action === 'answer' || o.action === 'override' || o.action === 'confirm-proxy';
@@ -254,6 +256,7 @@ export async function actionEvent(
     envelope,
     actionId,
     confirmsActionId: o.confirms ?? null,
+    ...(o.decline ? { decline: o.decline } : {}),
   });
   const provenance =
     o.provenance !== undefined

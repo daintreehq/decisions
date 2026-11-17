@@ -33,8 +33,16 @@ export interface ActionView {
   seq: number;
   signerDeviceId: string;
   signerRole: Role | null;
-  /** The signer's certified name, once verified: names the computer an answer made there (`human-desktop`) came from. */
+  /**
+   * The signer's certified name, once verified: names the computer an answer made there (`human-desktop`), or a
+   * decline made there, came from.
+   */
   signerLabel?: string;
+  /**
+   * The signed record's `decline` flag, set only on a verified `cancel` the owner desktop signed for the person
+   * (docs/protocol.md section 6.1). Never taken from a relay-supplied field.
+   */
+  decline?: true;
   content: AnswerContent | null;
   verified: boolean;
   error?: string;
@@ -372,6 +380,7 @@ export class QuestionStore {
             rec.action,
             v.value.signerRole,
             rec.expected_revision,
+            v.value.record.decline,
           );
         } catch (e) {
           reject(e instanceof Error ? e.message : 'illegal transition');
@@ -396,6 +405,7 @@ export class QuestionStore {
           provenance: v.value.provenance,
           signerRole: v.value.signerRole,
           signerLabel: v.value.signerLabel,
+          ...(v.value.record.decline === true ? { decline: true as const } : {}),
           content: v.value.content,
           verified: true,
           imagesOk: v.value.imagesOk,
