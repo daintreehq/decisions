@@ -311,6 +311,10 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         authenticator: auth,
         ...(o.mcp.port !== undefined ? { port: o.mcp.port } : {}),
         ...(o.mcp.path !== undefined ? { path: o.mcp.path } : {}),
+        // This host resolves an id inside the pane's human-designated folder, not the agent's worktree, so it says so.
+        attachmentIdDescription: o.mcp.attachmentsDir
+          ? 'The relative path the human gave you of an image in the attachments folder set up for this terminal; nothing else can be attached.'
+          : 'This host accepts no attachments; leave attachments out.',
       });
       ctx.out(`Decisions MCP listening on ${mcp.url} (loopback only)\n`);
       for (const l of mcpAddLines(mcp.url, token, {

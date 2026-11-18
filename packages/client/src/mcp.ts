@@ -165,7 +165,7 @@ export type DecisionsMcpBridge = Pick<DecisionsBridge, (typeof MCP_BRIDGE_METHOD
  * `initialize`, so it points at the tool rather than carrying the preference.
  */
 export const SERVER_INSTRUCTIONS =
-  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
+  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. When the person would have to see something to decide (a UI, a design, a layout, a chart, an error on screen), attach screenshots to ask_human as its attachments field describes, instead of describing it in words, with roles before and after for a change. If the images change after an approval, ask again: an approval covers only the images it was given. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
   "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
 /** The `ask_human` result text. */
@@ -178,12 +178,19 @@ export const followupInstruction = (alias: number, expectsReply: boolean) =>
     ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
     : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
 
+/**
+ * How an agent names an image to attach, as Daintree resolves it: a path inside the agent's working directory.
+ * A host that resolves ids differently says so through `McpHandlerOptions.attachmentIdDescription`.
+ */
+export const DEFAULT_ATTACHMENT_ID_DESCRIPTION =
+  'A PNG, JPEG or WebP image (up to 20 MiB) you saved, named by its path relative to the folder this terminal started in, such as .tmp/after.png.';
+
 /** Tool definitions. Descriptions stay under 400 bytes (Daintree's CI budget for tool lists). */
 export const TOOLS = [
   {
     name: 'ask_human',
     description:
-      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). Returns at once, never waiting: keep doing work that does not depend on the answer, and end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
+      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). If they must see something to decide, attach screenshots. Returns at once: keep doing work that does not depend on the answer; end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -224,6 +231,8 @@ export const TOOLS = [
         attachments: {
           type: 'array',
           maxItems: 8,
+          description:
+            'Screenshots or other images the person should look at to decide: the UI, design or result in question, before and after a change. Attach them whenever the question is about something visual.',
           items: {
             type: 'object',
             additionalProperties: false,
@@ -231,7 +240,7 @@ export const TOOLS = [
             properties: {
               local_resource_id: {
                 type: 'string',
-                description: 'Id of an image Daintree has registered for you.',
+                description: DEFAULT_ATTACHMENT_ID_DESCRIPTION,
               },
               role: { type: 'string', enum: ['before', 'after', 'reference', 'other'] },
               alt: { type: 'string', maxLength: 500 },
@@ -490,6 +499,12 @@ export const TOOLS = [
 ] as const;
 
 export interface McpHandlerOptions {
+  /**
+   * Replaces `DEFAULT_ATTACHMENT_ID_DESCRIPTION` in the `tools/list` schema of `ask_human`'s
+   * `attachments[].local_resource_id`, for a host whose `AttachmentResolver` takes something other than a path
+   * relative to the agent's working directory. Agents attach only what this tells them they can name.
+   */
+  attachmentIdDescription?: string;
   /** Exact `Host` header values accepted. Defaults to the loopback names on `port`. */
   allowedHosts?: () => string[];
   /**
@@ -576,6 +591,34 @@ function bearer(req: IncomingMessage): string | null {
   return h.replace(/^Bearer\s+/i, '');
 }
 
+/** `TOOLS` as served, with the host's own words for an attachment id. Leaves `TOOLS` itself untouched. */
+export function toolsWithAttachmentIdDescription(description: string) {
+  return TOOLS.map((t) => {
+    if (t.name !== 'ask_human') return t;
+    const attachments = t.inputSchema.properties.attachments;
+    const id = attachments.items.properties.local_resource_id;
+    return {
+      ...t,
+      inputSchema: {
+        ...t.inputSchema,
+        properties: {
+          ...t.inputSchema.properties,
+          attachments: {
+            ...attachments,
+            items: {
+              ...attachments.items,
+              properties: {
+                ...attachments.items.properties,
+                local_resource_id: { ...id, description },
+              },
+            },
+          },
+        },
+      },
+    };
+  });
+}
+
 export function createDecisionsMcpHandler(
   bridge: DecisionsMcpBridge,
   authenticator: PaneAuthenticator,
@@ -586,6 +629,9 @@ export function createDecisionsMcpHandler(
   const limit = opts.rateLimitPerMinute ?? 60;
   const now = opts.now ?? Date.now;
   const hits = new Map<string, number[]>();
+  const tools = toolsWithAttachmentIdDescription(
+    opts.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
+  );
 
   const limited = (key: string): boolean => {
     const t = now();
@@ -687,7 +733,7 @@ export function createDecisionsMcpHandler(
       case 'ping':
         return isNotification ? null : rpcOk(m.id, {});
       case 'tools/list':
-        return rpcOk(m.id, { tools: TOOLS });
+        return rpcOk(m.id, { tools });
       case 'tools/call': {
         const name = m.params?.name;
         const args = (m.params?.arguments ?? {}) as Record<string, unknown>;

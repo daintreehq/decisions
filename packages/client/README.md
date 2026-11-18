@@ -24,6 +24,12 @@ import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
 const store = new SqliteLocalStore('/path/to/decisions.db');
 ```
 
+The MCP tools tell agents to attach screenshots when a decision is visual, and describe an attachment's
+`local_resource_id` as Daintree resolves it: an image path relative to the folder the agent's terminal started in.
+A host whose `AttachmentResolver` takes something else says so with `attachmentIdDescription` (on
+`createDecisionsMcpHandler` and `startDecisionsMcpServer`); it changes only what agents are told, never what
+the resolver accepts.
+
 The `decisions` command ([`@daintreehq/decisions-cli`](https://www.npmjs.com/package/@daintreehq/decisions-cli))
 is a complete host built on this package; [docs/architecture.md](https://github.com/daintreehq/decisions/blob/main/docs/architecture.md)
 and the [Daintree integration spec](https://github.com/daintreehq/decisions/blob/main/docs/daintree-integration-spec.md)

@@ -6,6 +6,7 @@ import { AgentMessageContentV1, type SignedMessage } from '@daintreehq/decisions
 import {
   MCP_BRIDGE_METHODS,
   PolicyRegistry,
+  DEFAULT_ATTACHMENT_ID_DESCRIPTION,
   SERVER_INSTRUCTIONS,
   TOOLS,
   TokenMapAuthenticator,
@@ -31,6 +32,7 @@ async function boot(
     rate?: number;
     maxBody?: number;
     path?: string;
+    attachmentIdDescription?: string;
     bridge?: Parameters<typeof setupBridge>[0];
     /** Serve this instead of the bridge itself (a host's forwarder). */
     wrap?: (b: Awaited<ReturnType<typeof setupBridge>>['bridge']) => DecisionsMcpBridge;
@@ -46,6 +48,9 @@ async function boot(
     ...(opts.rate ? { rateLimitPerMinute: opts.rate } : {}),
     ...(opts.maxBody ? { maxBodyBytes: opts.maxBody } : {}),
     ...(opts.path ? { path: opts.path } : {}),
+    ...(opts.attachmentIdDescription
+      ? { attachmentIdDescription: opts.attachmentIdDescription }
+      : {}),
   });
   return { ...env, mcp: running };
 }
@@ -144,6 +149,42 @@ describe('HTTP MCP: protocol', () => {
     ]);
     for (const t of TOOLS) expect(new TextEncoder().encode(t.description).length).toBeLessThan(400);
     expect(r.result.tools[0].inputSchema.required).toEqual(['question']);
+  });
+  it('tools/list: agents are told to attach screenshots when the decision is visual, and how', async () => {
+    // An agent that cannot tell what an attachment id is asks in words about something the person
+    // has to see, so every layer says when to attach and the id is described as a path it can write.
+    const { mcp } = await boot();
+    const init = JSON.parse((await raw(mcp, { body: rpc('initialize') })).body);
+    const instructions: string = init.result.instructions;
+    expect(instructions).toMatch(/see something to decide .* attach screenshots to ask_human/);
+    expect(instructions).toMatch(/roles before and after/);
+    expect(instructions).toMatch(/approval covers only the images it was given/);
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const ask = r.result.tools.find((t: { name: string }) => t.name === 'ask_human');
+    expect(ask).toBeDefined();
+    expect(ask.description).toMatch(/see something to decide, attach screenshots/);
+    expect(ask.inputSchema.properties.attachments.description).toMatch(/screenshots/i);
+    expect(ask.inputSchema.properties.attachments.description).toMatch(/visual/);
+    const id: string =
+      ask.inputSchema.properties.attachments.items.properties.local_resource_id.description;
+    expect(id).toMatch(/PNG, JPEG or WebP/);
+    expect(id).toMatch(/path relative to the folder this terminal started in/);
+    expect(id).not.toMatch(/registered/);
+  });
+  it('tools/list: a host replaces the attachment id description without touching TOOLS', async () => {
+    const before = structuredClone(TOOLS);
+    const { mcp } = await boot({ attachmentIdDescription: 'A file name in your pane folder.' });
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    // Exactly one field differs from the defaults; every sibling and every other tool is served as is.
+    const expected = structuredClone(before) as unknown as Array<Record<string, any>>;
+    const ask = expected.find((t) => t.name === 'ask_human')!;
+    ask.inputSchema.properties.attachments.items.properties.local_resource_id.description =
+      'A file name in your pane folder.';
+    expect(r.result.tools).toEqual(JSON.parse(JSON.stringify(expected)));
+    expect(TOOLS).toEqual(before);
+    expect(
+      before[0].inputSchema.properties.attachments.items.properties.local_resource_id.description,
+    ).toBe(DEFAULT_ATTACHMENT_ID_DESCRIPTION);
   });
   it('tools/list: annotations let approval-gating clients run ask_human and get_decision unprompted', async () => {
     // MCP defaults an unannotated tool to destructive and open-world. Codex then asks for approval of
