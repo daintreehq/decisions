@@ -19,6 +19,15 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8]);
 const origin = cliOrigin('mcp');
 
+type AskHumanSchema = {
+  name: string;
+  inputSchema: {
+    properties: {
+      attachments: { items: { properties: { local_resource_id: { description: string } } } };
+    };
+  };
+};
+
 describe('readBounded', () => {
   it('reads regular files, refuses oversize, empty, directories and FIFOs without blocking', async () => {
     const f = join(root, 'ok.png');
@@ -137,6 +146,7 @@ describe('the MCP daemon: attachments and secrets over the wire', () => {
         name: string,
         args: unknown,
       ) => Promise<{ isError?: boolean; content: { text: string }[] }>;
+      attachmentIdDescription: () => Promise<string>;
     }) => Promise<void>,
   ) {
     const home = mkdtempSync(join(root, 'home-'));
@@ -186,14 +196,40 @@ describe('the MCP daemon: attachments and secrets over the wire', () => {
       return ((await r.json()) as { result: { isError?: boolean; content: { text: string }[] } })
         .result;
     };
+    const attachmentIdDescription = async () => {
+      const r = await fetch(h.mcp.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${h.token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+      const tools = ((await r.json()) as { result: { tools: AskHumanSchema[] } }).result.tools;
+      const ask = tools.find((t) => t.name === 'ask_human');
+      expect(ask).toBeDefined();
+      return ask!.inputSchema.properties.attachments.items.properties.local_resource_id.description;
+    };
     try {
-      await fn({ url: h.mcp.url, token: h.token!, out: m.out, call });
+      await fn({ url: h.mcp.url, token: h.token!, out: m.out, call, attachmentIdDescription });
     } finally {
       release();
       await done;
     }
   }
 
+  it('tells agents how this host names an attachment, not the default worktree path', async () => {
+    await withDaemon({}, async ({ attachmentIdDescription }) => {
+      const text = await attachmentIdDescription();
+      expect(text).toMatch(/no attachments/);
+      expect(text).toMatch(/leave attachments out|omit/);
+    });
+    await withDaemon({ attachmentsDir: join(root, 'resources') }, async (h) => {
+      const text = await h.attachmentIdDescription();
+      expect(text).toMatch(/the human gave you/);
+      expect(text).toMatch(/attachments folder set up for this terminal/);
+      expect(text).toMatch(/nothing else can be attached/);
+      expect(text).not.toMatch(/working directory|worktree|terminal started in/);
+      expect(text).not.toContain(join(root, 'resources'));
+    });
+  });
   it('an agent cannot read an arbitrary path (no folder configured)', async () => {
     await withDaemon({}, async ({ call }) => {
       const r = await call('ask_human', {
