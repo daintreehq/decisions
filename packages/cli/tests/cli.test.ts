@@ -410,6 +410,25 @@ describe('listen without a live socket', () => {
     expect(m.out.join('\n')).toMatch(/Last HTTP sync last success \S+ at event 0/);
   });
 
+  it('--once gives up at its deadline when the relay never answers', async () => {
+    const m = await ready({ routes: relay() });
+    const inner = m.ctx.fetch;
+    m.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+      if (!String(u).includes('/api/v1/events')) return inner(u as string, init);
+      return new Promise<Response>((_, reject) =>
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        ),
+      );
+    }) as typeof fetch;
+    const ended = await daemon(m.ctx, {}, { once: true, onceDeadlineMs: 100 }).catch(
+      (e: unknown) => e,
+    );
+    expect(ended).toBeInstanceOf(CliError);
+    expect((ended as CliError).message).toMatch(/did not finish within two minutes/);
+    expect((ended as CliError).exitCode).toBe(1);
+  });
+
   it('--once fails when the relay cannot be read', async () => {
     const m = await ready({ routes: relay(down) });
     await expect(daemon(m.ctx, {}, { once: true })).rejects.toThrow(
@@ -666,6 +685,18 @@ describe('exec sink', () => {
     expect(await sink.inject(await target, 'hello', 'i')).toEqual({
       outcome: 'held',
       reason: 'exec_tempfail',
+    });
+  });
+
+  it('close() ends a command that never exits, which settles as ambiguous', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null; sleep 30' }, () => undefined);
+    const pending = sink.inject(await target, 'hello', 'i');
+    await new Promise((r) => setTimeout(r, 100));
+    sink.close();
+    const late = new Promise((r) => setTimeout(() => r('hung'), 5_000));
+    expect(await Promise.race([pending, late])).toEqual({
+      outcome: 'ambiguous',
+      reason: 'exec_exit_signal',
     });
   });
 

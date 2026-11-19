@@ -137,6 +137,43 @@ export interface BridgeOptions {
 export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
 
 /**
+ * Runs a task one run at a time. A kick while it runs asks for one more run after it, never a queue: however often
+ * it is kicked while a run is stuck, it holds one run and one flag. The promise settles when the loop has run out of
+ * kicks; a run's failure is reported and the loop goes on.
+ */
+class Rerun {
+  private loop: Promise<void> | null = null;
+  private again = false;
+  constructor(
+    private readonly task: () => Promise<void>,
+    private readonly onError: (e: Error) => void,
+  ) {}
+  kick(): Promise<void> {
+    this.again = true;
+    this.loop ??= (async () => {
+      try {
+        while (this.again) {
+          this.again = false;
+          try {
+            await this.task();
+          } catch (e) {
+            this.onError(e as Error);
+          }
+        }
+      } finally {
+        this.loop = null;
+      }
+    })();
+    return this.loop;
+  }
+}
+
+/** How long `stop` waits for the last status record before letting the host close the store anyway. */
+const STATUS_WAIT_MS = 5_000;
+/** The deadline of each page request a direct `catchUp` makes (it keeps the client's own retries). */
+const CATCH_UP_TIMEOUT_MS = 30_000;
+
+/**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
  * answer from a client that does not declare it, and its words must still arrive. `involvement-v1` brings the
@@ -381,8 +418,21 @@ export class DecisionsBridge {
   private httpSynced = false;
   /** Status records, written in order; `stop` waits for them so the host can close the store after it. */
   private statusWrites: Promise<void> = Promise.resolve();
-  /** Applying and delivering what the latest sync read, in the background (`sync({ settle: true })` waits). */
-  private applying: Promise<void> = Promise.resolve();
+  /**
+   * Applying what syncs read, and delivering what that brings, each one run at a time in the background, so a sink
+   * or a key lookup that hangs holds one run, never a growing queue, and a hung sink does not stop events (a
+   * withdrawal, a revocation) from being applied. `sync({ settle: true })` waits for both.
+   */
+  private readonly applier = new Rerun(
+    () => this.applyStored(),
+    (e) => this.emitError(e),
+  );
+  private readonly deliverer = new Rerun(
+    () => this.deliverNow(),
+    (e) => this.emitError(e),
+  );
+  /** The last sync was refused this device's signature: background requests wait for the sync's slow retry. */
+  private authRefused = false;
   /** Deliveries already announced on `delivered`, so two drains settling the same one announce it once. */
   private announced = new Set<string>();
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
@@ -607,7 +657,15 @@ export class DecisionsBridge {
     // A sync's page read writes events and the cursor: its requests were just aborted, so it settles at once. Applying
     // and delivering are not waited for, as with the socket: the delivery engine stops admitting on its own.
     if (this.paging?.abortable) await this.paging.pass.catch(() => undefined);
-    await this.statusWrites;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.statusWrites,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, STATUS_WAIT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   private stopPolling(): void {
@@ -1213,6 +1271,9 @@ export class DecisionsBridge {
   /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
   pump(): Promise<void> {
     if (!this.running()) return Promise.resolve();
+    // The relay is refusing this device's signature: every signed request now counts against its limit on failed
+    // authentications from this address, so the background work waits for the sync's slow retry to get through.
+    if (this.pollMode && this.authRefused) return Promise.resolve();
     if (this.pumping) return this.pumping;
     this.pumping = (async () => {
       try {
@@ -1313,13 +1374,18 @@ export class DecisionsBridge {
    * finds, so a withdrawal still lands while an answer waits to be typed.
    */
   catchUp(): Promise<number> {
-    return this.catchUpWith({});
+    // Bounded, and cut short by `stop`, so a sync that joins this read cannot hang behind it.
+    return this.catchUpWith({
+      timeoutMs: CATCH_UP_TIMEOUT_MS,
+      ...(this.running() ? { signal: this.httpAbort.signal } : {}),
+    });
   }
 
   private async catchUpWith(req: CallOptions): Promise<number> {
     const cursor = await this.readPages(req);
     await this.reportReceived(cursor, req);
-    await this.applyRead();
+    if (await this.inbox.processPending()) await this.deliverNow();
+    this.refreshPreference();
     return cursor;
   }
 
@@ -1328,17 +1394,20 @@ export class DecisionsBridge {
     try {
       await this.ctx.client.deliveriesReceived(cursor, req);
     } catch (e) {
-      if (isDeviceRevoked(e)) throw e;
+      if (isDeviceRevoked(e)) this.markRevoked();
     }
   }
 
-  /** Apply the events read and deliver what they bring; after a complete read, also read the preference. */
-  private async applyRead(complete = true): Promise<void> {
-    if (await this.inbox.processPending()) await this.deliverNow();
-    // Without a socket there is no reconnect to read the preference on: read it after each catch-up. Not after a
-    // failed one: the relay is not answering, or refusing this device, and is asked again on the sync's schedule.
-    if (complete && this.socket.currentState !== 'live')
+  /** Without a socket there is no reconnect to read the preference on: read it after each complete catch-up. */
+  private refreshPreference(): void {
+    if (this.socket.currentState !== 'live')
       void this.involvement.refresh().catch((e) => this.emitError(e as Error));
+  }
+
+  /** The applier's run: apply the stored events, and have the deliverer type what they bring. */
+  private async applyStored(): Promise<void> {
+    if (!this.running()) return;
+    if (await this.inbox.processPending()) void this.deliverer.kick();
   }
 
   private readPages(req: CallOptions): Promise<number> {
@@ -1386,7 +1455,11 @@ export class DecisionsBridge {
       this.syncing = pass;
     }
     const status = await this.syncing;
-    if (opts.settle) await this.applying;
+    if (opts.settle) {
+      // Fresh runs of both, after this sync's read: whatever another run already took is done by then too.
+      await this.applier.kick();
+      await this.deliverer.kick();
+    }
     return status;
   }
 
@@ -1433,6 +1506,7 @@ export class DecisionsBridge {
       };
     } else if (!failure) {
       this.syncFailures = 0;
+      this.authRefused = false;
       status = {
         v: 1,
         outcome: 'ok',
@@ -1445,6 +1519,8 @@ export class DecisionsBridge {
       };
     } else {
       this.syncFailures++;
+      this.authRefused =
+        failure.error instanceof RelayError && failure.error.code === 'not_authenticated';
       const fatal = isFatalSyncError(failure.error);
       if (fatal) {
         // Polling ends, but this run stays one that polls: nothing else starts reading the relay instead.
@@ -1462,11 +1538,15 @@ export class DecisionsBridge {
           poll && !fatal ? now + retryDelayMs(this.syncFailures, poll, failure.error) : null,
       };
     }
-    // A revocation was recorded as it happened (`markRevoked`).
-    if (!revoked) await this.recordStatus(status);
-    // Whatever was read, a failed sync's earlier pages included, is applied and delivered without holding up the next.
-    if (run === this.lifecycle)
-      this.applying = this.applyRead(!failure).catch((e) => this.emitError(e as Error));
+    // Queued, not awaited: a store slow to write must not hold up polling. A revocation was recorded as it happened
+    // (`markRevoked`). Classifying, queueing and announcing run without a pause, so nothing changes in between.
+    if (!revoked) void this.recordStatus(status);
+    if (run === this.lifecycle) {
+      // Whatever was read, a failed sync's earlier pages included, is applied and delivered in the background.
+      void this.applier.kick();
+      // Not after a failed sync: the relay is not answering, or refusing this device, and is asked on its schedule.
+      if (!failure) this.refreshPreference();
+    }
     for (const l of [...this.listeners.sync]) {
       try {
         l(status);
@@ -1496,7 +1576,13 @@ export class DecisionsBridge {
   private writeStatus(make: () => Promise<HttpSyncStatus>): Promise<void> {
     const write = this.statusWrites
       .then(async () => this.ctx.store.setMeta(HTTP_SYNC_META_KEY, JSON.stringify(await make())))
-      .catch((e) => this.emitError(e as Error));
+      .catch((e) => {
+        try {
+          this.emitError(e as Error);
+        } catch {
+          /* a listener threw: the queue must still settle */
+        }
+      });
     this.statusWrites = write;
     return write;
   }

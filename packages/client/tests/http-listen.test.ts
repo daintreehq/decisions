@@ -288,6 +288,52 @@ describe('a socketless bridge that polls over HTTP', () => {
     expect(await Promise.race([stopped, late])).toBe('stopped');
   });
 
+  it('applies a withdrawal while the sink is stuck typing another answer', async () => {
+    const env = await listening();
+    const first = await ask(env);
+    const second = await ask(env);
+    let typing = 0;
+    env.sink.inject = () => {
+      typing++;
+      return new Promise(() => undefined);
+    };
+    await env.relay.answerEvent({ questionId: first, phone: env.phone, options: ['yes'] });
+    await wait(() => expect(typing).toBe(1));
+    env.relay.push('decision.deleted', second, null, {});
+    await wait(async () =>
+      expect((await env.store.getQuestion(second))!.local_status).toBe('cancelled'),
+    );
+    expect(typing).toBe(1);
+  });
+
+  it('never types an answer twice when recording its delivery fails', async () => {
+    const env = await setupBridge();
+    bridges.push(env.bridge);
+    const qid = await ask(env);
+    // The sink confirms the write, then the store fails once while recording it.
+    let failures = 1;
+    const fail = <T extends unknown[]>(fn: (...a: T) => Promise<void>) =>
+      (async (...a: T) => {
+        const patch = a.at(-1) as { delivery_status?: string };
+        if (patch?.delivery_status === 'terminal-delivered' && failures-- > 0)
+          throw new Error('disk full');
+        return fn(...a);
+      }) as (...a: T) => Promise<void>;
+    env.store.settleIntent = fail(env.store.settleIntent.bind(env.store));
+    const update = env.store.updateQuestion.bind(env.store);
+    env.store.updateQuestion = (async (id, patch) => {
+      if (patch.delivery_status === 'terminal-delivered' && failures-- > 0)
+        throw new Error('disk full');
+      return update(id, patch);
+    }) as typeof env.store.updateQuestion;
+    await env.relay.answerEvent({ questionId: qid, phone: env.phone, options: ['yes'] });
+    await env.bridge.catchUp().catch(() => undefined);
+    expect(env.sink.typed).toHaveLength(1);
+    await env.bridge.pump().catch(() => undefined);
+    await env.bridge.pump().catch(() => undefined);
+    expect(env.sink.typed).toHaveLength(1);
+  });
+
   it('declares its features again every few minutes, in case another process replaced them', async () => {
     let now = Date.now();
     const env = await listening({ now: () => now });
