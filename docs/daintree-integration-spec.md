@@ -60,9 +60,157 @@ Tool timeout: the generated config uses `MCP_CONFIRMABLE_CALL_MAX_MS` seconds fo
 
 ### 3.3 Tools and budgets
 
-Five tools, each with a description under 400 bytes (Daintree CI caps this, `.claude/rules/actions-and-mcp.md`): `ask_human`, `get_decision`, `cancel_question`, `send_followup`, `get_involvement`. They are not part of the control surface action manifest, so they do not consume the external-tier budget, and because the route is separate they are not re-sent every turn to clients that did not mount it. Input schemas are exactly the ones in `@daintreehq/decisions-client` (`AskHumanInput`: question ≤ 8000 chars, context ≤ 32 KiB, options ≤ 12, attachments, `requested_requirement`, `workflow_gate_id`, `expires_at`, `correlation_id`, and an optional `preparation` report (3.4); `PostMessageInput`: `question_id`, non-blank `text` ≤ 16 KiB of UTF-8, and a required `expects_reply` boolean).
+Five tools, each with a description under 400 bytes (Daintree CI caps this, `.claude/rules/actions-and-mcp.md`): `ask_human`, `get_decision`, `cancel_question`, `send_followup`, `get_involvement`. They are not part of the control surface action manifest, so they do not consume the external-tier budget, and because the route is separate they are not re-sent every turn to clients that did not mount it. Input schemas are exactly the ones in `@daintreehq/decisions-client` (`AskHumanInput`: question ≤ 8000 chars, context ≤ 32 KiB, options ≤ 12, attachments, `requested_requirement`, `workflow_gate_id`, `expires_at` or `expires_in`, `correlation_id`, an optional `preparation` report (3.4), and an optional `planned_fallback` (3.3.1); `PostMessageInput`: `question_id`, non-blank `text` ≤ 16 KiB of UTF-8, and a required `expects_reply` boolean).
 
-The result text returned to the agent is: `Asked as q-<alias>. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.` The alias `q-N` is a cosmetic, per-installation counter. Wire ids are full unguessable identifiers. The server instructions (`SERVER_INSTRUCTIONS`) say the same, so an agent knows about threads before it asks.
+The result text returned to the agent (`askedText`) begins: `Asked as q-<alias>. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.` (`askedInstruction`). It goes on with the deadline that applies and what happens at it, any change policy made to the request, and `To check on it later, or if you lose track of it, call get_decision with question_id <id>.` The alias `q-N` is a cosmetic, per-installation counter. Wire ids are full unguessable identifiers. The server instructions (`SERVER_INSTRUCTIONS`) say the same, so an agent knows about threads before it asks.
+
+#### 3.3.1 Deadlines, advice and retries
+
+`ask_human` takes the deadline as `expires_at` (an ISO 8601 time) or `expires_in` (a whole number and one unit, `s`, `m`, `h` or `d` for 24 hours, from `61s` to `365d`, such as `15m`), never both: both is `validation_error: expires_in: supply only one of expires_at and expires_in`. The bridge reads its clock once when it takes the question, converts `expires_in` from that moment, and applies the expiry policy (section 5) to the result. Neither means the host or gate default. The structured result says what applies, beside `question_id`, `status: "queued"` and `enforced_requirement`:
+
+- `expires_at`: the deadline the question was signed with, in UTC, or `null` when it never expires; `requested_expires_at`: what the agent asked for, in UTC, or `null`.
+- `reply_mode`: `blocking`, or `advisory` for advice (below); `planned_fallback`: the plan, or `null`.
+- `policy_adjustments`: each change trusted policy made, as `{field, requested, effective, source, gate_id}`: the deadline (a cap, or a default where none was asked), the requirement raised, or the kind a gate set, with `source` `host` or `gate` naming the policy that made the change.
+- `duplicate`: true when the call repeated an earlier one (below).
+
+A host that forwards `registerQuestion` from an older library version returns only the first four fields and `duplicate`. The result then leaves out the rest and says nothing about the deadline, rather than guess one. If the agent sent `expires_in` or `planned_fallback`, the text says they could not be confirmed and the question should be treated as one that waits for a decision.
+
+**Advice.** `planned_fallback` (1 to 1,000 characters, not blank; anything else is `validation_error: planned_fallback: …`) asks for advice before a step the agent may take on its own, and says what it will do if no answer arrives by the deadline. The bridge signs it as an advisory question (protocol section 21) only when every condition in the advisory bullet of section 5 holds, checked again just before signing when reading the images took time. Otherwise the call fails, nothing is stored, and nothing is asked: it is never made blocking. The tool error gives the reason after its code, as in `not_supported: relay-unsupported: …`. The reasons are `host-unsupported`, `policy-disallowed`, `relay-unsupported` (an older relay), `no-capable-reader`, `gated`, `approval` and `no-deadline` (under a default of never with no deadline asked). Each says to ask again without `planned_fallback` for a decision. Whether the relay and a phone or tablet support advice is read in the background, so `ask_human` never waits on the network. Before the first read, or once the last one is five minutes old, the call fails with `invalid_state: support-unknown`, and a retry a moment later is decided.
+
+While it waits, the agent carries on with anything that does not depend on the answer. An answer committed before the deadline is typed into the pane as usual, however late it arrives. If none is, the agent is told the plan it stated is now its own to carry out, at its discretion: nothing was decided or approved. The distinct notice typed for that is daintreehq/decisions#155; until it ships, delivery types the ordinary expiry block, so a host turns `advisoryDeadlines` on only with it. `get_decision` recovers the same facts by `question_id`. `reply_mode` and `planned_fallback` describe the current round: an advisory question that expired unanswered in its first round reports `status: "expired"`, `revision: 0`, `reply_mode: "advisory"`, the plan, and text saying the plan is the agent's to carry out. A reopened question is a new round that waits for a decision, with `reply_mode: "blocking"` and no plan.
+
+**Retries and collisions.** `correlation_id` is scoped to the asking pane's identity (host, pane, generation, principal, incarnation, session, worktree), so two panes never share a question. A repeat call with the same id and the same request returns the original question with its original receipt: the same `question_id`, the original `expires_at` (an `expires_in` is not counted again), `duplicate: true`. Its text starts `Already asked as q-<alias>`, says how the question was asked, and sends the agent to `get_decision` to see where it stands now. That holds after a restart, whatever the question's state now and whatever the host default is now. The same request means all of these match:
+
+- the question, context, kind, options (ids, labels, descriptions and order) and preparation report, as the person would see them once the gates have shaped them;
+- the images, by content, in order, with their roles and captions;
+- the plan, and the deadline as asked (`15m` and `900s` are the same; `expires_in` and `expires_at` are not);
+- the requested requirement, the named gate and the origin's gate (registered or not);
+- the governing gate, its policy version, and the enforced level.
+
+A change to any of them under the same id asks a new question. The id then moves to the new question once it is committed, and the earlier question keeps its own id and answer. A call that fails (a refused plan, a missing image, the open-question limit, a failed commit) moves nothing. The comparison opens the stored question content in memory with the keys the identity already holds. Content it cannot open is never taken as the same. The store keeps no text or hash of the request: `reg:<question id>` in its meta holds only the deadline request, mode, gate ids, requested level and receipt. A correlation id first used before this release is asked afresh once. Identical calls at the same moment, in one bridge, make one question.
+
+Asking for advice (`tools/call`, its result, a `get_decision` after the deadline passed unanswered):
+
+```json
+{
+  "name": "ask_human",
+  "arguments": {
+    "question": "Which fixture should the import tests use?",
+    "options": [
+      { "id": "mem", "label": "In memory" },
+      { "id": "disk", "label": "On disk" }
+    ],
+    "expires_in": "15m",
+    "planned_fallback": "I'll use the in-memory fixture.",
+    "correlation_id": "import-fixture"
+  }
+}
+```
+
+```json
+{
+  "question_id": "01a1f33fb100734e9e6c3c642f3749aa",
+  "status": "queued",
+  "duplicate": false,
+  "enforced_requirement": "human-required",
+  "reply_mode": "advisory",
+  "expires_at": "2026-11-19T10:15:00.000Z",
+  "requested_expires_at": "2026-11-19T10:15:00.000Z",
+  "planned_fallback": "I'll use the in-memory fixture.",
+  "policy_adjustments": [],
+  "instruction": "Asked as q-7. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way. Asked for advice, due 2026-11-19T10:15:00.000Z (UTC). An answer committed before then is typed here as usual. If none is, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing. To check on it later, or if you lose track of it, call get_decision with question_id 01a1f33fb100734e9e6c3c642f3749aa."
+}
+```
+
+```json
+{ "name": "get_decision", "arguments": { "question_id": "01a1f33fb100734e9e6c3c642f3749aa" } }
+```
+
+```json
+{
+  "question_id": "01a1f33fb100734e9e6c3c642f3749aa",
+  "status": "expired",
+  "requirement": "human-required",
+  "workflow_gate_id": null,
+  "provenance": null,
+  "answered_on": null,
+  "closed_reason": "expired",
+  "choice": null,
+  "text": "",
+  "reviewed_digests_match": false,
+  "revision": 0,
+  "expires_at": "2026-11-19T10:15:00.000Z",
+  "reply_mode": "advisory",
+  "planned_fallback": "I'll use the in-memory fixture.",
+  "error_code": null
+}
+```
+
+Its text: `q-7's deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.` This `get_decision` result, like the one below, also carries `alias`, `delivery_status`, `answers` and `thread`, left out here.
+
+An approval under a gate the host registered with a 5-minute expiry, and a `get_decision` once the person approved it on their phone:
+
+```json
+{
+  "name": "ask_human",
+  "arguments": {
+    "question": "Approve publishing the release notes?",
+    "kind": "approval",
+    "workflow_gate_id": "release",
+    "expires_in": "15m",
+    "correlation_id": "release-notes"
+  }
+}
+```
+
+```json
+{
+  "question_id": "01a1f33fb1007a13a6ba7f573795c0bb",
+  "status": "queued",
+  "duplicate": false,
+  "enforced_requirement": "human-required",
+  "reply_mode": "blocking",
+  "expires_at": "2026-11-19T10:05:00.000Z",
+  "requested_expires_at": "2026-11-19T10:15:00.000Z",
+  "planned_fallback": null,
+  "policy_adjustments": [
+    {
+      "field": "expires_at",
+      "requested": "2026-11-19T10:15:00.000Z",
+      "effective": "2026-11-19T10:05:00.000Z",
+      "source": "gate",
+      "gate_id": "release"
+    }
+  ],
+  "instruction": "Asked as q-8. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way. It waits for a decision until 2026-11-19T10:05:00.000Z (UTC); unanswered by then, it expires, and expiry authorises nothing. Policy: the workflow gate release moved the deadline you asked for (2026-11-19T10:15:00.000Z) to 2026-11-19T10:05:00.000Z. To check on it later, or if you lose track of it, call get_decision with question_id 01a1f33fb1007a13a6ba7f573795c0bb."
+}
+```
+
+```json
+{ "name": "get_decision", "arguments": { "question_id": "01a1f33fb1007a13a6ba7f573795c0bb" } }
+```
+
+```json
+{
+  "question_id": "01a1f33fb1007a13a6ba7f573795c0bb",
+  "status": "human-answered",
+  "requirement": "human-required",
+  "workflow_gate_id": "release",
+  "provenance": "human",
+  "answered_on": "phone",
+  "closed_reason": null,
+  "choice": "approve",
+  "text": "",
+  "reviewed_digests_match": false,
+  "revision": 1,
+  "expires_at": "2026-11-19T10:05:00.000Z",
+  "reply_mode": "blocking",
+  "planned_fallback": null,
+  "error_code": null
+}
+```
+
+The agent continues the gated step only on `status: "human-answered"`, `provenance: "human"` and `choice: "approve"`. Expiry, a decline, a withdrawal and `publish-failed` (with the relay's `error_code`) approve nothing. `planned_fallback` is refused for an approval and under any gate.
 
 `send_followup` posts an agent message into the thread of a question the same pane identity asked (docs/protocol.md section 16): a clarification before the answer, a follow-up after it, or a reply to a follow-up the person sent. Like `ask_human`, it commits locally and returns at once with `status: "queued"`; the bridge encrypts and signs the message at that moment and publishes it from its durable outbox, after the question itself and in thread order, so it survives the desktop being offline or restarted. `expects_reply` goes into the signed record, and the relay uses it to bring an answered question back to "Needs you" on the phone. A message never counts as an answer, never changes the answer in force and never touches a gate. Another pane's question, an imported one and an unknown id are all refused with the same `not_found: unknown question`; a cancelled or expired question, one whose publication failed and one being cancelled are refused with `invalid_state` or `expired`. A message accepted while its question was still queued waits for the question, and is dropped with it if the question is never published. The bridge sends messages only to a relay that advertises `thread-messages-v1` in `GET /info`: on a relay last seen without it, the call is refused with `not_supported`, and a message queued before that was known is dropped and audited (`outbox.message.rejected`) rather than sent. The person's side of the thread reaches the pane as follow-up blocks (6.3, 6.4). `get_decision` also returns `thread`: the question's answers and the messages from both sides in ledger order, each of the person's with its delivery (`status`, `received_at`, `terminal_delivered_at`, `injection_id`, `error_code`) and `sent_from` (`phone`, or `computer` for one the person wrote on their computer, 6.9), and the agent's own with `delivery: null` and `sent_from: null`. Every other field reports the answer in force exactly as before.
 
@@ -138,9 +286,9 @@ An answer is injected only if host, pane, generation, ownership principal, agent
 - `enforceRequirement({ workflowMin, requested, proxyAllowlisted })`: the agent's `requested_requirement` can only make a question stricter. With no trusted gate the level is `human-required`. Proxy-capable levels require either a trusted gate that allows them or the user's explicit allowlist in Settings.
 - A gate with `choices` validates exact option ids and labels; free text is accepted only if `allowText`.
 - **Design review gate.** The final before/after screenshots of a design review are submitted as `attachments` with `workflow_gate_id: "design-review/final"`, a `human-required` gate with `approve`/`reject` choices and `bindArtifacts: true`. The phone UI records `reviewed_attachment_digests` (SHA-256 of the plaintext images it displayed). `get_decision` returns `status`, `provenance`, `choice`, `text` and `reviewed_digests_match` (true only if the digests equal the digests of the images attached to the question). The skill continues to the PR step only when `status = human-answered`, `provenance = human`, `choice = approve` and `reviewed_digests_match = true`. An approval the person gives on the computer (signed by the owner desktop, protocol section 2) reports the same, with `answered_on = computer` instead of `phone`, and its digests are the images the desktop displayed. If the images change after approval, a new gate must be asked; an old approval does not carry over. There is no design-review workflow in the Daintree repo today (only `scripts/design-review-shots.mjs`), so this ships as a skill/runbook in the user's global configuration plus documentation; Daintree itself only needs the gate registered.
-- Expiry. Daintree sets the default expiry of a question with no origin gate from Settings, `null` for never: `new PolicyRegistry({ defaultQuestionExpiryMs })`, changed at runtime with the setter of the same name (7 days when unset). An agent may ask for any `expires_at` up to 30 days, or up to the default when it is longer, or without limit when the default is `null`. A gate the agent names only shortens that. An origin gate's `expiryMs` is both its questions' default and their limit; a gate without one takes the host default. `questionExpiryPolicy(defaultQuestionExpiryMs, gate?)` returns the resulting `{ defaultMs, maxMs }` for Settings to show. A finite expiry more than `QUESTION_EXPIRY_LIMIT_MS` away (the relay's 366-day limit, less two minutes for clock skew) is refused when the question is asked.
+- Expiry. Daintree sets the default expiry of a question with no origin gate from Settings, `null` for never: `new PolicyRegistry({ defaultQuestionExpiryMs })`, changed at runtime with the setter of the same name (7 days when unset). An agent may ask for any `expires_at` or `expires_in` up to 30 days, or up to the default when it is longer, or without limit when the default is `null`; a request the policy shortens is reported in `policy_adjustments` (3.3.1). A gate the agent names only shortens that. An origin gate's `expiryMs` is both its questions' default and their limit; a gate without one takes the host default. `questionExpiryPolicy(defaultQuestionExpiryMs, gate?)` returns the resulting `{ defaultMs, maxMs }` for Settings to show. A finite expiry more than `QUESTION_EXPIRY_LIMIT_MS` away (the relay's 366-day limit, less two minutes for clock skew) is refused when the question is asked.
 - Expiry never authorizes anything. The notice delivered on expiry says so in plain words and tells the agent the workflow is not authorized to continue.
-- Advisory questions (protocol section 21). An agent may instead ask for advice before a step it may take on its own, with a finite deadline and the plan it will follow if no answer arrives. Daintree turns them on with `BridgeOptions.advisoryDeadlines` once its sink handles the advisory notice, and allows them with `PolicyRegistryOptions.advisoryQuestions`, both off by default. `advisoryRefusal` (protocol `policy.ts`) admits one only when the relay lists `advisory-deadlines-v1` in `GET /info` and at least one active phone or tablet declares it, and refuses one under any gate (origin or named, registered or not), for an approval, or without a finite deadline or a valid plan. Its expiry only means the agent's own plan is due: it is not an answer, it approves nothing, and it never trains the decision model.
+- Advisory questions (protocol section 21). An agent may instead ask for advice before a step it may take on its own, with a finite deadline and the plan it will follow if no answer arrives. Daintree turns them on with `BridgeOptions.advisoryDeadlines` once its sink handles the advisory notice, and allows them with `PolicyRegistryOptions.advisoryQuestions`, both off by default. `advisoryRefusal` (protocol `policy.ts`) admits one only when the relay lists `advisory-deadlines-v1` in `GET /info` and at least one active phone or tablet declares it, and refuses one under any gate (origin or named, registered or not), for an approval, or without a finite deadline or a valid plan. An agent asks for advice with `ask_human`'s `planned_fallback` (3.3.1). The bridge reads the relay's and the devices' support in the background, beside its pump and only while both settings are on: once a minute, and 15 seconds after a read that failed. It believes a read for five minutes, by the wall clock and a monotonic one. A device whose revocation the bridge has seen in the ledger stops counting at once. Its expiry only means the agent's own plan is due: it is not an answer, it approves nothing, and it never trains the decision model.
 
 ## 6. The relay connection: hibernatable WebSocket
 

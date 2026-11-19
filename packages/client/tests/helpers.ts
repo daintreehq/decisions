@@ -243,6 +243,8 @@ export class FakeRelay {
     | { status: number; body: Record<string, unknown> | string; headers?: Record<string, string> }
     | 'reset'
   )[] = [];
+  /** The features each device declared on its latest socket ticket, as `GET /devices` lists them, by device id. */
+  deviceFeatures = new Map<string, string[]>();
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -603,6 +605,9 @@ export class FakeRelay {
           last_ack_seq: 0,
           cert,
           push_enabled: false,
+          ...(this.deviceFeatures.has(cert.device_id)
+            ? { features: this.deviceFeatures.get(cert.device_id) }
+            : {}),
         })),
       });
     }
