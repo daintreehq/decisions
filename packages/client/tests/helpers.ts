@@ -137,6 +137,11 @@ export class FakeRelay {
   dropAfterReceive = 0;
   /** Number of upcoming question creates the relay COMMITS but whose reply is lost. */
   dropCreateReply = 0;
+  /**
+   * The relay's clock for a create's deadline. When set, a new question already past its signed `expires_at` is
+   * refused, while a retry of one already taken replays its receipt, as the relay does. Unset, no deadline is checked.
+   */
+  createNow: (() => number) | null = null;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
   /** The relay's current key epoch and every device's sealed grants (`GET /devices/{id}/key-grants`). */
   epoch = 1;
@@ -417,6 +422,13 @@ export class FakeRelay {
       const prior = this.receipts.get(b.idempotency_key);
       if (prior) return json(201, prior);
       const q = b.question;
+      if (
+        this.createNow &&
+        q.record.expires_at &&
+        Date.parse(q.record.expires_at) <= this.createNow()
+      ) {
+        return json(400, { code: 'validation_error', message: 'expires_at must be in the future' });
+      }
       this.questions.set(q.record.question_id, { signed: q, idem: b.idempotency_key });
       const ev = this.push('decision.created', q.record.question_id, 0, {
         record: q.record,

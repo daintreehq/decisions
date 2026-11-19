@@ -1352,10 +1352,16 @@ export class Publisher {
         if (item.kind === 'create') {
           const receipt = await this.sendCreate(item);
           created.push(item.question_id);
-          await ctx.store.updateQuestion(item.question_id, {
-            local_status: 'open',
-            remote_event_seq: receipt.event_seq,
-            error_code: null,
+          // A retry after a lost reply replays the original receipt, which can be older than the history already
+          // applied (an answer, an expiry): only a question still queued takes it. Under the lock, like the inbox.
+          await ctx.lock.run(async () => {
+            const row = await ctx.store.getQuestion(item.question_id);
+            if (row?.local_status !== 'queued') return;
+            await ctx.store.updateQuestion(item.question_id, {
+              local_status: 'open',
+              remote_event_seq: receipt.event_seq,
+              error_code: null,
+            });
           });
         } else if (item.kind === 'message') {
           await this.sendMessage(item);
