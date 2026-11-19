@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION, type PhoneImageReference } from '@daintreehq/decisions-protocol';
 import type { HumanActionKind } from '../domain/answer.js';
+import type { DeclineOutcome } from '../domain/decline.js';
 import type { Db } from './db.js';
 import { open, openBytes, seal, sealBytes } from './seal.js';
 import { RelayError } from './relay.js';
@@ -79,6 +80,11 @@ export interface OutboxEntry {
   errorCode?: string;
   /** Why, when the relay named a reason with its refusal (`creator-missing-feature`). */
   refusalReason?: string;
+  /**
+   * A decline's settlement when something else settled the question's round first (or the relay refused it): kept,
+   * as a note the person lets go, and never worked out again from a thread that has moved on since.
+   */
+  outcome?: DeclineOutcome;
 }
 
 export interface Poster {
@@ -111,6 +117,11 @@ export interface OutboxHooks {
   onChange?: () => void;
   /** The relay refused an entry for good; it is stored with the refusal before this is called. */
   onRefused?: (e: OutboxEntry) => void;
+  /**
+   * How a decline has settled, read from the thread (`declineSettlement`): `accepted` once the thread holds it, an
+   * outcome to keep, or null while the thread can't yet say. Without it, a decline settles as any other entry does.
+   */
+  declineSettlement?: (e: OutboxEntry) => 'accepted' | DeclineOutcome | null;
   /**
    * The relay lost an entry's photo reservation (its upload window or orphan deadline passed) or refused the record's
    * photos: sign the same answer or follow-up again with the photos encrypted under fresh ids. Null when it can't be.
@@ -232,6 +243,7 @@ export class Outbox {
     return this.forQuestion(questionId).find(
       (e) =>
         e.kind === 'decline' &&
+        !e.outcome &&
         (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
     );
   }
@@ -304,6 +316,10 @@ export class Outbox {
   async retry(id: string): Promise<void> {
     const e = this.entries.get(id);
     if (!e || e.state === 'queued' || e.state === 'sending') return;
+    // A decline is never sent again once it has settled: dismissing again signs a new one for the round in view.
+    if (e.kind === 'decline') return;
+    // Nothing else goes on a question while this device's dismissal of it is on its way.
+    if (this.declineInFlight(e.questionId)) return;
     e.state = 'queued';
     delete e.error;
     // Asked for again by the person: photos the relay lost may be encrypted afresh once more.
@@ -326,11 +342,18 @@ export class Outbox {
   }
 
   private async persist(e: OutboxEntry): Promise<void> {
-    await this.db.putOutbox({
+    const sealed = await seal(this.cacheKey, e, label(e.id));
+    // Let go while it was being sealed (settled from the thread meanwhile): it is never written back.
+    if (this.entries.get(e.id) !== e) return;
+    await this.write(e, sealed);
+  }
+
+  private write(e: OutboxEntry, sealed: Awaited<ReturnType<typeof seal>>): Promise<unknown> {
+    return this.db.putOutbox({
       id: e.id,
       createdAt: e.createdAt,
       questionId: e.questionId,
-      sealed: await seal(this.cacheKey, e, label(e.id)),
+      sealed,
     });
   }
 
@@ -349,7 +372,7 @@ export class Outbox {
       attempts: 0,
     };
     if (ciphertexts?.size) await this.storeCiphertexts(entry.id, ciphertexts);
-    await this.persist(entry);
+    await this.write(entry, await seal(this.cacheKey, entry, label(entry.id)));
     this.entries.set(entry.id, entry);
     this.changed();
     return entry;
@@ -523,13 +546,23 @@ export class Outbox {
 
   private async pass(): Promise<void> {
     for (const e of this.list()) {
+      // Let go since this pass began (a decline the thread already holds): never sent, never written back.
+      if (this.entries.get(e.id) !== e) continue;
       if (e.state === 'committed') {
         await this.settled(e);
         continue;
       }
       if (e.state !== 'queued') continue;
+      // A decline whose earlier send was taken (its answer lost on the way back) is already in the thread.
+      if (e.kind === 'decline' && this.hooks.declineSettlement?.(e) === 'accepted') {
+        await this.discard(e.id);
+        continue;
+      }
       e.state = 'sending';
       e.attempts++;
+      // A decline remembers that it went out before it goes: after a restart mid-send it is shown as unconfirmed,
+      // since the relay may have taken it, never as one that was not sent.
+      if (e.kind === 'decline') await this.persist(e);
       this.changed();
       let photoPhase = false;
       try {
@@ -588,6 +621,7 @@ export class Outbox {
           await this.persist(e);
           this.changed();
           this.hooks.onRefused?.(e);
+          if (e.kind === 'decline') await this.settleDecline(e);
           continue;
         }
         // Network trouble or relay hiccup: keep it queued and stop, order matters. Photos part-way up say so, and
@@ -609,14 +643,39 @@ export class Outbox {
   /** Read a committed entry back; let its local copy go only once the thread holds what it committed. */
   private async settled(e: OutboxEntry): Promise<void> {
     await Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
+    if (e.kind === 'decline' && this.hooks.declineSettlement) return this.settleDecline(e);
     if (!this.hooks.inThread || this.hooks.inThread(e)) await this.discard(e.id);
+  }
+
+  /**
+   * Settle a decline from the thread: it goes once the thread holds it, and when something else settled its round
+   * first (or the relay refused it), that outcome is kept with it until the person lets it go. Nothing yet: it waits.
+   */
+  private async settleDecline(e: OutboxEntry): Promise<void> {
+    const s = this.hooks.declineSettlement?.(e);
+    if (!s || this.entries.get(e.id) !== e) return;
+    if (s === 'accepted') return this.discard(e.id);
+    if (e.outcome) return;
+    e.outcome = s;
+    // Committed but settled by something else: no longer on its way.
+    if (e.state === 'committed') e.state = 'conflicted';
+    await this.persist(e);
+    this.changed();
   }
 
   /** The thread changed: committed entries it now holds (or never will) can go. Synchronous check, async removal. */
   reconcile(): void {
-    if (!this.hooks.inThread) return;
-    for (const e of this.entries.values())
-      if (e.state === 'committed' && this.hooks.inThread(e)) void this.discard(e.id);
+    for (const e of this.entries.values()) {
+      if (e.kind === 'decline' && this.hooks.declineSettlement) {
+        // Settled from the thread as soon as it can say, whatever the send got back; never while being sent.
+        if (e.state !== 'sending' && !e.outcome) {
+          const s = this.hooks.declineSettlement(e);
+          if (s === 'accepted' || (s && e.state !== 'queued')) void this.settleDecline(e);
+        }
+        continue;
+      }
+      if (e.state === 'committed' && this.hooks.inThread?.(e)) void this.discard(e.id);
+    }
   }
 
   /** Stop any scheduled retry (unpair, revocation). */

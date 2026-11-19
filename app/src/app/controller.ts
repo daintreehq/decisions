@@ -47,6 +47,7 @@ import {
   highestEpoch,
   type HumanActionKind,
 } from '../domain/answer.js';
+import { DeclineBlockedError, DeclineInFlightError, declineSettlement } from '../domain/decline.js';
 import { buildMessageRequest } from '../domain/message.js';
 import {
   buildInvolvementRecord,
@@ -526,11 +527,15 @@ export class AppController {
         if (!v) return true; // deleted: nothing will ever show it, and the relay has it
         const id = e.recordId ?? e.messageId;
         if (!id) return true;
-        if (e.kind === 'message') return v.messages.some((m) => m.messageId === id);
-        if (v.actions.some((a) => a.actionId === id)) return true;
-        // A decline the relay took as a no-op (another cancel closed the question first) is never in the log: it has
-        // settled once the thread shows the question moved on from the open round it was signed against.
-        return e.kind === 'decline' && (v.status !== 'open' || v.revision !== e.expectedRevision);
+        return e.kind === 'message'
+          ? v.messages.some((m) => m.messageId === id)
+          : v.actions.some((a) => a.actionId === id);
+      },
+      // A decline is settled only by the very cancel this device signed, verified in the thread (a relay answers a
+      // cancel another cancel beat with a receipt like a committed one), or by what settled its round instead.
+      declineSettlement: (e) => {
+        const deviceId = this.snap.config?.deviceId;
+        return deviceId ? declineSettlement(e, this.store?.get(e.questionId), deviceId) : null;
       },
       onRefused: (e) => {
         // The asking desktop stopped taking declines since the device list was read: read it again, so Dismiss agrees.
@@ -592,7 +597,8 @@ export class AppController {
     return {
       questions: this.store?.list().length ?? 0,
       // An entry already on the relay, only waiting to be read back here, is not unsent.
-      unsent: this.outbox?.list().filter((e) => e.state !== 'committed').length ?? 0,
+      // Nor is a note about how a dismissal settled.
+      unsent: this.outbox?.list().filter((e) => e.state !== 'committed' && !e.outcome).length ?? 0,
       drafts,
     };
   }
@@ -832,6 +838,8 @@ export class AppController {
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
     if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+    // Nothing else goes on a question while this device's dismissal of it is on its way.
+    if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
     const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
     const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
     const req = await buildAnswerRequest({
@@ -896,6 +904,17 @@ export class AppController {
   private async storeDecline(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
     const outbox = this.outbox;
     if (!this.keys || !this.snap.config || !outbox) throw new Error('not paired');
+    // An answer or follow-up from this device still on its way goes first: a decline behind it would only be refused.
+    if (
+      outbox
+        .forQuestion(view.id)
+        .some(
+          (e) =>
+            e.kind !== 'decline' &&
+            (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
+        )
+    )
+      throw new DeclineBlockedError();
     const req = await buildDeclineRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -937,6 +956,7 @@ export class AppController {
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
     if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+    if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
     const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
     const req = await buildMessageRequest({
       installationId: this.snap.config.installationId,
