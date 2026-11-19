@@ -1316,6 +1316,17 @@ describe('agent-stopped pushes (docs/protocol.md section 11)', () => {
     expect(declared.json.features).toEqual(CAN);
     const listed = await phone.call('GET', '/api/v1/push/subscriptions');
     expect(listed.json.subscriptions[0].features).toEqual(CAN);
+    // A registration of the same endpoint with other keys is another subscription: it changes no other row.
+    const other = await pairDevice(w, 'tablet', 'Test iPad');
+    const otherKeys = await subscription();
+    const foreign = await other.call('POST', '/api/v1/push/subscriptions', {
+      ...plain,
+      p256dh: otherKeys.p256dh,
+      auth: otherKeys.auth,
+    });
+    expect(foreign.json.features).toEqual([]);
+    const after = await phone.call('GET', '/api/v1/push/subscriptions');
+    expect(after.json.subscriptions[0].features).toEqual(CAN);
   });
 
   it('skips an endpoint whose declaration is withdrawn while the push is going out', async () => {
@@ -1346,14 +1357,15 @@ describe('agent-stopped pushes (docs/protocol.md section 11)', () => {
 
   it('drops a request in quiet hours rather than deferring it, presence or not', async () => {
     await subscriber(phone, CAN);
+    expect((await quiet(true)).status).toBe(200);
+    const jobs = await pending();
+    expect(await outcome()).toBe('quiet-hours');
     // The person at the computer changes nothing: quiet hours still drop it.
     const lease = await w.owner.call('PUT', '/api/v1/presence', {
       protocol_version: 1,
       present: true,
     });
     expect(lease.status).toBe(200);
-    expect((await quiet(true)).status).toBe(200);
-    const jobs = await pending();
     expect(await outcome()).toBe('quiet-hours');
     expect(calls).toEqual([]);
     expect(await pending()).toEqual(jobs);

@@ -388,8 +388,8 @@ stopped, and when, and, since the desktop asks only while the person is away, th
 It goes only to an endpoint that declared it can show one, by subscribing with `features` listing
 `agent-stopped-push-v1`. Each subscription replaces its endpoint's declaration, so the same endpoint subscribed again
 without it, by an older app, receives none, and every endpoint from before the relay knew the feature starts unable.
-The declaration belongs to the endpoint, so it also covers a row the same browser left under an earlier pairing that
-was never revoked. A device's socket-ticket declaration does not count: one device holds up to five endpoints, and the
+The declaration belongs to the push subscription, so it also covers a row the same browser left, with the same
+endpoint and keys, under an earlier pairing that was never revoked. A device's socket-ticket declaration does not count: one device holds up to five endpoints, and the
 service worker that shows a push can be an older build than the page that declared, so a phone app MUST declare only
 what its active service worker can show. `PushSubscriptionInfo.features` says what the relay applied. The relay reads
 each endpoint again just before sending to it, so a declaration withdrawn while a push is going out to other endpoints

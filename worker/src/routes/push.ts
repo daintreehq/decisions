@@ -80,12 +80,15 @@ export const subscribe: Handler = async (room, c) => {
   };
   const id = await room.tx(() => {
     const sid = register();
-    // The declaration is the endpoint's service worker's, not one device row's: a row this browser left under an
-    // earlier pairing that was never revoked follows it too.
+    // The declaration is the push subscription's service worker's, not one device row's: a row this browser left
+    // under an earlier pairing that was never revoked follows it too. Only the same subscription (endpoint and keys)
+    // does, so a registration with other keys never changes another device's row.
     room.run(
-      `UPDATE push_subscriptions SET agent_stopped_capable = ? WHERE endpoint = ?`,
+      `UPDATE push_subscriptions SET agent_stopped_capable = ? WHERE endpoint = ? AND p256dh = ? AND auth = ?`,
       capable,
       b.endpoint,
+      b.p256dh,
+      b.auth,
     );
     return sid;
   });
