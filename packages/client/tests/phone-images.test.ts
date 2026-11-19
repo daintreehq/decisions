@@ -659,20 +659,32 @@ describe('declaring phone-images-v1', () => {
     expect(new URL(seen[2]!.url).searchParams.has('features')).toBe(false);
   });
 
-  it('the bridge declares it on catch-up and on its socket, with or without an image store', async () => {
-    FakeSocket.instances = [];
-    const env = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
-    const events = vi.spyOn(env.client, 'events');
-    await env.bridge.catchUp();
-    expect(events.mock.calls[0]![2]).toContain('phone-images-v1');
-    await env.bridge.start();
-    await vi.waitFor(() =>
-      expect(env.relay.calls.some((c) => c.path === '/api/v1/socket-ticket')).toBe(true),
-    );
-    const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket')!;
-    expect((ticket.body as { features?: string[] }).features).toContain('phone-images-v1');
-    await env.bridge.stop();
-  });
+  it.each([
+    ['without', undefined],
+    ['with', new FakeImageStore()],
+  ])(
+    'the bridge declares it on catch-up and on its socket, %s an image store',
+    async (_, phoneImages) => {
+      FakeSocket.instances = [];
+      const env = await setupBridge({
+        webSocket: (u) => new FakeSocket(u),
+        ...(phoneImages ? { phoneImages } : {}),
+      });
+      try {
+        const events = vi.spyOn(env.client, 'events');
+        await env.bridge.catchUp();
+        expect(events.mock.calls[0]![2]).toContain('phone-images-v1');
+        await env.bridge.start();
+        await vi.waitFor(() =>
+          expect(env.relay.calls.some((c) => c.path === '/api/v1/socket-ticket')).toBe(true),
+        );
+        const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket')!;
+        expect((ticket.body as { features?: string[] }).features).toContain('phone-images-v1');
+      } finally {
+        await env.bridge.stop();
+      }
+    },
+  );
 
   it('stops reading a download at the cap, and never reads one whose declared length is over it', async () => {
     const identity = await makeIdentity();
