@@ -1201,15 +1201,22 @@ describe('the standalone flow through decisions mcp', () => {
         stopped: never(),
         ...QUICK,
       });
+      // It only reads: the server receives, and its sink is the one that refuses the notice.
+      await vi.waitFor(() =>
+        expect(waiter.err.join('\n')).toMatch(/another decisions process receives/),
+      );
       e.clock.skew = 16 * MIN;
       e.relay.expiryEvent({ questionId: id });
       expect(await waiting).toBe(13);
+      expect(waiter.records()).toHaveLength(1);
       expect(result(waiter.records())).toMatchObject({
         outcome: 'advisory-expired',
+        exit_code: 13,
         fallback_due: true,
         delivery: 'needs-attention',
         advisory_timeout: { disposition: 'fallback-due', notice: 'needs-attention' },
       });
+      expect(waiter.calls.filter((c) => c.includes('/events'))).toEqual([]);
 
       const viaMcp = (await call('get_decision', { question_id: id })).structuredContent;
       expect(viaMcp).toMatchObject({ status: 'expired', fallback_due: true });

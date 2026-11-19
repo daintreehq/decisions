@@ -350,7 +350,8 @@ export interface DecisionView {
    * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
    * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
    * desktop to read the relay (a reopen may be on its way), unless its sink refused a write admitted after that read
-   * (`advisoryTimeout.writeRefused`). It is never an answer or an approval: the person decided nothing.
+   * (`advisoryTimeout.writeRefused`): that one waits only while an event of its question is stored and not yet applied.
+   * It is never an answer or an approval: the person decided nothing.
    */
   fallbackDue: boolean;
   /**
@@ -1375,8 +1376,9 @@ export class DecisionsBridge {
     const unsettled = await this.delivery
       .ledgerHolds(questionId, { start: false })
       .catch(() => true);
+    const unapplied = await this.unappliedEvent(questionId);
     const row = await this.owned(questionId, pane);
-    return this.view(row, unsettled);
+    return this.view(row, unsettled, unapplied);
   }
 
   async listPending(pane?: PaneIdentity): Promise<DecisionView[]> {
@@ -1398,7 +1400,11 @@ export class DecisionsBridge {
   }
 
   /** Opens the answers in memory to build the view; nothing decrypted is written back. */
-  private async view(row: QuestionRow, unsettled?: boolean): Promise<DecisionView> {
+  private async view(
+    row: QuestionRow,
+    unsettled?: boolean,
+    unapplied?: boolean,
+  ): Promise<DecisionView> {
     const create = (await this.ctx.store.outboxFor(row.question_id)).find(
       (o) => o.kind === 'create',
     );
@@ -1411,7 +1417,7 @@ export class DecisionsBridge {
       allowed: this.ctx.policy.advisoryQuestions,
     };
     // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
-    // ahead here either. One whose admitted write its sink refused was settled as a typed one is: it waits no more.
+    // ahead here either.
     const noticeWaits =
       timeout?.inForce === true &&
       (timeout.view.notice === 'pending' ||
@@ -1420,7 +1426,13 @@ export class DecisionsBridge {
     const held = noticeWaits
       ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
       : false;
-    const waiting = noticeWaits && (unsettled === true || held);
+    // One whose admitted write its sink refused was settled as a typed one is, so only an event of its question stored
+    // since and not yet applied (a reopen read past a gap) holds it: the store shows that to every process alike.
+    const refusedWaits =
+      timeout?.inForce === true && timeout.view.writeRefused
+        ? (unapplied ?? (await this.unappliedEvent(row.question_id)))
+        : false;
+    const waiting = (noticeWaits && (unsettled === true || held)) || refusedWaits;
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1668,6 +1680,12 @@ export class DecisionsBridge {
     return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
       ? 'reading'
       : null;
+  }
+
+  /** Whether an event of `questionId` is stored and not yet applied (`ledgerUnsettled`); one that cannot be read is. */
+  private async unappliedEvent(questionId: string): Promise<boolean> {
+    const state = await this.ledgerUnsettled(questionId).catch(() => 'unapplied' as const);
+    return state === 'unapplied';
   }
 
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */

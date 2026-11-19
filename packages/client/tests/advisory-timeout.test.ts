@@ -607,7 +607,10 @@ describe('where the advisory notice goes', () => {
     expect(e.sink.injectCalls).toBe(1);
     expect(e.sink.typed).toHaveLength(0);
     const row = await e.row();
-    expect(row.delivery_status).toBe('needs-attention');
+    expect(row).toMatchObject({
+      delivery_status: 'needs-attention',
+      error_code: 'inject_rejected',
+    });
     expect(parseAnswers(row.answers_json)[0]).toMatchObject({
       write_refused: true,
       delivered: false,
@@ -643,11 +646,55 @@ describe('where the advisory notice goes', () => {
     const f = await advised();
     f.sink.panes.clear();
     await f.expire();
+    expect(f.sink.injectCalls).toBe(0);
+    expect(await f.row()).toMatchObject({
+      delivery_status: 'needs-attention',
+      error_code: 'pane_gone',
+    });
+    expect(parseAnswers((await f.row()).answers_json)[0]!.write_refused).toBeUndefined();
     expect(await f.bridge.getDecision(f.qid)).toMatchObject({
       fallbackDue: true,
       advisoryTimeout: { notice: 'needs-attention', writeRefused: false },
     });
     expect((await f.restart().getDecision(f.qid)).fallbackDue).toBe(false);
+  });
+
+  it('a refused notice still waits for an event of its question stored and not yet applied', async () => {
+    const e = await advised();
+    e.sink.injectBehaviour = { unavailable: 'rejected' };
+    await e.expire();
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
+    // A reopen read past a hole, stored and waiting for the event before it: in this process and every other one.
+    e.relay.skipSeq(1);
+    const reopened = await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    await e.store.insertEvent({
+      seq: reopened.seq,
+      event_id: reopened.event_id,
+      event_type: reopened.event_type,
+      json: JSON.stringify(reopened),
+      received_at: e.now,
+      processed_at: null,
+    });
+    const held = {
+      status: 'expired',
+      fallbackDue: false,
+      advisoryTimeout: { notice: 'needs-attention', writeRefused: true },
+    };
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject(held);
+    expect(await e.restart().getDecision(e.qid)).toMatchObject(held);
+    e.setNow(e.now + 3 * ADVISORY_LEDGER_WAIT_MS);
+    expect(await e.restart().getDecision(e.qid)).toMatchObject(held);
+    await e.bridge.catchUp();
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      status: 'open',
+      fallbackDue: false,
+      advisoryTimeout: { notice: 'superseded', writeRefused: false },
+    });
   });
 
   it('a retry takes the refusal back, and a reopen supersedes a refused notice', async () => {
@@ -659,6 +706,7 @@ describe('where the advisory notice goes', () => {
     e.sink.injectBehaviour = 'ok';
     e.sink.panes.get('pane-1')!.idle = false;
     await e.bridge.retryDelivery(e.qid);
+    expect(e.sink.injectCalls).toBe(1);
     expect(parseAnswers((await e.row()).answers_json)[0]!.write_refused).toBeUndefined();
     expect((await e.bridge.getDecision(e.qid)).advisoryTimeout).toMatchObject({
       notice: 'pending',
@@ -667,6 +715,7 @@ describe('where the advisory notice goes', () => {
     expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(false);
     e.sink.panes.get('pane-1')!.idle = true;
     await e.bridge.notifyPaneIdle();
+    expect(e.sink.injectCalls).toBe(2);
     expect(e.sink.typed).toHaveLength(1);
     expect((await e.bridge.getDecision(e.qid)).advisoryTimeout).toMatchObject({
       notice: 'delivered',
@@ -676,6 +725,8 @@ describe('where the advisory notice goes', () => {
     const f = await advised();
     f.sink.injectBehaviour = { unavailable: 'rejected' };
     await f.expire();
+    expect(f.sink.injectCalls).toBe(1);
+    expect(parseAnswers((await f.row()).answers_json)[0]!.write_refused).toBe(true);
     await f.relay.plainActionEvent({
       questionId: f.qid,
       signer: f.desktop,
