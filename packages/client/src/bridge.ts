@@ -23,6 +23,7 @@ import {
   type SetInvolvementResult,
 } from './involvement.js';
 import { PresenceReporter } from './presence.js';
+import { AgentStoppedPusher, type AgentStoppedPushResult } from './agent-stopped.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
 import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
@@ -329,6 +330,8 @@ export class DecisionsBridge {
   readonly involvement: InvolvementSync;
   /** Keeps the relay's presence lease current while the host reports the person is here (`reportPresence`). */
   readonly presence: PresenceReporter;
+  /** Asks the relay for an agent-stopped push when the host says one is due (`requestAgentStoppedPush`). */
+  readonly agentStopped: AgentStoppedPusher;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
@@ -380,6 +383,7 @@ export class DecisionsBridge {
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.presence = new PresenceReporter(this.ctx, (e) => this.emitError(e));
+    this.agentStopped = new AgentStoppedPusher(this.ctx);
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -911,6 +915,37 @@ export class DecisionsBridge {
     if (typeof present !== 'boolean')
       throw new BridgeError('validation_error', 'present must be true or false');
     this.presence.report(present);
+  }
+
+  /**
+   * Ask the relay to tell the person's phone that an agent stopped (protocol section 11, `agent-stopped-push-v1`).
+   * When to ask (which stops count, whether the person is away, quiet hours, batching stops that land together) is
+   * the host's call; the relay still drops a request in its quiet hours, and accepts at most one a minute.
+   *
+   * It takes nothing, and sends nothing but the protocol version: which agent stopped, where, how many and why stay
+   * on the computer. A relay that does not advertise `agent-stopped-push-v1` is never asked, and asking one resolves
+   * `unsupported`, without an error. The request is sent at most once, never retried, whatever its outcome: a refusal,
+   * rate-limited or otherwise, or a relay that could not be reached, resolves `dropped`, so a stop is never alerted
+   * late. Resolves with the outcome (`AgentStoppedPushResult`) and never rejects over the relay.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed, as is a revoked desktop, and
+   * the bridge must be started (`invalid_state`); one stopped while the relay's features are read sends nothing, though
+   * a request already being signed or sent still goes out. This is a host API: it is not an MCP tool, and a pane's
+   * bearer token never reaches it.
+   */
+  async requestAgentStoppedPush(): Promise<AgentStoppedPushResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        'only the owner desktop asks for an agent-stopped push; a Remote Host never does',
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (this.state !== 'running')
+      throw new BridgeError('invalid_state', 'start the bridge before asking for a push');
+    const run = this.lifecycle;
+    return this.agentStopped.request(() => this.state === 'running' && run === this.lifecycle);
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
