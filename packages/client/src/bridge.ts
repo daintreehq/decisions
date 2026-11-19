@@ -290,12 +290,7 @@ export type ThreadEntryView =
  * - `unknown`: imported history, or a row too old or damaged to tell.
  */
 export type PublicationState =
-  | 'not-sent'
-  | 'possibly-committed'
-  | 'accepted'
-  | 'never-published'
-  | 'refused'
-  | 'unknown';
+  'not-sent' | 'possibly-committed' | 'accepted' | 'never-published' | 'refused' | 'unknown';
 
 export interface DecisionView {
   questionId: string;
@@ -1413,7 +1408,14 @@ export class DecisionsBridge {
 
   private async deliverNow(): Promise<void> {
     const before = await this.ctx.store.listQuestions({
-      status: ['open', 'proxy-answered', 'human-answered', 'expired', 'cancelled', 'publish-failed'],
+      status: [
+        'open',
+        'proxy-answered',
+        'human-answered',
+        'expired',
+        'cancelled',
+        'publish-failed',
+      ],
     });
     const r = await this.delivery.drain();
     if (r.delivered > 0) {

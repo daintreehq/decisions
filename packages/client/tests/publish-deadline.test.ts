@@ -95,7 +95,9 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     env.relay.fetch = async (input, init) => {
       if (offline.on) {
         throw new TypeError('fetch failed', {
-          cause: Object.assign(new Error('getaddrinfo ENOTFOUND relay.test'), { code: 'ENOTFOUND' }),
+          cause: Object.assign(new Error('getaddrinfo ENOTFOUND relay.test'), {
+            code: 'ENOTFOUND',
+          }),
         });
       }
       return relayFetch(input, init);
@@ -117,7 +119,11 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     const deadline = now + 120_000;
     const r = await bridge.registerQuestion({
       origin: origin(),
-      input: { question: 'Ship it?', options: [{ id: 'y', label: 'Yes' }], expires_at: iso(deadline) },
+      input: {
+        question: 'Ship it?',
+        options: [{ id: 'y', label: 'Yes' }],
+        expires_at: iso(deadline),
+      },
     });
     await bridge.pump();
     expect(await bridge.getDecision(r.questionId)).toMatchObject({ publication: 'not-sent' });
@@ -377,7 +383,9 @@ describe('a restart during an attachment upload', () => {
     const row = (await b.store.getQuestion(r.questionId))!;
     expect(row.local_status).toBe('queued');
     const needed = (await b.store.outboxFor(r.questionId))
-      .flatMap((o) => (o.payload as { attachments?: { attachment_id: string }[] }).attachments ?? [])
+      .flatMap(
+        (o) => (o.payload as { attachments?: { attachment_id: string }[] }).attachments ?? [],
+      )
       .map((x) => x.attachment_id);
     expect(needed).toHaveLength(2);
     expect(kept).toEqual([...needed, 'fresh03'].sort());
@@ -412,7 +420,11 @@ describe('a restart during an attachment upload', () => {
 
 describe('an advisory question that never reached the relay', () => {
   /** Queue a question, then make its stored content advisory, as `ask_human` will once it signs advisory asks (#154). */
-  const advisoryAsk = async (over: { advisoryDeadlines: boolean; policy: boolean; plan?: string }) => {
+  const advisoryAsk = async (over: {
+    advisoryDeadlines: boolean;
+    policy: boolean;
+    plan?: string;
+  }) => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({
       now: () => now,
@@ -438,7 +450,10 @@ describe('an advisory question that never reached the relay', () => {
       senderDeviceId: env.identity.config.deviceId,
       purpose: 'question-content',
       replyMode: 'advisory',
-      plaintext: { ...content, ...(over.plan !== undefined ? { planned_fallback: over.plan } : {}) },
+      plaintext: {
+        ...content,
+        ...(over.plan !== undefined ? { planned_fallback: over.plan } : {}),
+      },
     });
     await env.store.updateQuestion(r.questionId, { content_sealed: JSON.stringify(envelope) });
     now = deadline;
@@ -467,8 +482,14 @@ describe('an advisory question that never reached the relay', () => {
   });
 
   it.each([
-    ['the host policy no longer allows advisory questions', { advisoryDeadlines: true, policy: false, plan: 'Go.' }],
-    ['the host does not deliver advisory outcomes', { advisoryDeadlines: false, policy: true, plan: 'Go.' }],
+    [
+      'the host policy no longer allows advisory questions',
+      { advisoryDeadlines: true, policy: false, plan: 'Go.' },
+    ],
+    [
+      'the host does not deliver advisory outcomes',
+      { advisoryDeadlines: false, policy: true, plan: 'Go.' },
+    ],
     ['the content states no plan', { advisoryDeadlines: true, policy: true }],
   ] as const)('authorises nothing when %s', async (_why, over) => {
     const { env, r } = await advisoryAsk(over);

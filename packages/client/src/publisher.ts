@@ -1977,7 +1977,8 @@ export class Publisher {
     const settled = await ctx.lock.run(async () => {
       const row = await ctx.store.getQuestion(questionId);
       // A question the relay's history has reached meanwhile is the relay's to settle: nothing of it is touched.
-      if (row && row.local_status !== 'queued' && row.local_status !== 'publish-failed') return false;
+      if (row && row.local_status !== 'queued' && row.local_status !== 'publish-failed')
+        return false;
       const settle = row?.local_status === 'queued';
       if (row && settle) {
         const entries = parseAnswers(row.answers_json);
@@ -2004,7 +2005,8 @@ export class Publisher {
       await this.dropMessages(questionId, 'never-published');
       const items = await ctx.store.outboxFor(questionId);
       creates = items.filter((o) => o.kind === 'create');
-      for (const o of items) if (o.kind !== 'message' && !isPersonItem(o)) await ctx.store.deleteOutbox(o.id);
+      for (const o of items)
+        if (o.kind !== 'message' && !isPersonItem(o)) await ctx.store.deleteOutbox(o.id);
       return settle;
     });
     for (const o of creates) await this.dropSpool(o.payload as CreatePayload);
