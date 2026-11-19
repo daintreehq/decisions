@@ -8271,6 +8271,14 @@
                           },
                           "enabled": {
                             "type": "boolean"
+                          },
+                          "features": {
+                            "maxItems": 16,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                            }
                           }
                         },
                         "required": [
@@ -8358,6 +8366,14 @@
                     },
                     "enabled": {
                       "type": "boolean"
+                    },
+                    "features": {
+                      "maxItems": 16,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                      }
                     }
                   },
                   "required": [
@@ -8411,6 +8427,14 @@
                     "minLength": 22,
                     "maxLength": 22,
                     "pattern": "^[A-Za-z0-9_-]*$"
+                  },
+                  "features": {
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9.-]{0,39}$"
+                    }
                   }
                 },
                 "required": [
@@ -8565,6 +8589,78 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/agent-stopped": {
+      "post": {
+        "summary": "Tell the phone that an agent stopped: at most one push per window, none in quiet hours, only to endpoints that can show it",
+        "operationId": "post_push_agent_stopped",
+        "security": [
+          {
+            "DecisionsSig": []
+          }
+        ],
+        "x-roles": [
+          "owner-desktop"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "sent",
+                        "failed",
+                        "quiet-hours",
+                        "rate-limited",
+                        "no-subscription"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "protocol_version": {
+                    "type": "number",
+                    "const": 1
+                  }
+                },
+                "required": [
+                  "protocol_version"
+                ],
+                "additionalProperties": false
               }
             }
           }

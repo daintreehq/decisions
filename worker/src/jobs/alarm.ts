@@ -98,7 +98,7 @@ async function pushJob(
   room: Room,
   job: JobRow,
   q: QuestionRow,
-  type: Exclude<PushPayload['type'], 'test'>,
+  type: Extract<PushPayload, { question_id: string }>['type'],
   urgency: 'normal' | 'high',
 ): Promise<Outcome> {
   const t = nowMs();

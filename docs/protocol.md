@@ -341,9 +341,10 @@ decoding (terminal line wraps). Both objects are strict: unknown top-level field
 
 ## 11. Push, reminders and expiry
 
-`GET /push/config`, `POST /push/subscriptions {endpoint, p256dh, auth}`, `DELETE /push/subscriptions/{id}`,
+`GET /push/config`, `POST /push/subscriptions {endpoint, p256dh, auth, features?}`, `DELETE /push/subscriptions/{id}`,
 `POST /push/test`. Payloads are generic JSON (`{"type":"decision-new","question_id":"…"}`; every allowed shape is `PushPayload`, which
-admits a type and a question id and nothing else, and `decision-reply` marks an agent message that expects a reply)
+admits a type and a question id and nothing else, `decision-reply` marks an agent message that expects a reply, and
+`test` and `agent-stopped` carry the type alone)
 encrypted per RFC 8291 and
 signed with VAPID (RFC 8292); the lock-screen text is fixed client-side by the service worker. Endpoints must be HTTPS
 on a known push-service host. One Durable Object alarm drives a SQL `scheduled_jobs` table: initial notification
@@ -374,6 +375,43 @@ proxy answer), reply pushes (`decision-reply`, for a later agent message once th
 question), reminders (never held; the first comes hours later unless the person set it sooner) and test pushes. Quiet
 hours apply after the hold as before, and can defer a push past it. A relay that does not advertise `presence-v1` has
 no `/presence` route and pushes as it always has; a client MUST NOT send presence to it.
+
+**Agent stopped** (`agent-stopped-push-v1`). The owner desktop tells the person's phone that an agent stopped while
+they were away with `POST /push/agent-stopped` `AgentStoppedPushBody {protocol_version}` →
+`200 AgentStoppedPushResponse {outcome}`. Only the owner desktop asks (`403 forbidden` for any other role), and the
+request names nothing: which agent stopped, in which pane or project, how many and why all stay on the computer, as do
+which stops count, whether the person is away and their setting, which belong to the host app. The body is strict, so
+any other field is `400 validation_error`. The push is `{"type":"agent-stopped"}`; no question id or any other field
+fits `PushPayload`. From each request, sent or dropped, the relay learns that some agent on the owner computer
+stopped, and when, and, since the desktop asks only while the person is away, that they probably were.
+
+It goes only to an endpoint that declared it can show one, by subscribing with `features` listing
+`agent-stopped-push-v1`. Each subscription replaces its endpoint's declaration, so the same endpoint subscribed again
+without it, by an older app, receives none, and every endpoint from before the relay knew the feature starts unable.
+The declaration belongs to the push subscription, so it also covers a row the same browser left, with the same
+endpoint and keys, under an earlier pairing that was never revoked. A device's socket-ticket declaration does not count: one device holds up to five endpoints, and the
+service worker that shows a push can be an older build than the page that declared, so a phone app MUST declare only
+what its active service worker can show. `PushSubscriptionInfo.features` says what the relay applied. The relay reads
+each endpoint again just before sending to it, so a declaration withdrawn while a push is going out to other endpoints
+applies at once.
+
+The relay drops the request, with the `outcome`:
+
+- `quiet-hours` during quiet hours, never deferred: an agent that stopped at 2am is no news at 7am. The presence hold
+  does not apply, since the desktop asks only while the person is away;
+- `no-subscription` when no endpoint can show it;
+- `rate-limited` when it accepted one within the last `agentStoppedPushWindowMs` (60 s).
+
+Otherwise it accepts the request, which starts a new window, and sends with `Urgency: high`, a TTL of
+`agentStoppedPushTtlSeconds` (600 s) and the fixed `Topic: agent-stopped`: for each endpoint of a phone that is
+offline, a push service holds at most the latest one, and drops it unsent within ten minutes. The outcome is `sent`
+when a push service took it for at least one endpoint and `failed` when none did; a failed push still used the window.
+Every outcome is final. A desktop MUST NOT retry a request, whatever its outcome, nor after a refusal that comes before
+the route runs, such as a `429 rate_limited` from the relay's per-device request budget. Quiet hours and an empty
+endpoint list use no window, so the next stop is asked for as usual. No job or event comes of a request, and the relay keeps
+only when it last accepted one, until its daily cleanup once that is a day old, or `POST /admin/delete-data` with
+scope `everything`. A relay that does not advertise `agent-stopped-push-v1` has no such route; a desktop MUST NOT ask
+it.
 
 ## 12. Deliveries
 
@@ -723,7 +761,7 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`, `presence-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`, `presence-v1`, `agent-stopped-push-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
 features parse and are ignored (`knownFeatures`).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
@@ -734,6 +772,11 @@ check of section 2.
 
 `presence-v1` filters no events and needs no declaration: it advertises `PUT /presence` and the push hold of
 section 11, and a client reports presence only to a relay that lists it.
+
+`agent-stopped-push-v1` filters no events. In `GET /info` it advertises `POST /push/agent-stopped`, and a desktop asks
+only a relay that lists it. On a push subscription (`PushSubscribeBody.features`, section 11) it says that endpoint's
+service worker can show an `agent-stopped` push, and only that declaration counts: the same token on a socket ticket or
+`GET /events` declares nothing about any endpoint.
 
 `person-declines-v1` filters no events either. A publishing desktop declares it to say it files a phone's or tablet's
 decline of its questions (section 6.1), and the relay checks that desktop's latest socket-ticket declaration in the
@@ -782,7 +825,7 @@ events it was not sent.
 0.3.0 protocol but for one new value, below. The new optional fields in existing shapes (`ActionRecord.attachment_ids`,
 `ActionRecord.decline`,
 `HumanAnswerContentV1.images`, `DecisionContentV1.preparation`, `InfoResponse.features`, `DeviceInfo.features`,
-`SocketTicketBody.features`) parse under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0
+`SocketTicketBody.features`, `PushSubscribeBody.features`, `PushSubscriptionInfo.features`) parse under 0.3.0 schemas, and a non-empty `attachment_ids` appears only on events a 0.3.0
 client is never sent (an empty list is harmless). `decline: true` is on a `decision.cancelled` that every client is
 sent: the record is a loose object and the flag is part of its signed bytes, so a 0.3.0 client verifies it and reads the
 cancel as a withdrawal. The one new value in an existing field is `human-desktop`
