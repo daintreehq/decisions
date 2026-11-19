@@ -92,9 +92,7 @@ describe('D: cancel accounts for a create that may already be on the relay', () 
       }
       now = deadline + 1_000;
       if (how === 'left to expire') {
-        env.relay.push('decision.expired', r.questionId, 0, {
-          expired_at: new Date(deadline).toISOString(),
-        });
+        env.relay.expiryEvent({ questionId: r.questionId, at: new Date(deadline).toISOString() });
       }
       for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
         await env.store.putOutbox({ ...o, next_attempt_at: 0 });
