@@ -21,7 +21,13 @@ describe('push payload shaping', () => {
   it('shows an agent-stopped push as fixed text that opens the question list', () => {
     expect(shapePush({ type: 'agent-stopped' })).toMatchObject({
       title: 'Daintree Decisions',
-      options: { body: 'An agent stopped', tag: 'agent-stopped', data: { url: '/' } },
+      // One tag, so a newer stop replaces the one still showing; it still alerts, as a new stop is news.
+      options: {
+        body: 'An agent stopped',
+        tag: 'agent-stopped',
+        renotify: true,
+        data: { url: '/' },
+      },
     });
     // A question id never fits the payload, and one that arrived anyway neither opens a question nor splits the tag.
     expect(shapePush({ type: 'agent-stopped', question_id: QID }).options).toMatchObject({

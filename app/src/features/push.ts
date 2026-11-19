@@ -21,6 +21,8 @@ export const WORKER_ASK_MS = 2_000;
 export interface PushFeatureGate {
   /** Whether the relay advertises `agent-stopped-push-v1` in `GET /info`, read again before every declaration. */
   served: () => boolean;
+  /** False once the pairing this started under has gone (wipe, revocation, re-pair): nothing more is sent for it. */
+  current?: () => boolean;
   timeoutMs?: number;
 }
 
@@ -147,23 +149,25 @@ const notificationsGranted = () =>
  * person doesn't turn notifications on again. It never asks for permission, subscribes or removes anything.
  *
  * Re-sending a subscription turns its relay row back on, and rows name no endpoint, so it declares only when none
- * is disabled (a dead row may be this browser's; turning notifications on again in Settings replaces it) and none
- * declares yet (once one does, this device was already declared, so it never sends again on every launch). Resolves
- * true when it declared.
+ * is disabled (a dead row may be this browser's; turning notifications on again in Settings replaces it) and one
+ * doesn't declare yet. The worker is asked first, so the rows are read just before the send: a push service that
+ * reports this endpoint gone while the worker answers is seen, not undone. Resolves true when it declared.
  */
 export async function declareAgentStoppedPush(
   relay: Relay,
   reg: ServiceWorkerRegistration,
-  gate: PushFeatureGate & { current?: () => boolean },
+  gate: PushFeatureGate,
 ): Promise<boolean> {
   const current = gate.current ?? (() => true);
   if (!gate.served() || !notificationsGranted()) return false;
   const sub = await reg.pushManager.getSubscription();
-  if (!sub || !current()) return false;
-  const { subscriptions } = SubscriptionList.parse(await relay.json('GET', '/push/subscriptions'));
-  if (subscriptions.length === 0 || subscriptions.some((s) => !s.enabled)) return false;
-  if (subscriptions.some((s) => s.features?.includes(AGENT_STOPPED_PUSH))) return false;
+  if (!sub) return false;
   const worker = await agentStoppedWorker(reg, gate.timeoutMs);
+  if (!worker || !current()) return false;
+  const { subscriptions } = SubscriptionList.parse(await relay.json('GET', '/push/subscriptions'));
+  if (subscriptions.some((s) => !s.enabled)) return false;
+  // No rows at all means the relay holds none for this phone: nothing to declare, and no new row to make.
+  if (subscriptions.every((s) => s.features?.includes(AGENT_STOPPED_PUSH))) return false;
   const now = await reg.pushManager.getSubscription();
   const features = declared(reg, worker, gate);
   if (!features.features || now?.endpoint !== sub.endpoint || !current() || !notificationsGranted())
@@ -198,6 +202,7 @@ export async function enablePush(relay: Relay, gate: PushFeatureGate): Promise<v
   });
   // Each subscription replaces the endpoint's declaration, so it says what the worker that receives it can show.
   const worker = gate.served() ? await agentStoppedWorker(reg, gate.timeoutMs) : null;
+  if (gate.current && !gate.current()) return;
   await relay.json('POST', '/push/subscriptions', {
     body: { ...subscriptionBody(sub), ...declared(reg, worker, gate) },
   });

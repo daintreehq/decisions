@@ -126,7 +126,7 @@ export function NotificationsSection() {
 
   const turnOn = () =>
     void run(async () => {
-      await enablePush(app.getRelay()!, { served: () => app.agentStoppedPushServed() });
+      await enablePush(app.getRelay()!, app.pushFeatureGate());
       // A `GET /info` that answered while this was on its way may have let a declaration land first, which this
       // subscription, sent without it, then cleared.
       app.declarePushFeatures();

@@ -44,6 +44,7 @@ const pair = (c: Controller) => {
 const registerWorker = (c: Controller) =>
   c.setServiceWorker(reg as unknown as ServiceWorkerRegistration);
 const answerInfo = (c: Controller) => c.ensureInfo();
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   declare.mockReset();
@@ -80,45 +81,78 @@ describe('declaring the agent-stopped push on an app updated in place', () => {
     expect(declare).not.toHaveBeenCalled();
   });
 
-  it('asks again when a worker takes over the page', async () => {
+  it('asks again each time a worker takes over the page', async () => {
     const c = new AppController('https://relay.example');
     await answerInfo(c);
     pair(c);
     registerWorker(c);
     await vi.waitFor(() => expect(declare).toHaveBeenCalledOnce());
-    container.dispatchEvent(new Event('controllerchange'));
-    await vi.waitFor(() => expect(declare).toHaveBeenCalledTimes(2));
+    for (const times of [2, 3]) {
+      await settle();
+      container.dispatchEvent(new Event('controllerchange'));
+      await vi.waitFor(() => expect(declare).toHaveBeenCalledTimes(times));
+    }
   });
 
-  it('runs one pass at a time, and requests during it get exactly one more', async () => {
-    let finish!: () => void;
-    declare.mockImplementationOnce(() => new Promise<boolean>((r) => (finish = () => r(false))));
+  it.each(['resolves', 'rejects'])(
+    'runs one pass at a time, and requests during one that %s get exactly one more',
+    async (outcome) => {
+      let finish!: () => void;
+      declare.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve, reject) => {
+            finish = () => (outcome === 'resolves' ? resolve(false) : reject(new Error('offline')));
+          }),
+      );
+      const c = new AppController('https://relay.example');
+      await answerInfo(c);
+      pair(c);
+      registerWorker(c);
+      expect(declare).toHaveBeenCalledOnce();
+      c.declarePushFeatures();
+      c.declarePushFeatures();
+      expect(declare).toHaveBeenCalledOnce();
+      finish();
+      await vi.waitFor(() => expect(declare).toHaveBeenCalledTimes(2));
+      await settle();
+      await settle();
+      expect(declare).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('a pass outlived by its pairing or its worker registration is no longer current', async () => {
     const c = new AppController('https://relay.example');
     await answerInfo(c);
     pair(c);
     registerWorker(c);
-    expect(declare).toHaveBeenCalledOnce();
-    c.declarePushFeatures();
-    c.declarePushFeatures();
-    expect(declare).toHaveBeenCalledOnce();
-    finish();
-    await vi.waitFor(() => expect(declare).toHaveBeenCalledTimes(2));
-    await new Promise((r) => setTimeout(r, 10));
-    expect(declare).toHaveBeenCalledTimes(2);
-  });
-
-  it('a failed pass leaves later ones free, and a pass outlived by its pairing is no longer current', async () => {
-    declare.mockRejectedValueOnce(new Error('offline'));
-    const c = new AppController('https://relay.example');
-    await answerInfo(c);
-    pair(c);
-    registerWorker(c);
+    await vi.waitFor(() => expect(declare).toHaveBeenCalledOnce());
     expect(gateOf(0).current()).toBe(true);
-    await vi.waitFor(() => expect(declare).toHaveBeenCalledOnce());
-    await new Promise((r) => setTimeout(r, 0));
-    c.declarePushFeatures();
-    expect(declare).toHaveBeenCalledTimes(2);
+    // Paired again: the relay client is a new one while the app stays ready.
+    inside(c).relay = { json: vi.fn() };
+    expect(gateOf(0).current()).toBe(false);
+    inside(c).relay = relay;
+    expect(gateOf(0).current()).toBe(true);
+    await settle();
+    c.setServiceWorker(
+      Object.assign(new EventTarget(), {
+        waiting: null,
+        installing: null,
+      }) as unknown as ServiceWorkerRegistration,
+    );
+    expect(gateOf(0).current()).toBe(false);
     inside(c).patch({ phase: 'unpaired' });
     expect(gateOf(1).current()).toBe(false);
+  });
+
+  it("gives the Settings tap a gate that reads the relay's answer and the pairing live", async () => {
+    const c = new AppController('https://relay.example');
+    pair(c);
+    const gate = c.pushFeatureGate();
+    expect(gate.served()).toBe(false);
+    await answerInfo(c);
+    expect(gate.served()).toBe(true);
+    expect(gate.current!()).toBe(true);
+    inside(c).patch({ phase: 'revoked' });
+    expect(gate.current!()).toBe(false);
   });
 });

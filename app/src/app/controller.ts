@@ -58,7 +58,11 @@ import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
 import { applyTheme, DEFAULT_PREFS, type LocalPrefs } from './prefs.js';
 import { checkInvite } from '../data/pairing.js';
-import { AGENT_STOPPED_PUSH, declareAgentStoppedPush } from '../features/push.js';
+import {
+  AGENT_STOPPED_PUSH,
+  declareAgentStoppedPush,
+  type PushFeatureGate,
+} from '../features/push.js';
 import type { PairingInvitePayload, ProtocolFeature } from '@daintreehq/decisions-protocol';
 
 /** The extension this app understands: pane snapshots, read for each question's observed agent state. */
@@ -246,6 +250,15 @@ export class AppController {
     return this.snap.info?.features?.includes(AGENT_STOPPED_PUSH) ?? false;
   }
 
+  /** What a push subscription sent now may declare, for as long as the pairing it was started under lasts. */
+  pushFeatureGate(): PushFeatureGate {
+    const relay = this.relay;
+    return {
+      served: () => this.agentStoppedPushServed(),
+      current: () => relay !== null && this.relay === relay && this.snap.phase === 'ready',
+    };
+  }
+
   /**
    * Declare the agent-stopped push on this browser's existing push subscription once the relay serves it and the active
    * service worker can show it, so an app updated in place says so without the person turning notifications on again.
@@ -262,10 +275,10 @@ export class AppController {
     if (!relay || !reg || this.snap.phase !== 'ready' || !this.agentStoppedPushServed()) return;
     this.pushDeclaring = true;
     // A revoked or wiped pairing keeps nothing it started: the relay it was declaring to is no longer this one.
-    const current = () => this.relay === relay && this.swReg === reg && this.snap.phase === 'ready';
+    const gate = this.pushFeatureGate();
     void declareAgentStoppedPush(relay, reg, {
-      served: () => this.agentStoppedPushServed(),
-      current,
+      ...gate,
+      current: () => gate.current!() && this.swReg === reg,
     })
       .catch(() => undefined)
       .finally(() => {
