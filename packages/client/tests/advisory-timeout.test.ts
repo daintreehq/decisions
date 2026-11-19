@@ -96,8 +96,7 @@ async function advised(over: Partial<BridgeOptions> = {}) {
     /** Requests that would tell the relay about a delivery of an answer: a receipt or a failure. */
     answerReceipts: () =>
       e.relay.calls.filter(
-        (c) =>
-          c.path === '/api/v1/deliveries/terminal' || c.path === '/api/v1/deliveries/failed',
+        (c) => c.path === '/api/v1/deliveries/terminal' || c.path === '/api/v1/deliveries/failed',
       ),
     /** A second bridge on the same store, as after a restart. */
     restart(o: Partial<BridgeOptions> = {}) {
@@ -121,6 +120,11 @@ async function advised(over: Partial<BridgeOptions> = {}) {
       return again;
     },
   };
+}
+
+/** Wait, a few milliseconds at a time, until `ok` holds (or two seconds pass); the socket applies frames in the background. */
+async function until(ok: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 200 && !(await ok()); i++) await tick(10);
 }
 
 const blockOf = (text: string) => text.split('\n').slice(1).join('\n');
@@ -222,7 +226,11 @@ describe('the advisory notice', () => {
       question_id: e.qid,
       expires_at: DEADLINE,
       planned_fallback: PLAN,
-      advisory_timeout: { ...f.advisory_timeout, deadline: DEADLINE, injection_id: e.sink.typed[0]!.id },
+      advisory_timeout: {
+        ...f.advisory_timeout,
+        deadline: DEADLINE,
+        injection_id: e.sink.typed[0]!.id,
+      },
     });
     expect(r.content[0]!.text).toContain(
       'You asked for advice, so the plan you stated (planned_fallback) is yours to carry out',
@@ -359,7 +367,11 @@ describe('the advisory notice', () => {
       input: { question: 'Which name?', expires_in: '15m', planned_fallback: PLAN },
     });
     await e.bridge.pump();
-    await e.relay.plainActionEvent({ questionId: declined.questionId, signer: e.phone, action: 'cancel' });
+    await e.relay.plainActionEvent({
+      questionId: declined.questionId,
+      signer: e.phone,
+      action: 'cancel',
+    });
     e.relay.expiryEvent({ questionId: blocking.questionId });
     e.setNow(T0 + 16 * MIN);
     await e.bridge.catchUp();
@@ -488,13 +500,14 @@ describe('where the advisory notice goes', () => {
     });
     for (const ev of e.relay.events.filter((x) => x.seq <= expired.seq))
       ws.recv({ t: 'event', event: ev });
-    await tick(20);
+    await until(async () => (await e.row()).local_status === 'expired');
     expect((await e.row()).local_status).toBe('expired');
     // The pane going idle mid-replay types nothing.
     await e.bridge.notifyPaneIdle();
     expect(e.sink.typed).toHaveLength(0);
     ws.recv({ t: 'event', event: reopened });
     ws.recv({ t: 'caught_up', high_water: reopened.seq, has_more: false });
+    await until(async () => (await e.row()).local_status === 'open');
     await tick(30);
     expect((await e.row()).local_status).toBe('open');
     expect(e.sink.typed).toHaveLength(0);
@@ -640,7 +653,10 @@ describe('a crash around the advisory notice', () => {
     expect(e.sink.typed).toHaveLength(0);
     const v = await again.getDecision(e.qid);
     expect(v.deliveryStatus).toBe('delivery-uncertain');
-    expect(v.advisoryTimeout).toMatchObject({ notice: 'uncertain', injectionId: expect.any(String) });
+    expect(v.advisoryTimeout).toMatchObject({
+      notice: 'uncertain',
+      injectionId: expect.any(String),
+    });
     expect(e.answerReceipts()).toEqual([]);
   });
 

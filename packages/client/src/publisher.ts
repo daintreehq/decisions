@@ -2130,11 +2130,7 @@ export class Publisher {
       signed.record.expires_at === null
     )
       return false;
-    const holds = await advisoryContentHolds(
-      this.ctx,
-      row.question_id,
-      JSON.stringify(envelope),
-    );
+    const holds = await advisoryContentHolds(this.ctx, row.question_id, JSON.stringify(envelope));
     // The policy is read again once the content is open: a host that turned advice off meanwhile authorises nothing.
     return holds && this.advisory?.hostSupport === true && this.ctx.policy.advisoryQuestions;
   }
