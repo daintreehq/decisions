@@ -24,6 +24,7 @@
     "build:all": "pnpm -r build",
     "build:packages": "pnpm -r --filter \"./packages/*\" build",
     "pack:check": "node tools/pack-check/pack-check.mjs",
+    "compat:check": "node tools/compat-check/compat-check.mjs",
     "release:version": "node tools/release/version.mjs",
     "release:publish": "node tools/release/publish.mjs"
   },
