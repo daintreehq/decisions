@@ -22,7 +22,8 @@ export const AGENT_STOPPED_PUSH_FEATURE = 'agent-stopped-push-v1' as const;
  * sent or got no outcome: the relay could not be reached or refused it, its reply did not parse, or the bridge
  * stopped first. Every outcome is final; a push may still have gone out for a `dropped` whose reply was lost.
  */
-export type AgentStoppedPushOutcome = AgentStoppedPushResponse['outcome'] | 'unsupported' | 'dropped';
+export type AgentStoppedPushOutcome =
+  AgentStoppedPushResponse['outcome'] | 'unsupported' | 'dropped';
 export interface AgentStoppedPushResult {
   outcome: AgentStoppedPushOutcome;
 }

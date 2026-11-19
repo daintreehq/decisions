@@ -26,7 +26,8 @@ const MINUTE = 60_000;
  */
 async function world(o: { features?: string[] | undefined } = {}) {
   const env = await setupBridge();
-  env.relay.features = 'features' in o ? o.features : ['thread-messages-v1', 'agent-stopped-push-v1'];
+  env.relay.features =
+    'features' in o ? o.features : ['thread-messages-v1', 'agent-stopped-push-v1'];
   let clock = Date.now();
   const sleep = vi.fn(async (_ms: number) => {});
   const client = new RelayClient({ identity: env.identity, fetch: env.relay.fetch, sleep });
@@ -91,7 +92,8 @@ describe('asking for a push', () => {
     const w = await world();
     await w.start();
     const outcomes = ['sent', 'failed', 'quiet-hours', 'rate-limited', 'no-subscription'] as const;
-    for (const outcome of outcomes) w.relay.agentStoppedReplies.push({ status: 200, body: { outcome } });
+    for (const outcome of outcomes)
+      w.relay.agentStoppedReplies.push({ status: 200, body: { outcome } });
     for (const outcome of outcomes) expect(await w.ask()).toBe(outcome);
     expect(w.posts()).toHaveLength(outcomes.length);
     expect(w.sleep).not.toHaveBeenCalled();
