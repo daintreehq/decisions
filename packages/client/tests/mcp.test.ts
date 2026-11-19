@@ -334,6 +334,22 @@ describe('HTTP MCP: protocol', () => {
       ),
     ).toEqual([]);
   });
+  it("a pane's bearer token cannot ask for an agent-stopped push, as a tool or as a method", async () => {
+    const { mcp, relay, bridge } = await boot();
+    relay.features = ['thread-messages-v1', 'agent-stopped-push-v1'];
+    await bridge.start({ socket: false });
+    for (const name of ['request_agent_stopped_push', 'requestAgentStoppedPush', 'agent_stopped']) {
+      const r = await raw(mcp, { body: rpc('tools/call', { name, arguments: {} }) });
+      expect(JSON.parse(r.body).error.code).toBe(-32602);
+    }
+    for (const method of ['requestAgentStoppedPush', 'request_agent_stopped_push']) {
+      expect(JSON.parse((await raw(mcp, { body: rpc(method, {}) })).body).error.code).toBe(-32601);
+    }
+    // A host's forwarder forwards only these, so it never reaches the bridge through a pane.
+    expect([...MCP_BRIDGE_METHODS]).not.toContain('requestAgentStoppedPush');
+    expect(relay.calls.filter((c) => c.path === '/api/v1/push/agent-stopped')).toEqual([]);
+    await bridge.stop();
+  });
   it('GET/DELETE/OPTIONS are 405 without CORS headers', async () => {
     const { mcp } = await boot();
     for (const method of ['GET', 'DELETE', 'OPTIONS']) {

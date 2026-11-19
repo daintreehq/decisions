@@ -328,6 +328,18 @@ While the owner desktop says the person is at the computer, the relay holds a ne
 - **What is sent.** Only the flag: `PUT /presence {protocol_version, present}`. Nothing about questions, panes or content.
 - **Who may call it.** Only the owner desktop. A Remote Host's bridge throws `forbidden`, and its relay client refuses `putPresence`, before anything is signed. `reportPresence` is a host API: it isn't an MCP tool and isn't in `MCP_BRIDGE_METHODS`, and `QuestionBridge` must not forward it.
 
+### 6.11 Telling the phone that an agent stopped
+
+While the person is away, Daintree can ask the relay to tell their phone that an agent stopped ([protocol](./protocol.md) section 11, `agent-stopped-push-v1`). The push says only that: which agent, in which pane or project, how many and why all stay on the computer. Daintree decides when to ask (which stops count, whether the person is away, its own setting and quiet hours, batching stops that land together); the library only asks.
+
+- **Asking.** `await bridge.requestAgentStoppedPush()` on the owner desktop's bridge. It takes no arguments, and sends only `POST /push/agent-stopped {protocol_version}`. The bridge must be started (`invalid_state` otherwise). It resolves to `{ outcome }` and never rejects over the relay:
+  - the relay's own outcomes: `sent` (a push service took it for at least one endpoint), `failed` (none did), `quiet-hours` (dropped, never deferred), `rate-limited` (the relay accepted one within the last minute), `no-subscription` (no paired phone can show one yet);
+  - `unsupported`: the relay doesn't advertise `agent-stopped-push-v1`, so nothing was sent, or it lists the feature without the route;
+  - `dropped`: the relay couldn't be reached, refused the request (a `429` from its request budget included), or replied with something the library doesn't understand, or the bridge stopped before the request went out. A push may still have gone out if the reply was lost.
+- **Never retried.** Every outcome is final. The request is sent at most once, with none of the relay client's usual retries and not even again after a clock-skew refusal (the skew it shows is learned for the next request), because a retry would turn a dropped stop into a late alert. Ask again only for the next stop.
+- **Older relays.** The library reads `GET /info` before each request, and asks only a relay that lists `agent-stopped-push-v1`; requests made together share one read. A relay without it is believed for 10 minutes, so an upgraded one is picked up. Asking one does nothing and raises no error.
+- **Who may call it.** Only the owner desktop. A Remote Host's bridge, or a revoked desktop, throws `forbidden`, and a Remote Host's relay client refuses `postAgentStoppedPush`, before anything is signed. `requestAgentStoppedPush` is a host API: it isn't an MCP tool and isn't in `MCP_BRIDGE_METHODS`, and `QuestionBridge` must not forward it.
+
 ## 7. Storage in Daintree
 
 - **SQLite.** Add `electron/services/persistence/migrations/0020_decisions.sql` plus a journal entry. Tables mirror the client's `LocalStore`: `decisions_questions` (origin map and status), `decisions_outbox`, `decisions_inbound_events`, `decisions_injection_intents`, `decisions_cursor`, `decisions_audit`. Follow the precedent of `0017_assistant_sender_credentials.sql` (raw `CREATE TABLE IF NOT EXISTS`, used through `sqlite.prepare`) or declare them in `schema.ts` and run `npm run db:generate` and `npm run db:check`. Writes are synchronous in better-sqlite3 and can stall main, so batch them and never write per audio/event frame; respect `diskPressureState.getWritesSuppressed()`.

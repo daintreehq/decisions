@@ -151,6 +151,8 @@ export class FakeRelay {
   features: string[] | undefined = ['thread-messages-v1'];
   /** Number of upcoming `GET /info` reads that fail with a network error. */
   failInfo = 0;
+  /** While set, `GET /info` waits for it before answering (a slow relay). */
+  holdInfo: Promise<void> | null = null;
   /** Thread messages the relay committed, in commit order. */
   messages: { idem: string; message: SignedMessage }[] = [];
   /** The status, code and details every upcoming message POST is refused with, until cleared. */
@@ -224,8 +226,14 @@ export class FakeRelay {
    * `agent-stopped-push-v1`. Advertising the feature is `features`' job, so a test can make the two disagree.
    */
   agentStoppedRoute = true;
-  /** Replies for upcoming agent-stopped POSTs, in order; when empty the relay answers `sent`. */
-  agentStoppedReplies: { status: number; body: Record<string, unknown> | string }[] = [];
+  /**
+   * Replies for upcoming agent-stopped POSTs, in order, each with any headers (a string body is sent as given), or
+   * `reset` for a connection lost before the reply; when empty the relay answers `sent`.
+   */
+  agentStoppedReplies: (
+    | { status: number; body: Record<string, unknown> | string; headers?: Record<string, string> }
+    | 'reset'
+  )[] = [];
   /** While set, agent-stopped POSTs wait for it before the relay looks at them (a slow relay). */
   holdAgentStopped: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
@@ -307,6 +315,7 @@ export class FakeRelay {
     }
 
     if (method === 'GET' && p === '/api/v1/info') {
+      if (this.holdInfo) await this.holdInfo;
       if (this.failInfo > 0) {
         this.failInfo--;
         throw new TypeError('fetch failed');
@@ -667,13 +676,14 @@ export class FakeRelay {
       if (!AgentStoppedPushBody.safeParse(body).success)
         return json(400, { code: 'validation_error', message: 'invalid body' });
       const reply = this.agentStoppedReplies.shift();
+      if (reply === 'reset') throw new TypeError('connection reset');
       if (reply)
         return typeof reply.body === 'string'
           ? new Response(reply.body, {
               status: reply.status,
-              headers: { 'content-type': 'application/json' },
+              headers: { 'content-type': 'application/json', ...reply.headers },
             })
-          : json(reply.status, reply.body);
+          : json(reply.status, reply.body, reply.headers);
       return json(200, { outcome: 'sent' });
     }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
