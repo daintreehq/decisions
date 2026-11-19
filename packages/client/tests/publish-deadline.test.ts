@@ -18,6 +18,7 @@ import {
   type BridgeOptions,
   type CreatePayload,
 } from '../src/index.js';
+import type { SignedQuestion } from '@daintreehq/decisions-protocol';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { FakeRelay, FakeSink, makeIdentity, origin, setupBridge } from './helpers.js';
 
@@ -228,6 +229,10 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     await env.bridge.pump();
 
     expect(creates(env.relay)).toHaveLength(1); // the retry, answered 400: the relay holds no such question
+    // The relay's own word settles it: nothing is read back.
+    expect(
+      env.relay.calls.filter((c) => c.method === 'GET' && c.path.startsWith('/api/v1/questions/')),
+    ).toEqual([]);
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'publish-failed',
       publication: 'never-published',
@@ -290,6 +295,10 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
       await env.store.putOutbox({ ...o, next_attempt_at: 0 });
     await env.bridge.pump();
+    // Its history is applied: the relay is not asked about it, and only the leftover create goes.
+    expect(
+      env.relay.calls.filter((c) => c.method === 'GET' && c.path.startsWith('/api/v1/questions/')),
+    ).toEqual([]);
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'human-answered',
       publication: 'accepted',
@@ -313,6 +322,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     env.relay.dropCreateReply = 1; // committed; the reply is lost
     await env.bridge.pump();
     await env.relay.answerEvent({ questionId: r.questionId, phone: env.phone, options: ['a'] });
+    env.relay.answerState.set(r.questionId, { status: 'human-answered', revision: 1 });
     now = deadline + 1_000;
     env.relay.rejectCreate = 400;
     const retry = async () => {
@@ -324,7 +334,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       env.relay.calls.filter(
         (c) => c.method === 'GET' && c.path === `/api/v1/questions/${r.questionId}`,
       ).length;
-    return { env, questionId: r.questionId, retry, reads };
+    return { env, questionId: r.questionId, retry, reads, now: () => now };
   };
 
   it('takes a question an older relay refused the late retry of as published once the relay shows it holds it, and delivers its answer', async () => {
@@ -351,17 +361,56 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect(env.sink.typed[0]!.text).toContain('choice: a');
   });
 
+  /** Reshape the question the relay holds, as its read shows it; returns the undo. */
+  const reshape = (relay: FakeRelay, id: string, signed: (s: SignedQuestion) => SignedQuestion) => {
+    const held = relay.questions.get(id)!;
+    relay.questions.set(id, { ...held, signed: signed(held.signed) });
+    return () => void relay.questions.set(id, held);
+  };
+
   it.each([
-    ['cannot reach the relay', (relay: FakeRelay) => void (relay.failDetail = 1)],
     [
-      'has its signature refused',
-      (relay: FakeRelay) => void (relay.rejectDetail = { status: 401, code: 'not_authenticated' }),
+      'the relay cannot be reached',
+      'network_error',
+      (relay: FakeRelay) => {
+        relay.failDetail = 1;
+        return () => undefined;
+      },
+    ],
+    ...(
+      [
+        [401, 'not_authenticated'],
+        [403, 'forbidden'],
+        [426, 'upgrade_required'],
+      ] as const
+    ).map(
+      ([status, code]) =>
+        [
+          `the read is refused (${status})`,
+          code,
+          (relay: FakeRelay) => {
+            relay.rejectDetail = { status, code };
+            return () => void (relay.rejectDetail = null);
+          },
+        ] as const,
+    ),
+    [
+      'the read shows no signed question',
+      'malformed_question',
+      (relay: FakeRelay, id: string) =>
+        reshape(relay, id, () => undefined as unknown as SignedQuestion),
+    ],
+    [
+      'the read shows this signature under another id',
+      'malformed_question',
+      (relay: FakeRelay, id: string) =>
+        reshape(relay, id, (q) => ({ ...q, record: { ...q.record, question_id: 'q_other' } })),
     ],
   ] as const)(
-    'keeps a refused create queued, possibly committed, while it %s to ask whether the relay holds it',
-    async (_why, fail) => {
-      const { env, questionId, retry, reads } = await refusedLateRetry();
-      fail(env.relay);
+    'keeps a refused create queued, possibly committed, and asks again, while %s',
+    async (_why, code, fail) => {
+      const { env, questionId, retry, reads, now } = await refusedLateRetry();
+      const undo = fail(env.relay, questionId);
       await retry();
       expect(reads()).toBe(1);
       expect(await env.bridge.getDecision(questionId)).toMatchObject({
@@ -369,10 +418,14 @@ describe('a question whose deadline passes before it reaches the relay', () => {
         publication: 'possibly-committed',
       });
       const [create] = await env.store.outboxFor(questionId);
-      expect(create).toMatchObject({ kind: 'create', attempts: 2 });
+      expect(create).toMatchObject({ kind: 'create', attempts: 2, last_error: code });
       expect((create!.payload as CreatePayload).maybePublished).toBe(true);
+      // Backed off like a transient failure: nothing goes before it is due.
+      expect(create!.next_attempt_at).toBeGreaterThan(now());
+      await env.bridge.pump();
+      expect(reads()).toBe(1);
 
-      env.relay.rejectDetail = null;
+      undo();
       await retry();
       expect(reads()).toBe(2);
       expect(await env.bridge.getDecision(questionId)).toMatchObject({
@@ -382,31 +435,20 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     },
   );
 
-  it('keeps the refusal when the relay holds another question under the id, or will not say', async () => {
-    const other = await refusedLateRetry();
-    // Another record under this id: not this create's question, whatever the relay says.
-    const held = other.env.relay.questions.get(other.questionId)!;
-    other.env.relay.questions.set(other.questionId, {
-      ...held,
-      signed: { ...held.signed, record: { ...held.signed.record, signature: 'x'.repeat(86) } },
-    });
-    await other.retry();
-    expect(other.reads()).toBe(1);
-    expect(await other.env.bridge.getDecision(other.questionId)).toMatchObject({
+  it('keeps the refusal when the relay shows another question under the id', async () => {
+    const { env, questionId, retry, reads } = await refusedLateRetry();
+    reshape(env.relay, questionId, (q) => ({
+      ...q,
+      record: { ...q.record, signature: 'x'.repeat(86) },
+    }));
+    await retry();
+    expect(reads()).toBe(1);
+    expect(await env.bridge.getDecision(questionId)).toMatchObject({
       status: 'publish-failed',
       publication: 'refused',
       errorCode: 'validation_error',
     });
-
-    const silent = await refusedLateRetry();
-    silent.env.relay.rejectDetail = { status: 403, code: 'forbidden' };
-    await silent.retry();
-    expect(silent.reads()).toBe(1);
-    expect(await silent.env.bridge.getDecision(silent.questionId)).toMatchObject({
-      status: 'publish-failed',
-      publication: 'refused',
-    });
-    expect(await silent.env.store.outboxFor(silent.questionId)).toHaveLength(0);
+    expect(await env.store.outboxFor(questionId)).toHaveLength(0);
   });
 
   it("reopens a question a refusal closed, once the relay's history shows it was taken and answered", async () => {

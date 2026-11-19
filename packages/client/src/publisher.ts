@@ -191,8 +191,8 @@ class CreateWithdrawn extends Error {}
 /** A create's deadline passed before it was first sent: it goes no further, and is settled as never published. */
 class CreateOverdue extends Error {}
 /**
- * The relay refused a create that may already be on it, and could not be asked whether it holds the question
- * (`error`): the create stays queued, possibly committed, and is sent and the relay asked again.
+ * The relay refused a create that may already be on it, and did not say whether it holds the question (`error`): the
+ * create stays queued, possibly committed, and is sent and the relay asked again.
  */
 class CreateUnconfirmed extends Error {
   constructor(readonly error: RelayError) {
@@ -2000,6 +2000,8 @@ export class Publisher {
       receipt = await ctx.client.createQuestion(item.id, p.signed).catch(async (e: unknown) => {
         if (!(e instanceof RelayError) || e.retryable) throw e;
         if (e.status === 400 && e.details?.reason === CREATE_NEVER_COMMITTED) throw e;
+        // A question whose history this desktop already applied needs no word from the relay: the leftover create goes.
+        if ((await ctx.store.getQuestion(item.question_id))?.local_status !== 'queued') throw e;
         await this.relayHolds(item.question_id, e, p.signed.record.signature);
         return null;
       });
@@ -2018,16 +2020,17 @@ export class Publisher {
   /**
    * After the relay refused a create that may already be on it: returns when the relay holds this very question (its
    * record carries this create's signature), so only the receipt was lost; a relay that checks the deadline before the
-   * receipt, as 0.8.0 does, refuses the retry of a question it took. Throws `refusal` when the relay holds no such
-   * question, holds another, or will not say, and `CreateUnconfirmed` when it cannot be read for now (a transient
-   * failure, or this device's signature refused), for the create to be sent and the relay asked again.
+   * receipt, as 0.8.0 does, refuses the retry of a question it took. The refusal stands (`refusal` is thrown) only on
+   * the relay's own word: it holds no such question (`not_found`), or another one under this id. Anything else (the
+   * relay unreachable, the read refused, a reply that shows neither) throws `CreateUnconfirmed`, for the create to be
+   * sent and the relay asked again.
    */
   private async relayHolds(
     questionId: string,
     refusal: RelayError,
     signature: string,
   ): Promise<void> {
-    let detail: { question?: { record?: { question_id?: unknown; signature?: unknown } } } | null;
+    let detail: unknown;
     try {
       detail = await this.ctx.client.getQuestion(questionId, {
         retry: false,
@@ -2036,11 +2039,19 @@ export class Publisher {
     } catch (e) {
       const err =
         e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
-      if (err.retryable || err.code === 'not_authenticated') throw new CreateUnconfirmed(err);
+      if (err.status === 404 && err.code === 'not_found') throw refusal;
+      throw new CreateUnconfirmed(err);
+    }
+    const record = (
+      detail as { question?: { record?: { question_id?: unknown; signature?: unknown } } } | null
+    )?.question?.record;
+    if (record?.question_id === questionId && typeof record.signature === 'string') {
+      if (record.signature === signature) return;
       throw refusal;
     }
-    const record = detail?.question?.record;
-    if (record?.question_id !== questionId || record.signature !== signature) throw refusal;
+    throw new CreateUnconfirmed(
+      new RelayError('malformed_question', 'the relay did not show the question it holds', 0),
+    );
   }
 
   /**
