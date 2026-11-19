@@ -159,6 +159,27 @@ const byteLen = (s: string): number => enc.encode(s).length;
 /** An answer entry's place in its question's thread: its ledger seq, or 0 for one stored before threads. */
 const seqOf = (e: AnswerEntry): number => e.event_seq ?? 0;
 
+/**
+ * `row`'s answers with each advisory notice in `ids` still to be typed marked `write_refused`, or null when none is.
+ * Runs under ctx.lock, on a fresh read.
+ */
+function markRefused(row: QuestionRow, ids: readonly string[]): string | null {
+  let marked = false;
+  const next = parseAnswers(row.answers_json).map((e) => {
+    if (!ids.includes(e.entry_id) || !isAdvisoryNotice(e) || e.delivered) return e;
+    marked = true;
+    return { ...e, write_refused: true };
+  });
+  return marked ? serializeAnswers(next) : null;
+}
+
+/** `row`'s answers with every `write_refused` mark taken off, or null when none carries one. */
+function clearRefused(row: QuestionRow): string | null {
+  const entries = parseAnswers(row.answers_json);
+  if (!entries.some((e) => e.write_refused)) return null;
+  return serializeAnswers(entries.map(({ write_refused: _w, ...e }) => e));
+}
+
 /** The wire form of a local error code (`MessageReceiptBody` and `deliveries/failed` take `[a-z0-9_.-]{1,48}`). */
 const wireCode = (code: string): string =>
   code.replace(/[^a-z0-9_.-]/g, '_').slice(0, 48) || 'unknown';
@@ -1141,7 +1162,11 @@ export class DeliveryEngine {
           const routed = await this.unavailable(q, result.reason, answers);
           if ('attention' in routed) {
             const code = result.code ?? routed.attention;
-            if (answers) await this.attention(q, code, 'needs-attention');
+            // An advisory notice admitted for this write was settled like one that lands: that is kept with it.
+            const refused = mine.flatMap((i) =>
+              i.kind === 'answer' && isAdvisoryNotice(i.entry) ? [i.entry.entry_id] : [],
+            );
+            if (answers) await this.attention(q, code, 'needs-attention', undefined, refused);
             for (const i of mine)
               if (i.kind === 'message')
                 await this.messageAttention(q, i.message, code, 'needs-attention');
@@ -1375,6 +1400,8 @@ export class DeliveryEngine {
     code: string,
     status: 'needs-attention' | 'delivery-uncertain',
     uncertainIntentId?: string,
+    /** Advisory notices whose admitted write the sink refused (`AnswerEntry.write_refused`). */
+    refused: readonly string[] = [],
   ): Promise<void> {
     const { ctx } = this;
     if (uncertainIntentId) {
@@ -1394,6 +1421,18 @@ export class DeliveryEngine {
             ...(marked ? { answers_json: marked } : {}),
           },
         );
+      });
+    } else if (refused.length > 0) {
+      // The refusal is kept with the notice in the same write as the status, on a fresh read under the lock the inbox
+      // appends under, so nothing it appended meanwhile is lost.
+      await ctx.lock.run(async () => {
+        const row = await ctx.store.getQuestion(q.question_id);
+        const marked = row ? markRefused(row, refused) : null;
+        await ctx.store.updateQuestion(q.question_id, {
+          delivery_status: status,
+          error_code: code,
+          ...(marked ? { answers_json: marked } : {}),
+        });
       });
     } else {
       await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
@@ -1629,7 +1668,7 @@ export class DeliveryEngine {
     const q = await this.ctx.store.getQuestion(questionId);
     if (!q) return;
     // Only answers that still have somewhere to go: a retry for a follow-up leaves a delivered answer's state alone.
-    // Read again under the lock delivery settles a write under, and only the status written: a copy of the answers
+    // Read again under the lock delivery settles a write under, and written from that read alone: a copy of the answers
     // read before a write settled would bring an answer typed meanwhile back as pending.
     await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(questionId);
@@ -1638,11 +1677,15 @@ export class DeliveryEngine {
         (this.pending(row).length > 0 ||
           row.delivery_status === 'needs-attention' ||
           row.delivery_status === 'delivery-uncertain')
-      )
+      ) {
+        // A refused write is history once the notice is sent again: the next attempt says how it stands.
+        const cleared = clearRefused(row);
         await this.ctx.store.updateQuestion(questionId, {
           delivery_status: 'desktop-received',
           error_code: null,
+          ...(cleared ? { answers_json: cleared } : {}),
         });
+      }
     });
     await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(questionId);

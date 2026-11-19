@@ -13,7 +13,7 @@ import {
   type AttachmentSpool,
   type BridgeContext,
 } from './context.js';
-import { DeliveryEngine, type DrainResult } from './delivery.js';
+import { ADVISORY_LEDGER_WAIT_MS, DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
 import {
@@ -206,6 +206,15 @@ const CATCH_UP_TIMEOUT_MS = 30_000;
 /** How many stored, unapplied events `ledgerUnsettled` looks through for the question's own. */
 const UNAPPLIED_SCAN = 500;
 
+/** The question a stored ledger event is about, when it names one. */
+function eventQuestionId(e: { json: string }): unknown {
+  try {
+    return (JSON.parse(e.json) as { question_id?: unknown }).question_id;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
@@ -349,8 +358,9 @@ export interface DecisionView {
    * round's deadline passed unanswered (`advisoryTimeout`, `fallback-due`), or the question never reached the relay
    * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
    * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
-   * desktop to read the relay (a reopen may be on its way). It is never an answer or an approval: the person decided
-   * nothing.
+   * desktop to read the relay (a reopen may be on its way), unless its sink refused a write admitted after that read
+   * (`advisoryTimeout.writeRefused`): that one waits only on what this computer's store shows, an event of its question
+   * not yet applied among them. It is never an answer or an approval: the person decided nothing.
    */
   fallbackDue: boolean;
   /**
@@ -415,6 +425,12 @@ export interface AdvisoryTimeoutView {
   notice: 'pending' | 'delivered' | 'uncertain' | 'needs-attention' | 'superseded';
   /** The write that delivered the notice, or that may have; null otherwise. */
   injectionId: string | null;
+  /**
+   * True when the notice needs attention because its sink refused a write this host had admitted, once it had read the
+   * relay for the notice's round as for a write that lands: the plan is settled as for a written notice, although
+   * nothing was typed. False otherwise, a notice that needs attention for another reason (its pane gone) included.
+   */
+  writeRefused: boolean;
   /** Always `unobserved`: Decisions never sees whether the agent carried out the plan. */
   agentAction: 'unobserved';
 }
@@ -1412,12 +1428,17 @@ export class DecisionsBridge {
     // ahead here either.
     const noticeWaits =
       timeout?.inForce === true &&
-      (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention');
+      (timeout.view.notice === 'pending' ||
+        (timeout.view.notice === 'needs-attention' && !timeout.view.writeRefused));
     // Read (and the hold timed from now, if it is not yet) only once a notice waits; an earlier unsettled read wins.
     const held = noticeWaits
       ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
       : false;
-    const waiting = noticeWaits && (unsettled === true || held);
+    // One whose admitted write its sink refused was settled as a typed one is, so only what the store shows every
+    // process alike holds it (`refusalHeld`).
+    const refusedWaits =
+      timeout?.inForce === true && timeout.view.writeRefused ? await this.refusalHeld(row) : false;
+    const waiting = (noticeWaits && (unsettled === true || held)) || refusedWaits;
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1570,6 +1591,7 @@ export class DecisionsBridge {
             : notice === 'uncertain'
               ? (e.uncertain_injection_id ?? null)
               : null,
+        writeRefused: notice === 'needs-attention' && e.write_refused === true,
         agentAction: 'unobserved',
       },
     };
@@ -1651,19 +1673,37 @@ export class DecisionsBridge {
    */
   private async ledgerUnsettled(questionId: string): Promise<'unapplied' | 'reading' | null> {
     const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
-    for (const e of stored) {
-      let id: unknown;
-      try {
-        id = (JSON.parse(e.json) as { question_id?: unknown }).question_id;
-      } catch {
-        id = undefined;
-      }
-      if (id === questionId) return 'unapplied';
-    }
+    if (stored.some((e) => eventQuestionId(e) === questionId)) return 'unapplied';
     // More than were looked through: one of them may be the question's, so the wait is bounded like a read's.
     return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
       ? 'reading'
       : null;
+  }
+
+  /**
+   * Whether an advisory notice of `row` whose write its sink refused still waits (`view`), from the store alone: an event
+   * of its question is stored and not yet applied (a reopen read past a gap), the store cannot be read, or the row has
+   * moved on since it was read. More stored than one look reads may hide one of the question's, so they hold it as a
+   * read under way does, two minutes at most, timed from the refused attempt. Looked at after the row was read, so an
+   * event stored before the refusal is either still waiting here or applied, which the row read again shows.
+   */
+  private async refusalHeld(row: QuestionRow): Promise<boolean> {
+    try {
+      const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
+      if (stored.some((e) => eventQuestionId(e) === row.question_id)) return true;
+      const tried = row.last_attempt_at ? Date.parse(row.last_attempt_at) : NaN;
+      if (stored.length >= UNAPPLIED_SCAN && !(this.ctx.now() - tried >= ADVISORY_LEDGER_WAIT_MS))
+        return true;
+      const now = await this.ctx.store.getQuestion(row.question_id);
+      return (
+        !now ||
+        now.local_status !== row.local_status ||
+        now.question_revision !== row.question_revision ||
+        now.answers_json !== row.answers_json
+      );
+    } catch {
+      return true;
+    }
   }
 
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */

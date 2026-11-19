@@ -119,6 +119,7 @@ describe('the outcome a wait reports', () => {
     disposition: 'fallback-due' as const,
     notice: 'delivered' as const,
     injectionId: 'i',
+    writeRefused: false,
     agentAction: 'unobserved' as const,
     ...o,
   });
@@ -206,6 +207,34 @@ describe('the outcome a wait reports', () => {
     });
     expect(outcomeOf(unwritten)).toBeNull();
     expect(outcomeOf(unwritten, { receiving: true })).toBe('advisory-expired');
+    // Unless the receiver's sink refused a write it admitted: it read the relay before it tried.
+    const refused = v({
+      ...expired,
+      fallbackDue: true,
+      advisoryTimeout: timeout({
+        notice: 'needs-attention',
+        injectionId: null,
+        writeRefused: true,
+      }),
+    });
+    expect(outcomeOf(refused)).toBe('advisory-expired');
+    expect(deliveryOf(refused, 'advisory-expired')).toBe('needs-attention');
+    // Still held where it reads (an event of its question waits to be applied): no outcome yet.
+    expect(outcomeOf({ ...refused, fallbackDue: false })).toBeNull();
+    // A policy that withholds it now: a plain expiry, from any process.
+    expect(
+      outcomeOf(
+        v({
+          ...expired,
+          fallbackDue: false,
+          advisoryTimeout: timeout({
+            disposition: 'fallback-withheld',
+            notice: 'needs-attention',
+            writeRefused: true,
+          }),
+        }),
+      ),
+    ).toBe('expired');
     const withheld = v({
       ...expired,
       advisoryTimeout: timeout({ disposition: 'fallback-withheld', notice: 'pending' }),
@@ -1105,6 +1134,98 @@ describe('the standalone flow through decisions mcp', () => {
       await getCmd(got.ctx, {}, id, { pane: 'mcp' });
       const viaCli = JSON.parse(got.out[0]!) as Record<string, unknown>;
       expect(viaCli).toMatchObject({ outcome: 'advisory-expired', delivery: 'delivered' });
+      const { outcome: _o, delivery: _d, ...fields } = viaCli;
+      expect(fields).toEqual(viaMcp);
+    } finally {
+      release();
+      await serving;
+    }
+  });
+
+  it("reports a due advisory plan from another process while the receiver's sink cannot write its notice", async () => {
+    const e = await env({ advisory: true });
+    const server = e.proc({ json: false });
+    let release!: () => void;
+    const until = new Promise<void>((r) => (release = r));
+    let ready!: (url: string, token: string) => void;
+    const up = new Promise<{ url: string; token: string }>(
+      (r) => (ready = (url, token) => r({ url, token })),
+    );
+    const serving = daemon(
+      server.ctx,
+      {},
+      {
+        socket: false,
+        poll: FAST,
+        pumpIntervalMs: 20,
+        // A directory that does not exist: the notice can never be written.
+        sink: `file:${join(e.home, 'missing', 'notices.log')}`,
+        until,
+        mcp: { port: 0 },
+        onReady: (h) => ready(h.mcp!.url, h.token!),
+      },
+    );
+    const { url, token } = await up;
+    const call = async (name: string, args: unknown) => {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name, arguments: args },
+        }),
+      });
+      return (
+        (await r.json()) as {
+          result: { isError?: boolean; structuredContent: Record<string, unknown> };
+        }
+      ).result;
+    };
+    try {
+      const asked = await vi.waitFor(async () => {
+        const r = await call('ask_human', {
+          question: 'Which fixture should I use?',
+          expires_in: '15m',
+          planned_fallback: 'I will use the in-memory fixture.',
+        });
+        expect(r.isError).toBeFalsy();
+        return r.structuredContent;
+      });
+      const id = asked.question_id as string;
+      await vi.waitFor(() => expect(e.created()).toEqual([id]));
+
+      const waiter = e.proc();
+      const waiting = waitCmd(waiter.ctx, {}, id, {
+        pane: 'mcp',
+        waitTimeout: '3s',
+        stopped: never(),
+        ...QUICK,
+      });
+      // It only reads: the server receives, and its sink is the one that refuses the notice.
+      await vi.waitFor(() =>
+        expect(waiter.err.join('\n')).toMatch(/another decisions process receives/),
+      );
+      e.clock.skew = 16 * MIN;
+      e.relay.expiryEvent({ questionId: id });
+      expect(await waiting).toBe(13);
+      expect(waiter.records()).toHaveLength(1);
+      expect(result(waiter.records())).toMatchObject({
+        outcome: 'advisory-expired',
+        exit_code: 13,
+        fallback_due: true,
+        delivery: 'needs-attention',
+        advisory_timeout: { disposition: 'fallback-due', notice: 'needs-attention' },
+      });
+      expect(waiter.calls.filter((c) => c.includes('/events'))).toEqual([]);
+
+      const viaMcp = (await call('get_decision', { question_id: id })).structuredContent;
+      expect(viaMcp).toMatchObject({ status: 'expired', fallback_due: true });
+      const got = e.proc();
+      await getCmd(got.ctx, {}, id, { pane: 'mcp' });
+      const viaCli = JSON.parse(got.out[0]!) as Record<string, unknown>;
+      expect(viaCli).toMatchObject({ outcome: 'advisory-expired', delivery: 'needs-attention' });
       const { outcome: _o, delivery: _d, ...fields } = viaCli;
       expect(fields).toEqual(viaMcp);
     } finally {

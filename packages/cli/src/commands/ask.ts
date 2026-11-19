@@ -93,7 +93,7 @@ function currentAdvisoryTimeout(v: DecisionView) {
  *
  * `receiving`: this process runs the bridge that reads the relay, so its own view of the ledger decides that. A process
  * that does not (another one receives, or `get`) cannot see a replay under way there, so it takes the plan as due only
- * once the receiver has written, or may have written, its notice.
+ * once the receiver has written, or may have written, its notice, or had its sink refuse a write it admitted.
  */
 export function outcomeOf(
   v: DecisionView,
@@ -102,8 +102,14 @@ export function outcomeOf(
   const advisory = currentAdvisoryTimeout(v);
   if (advisory?.disposition === 'fallback-due') {
     if (!v.fallbackDue) return null;
-    // Written, or perhaps written, by the receiver: it read the relay before it wrote. Nothing written proves nothing.
-    if (!o.receiving && advisory.notice !== 'delivered' && advisory.notice !== 'uncertain')
+    // Written, perhaps written, or refused by the receiver's sink: it read the relay before it wrote. A notice it never
+    // tried to write proves nothing.
+    if (
+      !o.receiving &&
+      advisory.notice !== 'delivered' &&
+      advisory.notice !== 'uncertain' &&
+      !advisory.writeRefused
+    )
       return null;
   }
   switch (v.status) {
