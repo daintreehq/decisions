@@ -1,5 +1,11 @@
 /// <reference lib="webworker" />
-import { isCacheable, safeTargetUrl, shapePush } from './sw-core.js';
+import {
+  FEATURES_REQUEST,
+  isCacheable,
+  safeTargetUrl,
+  shapePush,
+  SW_FEATURES,
+} from './sw-core.js';
 
 declare const self: ServiceWorkerGlobalScope;
 declare const __PRECACHE__: string[];
@@ -19,7 +25,10 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('message', (event) => {
-  if ((event.data as { type?: string } | null)?.type === 'SKIP_WAITING') void self.skipWaiting();
+  const type = (event.data as { type?: string } | null)?.type;
+  if (type === 'SKIP_WAITING') void self.skipWaiting();
+  // An older build never answers this, so the page declares nothing for it.
+  if (type === FEATURES_REQUEST) event.ports[0]?.postMessage({ features: [...SW_FEATURES] });
 });
 
 self.addEventListener('activate', (event) => {
