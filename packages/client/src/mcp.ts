@@ -8,7 +8,7 @@ import type { InvolvementView } from './involvement.js';
 import type { PolicyAdjustment, RegisterResult } from './publisher.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.8.0';
+const SERVER_VERSION = '0.9.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
