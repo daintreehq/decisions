@@ -159,12 +159,13 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
     lines.push(`revision: ${Math.max(0, Math.trunc(n.revision))}`);
     if (n.injectionId) lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
     if (question) field('question', question);
-    if (n.kind === 'expired' && n.disposition) {
+    // The advisory notice always names its deadline: without one, the ordinary expiry block (it authorises nothing).
+    if (n.kind === 'expired' && n.disposition && n.deadline) {
       // Only `fallback-due` lets the plan go ahead; anything else reads as withheld.
       const due = n.disposition === 'fallback-due';
       lines.push('source: system');
       lines.push('status: advisory-unanswered');
-      if (n.deadline) lines.push(`deadline: ${oneLine(n.deadline, 40)}`);
+      lines.push(`deadline: ${oneLine(n.deadline, 40)}`);
       lines.push(`disposition: ${due ? 'fallback-due' : 'fallback-withheld'}`);
       lines.push('authorised: no');
       lines.push(ADVISORY_NOTE_UNANSWERED);

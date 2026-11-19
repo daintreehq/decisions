@@ -41,9 +41,9 @@ export interface AnswerEntry {
    * `expired` only: the expiry closed the advisory round of an advisory question (protocol section 21) on a host that
    * delivers advisory outcomes, so the agent is told in its own notice, never the blocking expiry block.
    * `fallback-due`: the host's policy lets the stated plan go ahead; `fallback-withheld`: it does not. Absent on an
-   * ordinary expiry. Delivery may only ever turn `fallback-due` into `fallback-withheld` (or drop it, for a host that
-   * no longer delivers advisory outcomes) before the notice is typed, never the other way. Nothing was decided or
-   * approved either way.
+   * ordinary expiry. Delivery may only ever turn `fallback-due` into `fallback-withheld` before the notice is typed
+   * (the policy no longer allows advice, or the host no longer delivers advisory outcomes and types the ordinary
+   * expiry block instead), never the other way. Nothing was decided or approved either way.
    */
   advisory_disposition?: AdvisoryDisposition;
   /**
@@ -79,15 +79,15 @@ export type AdvisoryDisposition = 'fallback-due' | 'fallback-withheld';
 
 /**
  * The disposition an advisory expiry notice not yet typed may still carry, as the host stands now: `fallback-due`
- * becomes `fallback-withheld` once its policy no longer allows advice, and none at all (an ordinary expiry) once it no
- * longer delivers advisory outcomes, whose notice its sink may not read. Never upgraded.
+ * becomes `fallback-withheld` once its policy no longer allows advice, or once it no longer delivers advisory outcomes
+ * (it then types the ordinary expiry block, which says the same). Never upgraded.
  */
 export function currentDisposition(
   d: AdvisoryDisposition | undefined,
   host: { outcomes: boolean; allowed: boolean },
 ): AdvisoryDisposition | undefined {
-  if (d === undefined || !host.outcomes) return undefined;
-  return d === 'fallback-due' && !host.allowed ? 'fallback-withheld' : d;
+  if (d === undefined) return undefined;
+  return d === 'fallback-due' && !(host.outcomes && host.allowed) ? 'fallback-withheld' : d;
 }
 
 /** The content of an answer. Held in memory only; at rest it is sealed into `AnswerEntry.sealed`. */

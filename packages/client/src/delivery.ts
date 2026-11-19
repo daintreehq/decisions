@@ -8,6 +8,7 @@ import {
   answeredOn,
   closureInForce,
   currentDisposition,
+  type AdvisoryDisposition,
   isAdvisoryNotice,
   isClosure,
   parseAnswers,
@@ -16,13 +17,14 @@ import {
   type AnswerContent,
   type AnswerEntry,
 } from './answers.js';
+import { replyModeOfRow } from './advisory.js';
 import { openAnswerContent, openMessageContent, openQuestionContent } from './at-rest.js';
 import { RelayError } from './errors.js';
 import { TransientError } from './mutex.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
 import { newId, sha256Hex } from '@daintreehq/decisions-crypto';
-import { messageDeliveryKey } from '@daintreehq/decisions-protocol';
+import { ADVISORY_ROUND_REVISION, messageDeliveryKey } from '@daintreehq/decisions-protocol';
 import {
   isPendingMessage,
   isUndeliveredMessage,
@@ -68,10 +70,11 @@ export interface DeliveryOptions {
    */
   advisoryOutcomes?: boolean;
   /**
-   * True while the relay is replaying events this desktop missed: an advisory notice waits for the replay to end,
-   * since a later event of the same replay (a reopen, a deletion) may replace the round it closed.
+   * True while the ledger may hold events this desktop has not read and applied (a replay or a page read under way,
+   * one that ended part-way, a gap): an advisory notice waits, since a later event (a reopen, a deletion) may replace
+   * the round it closed. The host drains again once it is false (`takeReplayHold`).
    */
-  replaying?: () => boolean;
+  replaying?: () => boolean | Promise<boolean>;
 }
 
 export interface DrainResult {
@@ -196,11 +199,27 @@ export class DeliveryEngine {
   stopped = false;
   /** Closure notices being written to a terminal, by question (see `closureWrite`). */
   private readonly closureWrites = new Map<string, Promise<void>>();
+  /** An advisory notice waited for the ledger to be read (`DeliveryOptions.replaying`). */
+  private replayHeld = false;
 
   constructor(
     private readonly ctx: BridgeContext,
     private readonly o: DeliveryOptions,
   ) {}
+
+  /** True once if an advisory notice waited for the ledger to be read since the last call: drain again then. */
+  takeReplayHold(): boolean {
+    const held = this.replayHeld;
+    this.replayHeld = false;
+    return held;
+  }
+
+  /** Whether an advisory notice must wait for the ledger to be read; remembered so the host drains again. */
+  private async heldForReplay(): Promise<boolean> {
+    if (!(await this.o.replaying?.())) return false;
+    this.replayHeld = true;
+    return true;
+  }
 
   /** Serialised: concurrent callers share one pass plus at most one follow-up pass. */
   async drain(): Promise<DrainResult> {
@@ -301,7 +320,7 @@ export class DeliveryEngine {
       (q.delivery_status === 'needs-attention' ||
         q.delivery_status === 'delivery-uncertain' ||
         unsettled.has(q.question_id) ||
-        (pending.some(isAdvisoryNotice) && this.o.replaying?.() === true) ||
+        (pending.some(isAdvisoryNotice) && (await this.heldForReplay())) ||
         (await this.ctx.store.hasUncertainIntent(q.question_id)));
     const barrier = held ? Math.min(...pending.map(seqOf)) : Infinity;
     const messages: StoredMessage[] = [];
@@ -405,11 +424,14 @@ export class DeliveryEngine {
     // And on its original host: the relay keeps naming the host the question was published for, and the inbox
     // checks the relay's host-bound claims (an expiry, a snapshot refresh) against this origin.
     if (target.hostId !== q.origin.host_id) return { attention: 'resume_wrong_host' };
-    // An advisory notice tells the agent it may carry out the plan IT stated: only the session that asked may hear
-    // it, so a resume must bring back that very session, known by its id. Another session in the same worktree
-    // never stated the plan.
+    // An advisory question's notice tells the agent it may carry out the plan IT stated: while the question is in
+    // its advisory round, whatever resumes it (its notice, an answer, a follow-up) must bring back that very session,
+    // known by its id, or the origin would move to a session that never stated the plan. The row is read afresh: a
+    // reopen meanwhile made it a round that waits for a decision.
+    const now = (await this.ctx.store.getQuestion(q.question_id)) ?? q;
     if (
-      this.pending(q).some(isAdvisoryNotice) &&
+      now.question_revision === ADVISORY_ROUND_REVISION &&
+      (replyModeOfRow(now) === 'advisory' || this.pending(now).some(isAdvisoryNotice)) &&
       (q.origin.agent_session_id === null || target.agentSessionId !== q.origin.agent_session_id)
     )
       return { attention: 'resume_wrong_session' };
@@ -610,7 +632,8 @@ export class DeliveryEngine {
     return formatAnswerNotice({
       kind: e.kind,
       ...(e.fallback_due ? { fallbackDue: true } : {}),
-      ...(isAdvisoryNotice(e)
+      // A host that does not deliver advisory outcomes types the ordinary expiry block, which every sink reads.
+      ...(isAdvisoryNotice(e) && this.o.advisoryOutcomes
         ? { disposition: e.advisory_disposition!, deadline: e.created_at }
         : {}),
       questionId: i.q.question_id,
@@ -757,19 +780,22 @@ export class DeliveryEngine {
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
     //     the inbox applies cancellations and deletions under, so none lands between them. A closure notice
     //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink. An
-    //     advisory notice must still say what the host allows now: one its policy no longer allows is withheld (and
-    //     typed as an ordinary expiry once the host no longer delivers advisory outcomes), recorded here, and the
-    //     chunk is built again from the store.
+    //     advisory notice waits while the ledger may hold a later event for its round, and must still say what the
+    //     host allows now: one its policy no longer allows is withheld, recorded here, and the chunk is built again
+    //     from the store.
     let written!: () => void;
     const writing = new Promise<void>((r) => (written = r));
     const closing = new Set<string>();
-    const admitted = await ctx.lock.run(async () => {
+    const advisoryDue = chunk.some(
+      (i) => i.kind === 'answer' && i.entry.advisory_disposition === 'fallback-due',
+    );
+    const allows = () => this.o.advisoryOutcomes === true && ctx.policy.advisoryQuestions;
+    const admitted = await ctx.lock.run(async (): Promise<boolean | 'held'> => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
+      if (chunk.some((i) => i.kind === 'answer' && isAdvisoryNotice(i.entry)))
+        if (await this.heldForReplay()) return 'held';
       const rows = new Map<string, QuestionRow>();
-      const host = {
-        outcomes: this.o.advisoryOutcomes === true,
-        allowed: ctx.policy.advisoryQuestions,
-      };
+      const host = { outcomes: this.o.advisoryOutcomes === true, allowed: allows() };
       let stale = false;
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
@@ -784,7 +810,7 @@ export class DeliveryEngine {
                 .map((m) => m.message_id)
             : ([] as string[]),
         );
-        const withheld = new Map<string, AnswerEntry['advisory_disposition']>();
+        const withheld = new Map<string, AdvisoryDisposition>();
         for (const i of chunk) {
           if (i.q.question_id !== q.question_id) continue;
           if (i.kind === 'message') {
@@ -794,17 +820,16 @@ export class DeliveryEngine {
           const e = answers.get(i.entry.entry_id);
           if (!e || e.advisory_disposition !== i.entry.advisory_disposition) return false;
           const now = currentDisposition(e.advisory_disposition, host);
-          if (now !== e.advisory_disposition) withheld.set(e.entry_id, now);
+          if (now && now !== e.advisory_disposition) withheld.set(e.entry_id, now);
         }
         if (row && withheld.size > 0) {
           await ctx.store.updateQuestion(row.question_id, {
             answers_json: serializeAnswers(
-              parseAnswers(row.answers_json).map((e) => {
-                if (!withheld.has(e.entry_id)) return e;
-                const { advisory_disposition: _was, ...rest } = e;
-                const now = withheld.get(e.entry_id);
-                return now ? { ...rest, advisory_disposition: now } : rest;
-              }),
+              parseAnswers(row.answers_json).map((e) =>
+                withheld.has(e.entry_id)
+                  ? { ...e, advisory_disposition: withheld.get(e.entry_id)! }
+                  : e,
+              ),
             ),
           });
           await ctx.audit.log({
@@ -864,9 +889,23 @@ export class DeliveryEngine {
           if (isClosure(i.entry)) closing.add(i.q.question_id);
         }
       }
+      // The policy is a setting the host may change at any await above: read again after the last one, a notice
+      // that would now be withheld is not typed. Its intents are closed (nothing was written) and the next pass
+      // records it withheld.
+      if (advisoryDue && !allows()) {
+        for (const i of chunk)
+          await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
+        return false;
+      }
       for (const id of closing) this.closureWrites.set(id, writing);
       return true;
     });
+    if (admitted === 'held') {
+      // The ledger may hold a later event for its round: the host drains again once it has been read.
+      written();
+      res.deferred++;
+      return res;
+    }
     if (!admitted) {
       written();
       // Stale: another pass rebuilds the lane from the store, without what was settled, so the pane's other
@@ -1254,12 +1293,12 @@ export class DeliveryEngine {
         const entries = row ? parseAnswers(row.answers_json) : [];
         let marked = false;
         const next = entries.map((e) => {
+          // A deletion meanwhile stopped it from being typed again, not the write that may have reached the screen.
           if (
             !intent ||
             e.revision !== intent.answer_revision ||
             !isAdvisoryNotice(e) ||
-            e.delivered ||
-            !e.deliver
+            e.delivered
           )
             return e;
           marked = true;
@@ -1406,8 +1445,12 @@ export class DeliveryEngine {
       // `typed` was recorded once the sink confirmed the write: only the entry's own record and the receipt may be
       // owed, so a sink that keeps no markers (stdout, a command) still gets no second copy and no false alarm.
       if (intent.state === 'typed' || (await this.markerFound(q, intent))) {
+        // An advisory notice a deletion withdrew meanwhile was still typed: it is recorded as delivered.
         const entry = parseAnswers(q.answers_json).find(
-          (e) => e.revision === intent.answer_revision && e.deliver && !e.delivered,
+          (e) =>
+            e.revision === intent.answer_revision &&
+            (e.deliver || isAdvisoryNotice(e)) &&
+            !e.delivered,
         );
         if (entry)
           await this.markDelivered(

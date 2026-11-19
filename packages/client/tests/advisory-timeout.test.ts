@@ -10,6 +10,7 @@ import {
   PolicyRegistry,
   RelayClient,
   TokenMapAuthenticator,
+  currentDisposition,
   parseAnswers,
   startDecisionsMcpServer,
   type BridgeOptions,
@@ -270,6 +271,11 @@ describe('the advisory notice', () => {
     const e = await advised();
     e.policy.advisoryQuestions = false;
     await e.expire();
+    // Decided when the expiry was accepted, not only by delivery's later check.
+    expect((await e.store.listAudit(100)).map((a) => [a.event, a.result])).toContainEqual([
+      'question.expired',
+      'advisory:fallback-withheld',
+    ]);
     expect(e.sink.typed).toHaveLength(1);
     const text = e.sink.typed[0]!.text;
     expect(text).toContain('status: advisory-unanswered');
@@ -319,27 +325,72 @@ describe('the advisory notice', () => {
     e.policy.advisoryQuestions = false;
     expect(await e.bridge.getDecision(e.qid)).toMatchObject({
       fallbackDue: true,
-      advisoryTimeout: { disposition: 'fallback-due', notice: 'delivered' },
+      advisoryTimeout: {
+        disposition: 'fallback-due',
+        notice: 'delivered',
+        injectionId: e.sink.typed[0]!.id,
+      },
     });
   });
 
-  it('is the ordinary expiry on a host that no longer delivers advisory outcomes', async () => {
+  it('never upgrades a withheld notice, and withholds a due one the host no longer allows', () => {
+    const allowed = { outcomes: true, allowed: true };
+    expect(currentDisposition('fallback-due', allowed)).toBe('fallback-due');
+    expect(currentDisposition('fallback-withheld', allowed)).toBe('fallback-withheld');
+    expect(currentDisposition('fallback-due', { outcomes: true, allowed: false })).toBe(
+      'fallback-withheld',
+    );
+    expect(currentDisposition('fallback-due', { outcomes: false, allowed: true })).toBe(
+      'fallback-withheld',
+    );
+    expect(currentDisposition(undefined, allowed)).toBeUndefined();
+  });
+
+  it('withholds a plan the policy turned off while the write was being admitted', async () => {
+    const e = await advised();
+    const putIntent = e.store.putIntent.bind(e.store);
+    // The host turns advice off while delivery is writing its intent, after it read the policy.
+    e.store.putIntent = async (i) => {
+      e.policy.advisoryQuestions = false;
+      return putIntent(i);
+    };
+    await e.expire();
+    expect(e.sink.typed).toHaveLength(1);
+    expect(e.sink.typed[0]!.text).toContain('disposition: fallback-withheld');
+    expect(e.sink.typed[0]!.text).not.toContain(ADVISORY_NOTE_FALLBACK_DUE);
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      fallbackDue: false,
+      advisoryTimeout: { disposition: 'fallback-withheld', notice: 'delivered' },
+    });
+  });
+
+  it('is the ordinary expiry, withheld and with no receipt, on a host that no longer delivers advisory outcomes', async () => {
     const e = await advised();
     e.sink.panes.get('pane-1')!.idle = false;
     await e.expire();
     await e.bridge.stop();
     const again = e.restart({ advisoryDeadlines: false });
     await again.start({ socket: false });
+    await again.catchUp();
+    // Before anything is typed, get_decision already says the plan will not go ahead.
+    expect(await again.getDecision(e.qid)).toMatchObject({
+      fallbackDue: false,
+      advisoryTimeout: { disposition: 'fallback-withheld', notice: 'pending' },
+    });
+    e.sink.injectBehaviour = 'ambiguous';
     e.sink.panes.get('pane-1')!.idle = true;
     await again.notifyPaneIdle();
     expect(e.sink.typed).toHaveLength(1);
     expect(e.sink.typed[0]!.text).toContain('status: expired');
+    expect(e.sink.typed[0]!.text).toContain('You are NOT authorised');
     expect(e.sink.typed[0]!.text).not.toContain('advisory');
     expect(await again.getDecision(e.qid)).toMatchObject({
       status: 'expired',
       fallbackDue: false,
-      advisoryTimeout: null,
+      advisoryTimeout: { disposition: 'fallback-withheld', notice: 'uncertain' },
     });
+    // Still no answer receipt or failure report: it was a timeout, not an answer.
+    expect(e.answerReceipts()).toEqual([]);
   });
 
   it('is never recorded by a host that does not deliver advisory outcomes', async () => {
@@ -353,7 +404,11 @@ describe('the advisory notice', () => {
     expect(e.sink.typed).toHaveLength(1);
     expect(e.sink.typed[0]!.text).toContain('status: expired');
     expect(parseAnswers((await e.row()).answers_json)[0]!.advisory_disposition).toBeUndefined();
-    expect((await again.getDecision(e.qid)).advisoryTimeout).toBeNull();
+    expect(await again.getDecision(e.qid)).toMatchObject({
+      replyMode: 'advisory',
+      fallbackDue: false,
+      advisoryTimeout: null,
+    });
   });
 
   it('leaves the blocking expiry and the decline exactly as they were', async () => {
@@ -474,6 +529,114 @@ describe('where the advisory notice goes', () => {
     expect((await f.row()).origin.pane_id).toBe(origin().pane_id);
   });
 
+  it('a follow-up before the deadline never moves the question to another session', async () => {
+    const e = await advised({ followUps: true });
+    e.sink.panes.clear();
+    e.sink.addPane('pane-3', { session: 'sess-other' });
+    e.sink.resumeTarget = {
+      hostId: origin().host_id,
+      paneId: 'pane-3',
+      terminalGeneration: 1,
+      ownershipPrincipal: 'principal-1',
+      agentIncarnation: 'inc-1',
+      agentSessionId: 'sess-other',
+      worktreeId: origin().worktree_id,
+    };
+    await e.relay.messageEvent({ questionId: e.qid, signer: e.phone, text: 'Any thoughts?' });
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(0);
+    expect((await e.row()).origin).toMatchObject({
+      pane_id: origin().pane_id,
+      agent_session_id: origin().agent_session_id,
+    });
+    await e.expire();
+    expect(e.sink.typed).toHaveLength(0);
+    expect(await e.row()).toMatchObject({
+      delivery_status: 'needs-attention',
+      error_code: 'resume_wrong_session',
+    });
+  });
+
+  it('waits after a read of the ledger failed part-way, and is typed once a read gets through', async () => {
+    const e = await advised();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    // The relay stops answering: what it holds past the expiry is unknown.
+    e.relay.down = 1;
+    await expect(e.bridge.catchUp()).rejects.toThrow();
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    await e.bridge.pump();
+    expect(e.sink.typed).toHaveLength(0);
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.notice).toBe('pending');
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(1);
+    expect(e.sink.typed[0]!.text).toContain('disposition: fallback-due');
+  });
+
+  it('is typed when a socket replay that brought it ends, with nothing else to wake it', async () => {
+    FakeSocket.instances = [];
+    const e = await advised({ webSocket: (u) => new FakeSocket(u) });
+    e.setNow(T0 + 16 * MIN);
+    await e.bridge.start();
+    await e.bridge.pump();
+    const expired = e.relay.expiryEvent({ questionId: e.qid });
+    await tick(10);
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.recv({
+      t: 'hello',
+      protocol_version: PROTOCOL_VERSION,
+      device_id: e.identity.config.deviceId,
+      role: 'owner-desktop',
+      key_epoch: 1,
+      high_water: expired.seq,
+      server_time: new Date().toISOString(),
+    });
+    for (const ev of e.relay.events.filter((x) => x.seq <= expired.seq))
+      ws.recv({ t: 'event', event: ev });
+    await until(async () => (await e.row()).local_status === 'expired');
+    expect(e.sink.typed).toHaveLength(0);
+    ws.recv({ t: 'caught_up', high_water: expired.seq, has_more: false });
+    await until(async () => e.sink.typed.length > 0);
+    expect(e.sink.typed).toHaveLength(1);
+    expect(e.sink.typed[0]!.text).toContain('status: advisory-unanswered');
+  });
+
+  it('checks the ledger again at the write: an event stored after the pane was checked holds it', async () => {
+    const e = await advised();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    const reopened = await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    // The pane settles; between the lane's check and the write, a read stores the reopen without applying it yet.
+    let checks = 0;
+    e.sink.isIdle = async () => {
+      if (++checks === 2)
+        await e.store.insertEvent({
+          seq: reopened.seq,
+          event_id: reopened.event_id,
+          event_type: reopened.event_type,
+          json: JSON.stringify(reopened),
+          received_at: e.now,
+          processed_at: null,
+        });
+      return true;
+    };
+    await e.bridge.notifyPaneIdle();
+    expect(checks).toBeGreaterThanOrEqual(2);
+    expect(e.sink.typed).toHaveLength(0);
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(0);
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      revision: 1,
+      advisoryTimeout: { notice: 'superseded' },
+    });
+  });
+
   it('waits for a socket replay to end: a later event of it may reopen the round', async () => {
     FakeSocket.instances = [];
     const e = await advised({ webSocket: (u) => new FakeSocket(u) });
@@ -557,6 +720,14 @@ describe('a stale advisory notice is never typed', () => {
     expect(e.sink.typed[0]!.text).toContain('status: expired');
     expect(e.sink.typed[0]!.text).toContain('You are NOT authorised');
     expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(false);
+    const r = await getDecisionOverMcp(e.bridge, e.qid);
+    expect(r.structuredContent).toMatchObject({
+      revision: 1,
+      fallback_due: false,
+      advisory_timeout: { revision: 0, notice: 'superseded' },
+    });
+    expect(r.content[0]!.text).toContain('you are not authorised to continue the gated step');
+    expect(r.content[0]!.text).not.toContain('This host does not allow the plan');
   });
 
   it('a deletion while the pane is busy supersedes it', async () => {
@@ -581,9 +752,13 @@ describe('a stale advisory notice is never typed', () => {
     e.setNow(T0 + 20 * MIN);
     await e.bridge.catchUp();
     await e.bridge.pump();
+    // Even an expiry claim after it (a relay that raced its own sweep) changes nothing.
+    e.relay.expiryEvent({ questionId: e.qid });
+    await e.bridge.catchUp();
     expect(e.sink.typed).toHaveLength(1);
     expect(e.sink.typed[0]!.text).toContain('choice: disk');
     expect(e.sink.typed[0]!.text).not.toContain('advisory-unanswered');
+    expect(parseAnswers((await e.row()).answers_json).map((x) => x.kind)).toEqual(['answer']);
     expect(await e.bridge.getDecision(e.qid)).toMatchObject({
       status: 'human-answered',
       choice: 'disk',
@@ -612,6 +787,72 @@ describe('a stale advisory notice is never typed', () => {
   });
 });
 
+describe('a deletion while the advisory notice is being written', () => {
+  it('keeps the uncertainty of a write the sink could not confirm', async () => {
+    const e = await advised();
+    let answer!: (r: InjectResult) => void;
+    let entered!: () => void;
+    const reached = new Promise<void>((r) => (entered = r));
+    e.sink.inject = async (t, text, id) => {
+      e.sink.typed.push({ target: t, text, id });
+      entered();
+      return new Promise<InjectResult>((r) => (answer = r));
+    };
+    e.relay.expiryEvent({ questionId: e.qid });
+    e.setNow(T0 + 16 * MIN);
+    const first = e.bridge.catchUp();
+    await reached;
+    e.relay.push('decision.deleted', e.qid, null, {});
+    const second = e.bridge.catchUp();
+    await until(async () => (await e.row()).local_status === 'cancelled');
+    answer({ outcome: 'ambiguous', reason: 'enter_dropped' });
+    await first;
+    await second;
+    const id = e.sink.typed[0]!.id;
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout).toMatchObject({
+      notice: 'uncertain',
+      injectionId: id,
+    });
+    await e.bridge.stop();
+    const again = e.restart();
+    await again.start({ socket: false });
+    expect((await again.getDecision(e.qid)).advisoryTimeout).toMatchObject({
+      notice: 'uncertain',
+      injectionId: id,
+    });
+    expect(e.sink.typed).toHaveLength(1);
+  });
+
+  it('records a write found on screen after a restart as delivered', async () => {
+    const e = await advised();
+    let entered!: () => void;
+    const reached = new Promise<void>((r) => (entered = r));
+    e.sink.inject = async (t, text, id) => {
+      e.sink.typed.push({ target: t, text, id });
+      entered();
+      return new Promise<InjectResult>(() => {});
+    };
+    e.relay.expiryEvent({ questionId: e.qid });
+    e.setNow(T0 + 16 * MIN);
+    void e.bridge.catchUp();
+    await reached;
+    // The deletion is applied while the write is in flight; then the process dies before the sink answers.
+    e.relay.push('decision.deleted', e.qid, null, {});
+    void e.bridge.catchUp();
+    await until(async () => (await e.row()).local_status === 'cancelled');
+    expect(parseAnswers((await e.row()).answers_json)[0]).toMatchObject({ deliver: false });
+    await e.bridge.stop();
+    e.sink.inject = Object.getPrototypeOf(e.sink).inject.bind(e.sink);
+    const again = e.restart();
+    await again.start({ socket: false });
+    expect((await again.getDecision(e.qid)).advisoryTimeout).toMatchObject({
+      notice: 'delivered',
+      injectionId: e.sink.typed[0]!.id,
+    });
+    expect(e.sink.typed).toHaveLength(1);
+  });
+});
+
 describe('a crash around the advisory notice', () => {
   it('before anything was attempted: typed once after the restart, and get_decision says so', async () => {
     const e = await advised();
@@ -625,7 +866,10 @@ describe('a crash around the advisory notice', () => {
       advisoryTimeout: { disposition: 'fallback-due', notice: 'pending', deadline: DEADLINE },
     });
     e.sink.panes.get('pane-1')!.idle = true;
+    // Nothing has been read from the relay since the restart: a reopen may be waiting there.
     await again.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    await again.catchUp();
     expect(e.sink.typed).toHaveLength(1);
     expect((await again.getDecision(e.qid)).advisoryTimeout?.notice).toBe('delivered');
   });
@@ -696,6 +940,15 @@ describe('a crash around the advisory notice', () => {
       notice: 'uncertain',
       injectionId: id,
     });
+    // What may have been typed said the plan was due: a later policy change, or a person's retry, never rewrites it.
+    e.policy.advisoryQuestions = false;
+    await e.bridge.retryDelivery(e.qid);
+    expect(e.sink.typed).toHaveLength(1);
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      fallbackDue: true,
+      advisoryTimeout: { disposition: 'fallback-due', notice: 'uncertain', injectionId: id },
+    });
+    e.policy.advisoryQuestions = true;
     e.sink.injectBehaviour = 'ok';
     await e.relay.plainActionEvent({
       questionId: e.qid,

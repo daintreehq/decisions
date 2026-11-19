@@ -499,6 +499,12 @@ export class DecisionsBridge {
    * the next read. `abortable`: started by a sync, whose requests `stop` aborts.
    */
   private paging: { pass: Promise<number>; abortable: boolean } | null = null;
+  /**
+   * The ledger may hold events this desktop has not read: a socket replay started and has not ended, a page read
+   * failed part-way, or nothing has been read in full since the bridge started. An advisory notice waits meanwhile
+   * (`DeliveryOptions.replaying`), since a later event may replace the round it closed.
+   */
+  private ledgerUnread = true;
   /** The one HTTP sync in flight (`sync`). */
   private syncing: Promise<HttpSyncStatus> | null = null;
   /** Set while this run polls the relay over HTTP (`start({ socket: false, poll })`). */
@@ -607,8 +613,12 @@ export class DecisionsBridge {
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
       advisoryOutcomes: o.advisoryDeadlines === true,
-      // The socket's replay of missed events: a later frame of it may reopen the round an advisory notice closed.
-      replaying: () => this.socket.currentState === 'syncing',
+      // The ledger may hold a later event (a reopen, a deletion) for the round an advisory notice closed: one not read
+      // yet, or read and not yet applied (a gap waits for the events before it).
+      replaying: async () =>
+        this.ledgerUnread ||
+        this.paging !== null ||
+        (await this.ctx.store.unprocessedEvents(1)).length > 0,
     });
     this.socket = new RelaySocket({
       client,
@@ -619,6 +629,8 @@ export class DecisionsBridge {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => {
+          // A replay is under way until its last segment is caught up.
+          if (s === 'syncing') this.ledgerUnread = true;
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
@@ -1346,25 +1358,27 @@ export class DecisionsBridge {
     const e = entries.findLast(isAdvisoryNotice);
     if (!e?.advisory_disposition || row.history_only) return null;
     const inForce = e.deliver && closureInForce(e, row);
-    // A notice still to be typed says what the host allows when it is typed (delivery checks again before then).
-    const disposition =
-      e.delivered || !inForce
-        ? e.advisory_disposition
-        : (currentDisposition(e.advisory_disposition, {
-            outcomes: this.advisory.hostSupport,
-            allowed: this.ctx.policy.advisoryQuestions,
-          }) ?? 'fallback-withheld');
+    // A write that may have reached the terminal stays uncertain, also once a reopen or a deletion replaced the round.
     const notice: AdvisoryTimeoutView['notice'] = e.delivered
       ? 'delivered'
-      : inForce
-        ? row.delivery_status === 'delivery-uncertain'
-          ? 'uncertain'
-          : row.delivery_status === 'needs-attention'
-            ? 'needs-attention'
-            : 'pending'
-        : e.uncertain_injection_id
-          ? 'uncertain'
-          : 'superseded';
+      : e.uncertain_injection_id
+        ? 'uncertain'
+        : !inForce
+          ? 'superseded'
+          : row.delivery_status === 'delivery-uncertain'
+            ? 'uncertain'
+            : row.delivery_status === 'needs-attention'
+              ? 'needs-attention'
+              : 'pending';
+    // A notice nothing was typed for yet says what the host allows when it is typed (delivery checks again before
+    // then); one that was typed, or may have been, keeps what it said.
+    const disposition =
+      notice === 'pending' || notice === 'needs-attention'
+        ? (currentDisposition(e.advisory_disposition, {
+            outcomes: this.advisory.hostSupport,
+            allowed: this.ctx.policy.advisoryQuestions,
+          }) ?? e.advisory_disposition)
+        : e.advisory_disposition;
     return {
       inForce,
       view: {
@@ -1553,8 +1567,11 @@ export class DecisionsBridge {
     } catch {
       /* closed */
     }
-    if (!hasMore) await this.pump();
-    else await this.inbox.processPending();
+    if (!hasMore) {
+      // Read in full: the pump applies and delivers what the replay brought, advisory notices included.
+      this.ledgerUnread = false;
+      await this.pump();
+    } else await this.inbox.processPending();
   }
 
   private lastGap = { cursor: -1, at: 0 };
@@ -1570,9 +1587,10 @@ export class DecisionsBridge {
     if (cursor === this.lastGap.cursor && this.ctx.now() - this.lastGap.at < 5000) return;
     this.lastGap = { cursor, at: this.ctx.now() };
     try {
-      if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing')
+      if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing') {
+        this.ledgerUnread = true;
         this.socket.syncFrom(cursor);
-      else await this.catchUp();
+      } else await this.catchUp();
     } catch (e) {
       this.emitError(e as Error);
     }
@@ -1596,7 +1614,9 @@ export class DecisionsBridge {
   private async catchUpWith(req: CallOptions): Promise<number> {
     const cursor = await this.readPages(req);
     await this.reportReceived(cursor, req);
-    if (await this.inbox.processPending()) await this.deliverNow();
+    // An advisory notice held while the ledger was read is delivered now, even when the read brought nothing.
+    const drain = await this.inbox.processPending();
+    if (drain || this.delivery.takeReplayHold()) await this.deliverNow();
     this.refreshPreference();
     return cursor;
   }
@@ -1619,14 +1639,27 @@ export class DecisionsBridge {
   /** The applier's run: apply the stored events, and have the deliverer type what they bring. */
   private async applyStored(): Promise<void> {
     if (!this.running()) return;
-    if (await this.inbox.processPending()) void this.deliverer.kick();
+    const drain = await this.inbox.processPending();
+    if (drain || this.delivery.takeReplayHold()) void this.deliverer.kick();
   }
 
   private readPages(req: CallOptions): Promise<number> {
     if (this.paging) return this.paging.pass;
-    const pass = this.pageEvents(req).finally(() => {
-      if (this.paging?.pass === pass) this.paging = null;
-    });
+    const pass = this.pageEvents(req)
+      .then(
+        (cursor) => {
+          this.ledgerUnread = false;
+          return cursor;
+        },
+        (e: unknown) => {
+          // Read part-way: what the pages after it hold is unknown until a read gets through.
+          this.ledgerUnread = true;
+          throw e;
+        },
+      )
+      .finally(() => {
+        if (this.paging?.pass === pass) this.paging = null;
+      });
     this.paging = { pass, abortable: req.signal !== undefined };
     return pass;
   }

@@ -431,7 +431,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason, publication and the thread. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason, publication and the thread. Only status human-answered with provenance human is a human decision; a follow-up never is; an expiry approves nothing.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -522,7 +522,7 @@ export const TOOLS = [
           type: 'string',
           enum: ['blocking', 'advisory'],
           description:
-            "The current round's mode. advisory: you asked for advice in this round; expired unanswered, the plan you stated (planned_fallback) is yours to carry out. blocking: it waits for a decision, a reopened question included; expiry authorises nothing.",
+            "The current round's mode. advisory: you asked for advice in this round; whether the plan you stated (planned_fallback) is yours to carry out once it expires unanswered is fallback_due. blocking: it waits for a decision, a reopened question included; expiry authorises nothing.",
         },
         planned_fallback: { type: ['string', 'null'] },
         error_code: {
