@@ -127,6 +127,8 @@ export class Inbox {
    * way of an event. Until a pass has settled them all, an expiry is judged by `roundDeadline` instead.
    */
   private reconciling: Promise<void> | null = null;
+  /** Questions this run reopened itself: their deadline is the signed one, so the background pass leaves them. */
+  private readonly reopened = new Set<string>();
   private reconcileDone = false;
   private reconcileAfter = 0;
 
@@ -416,11 +418,11 @@ export class Inbox {
             );
       let open = 0;
       for (const row of rows) {
-        const done = await this.reconcileRow(row, reopens).catch(async (e: Error) => {
+        const done = await this.reconcileRow(row, reopens).catch(async (e: unknown) => {
           await ctx.audit.log({
             event: 'round.unreconciled',
             question_id: row.question_id,
-            result: e.message.slice(0, 80),
+            result: String((e as Error)?.message ?? e).slice(0, 80),
           });
           return false;
         });
@@ -434,7 +436,10 @@ export class Inbox {
       settled = true;
     } catch (e) {
       await ctx.audit
-        .log({ event: 'rounds.unreconciled', result: (e as Error).message.slice(0, 80) })
+        .log({
+          event: 'rounds.unreconciled',
+          result: String((e as Error)?.message ?? e).slice(0, 80),
+        })
         .catch(() => undefined);
     } finally {
       if (settled) this.reconcileDone = true;
@@ -495,6 +500,7 @@ export class Inbox {
       const fresh = await ctx.store.getQuestion(row.question_id);
       if (
         !fresh ||
+        this.reopened.has(row.question_id) ||
         fresh.local_status !== row.local_status ||
         fresh.question_revision !== row.question_revision ||
         fresh.expires_at !== row.expires_at
@@ -687,6 +693,7 @@ export class Inbox {
       case 'reopen': {
         // A new round: its signed deadline (null: never) replaces the last one, and a closure notice of an earlier
         // round that was not typed yet never will be: the question is open again.
+        this.reopened.add(row.question_id);
         const answers_json = serializeAnswers(withdrawClosures(entries, t.revision));
         // Best effort: a write it could not release keeps holding the question, never the reopen itself.
         const released = await this.releaseClosureWrites({
