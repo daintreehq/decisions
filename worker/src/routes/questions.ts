@@ -25,6 +25,7 @@ import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '..
 import { nextAllowed } from '../push/quiet-hours.js';
 import { clearSnapshot, deleteSnapshotState } from '../room/snapshots.js';
 import { presenceHold } from '../room/presence.js';
+import { pushTtlSeconds } from '../jobs/notify.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
@@ -161,31 +162,34 @@ function assertQuota(room: Room, originRef: string): void {
 /**
  * Schedules a question's `decision-new` push for `earliest`, or later while the person is at the computer: a
  * current presence lease holds it until the lease lapses or the round's bounded hold ends (section 11). The job
- * checks again when it runs, so this only saves an early wake-up.
+ * checks again when it runs, so this only saves an early wake-up. A push that would only be due once less than a
+ * second is left before the deadline is not scheduled at all.
  */
 function scheduleNewPush(
   room: Room,
   questionId: string,
   createdAt: number,
   earliest: number,
+  expiresAt: number | null,
 ): void {
   const hold = presenceHold(room, { question_id: questionId, created_at: createdAt }, nowMs());
-  room.schedule({
-    kind: 'notify_new',
-    runAt: hold === null ? earliest : Math.max(earliest, hold),
-    questionId,
-  });
+  const runAt = hold === null ? earliest : Math.max(earliest, hold);
+  if (pushTtlSeconds(runAt, expiresAt) === null) return;
+  room.schedule({ kind: 'notify_new', runAt, questionId });
 }
 
-function scheduleReminders(room: Room, questionId: string, from: number, n = 1): void {
+/** Schedules a question's first reminder, unless it would only be due at or after the deadline. */
+function scheduleReminders(
+  room: Room,
+  questionId: string,
+  from: number,
+  expiresAt: number | null,
+): void {
   const s = room.settings().reminders;
-  if (!s?.enabled || n > s.max) return;
-  room.schedule({
-    kind: 'remind',
-    runAt: from + (n === 1 ? s.first_ms : s.interval_ms),
-    questionId,
-    payload: { n },
-  });
+  if (!s?.enabled || s.max < 1) return;
+  const runAt = from + s.first_ms;
+  if (pushTtlSeconds(runAt, expiresAt) === null) return;
+  room.schedule({ kind: 'remind', runAt, questionId, payload: { n: 1 } });
 }
 
 /* ---------------- create ---------------- */
@@ -338,8 +342,8 @@ export const createQuestion: Handler = async (room, c) => {
     );
 
     const grace = record.requirement === 'human-required' ? 0 : PROXY_GRACE_MS;
-    scheduleNewPush(room, record.question_id, createdAt, t + grace);
-    scheduleReminders(room, record.question_id, t);
+    scheduleNewPush(room, record.question_id, createdAt, t + grace, expiresAt);
+    scheduleReminders(room, record.question_id, t, expiresAt);
     if (expiresAt !== null)
       room.schedule({ kind: 'expire', runAt: expiresAt, questionId: record.question_id });
 
@@ -677,15 +681,15 @@ function scheduleAfterAction(
     case 'proxy-abstain':
       // The person is told now, unless they are at the computer within the round's hold (section 11).
       room.cancelJobs({ questionId: id, kinds: ['notify_new'] });
-      scheduleNewPush(room, id, q.created_at, t);
+      scheduleNewPush(room, id, q.created_at, t, expiresAt);
       break;
     case 'reopen':
       // A reopened question starts with no snapshot and no outstanding refresh.
       clearSnapshot(room, id);
       room.cancelJobs({ questionId: id, kinds: ['delete_attachments'] });
       // A reopen starts a new round, and with it a new bounded hold (section 11).
-      scheduleNewPush(room, id, q.created_at, t);
-      scheduleReminders(room, id, t);
+      scheduleNewPush(room, id, q.created_at, t, expiresAt);
+      scheduleReminders(room, id, t, expiresAt);
       if (expiresAt !== null) room.schedule({ kind: 'expire', runAt: expiresAt, questionId: id });
       break;
   }

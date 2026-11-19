@@ -355,6 +355,20 @@ on a known push-service host. One Durable Object alarm drives a SQL `scheduled_j
 every 24 h, max 3), proxy-review reminder, expiry, attachment deletion and orphan GC. `GET/PUT /settings` stores quiet
 hours and reminder preferences (notification preferences only; they never delay sync).
 
+**Push lifetime.** A push's `TTL` is how long a push service may hold it for a device that is offline. While a question
+is open with an `expires_at`, its pushes (`decision-new`, `decision-reminder` and `decision-reply`) live only as long as
+the person can still answer: the TTL is the whole seconds left until the deadline, at most 86,400, worked out again
+just before each endpoint's send and each retry. Once less than a second is left, nothing more is sent and no retry is
+lined up. A push whose job is cancelled while it is going out (the question is answered, say) reaches no further
+endpoint and is not retried. Every other push keeps a TTL of 86,400 seconds: a question without a deadline, the `decision-proxy` notice and
+proxy-review reminder (a proxy answer ends the deadline), a `decision-reply` for a question no longer open, and test
+pushes; `agent-stopped` has its own (below). The relay never queues a new question's push or a reminder to be due with
+less than a second left, and drops one that quiet hours or the presence hold would defer that long instead of deferring
+it; a reminder dropped this way lines up no next one. A reply push that quiet hours hold still waits for them to end: a
+proxy answer meanwhile ends the deadline without answering the agent's message, and the question's expiry cancels the
+push otherwise. The lock-screen text stays the same fixed text. A notification already shown can still be opened, and shows the
+question as it is now.
+
 **Presence** (`presence-v1`). The owner desktop says the person is at the computer with `PUT /presence`
 `PresenceBody {protocol_version, present}` → `200 PresenceResponse {present, until}`. `present: true` starts or renews
 a lease that ends `presenceLeaseMs` (60 s) after the relay accepts it, and `until` says when, so the desktop renews in
@@ -376,7 +390,7 @@ The hold covers the `decision-new` push of a new question, of a proxy abstaining
 `decision-proxy` notice of a proxy answer and the proxy-review reminder (only a phone or tablet confirms or overrides a
 proxy answer), reply pushes (`decision-reply`, for a later agent message once the person already knows of the
 question), reminders (never held; the first comes hours later unless the person set it sooner) and test pushes. Quiet
-hours apply after the hold as before, and can defer a push past it. A relay that does not advertise `presence-v1` has
+hours apply after the hold as before, and can defer a push past it, though never to the question's deadline. A relay that does not advertise `presence-v1` has
 no `/presence` route and pushes as it always has; a client MUST NOT send presence to it.
 
 **Agent stopped** (`agent-stopped-push-v1`). The owner desktop tells the person's phone that an agent stopped while
@@ -571,7 +585,8 @@ a human message or the person's answer (each from a phone, a tablet or the owner
 later agent message that asks nothing withdraws the request. Closed threads wait on nobody. An open question needs the person anyway; this is what shows an answered one as
 "Needs you" again. The relay sends a `decision-reply` push (`{type, question_id}` and nothing else) for an agent message
 that expects a reply. Quiet hours hold it back like any push, a newer asking message on the same question replaces one
-not yet sent, and when it is due the relay sends it only if the thread still waits on the person.
+not yet sent, and when it is due the relay sends it only if the thread still waits on the person. While the question
+is open with a deadline, the push's lifetime ends there (section 11).
 
 ### 16.3 Delivering human messages
 

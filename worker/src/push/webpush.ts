@@ -147,6 +147,9 @@ export function isAllowedPushEndpoint(endpoint: string, extra: string[] = []): b
   return [...DEFAULT_ALLOWED_SUFFIXES, ...extra].some((s) => host === s || host.endsWith('.' + s));
 }
 
+/** How long a push service may hold a push for an offline device when the sender sets nothing shorter (a day). */
+export const DEFAULT_PUSH_TTL_SECONDS = 86_400;
+
 export interface PushOptions {
   ttlSeconds?: number;
   urgency?: 'very-low' | 'low' | 'normal' | 'high';
@@ -166,7 +169,7 @@ export async function sendWebPush(
   const headers: Record<string, string> = {
     'Content-Encoding': 'aes128gcm',
     'Content-Type': 'application/octet-stream',
-    TTL: String(opts.ttlSeconds ?? 86_400),
+    TTL: String(opts.ttlSeconds ?? DEFAULT_PUSH_TTL_SECONDS),
     Urgency: opts.urgency ?? 'normal',
     Authorization: await vapidAuthorization(target.endpoint, vapid, subject),
   };
