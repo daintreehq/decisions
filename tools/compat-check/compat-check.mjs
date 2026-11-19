@@ -271,6 +271,11 @@ function stageInstalledRelay(side) {
 /* ---------------------------------------------------------------- processes */
 
 const running = new Set();
+/** Set once SIGINT or SIGTERM arrives: nothing is started after it, so the shutdown sees every process. */
+let shuttingDown = false;
+const mayStart = (what) => {
+  if (shuttingDown) throw new Error(`stopping: ${what} not started`);
+};
 
 /** Whether anything accepts a connection on the loopback port. */
 const answers = (port) =>
@@ -292,6 +297,7 @@ async function startRelay(dir, port, persist, label) {
     20_000,
     `ports ${port} and ${port + 1000} to be free for relay ${label} (try another --port)`,
   );
+  mayStart(`relay ${label}`);
   const log = createWriteStream(join(logs, `relay-${label}.log`));
   const child = spawn(
     WRANGLER,
@@ -369,6 +375,7 @@ async function info(origin) {
 
 /** One side's actor.mjs as a child process, answering `call(op, args)`. */
 function startActor(side, label) {
+  mayStart(`actor ${label}`);
   const log = createWriteStream(join(logs, `actor-${label}.log`));
   const child = spawn(process.execPath, ['actor.mjs'], {
     cwd: side.dir,
@@ -442,6 +449,8 @@ let cliRuns = 0;
  * stopped with its scenario if it is still going, and its output is kept in the logs.
  */
 function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
+  if (shuttingDown)
+    return Promise.reject(new Error(`stopping: decisions ${argv.join(' ')} not run`));
   const n = ++cliRuns;
   return new Promise((done) => {
     const child = spawn(process.execPath, [side.bin, '--home', home, ...argv], {
@@ -1488,13 +1497,16 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${NEW.label} host to type the answers to both reopened rounds`,
     ).catch((e) => fail(e.message));
     const final = await settled(neu, 'post');
+    // Exactly one notice of each reopened round's answer (revision 2) in any pane, and that one is the answer, here.
+    const roundTwo = (id, name) => {
+      const typed = notices(final, id).filter((n) => n.fields.revision === '2');
+      return (
+        typed.length === 1 &&
+        noticeSays(typed[0], { choice: 'no', text: `Compat answer ${name}` }, 'compat-3')
+      );
+    };
     check(
-      // One notice for each reopened round's answer, anywhere: a second one in another pane counts too.
-      [B, C].every(
-        (id) => notices(final, id).filter((n) => n.fields.revision === '2').length === 1,
-      ) &&
-        answeredIn(final, B, 'B').length === 1 &&
-        answeredIn(final, C, 'C').length === 1,
+      roundTwo(B, 'B') && roundTwo(C, 'C'),
       `the ${NEW.label} host types the answers to both reopened rounds, once each`,
       show([...notices(final, B), ...notices(final, C)]),
     );
@@ -1517,8 +1529,12 @@ const SCENARIOS = [
 const stopAll = async () => {
   for (const h of [...running]) await h.stop().catch(() => undefined);
 };
-process.on('SIGINT', () => void stopAll().then(() => process.exit(130)));
-process.on('SIGTERM', () => void stopAll().then(() => process.exit(143)));
+const onSignal = (code) => () => {
+  shuttingDown = true;
+  void stopAll().then(() => process.exit(code));
+};
+process.on('SIGINT', onSignal(130));
+process.on('SIGTERM', onSignal(143));
 
 let OLD;
 let NEW;
