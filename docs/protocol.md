@@ -166,7 +166,13 @@ Idempotency: a repeated `idempotency_key` with identical body returns the origin
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent. A create's retry is recognised
 before its deadline is checked: past `expires_at`, the same key and body still return the original receipt while the
 relay keeps it (30 days), and the same signed record under any other key returns the question as it stands. Only a
-new question must still be due.
+new question must still be due. Its overdue refusal carries `details.reason: "never-committed"`
+(`CREATE_NEVER_COMMITTED`) when the relay can also show that no question with that id was ever committed: no receipt,
+no question, no `decision.*` event for the id (a deletion leaves its `decision.deleted` tombstone), and no questions
+wipe (`POST /admin/delete-data`) since the record's `created_at`, less seven days for the desktop's clock. A desktop
+that lost the reply to an earlier attempt settles the question as never published only on that reason; a refusal
+without it (from this relay after a wipe, or from a relay older than this rule) proves nothing about the earlier
+attempt.
 
 Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opaque pane hash). Default expiry is
 chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the

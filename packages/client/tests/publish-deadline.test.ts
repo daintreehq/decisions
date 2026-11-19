@@ -1,8 +1,8 @@
 import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
-import { encryptEnvelope } from '@daintreehq/decisions-crypto';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { buildSignedQuestion, encryptEnvelope } from '@daintreehq/decisions-crypto';
 import {
   DecisionsBridge,
   FileSpool,
@@ -11,6 +11,7 @@ import {
   RelayError,
   currentEpochKey,
   openQuestionContent,
+  type CreatePayload,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
 import { FakeRelay, FakeSink, makeIdentity, origin, setupBridge } from './helpers.js';
@@ -52,11 +53,19 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       text: 'One more detail',
       expects_reply: false,
     });
-    // Each failed attempt backs off further, past the deadline if nothing caps it.
-    for (let i = 0; i < 8; i++) {
+    await env.bridge.pump();
+    // Many failures in, the next attempt backs off far past the deadline, unless the deadline caps it.
+    now = deadline - 5_000;
+    const [create] = (await env.store.outboxFor(r.questionId)).filter((o) => o.kind === 'create');
+    await env.store.putOutbox({ ...create!, attempts: 10, next_attempt_at: 0 });
+    const jitter = vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    try {
       await env.bridge.pump();
-      now += 5_000;
+    } finally {
+      jitter.mockRestore();
     }
+    const [backedOff] = (await env.store.outboxFor(r.questionId)).filter((o) => o.kind === 'create');
+    expect(backedOff!.next_attempt_at).toBe(deadline);
     const before = await env.bridge.getDecision(r.questionId);
     expect(before).toMatchObject({ status: 'queued', publication: 'not-sent', closedReason: null });
 
@@ -87,7 +96,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('publish-failed');
   });
 
-  it('settles a text-only ask whose every send failed while connecting, and tells the waiting agent the person never saw it', async () => {
+  it('settles a text-only ask whose every send failed while connecting, and tells the waiting agent no answer was recorded', async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
     // No network at all: name resolution fails, so no request ever leaves this computer.
@@ -141,18 +150,20 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('status: never-published');
     expect(notice).toContain('authorised: no');
-    expect(notice).toContain('the person never saw it');
-    expect(notice).not.toMatch(/expired without an answer|did not answer/);
+    expect(notice).toContain("it never reached the person's phone and no answer to it was recorded");
+    expect(notice).not.toMatch(/expired without an answer|did not answer|person never saw/);
     expect(await bridge.getDecision(r.questionId)).toMatchObject({
       closedReason: 'never-published',
       deliveryStatus: 'terminal-delivered',
     });
 
-    // Online again: nothing is sent for it, and the notice is not typed twice.
+    // Online again: nothing is sent for it, the notice is not typed twice, and no delivery is reported to a relay
+    // that never held the question.
     offline.on = false;
     await bridge.pump();
     expect(creates(env.relay)).toHaveLength(0);
     expect(env.sink.typed).toHaveLength(1);
+    expect(env.relay.calls.filter((c) => c.path.startsWith('/api/v1/deliveries'))).toHaveLength(0);
   });
 
   it('shows a create whose reply was lost as uncertain while the relay is unreachable, then takes the relay history', async () => {
@@ -229,6 +240,117 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
   });
 
+  it.each([
+    ['a create refused before its deadline', false],
+    ['a possibly-committed create refused past its deadline without the relay showing it never took it', true],
+  ] as const)('keeps %s as an ordinary refusal, with no notice', async (_why, late) => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    const deadline = now + 120_000;
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q?', options: [{ id: 'a', label: 'A' }], expires_at: iso(deadline) },
+    });
+    if (late) {
+      env.relay.down = 1; // possibly committed
+      await env.bridge.pump();
+      now = deadline + 1_000;
+      for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+        await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+    }
+    env.relay.rejectCreate = 400; // a plain refusal, as from a relay older than the never-committed reason
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'publish-failed',
+      publication: 'refused',
+      closedReason: null,
+      fallbackDue: false,
+    });
+    expect(env.sink.typed).toHaveLength(0);
+    expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+  });
+
+  it('keeps the relay history when a leftover create is refused after its answer was applied', async () => {
+    const env = await setupBridge();
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q?', options: [{ id: 'a', label: 'A' }] },
+    });
+    env.relay.dropCreateReply = 1;
+    await env.bridge.pump();
+    await env.relay.answerEvent({ questionId: r.questionId, phone: env.phone, options: ['a'] });
+    await env.bridge.catchUp();
+    expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('human-answered');
+    env.relay.rejectCreate = 403;
+    for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+      await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'human-answered',
+      publication: 'accepted',
+      choice: 'a',
+    });
+    expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+  });
+
+  it('closes as withdrawn, with nothing sent and no notice, when a create withdrawn while it was claimed proves never sent', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      options: [{ id: 'a', label: 'A' }],
+      expires_at: iso(now + 120_000),
+    });
+    env.client.createQuestion = async () => {
+      // The agent withdraws it while the create is on its way; the create then could not even connect.
+      await env.bridge.cancelQuestion(r.questionId);
+      expect((await env.store.outboxFor(r.questionId)).map((o) => o.kind).sort()).toEqual([
+        'cancel',
+        'create',
+      ]);
+      throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
+    };
+    await env.bridge.pump();
+    now += 300_000; // past the deadline too: still withdrawn, never an unpublished notice
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'cancelled',
+      publication: 'never-published',
+      closedReason: 'withdrawn',
+      fallbackDue: false,
+    });
+    expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+    expect(env.relay.calls.filter((c) => c.path.includes('/questions'))).toHaveLength(0);
+    expect(env.sink.typed).toHaveLength(0);
+  });
+
+  it('uploads no image once a reservation answers after the deadline', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({
+      now: () => now,
+      resolver: { resolve: async () => ({ bytes: png }) },
+    });
+    const deadline = now + 120_000;
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      expires_at: iso(deadline),
+      attachments: [{ local_resource_id: 'one' }],
+    });
+    const reserve = env.client.reserveAttachment.bind(env.client);
+    env.client.reserveAttachment = async (...args) => {
+      const res = await reserve(...args);
+      now = deadline; // the reservation took until the deadline to answer
+      return res;
+    };
+    await env.bridge.pump();
+    expect(env.relay.uploads).toHaveLength(0);
+    expect(creates(env.relay)).toHaveLength(0);
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      publication: 'never-published',
+      closedReason: 'never-published',
+    });
+  });
+
   it('delivers an answer committed while the host slept, never a timeout, whatever order reconnection runs in', async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
@@ -290,6 +412,45 @@ describe('several senders and the person on one queued create', () => {
       reason: 'not-found',
     });
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+  });
+
+  it('drops a withdrawal a crash left behind on a never-published question, with no network', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    env.relay.down = 1_000;
+    const deadline = now + 120_000;
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      options: [{ id: 'a', label: 'A' }],
+      expires_at: iso(deadline),
+    });
+    now = deadline;
+    await env.bridge.pump();
+    expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('publish-failed');
+    // The settlement wrote its row, then the process died before its queued withdrawal went.
+    await env.store.putOutbox({
+      id: 'leftover-cancel',
+      kind: 'cancel',
+      question_id: r.questionId,
+      payload: {},
+      attempts: 0,
+      next_attempt_at: 0,
+      created_at: now,
+      last_error: null,
+    });
+    const { answerId } = await env.bridge.publisher.enqueueOwnerAnswer({
+      questionId: r.questionId,
+      expectedRevision: 0,
+      selectedOptionIds: ['a'],
+      reviewedAttachmentDigests: [],
+    });
+    await env.bridge.pump();
+    await env.bridge.pump();
+    expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+    expect(await env.bridge.publisher.ownerAnswerResult(answerId)).toMatchObject({
+      status: 'closed',
+      reason: 'not-found',
+    });
   });
 
   it('never settles a create another sender claimed after this flush read it', async () => {
@@ -377,9 +538,20 @@ describe('a restart during an attachment upload', () => {
     const spoolDir = join(tmp, `${name}-spool`);
     /** Fail every request after the first `allow` with a network error (the process dies mid-upload). */
     const cut = { allow: Infinity };
+    // As the relay does, an image already uploaded takes no second upload.
+    const uploaded = new Set<string>();
     const fetch: typeof globalThis.fetch = async (input, init) => {
       if (cut.allow <= 0) throw new TypeError('fetch failed');
       cut.allow--;
+      const url = String(input instanceof Request ? input.url : input);
+      if (init?.method === 'PUT') {
+        if (uploaded.has(url))
+          return Response.json(
+            { code: 'invalid_state', message: 'attachment is not awaiting upload' },
+            { status: 409 },
+          );
+        uploaded.add(url);
+      }
       return relay.fetch(input, init);
     };
     const open = () => {
@@ -466,6 +638,39 @@ describe('a restart during an attachment upload', () => {
     await b.store.close();
   });
 
+  it('a restart after an image reached the relay but before it was recorded completes it and publishes', async () => {
+    const t = await setup('restart-after-put');
+    const deadline = t.clock.now + 120_000;
+    const a = t.open();
+    t.cut.allow = 2; // reserve and upload the image, then die before completing and recording it
+    const r = await a.bridge.registerQuestion({
+      origin: origin(),
+      input: {
+        question: 'Which screenshot?',
+        expires_at: iso(deadline),
+        attachments: [{ local_resource_id: 'one' }],
+      },
+    });
+    await a.bridge.pump();
+    expect(t.relay.uploads).toHaveLength(1);
+    await a.store.close();
+
+    t.clock.now += 10_000;
+    t.cut.allow = Infinity;
+    const b = t.open();
+    for (const o of await b.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+      await b.store.putOutbox({ ...o, next_attempt_at: 0 });
+    await b.bridge.pump();
+
+    expect(t.relay.uploads).toHaveLength(1);
+    expect(creates(t.relay)).toHaveLength(1);
+    expect(await b.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'open',
+      publication: 'accepted',
+    });
+    await b.store.close();
+  });
+
   it('removes spool files no queued create refers to when the bridge starts', async () => {
     const t = await setup('orphans');
     const a = t.open();
@@ -503,11 +708,12 @@ describe('a restart during an attachment upload', () => {
       question: 'q?',
       attachments: [{ local_resource_id: 'one' }],
     });
-    // The agent withdraws the question while its image is on the wire.
+    // The agent withdraws the question once its image has reached the relay, before the upload is recorded.
     const upload = env.client.uploadAttachment.bind(env.client);
     env.client.uploadAttachment = async (...args) => {
+      const res = await upload(...args);
       await env.bridge.cancelQuestion(r.questionId);
-      return upload(...args);
+      return res;
     };
     await env.bridge.pump();
     await env.bridge.pump();
@@ -524,11 +730,16 @@ describe('a restart during an attachment upload', () => {
 });
 
 describe('an advisory question that never reached the relay', () => {
-  /** Queue a question, then make its stored content advisory, as `ask_human` will once it signs advisory asks (#154). */
+  /**
+   * Queue a question, then sign its create as advisory, as `ask_human` will once it signs advisory asks (#154). With
+   * `rowOnly`, only the local copy of the content says advisory; the create stays signed as a blocking question.
+   */
   const advisoryAsk = async (over: {
     advisoryDeadlines: boolean;
     policy: boolean;
-    plan?: string;
+    plan?: unknown;
+    kind?: string;
+    rowOnly?: boolean;
   }) => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({
@@ -557,10 +768,31 @@ describe('an advisory question that never reached the relay', () => {
       replyMode: 'advisory',
       plaintext: {
         ...content,
+        ...(over.kind ? { kind: over.kind } : {}),
         ...(over.plan !== undefined ? { planned_fallback: over.plan } : {}),
       },
     });
     await env.store.updateQuestion(r.questionId, { content_sealed: JSON.stringify(envelope) });
+    if (!over.rowOnly) {
+      const item = (await env.store.outboxFor(r.questionId)).find((o) => o.kind === 'create')!;
+      const was = (item.payload as CreatePayload).signed.record;
+      const signed = await buildSignedQuestion({
+        installationId: env.identity.config.installationId,
+        questionId: r.questionId,
+        signerDeviceId: env.identity.config.deviceId,
+        signingKey: env.identity.keys.signing.privateKey,
+        targetHostId: was.target_host_id,
+        originRef: was.origin_ref,
+        requirement: was.requirement,
+        workflowGateIdHash: was.workflow_gate_id_hash,
+        policyVersion: was.policy_version,
+        expiresAt: was.expires_at,
+        attachmentIds: was.attachment_ids,
+        envelope,
+        createdAt: was.created_at,
+      });
+      await env.store.putOutbox({ ...item, payload: { ...(item.payload as CreatePayload), signed } });
+    }
     now = deadline;
     await env.bridge.pump();
     return { env, r };
@@ -581,14 +813,14 @@ describe('an advisory question that never reached the relay', () => {
     });
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('status: never-published');
-    expect(notice).toContain('the person never saw it');
+    expect(notice).toContain('no answer to it was recorded');
     expect(notice).toContain('You may carry out the plan you stated');
     expect(notice).not.toContain('NOT authorised to continue');
   });
 
   it.each([
     [
-      'the host policy no longer allows advisory questions',
+      'the host policy does not allow advisory questions',
       { advisoryDeadlines: true, policy: false, plan: 'Go.' },
     ],
     [
@@ -596,6 +828,13 @@ describe('an advisory question that never reached the relay', () => {
       { advisoryDeadlines: false, policy: true, plan: 'Go.' },
     ],
     ['the content states no plan', { advisoryDeadlines: true, policy: true }],
+    ['the plan is blank', { advisoryDeadlines: true, policy: true, plan: '   ' }],
+    ['the plan is not text', { advisoryDeadlines: true, policy: true, plan: 42 }],
+    ['it asks for an approval', { advisoryDeadlines: true, policy: true, plan: 'Go.', kind: 'approval' }],
+    [
+      'only the local copy says advisory, not the create that was signed',
+      { advisoryDeadlines: true, policy: true, plan: 'Go.', rowOnly: true },
+    ],
   ] as const)('authorises nothing when %s', async (_why, over) => {
     const { env, r } = await advisoryAsk(over);
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({

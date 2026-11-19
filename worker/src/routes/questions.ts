@@ -1,6 +1,7 @@
 import {
   ActionBody,
   ApiError,
+  CREATE_NEVER_COMMITTED,
   CREATOR_MISSING_FEATURE,
   CreateQuestionBody,
   DEFAULTS,
@@ -194,6 +195,26 @@ function scheduleReminders(
 
 /* ---------------- create ---------------- */
 
+/** When the owner last wiped every question (`POST /admin/delete-data`), in ms; absent if never. */
+export const QUESTIONS_WIPED_META = 'questions_wiped_at';
+/** A wipe this long before a record's (desktop-clock) `created_at` still counts as after it. */
+const WIPE_CLOCK_MARGIN_MS = 7 * 86_400_000;
+
+/**
+ * Sync, inside `room.tx`, after the receipt and the question were looked up and not found: whether this relay can show
+ * no question with this id was ever committed. A committed question always has a `decision.*` event, and a deletion
+ * leaves its `decision.deleted` tombstone; only a wipe of every question removes them, so a wipe since the record was
+ * made (with room for the desktop's clock) leaves it unknown.
+ */
+function neverCommitted(room: Room, questionId: string, createdAt: string): boolean {
+  if (room.q1(`SELECT 1 FROM events WHERE question_id = ? AND event_type LIKE 'decision.%' LIMIT 1`, questionId))
+    return false;
+  const wiped = room.q1<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, QUESTIONS_WIPED_META);
+  if (!wiped) return true;
+  const made = Date.parse(createdAt);
+  return Number.isFinite(made) && Number(wiped.value) < made - WIPE_CLOCK_MARGIN_MS;
+}
+
 export const createQuestion: Handler = async (room, c) => {
   const auth = c.auth!;
   const body = c.body(CreateQuestionBody);
@@ -275,7 +296,14 @@ export const createQuestion: Handler = async (room, c) => {
     // Only a new question must still be due. A retry of one already taken, answered above, may arrive after its
     // deadline when the reply was lost on the way back (section 6).
     if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
-      throw bad('expires_at must be in the future and within a year (use null for no expiry)');
+      // Past its deadline, say whether this relay can show the question was never committed, so a desktop that lost
+      // the reply to an earlier attempt can tell the person never had it.
+      const never = expiresAt <= t && neverCommitted(room, record.question_id, record.created_at);
+      throw new ApiError(
+        'validation_error',
+        'expires_at must be in the future and within a year (use null for no expiry)',
+        never ? { details: { reason: CREATE_NEVER_COMMITTED } } : {},
+      );
     }
     assertQuota(room, record.origin_ref);
 

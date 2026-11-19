@@ -84,12 +84,17 @@ const UNSENT_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
-/** True for a fetch failure that provably sent nothing (`UNSENT_CODES`, on the error or its `cause` chain). */
+/**
+ * True for a fetch failure that provably sent nothing: the error, or the cause fetch wraps it in, carries one of
+ * `UNSENT_CODES`. A connection raced over several addresses (`AggregateError`) counts only when every address failed
+ * that way. Nothing deeper in a cause chain is read, so an unrelated failure inside some other error never counts.
+ */
 export function isUnsentError(e: unknown): boolean {
-  for (let c: unknown = e, depth = 0; c && typeof c === 'object' && depth < 4; depth++) {
+  const unsent = (c: unknown): boolean => {
+    if (!c || typeof c !== 'object') return false;
+    if (c instanceof AggregateError) return c.errors.length > 0 && c.errors.every(unsent);
     const code = (c as { code?: unknown }).code;
-    if (typeof code === 'string' && UNSENT_CODES.has(code)) return true;
-    c = (c as { cause?: unknown }).cause;
-  }
-  return false;
+    return typeof code === 'string' && UNSENT_CODES.has(code);
+  };
+  return unsent(e) || (!!e && typeof e === 'object' && unsent((e as { cause?: unknown }).cause));
 }

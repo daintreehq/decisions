@@ -140,7 +140,8 @@ export class FakeRelay {
   dropCreateReply = 0;
   /**
    * The relay's clock for a create's deadline. When set, a new question already past its signed `expires_at` is
-   * refused, while a retry of one already taken replays its receipt, as the relay does. Unset, no deadline is checked.
+   * refused (saying it was never committed when no event names it), while a retry of one already taken replays its
+   * receipt, as the relay does. Unset, no deadline is checked.
    */
   createNow: (() => number) | null = null;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
@@ -450,7 +451,13 @@ export class FakeRelay {
         q.record.expires_at &&
         Date.parse(q.record.expires_at) <= this.createNow()
       ) {
-        return json(400, { code: 'validation_error', message: 'expires_at must be in the future' });
+        // As the relay does: it says the question was never committed when nothing of it ever reached it.
+        const never = !this.events.some((e) => e.question_id === q.record.question_id);
+        return json(400, {
+          code: 'validation_error',
+          message: 'expires_at must be in the future',
+          ...(never ? { details: { reason: 'never-committed' } } : {}),
+        });
       }
       this.questions.set(q.record.question_id, { signed: q, idem: b.idempotency_key });
       const ev = this.push('decision.created', q.record.question_id, 0, {

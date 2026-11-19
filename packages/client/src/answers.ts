@@ -13,7 +13,8 @@ export interface AnswerEntry {
   /**
    * `declined`: the person dismissed the question, from a phone or tablet (a human-signed cancel) or on the owner
    * desktop (its cancel with the signed `decline` flag); no content. `unpublished`: the question's deadline passed
-   * before it ever reached the relay, so no person saw it; written by this desktop (`source: system`), no content.
+   * before it ever reached the relay, so no answer to it was recorded; written by this desktop (`source: system`), no
+   * content.
    */
   kind: 'answer' | 'expired' | 'declined' | 'unpublished';
   action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';

@@ -455,7 +455,7 @@ export const TOOLS = [
             'unknown',
           ],
           description:
-            'Whether the question reached the relay: not-sent (queued on this computer), possibly-committed (it may have reached the relay but this computer could not confirm it; the outcome is unknown until the relay is reachable), accepted, never-published (the person never saw it) or refused. Accepted does not mean the person has seen it.',
+            'Whether the question reached the relay: not-sent (queued on this computer), possibly-committed (it may have reached the relay but this computer could not confirm it; the outcome is unknown until the relay is reachable), accepted, never-published (it never reached the phone and no answer was recorded), refused, or unknown (imported history). Accepted does not mean the person has seen it.',
         },
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
@@ -470,7 +470,7 @@ export const TOOLS = [
           type: ['string', 'null'],
           enum: ['declined', 'withdrawn', 'expired', 'never-published', null],
           description:
-            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop), expired, or never-published (its deadline passed before it reached the relay, so the person never saw it). None authorises anything.',
+            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop), expired, or never-published (its deadline passed before it reached the relay, so no answer was recorded). None authorises anything.',
         },
         fallback_due: {
           type: 'boolean',
@@ -816,14 +816,16 @@ export function createDecisionsMcpHandler(
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
               : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.closedReason === 'never-published'
-              ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so the person never saw it. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
+              ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
               : v.publication === 'possibly-committed'
                 ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
-                : v.status === 'publish-failed'
-                  ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
-                  : v.closedReason === 'declined'
-                    ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-                    : `q-${v.alias} is ${v.status}; no answer in force.`;
+                : v.publication === 'never-published' && v.closedReason === 'withdrawn'
+                  ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
+                  : v.status === 'publish-failed'
+                    ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
+                    : v.closedReason === 'declined'
+                      ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                      : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;
         return text(
           messages > 0

@@ -153,7 +153,7 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       lines.push('status: never-published');
       lines.push('authorised: no');
       lines.push(
-        'note: This question never reached the relay: its deadline passed before this computer could publish it, so the person never saw it and had no chance to answer. Nothing was decided or approved.',
+        "note: This question never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer to it was recorded. Nothing was decided or approved.",
       );
       lines.push(
         n.fallbackDue

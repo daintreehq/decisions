@@ -77,6 +77,11 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** Abort the request, and any retry still to come, when this fires (a network error). */
   signal?: AbortSignal;
+  /**
+   * Never follow a redirect (a redirect is a network error), still retrying as usual. Only such a request can report
+   * `RelayError.notSent`: a redirect followed could have delivered the body before the hop that failed.
+   */
+  noRedirect?: boolean;
 }
 
 /** What a caller may set on one of the routes that take per-call options. */
@@ -269,7 +274,8 @@ export class RelayClient {
     let skewRetried = false;
     let attempt = 0;
     // Whether any attempt may have reached the relay: a request that failed only while connecting was never sent.
-    let maybeSent = false;
+    // A request that may follow a redirect never says so: the hop that failed may not have been the first.
+    let maybeSent = !(opts.once || opts.noRedirect);
     for (;;) {
       if (aborted())
         throw new RelayError('network_error', 'request aborted', 0, { notSent: !maybeSent });
@@ -298,7 +304,7 @@ export class RelayClient {
           body: (opts.rawBody as unknown as BodyInit | undefined) ?? bodyText,
           signal: link.signal,
           // A 307 or 308 would have fetch send the body again, elsewhere.
-          ...(opts.once ? { redirect: 'error' as const } : {}),
+          ...(opts.once || opts.noRedirect ? { redirect: 'error' as const } : {}),
         });
       } catch (e) {
         link.done();
@@ -362,6 +368,8 @@ export class RelayClient {
   createQuestion(idempotencyKey: string, question: SignedQuestion): Promise<CommandReceipt> {
     return this.request('POST', `${API_PREFIX}/questions`, {
       body: { protocol_version: PROTOCOL_VERSION, idempotency_key: idempotencyKey, question },
+      // A create is sent only where it was addressed, so a failure to connect shows it never left (`notSent`).
+      noRedirect: true,
     });
   }
   getQuestion(
