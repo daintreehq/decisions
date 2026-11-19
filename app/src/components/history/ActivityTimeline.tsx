@@ -6,10 +6,13 @@ import {
   agentName,
   answerBy,
   currentAnswer,
+  deadlinePhase,
+  deadlineWords,
   declineBy,
   declinedLabel,
   effectiveStatus,
   followUpBy,
+  pastExpiryTitle,
   withdrawnLabel,
 } from '../../domain/selectors.js';
 import { previewText } from '../../lib/safe-text.js';
@@ -203,6 +206,16 @@ function messageEntry(v: QuestionView, m: ThreadMessage): Entry {
   };
 }
 
+/** This device's answer that the relay has accepted, though the thread hasn't read it back yet. */
+const answerAccepted = (v: QuestionView): boolean =>
+  (app.outbox?.forQuestion(v.id) ?? []).some(
+    (e) =>
+      e.kind !== 'message' &&
+      e.kind !== 'decline' &&
+      e.state === 'committed' &&
+      !v.actions.some((a) => a.actionId === e.recordId),
+  );
+
 function entries(v: QuestionView, now: number): Entry[] {
   const out: Entry[] = [
     {
@@ -210,12 +223,18 @@ function entries(v: QuestionView, now: number): Entry[] {
       kind: 'asked',
       at: v.createdAt,
       title: 'Asked by your agent',
-      // Only a verified question's requirement is known: an unreadable one (an advisory question this app cannot
-      // show, say) has a placeholder, and saying it waits for a person would be a claim nothing signed.
-      body:
-        v.verification.ok && v.requirement === 'human-required' ? (
-          <p className="tl-sub">Human decision required</p>
-        ) : undefined,
+      // Only a verified question's requirement is known: an unreadable one has a placeholder, and saying it waits for
+      // a person would be a claim nothing signed. An advisory question never waits for one (docs/protocol.md section
+      // 21): it says what its agent planned to do without an answer instead.
+      body: !v.verification.ok ? undefined : v.replyMode === 'advisory' &&
+        v.content?.planned_fallback ? (
+        <>
+          <p className="tl-sub">If no answer came in time, your agent planned to:</p>
+          <SafeText text={v.content.planned_fallback} className="tl-note" />
+        </>
+      ) : v.requirement === 'human-required' ? (
+        <p className="tl-sub">Human decision required</p>
+      ) : undefined,
     },
   ];
   const current = currentAnswer(v);
@@ -227,9 +246,25 @@ function entries(v: QuestionView, now: number): Entry[] {
     (m) => m.verified && (m.side === 'agent' || followUpBy(m) !== null),
   );
   let mi = 0;
+  let ei = 0;
+  // Messages, and the rounds the relay expired, that came before `beforeSeq`, in ledger order.
   const flushMessages = (beforeSeq: number) => {
-    while (mi < messages.length && messages[mi]!.seq < beforeSeq)
-      out.push(messageEntry(v, messages[mi++]!));
+    for (;;) {
+      const m = messages[mi];
+      const e = v.expiries[ei];
+      const next = Math.min(m?.seq ?? Infinity, e?.seq ?? Infinity);
+      if (next >= beforeSeq) return;
+      if (m && m.seq === next) out.push(messageEntry(v, messages[mi++]!));
+      else if (e) {
+        out.push({
+          key: `expiry:${e.seq}`,
+          kind: 'expired',
+          at: e.at,
+          title: pastExpiryTitle(v, e),
+        });
+        ei++;
+      }
+    }
   };
   for (const a of v.actions) {
     flushMessages(a.seq);
@@ -335,12 +370,19 @@ function entries(v: QuestionView, now: number): Entry[] {
       });
   }
   flushMessages(Number.POSITIVE_INFINITY);
-  if (effectiveStatus(v, now) === 'expired' && v.expiresAt)
+  // Passed by this device's clock only: the relay hasn't said how the round ended, so this is no outcome yet. Nothing
+  // is said once the relay has accepted this device's answer: it refuses a late one.
+  if (
+    effectiveStatus(v, now) === 'expired' &&
+    deadlinePhase(v, now) === 'passed-here' &&
+    !answerAccepted(v) &&
+    v.expiresAt
+  )
     out.push({
-      key: 'expired',
+      key: 'deadline:here',
       kind: 'expired',
       at: v.expiresAt,
-      title: 'Expired without an answer',
+      title: 'The deadline passed on this phone',
     });
   return out;
 }
@@ -351,15 +393,20 @@ function Summary({ v, now }: { v: QuestionView; now: number }) {
   const sum = answerSummary(v);
   const changes = correctionCount(v);
   if (!a || !sum) {
-    const closed =
-      s === 'expired'
-        ? 'Expired without an answer'
+    // This device's answer the relay has accepted, not yet read back: before or after this phone's deadline, it won.
+    const accepted =
+      (s === 'open' || (s === 'expired' && deadlinePhase(v, now) === 'passed-here')) &&
+      answerAccepted(v);
+    const closed = accepted
+      ? 'Your relay accepted your answer. It shows here once this device reads it back.'
+      : s === 'expired'
+        ? (deadlineWords(v, now)?.title ?? 'Expired without an answer')
         : s === 'cancelled'
           ? (declinedLabel(v) ?? withdrawnLabel(v))
           : s === 'open'
             ? 'Not answered yet'
             : 'No answer this device can show';
-    const at = s === 'expired' || s === 'cancelled' ? decidedAt(v, now) : null;
+    const at = !accepted && (s === 'expired' || s === 'cancelled') ? decidedAt(v, now) : null;
     return (
       <div className="activity-summary">
         <h3 className="eyebrow summary-h">Outcome</h3>

@@ -5,6 +5,7 @@ import {
   answerable,
   awaitingReply,
   currentAnswer,
+  deadlineWords,
   declinedByPerson,
   declinedLabel,
   deliveryNeedsAttention,
@@ -73,7 +74,12 @@ export function principalStatus(v: QuestionView, now: number): RowStatus {
 
 /** What a row says in place of an answer when a question closed without one (Home and History). */
 export function closedLine(status: RowStatus, v: QuestionView): string | null {
-  if (status === 'expired') return 'Expired without an answer';
+  // Past its deadline by this device's clock while the relay still says open: no outcome yet. Otherwise the relay
+  // expired it, and an advisory round's plan became due.
+  if (status === 'expired')
+    return v.status === 'open'
+      ? 'Deadline passed on this phone'
+      : (deadlineWords(v)?.row ?? 'Expired without an answer');
   if (status === 'withdrawn') return withdrawnLabel(v);
   if (status === 'declined') return declinedLabel(v) ?? 'Declined by you';
   if (status === 'unreadable') return 'This device holds no key for it';

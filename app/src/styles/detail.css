@@ -157,6 +157,7 @@
 /* Under the agent's message: its deadline. */
 .msg-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin: 10px 0 0;
@@ -336,6 +337,10 @@
 }
 .msg-prep .safe-text p:first-child {
   margin-top: 0;
+}
+/* What running out of time means, under the deadline: a sentence, not a chip. */
+.msg-meta-note {
+  margin-top: 2px;
 }
 
 /* Choices that can be picked: rows inside the message. Selected is a neutral lift with a text-secondary edge. */

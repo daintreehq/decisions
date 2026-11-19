@@ -1,6 +1,7 @@
 import {
   EventData,
   applyAction,
+  isAdvisoryRound,
   type ActionKind,
   type DecisionContentV1,
   type LedgerEvent,
@@ -10,6 +11,7 @@ import {
   type PhoneImageReference,
   type Provenance,
   type QuestionStatus,
+  type ReplyMode,
   type Requirement,
   type Role,
 } from '@daintreehq/decisions-protocol';
@@ -94,6 +96,19 @@ export interface ThreadMessage {
   delivery: MessageDeliveryInfo | null;
 }
 
+/**
+ * A round that ran out of time, as the relay committed it (`decision.expired`, believed only at or after the round's
+ * signed deadline). Kept per round, so a reopened question still shows that its earlier round went unanswered.
+ */
+export interface ExpiryView {
+  /** The ledger seq of the `decision.expired` event, which places it among the question's answers. */
+  seq: number;
+  /** The round's signed deadline. */
+  at: string;
+  /** It ended the advisory round (docs/protocol.md section 21): its agent's stated plan became due. */
+  advisory: boolean;
+}
+
 export interface QuestionView {
   id: string;
   status: QuestionStatus;
@@ -104,6 +119,12 @@ export interface QuestionView {
   originatingDeviceId: string;
   createdAt: string;
   expiresAt: string | null;
+  /**
+   * How the question waits, from its signed create (docs/protocol.md section 21): `advisory` when its agent may go
+   * ahead with a stated plan if no answer commits by the deadline of its first round. A reopen always waits
+   * (`advisoryRound`).
+   */
+  replyMode: ReplyMode;
   proxyAbstained: boolean;
   createdSeq: number;
   lastSeq: number;
@@ -113,6 +134,8 @@ export interface QuestionView {
   actions: ActionView[];
   /** The thread's messages in ledger order. */
   messages: ThreadMessage[];
+  /** Every round the relay expired, in ledger order. */
+  expiries: ExpiryView[];
   deliveries: Record<number, DeliveryView>;
   attachmentsAvailable: Record<string, true>;
   integrityIssues: string[];
@@ -202,9 +225,9 @@ export class QuestionStore {
     this.bump();
   }
 
-  private async verifyWithRetry<T>(
-    run: () => Promise<{ ok: true; value: T } | { ok: false; reason: string }>,
-  ) {
+  private async verifyWithRetry<R extends { ok: boolean; reason?: string }>(
+    run: () => Promise<R>,
+  ): Promise<R> {
     let r = await run();
     if (!r.ok && r.reason === 'unknown signer' && this.ctx.refreshDevices) {
       try {
@@ -235,6 +258,7 @@ export class QuestionStore {
       originatingDeviceId: '',
       createdAt: ev.occurred_at,
       expiresAt: null,
+      replyMode: 'blocking',
       proxyAbstained: false,
       createdSeq: ev.seq,
       lastSeq: ev.seq,
@@ -243,6 +267,7 @@ export class QuestionStore {
       content: null,
       actions: [],
       messages: [],
+      expiries: [],
       deliveries: {},
       attachmentsAvailable: {},
       integrityIssues: [],
@@ -278,8 +303,16 @@ export class QuestionStore {
         );
         if (!v.ok) {
           // Never adopt fields from a record that did not verify for THIS id (it may belong to another question).
-          if (!existing) this.views.set(qid, this.stub(qid, ev, v.reason));
-          else existing.verification = { ok: false, reason: v.reason };
+          const view = existing ?? this.stub(qid, ev, v.reason);
+          view.verification = { ok: false, reason: v.reason };
+          // Correctly signed but sealed under a key this phone was never given: an advisory one still shows its signed
+          // deadline and says its agent may go ahead after it, without naming the plan (docs/protocol.md section 21).
+          if (v.signed?.replyMode === 'advisory') {
+            view.replyMode = 'advisory';
+            view.expiresAt = v.signed.record.expires_at;
+            view.createdAt = v.signed.record.created_at;
+          }
+          this.views.set(qid, view);
           break;
         }
         const issues: string[] = [];
@@ -297,6 +330,7 @@ export class QuestionStore {
           originatingDeviceId: rec.originating_device_id,
           createdAt: rec.created_at,
           expiresAt: rec.expires_at,
+          replyMode: v.value.replyMode,
           proxyAbstained: false,
           createdSeq: ev.seq,
           lastSeq: ev.seq,
@@ -305,6 +339,7 @@ export class QuestionStore {
           content: v.value.content,
           actions: [],
           messages: [],
+          expiries: [],
           deliveries: {},
           attachmentsAvailable: {},
           integrityIssues: issues,
@@ -497,6 +532,15 @@ export class QuestionStore {
         else if (Date.parse(ev.occurred_at) < due || Date.parse(p.data.expired_at) < due)
           v.integrityIssues.push('expiry reported before the signed deadline (ignored)');
         else {
+          // Kept per round, so a reopened question still shows how its earlier round ended.
+          v.expiries.push({
+            seq: ev.seq,
+            at: v.expiresAt!,
+            advisory: isAdvisoryRound({
+              advisory: v.replyMode === 'advisory',
+              revision: v.revision,
+            }),
+          });
           v.status = 'expired';
           v.lastSeq = ev.seq;
           v.lastEventAt = ev.occurred_at;

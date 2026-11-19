@@ -100,7 +100,11 @@ export const QuestionRow = memo(function QuestionRow({
         onClick={(e) => onOpen(e, v.id)}
       >
         <span className="qrow-glyph">
-          <StatusGlyph status={status} />
+          {/* Past its deadline by this device's clock only: not an outcome, so never said as "Expired". */}
+          <StatusGlyph
+            status={status}
+            spoken={status === 'expired' && v.status === 'open' ? 'Deadline passed' : undefined}
+          />
         </span>
         <span className="qrow-line">
           <span className="qrow-q">

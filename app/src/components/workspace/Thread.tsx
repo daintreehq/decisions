@@ -72,9 +72,30 @@ export function PreparationNote({ report }: { report: PreparationReport }) {
 }
 
 /**
+ * An advisory question's plan (docs/protocol.md section 21): what its agent said it would do if no answer reaches the
+ * relay by the deadline, in its own words, attributed to it like its account of how it prepared. A plan, never
+ * something done: nothing here says the agent acted.
+ */
+export function PlanNote({ plan, deadline, now }: { plan: string; deadline: string; now: number }) {
+  return (
+    <div className="msg-prep msg-plan" role="note" aria-label="Your agent’s plan">
+      <p className="msg-prep-head">
+        <span className="msg-prep-label">Your agent’s plan</span> if no answer reaches your relay by{' '}
+        <time dateTime={deadline} title={absoluteLabel(deadline)}>
+          {momentLabel(deadline, now)}
+        </time>
+        :
+      </p>
+      <SafeText text={plan} className="msg-prep-summary" />
+    </div>
+  );
+}
+
+/**
  * The agent's question: who asked (agent kind and project), then one message holding the question, its files, its
- * context (collapsed), the agent's account of how it prepared (when it gave one) and its choices. `meta` sits under
- * the message (the deadline).
+ * context (collapsed), the agent's account of how it prepared (when it gave one), its plan if no one answers (an
+ * advisory question) and its choices. `meta` sits under the message (the deadline), and `note` under that (what
+ * running out of time means, when it needs saying).
  */
 export function AgentMessage({
   view,
@@ -83,7 +104,9 @@ export function AgentMessage({
   files,
   context,
   choices,
+  plan,
   meta,
+  note,
 }: {
   view: QuestionView;
   now: number;
@@ -91,7 +114,9 @@ export function AgentMessage({
   files?: ReactNode;
   context?: ReactNode;
   choices?: ReactNode;
+  plan?: ReactNode;
   meta?: ReactNode;
+  note?: ReactNode;
 }) {
   const c = view.content!;
   const { project } = originParts(view);
@@ -111,9 +136,11 @@ export function AgentMessage({
         {files}
         {context}
         {c.preparation && <PreparationNote report={c.preparation} />}
+        {plan}
         {choices}
       </div>
       {meta && <p className="msg-meta">{meta}</p>}
+      {note && <p className="msg-meta msg-meta-note">{note}</p>}
     </div>
   );
 }

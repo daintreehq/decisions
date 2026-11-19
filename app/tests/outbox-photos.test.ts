@@ -128,6 +128,31 @@ describe('photos in the outbox', () => {
     expect(again.list()).toHaveLength(0);
   });
 
+  it('keeps the words and photos of an answer that reached the relay after its deadline, across a restart', async () => {
+    const db = await Db.open(dbName());
+    const key = await generateCacheKey();
+    const { p } = relay((step) =>
+      step === 'commit' ? new RelayError('expired', 410, 'the question expired') : null,
+    );
+    const refused: string[] = [];
+    const hooks = { onRefused: (e: { state: string }) => void refused.push(e.state) };
+    const ob = new Outbox(db, key, () => p, hooks, []);
+    await ob.enqueue(entry('late', [image('img_late_aaaa')]), ciphertexts('img_late_aaaa'));
+    await ob.flush();
+    expect(ob.list()).toMatchObject([
+      { id: 'late', state: 'expired', text: 'WORDS-THAT-MUST-SURVIVE' },
+    ]);
+    // The controller is told, so it reads how the round ended.
+    expect(refused).toEqual(['expired']);
+    const again = new Outbox(db, key, () => p, {}, []);
+    await again.load();
+    const [e] = again.list();
+    expect(e).toMatchObject({ state: 'expired', text: 'WORDS-THAT-MUST-SURVIVE' });
+    expect(e!.images!.map((i) => i.attachmentId)).toEqual(['img_late_aaaa']);
+    // Its photo's ciphertext is still here to hand back to a draft.
+    expect(await again.localCiphertext('img_late_aaaa')).toEqual(MARK);
+  });
+
   it('marks a photo the relay refuses, and keeps the entry for the person', async () => {
     const db = await Db.open(dbName());
     const key = await generateCacheKey();

@@ -1115,8 +1115,10 @@ deadline and mode, and shows the deadline and says the agent may proceed after i
 decrypted plan that is missing or invalid, or an advisory approval, makes the question malformed rather than shown
 without its plan. In a round after the first it shows nothing advisory. A phone that does not declare the feature,
 whether older or merely without the advisory display, never shows the question as one that waits: it shows one it
-cannot read, so the person answers on a phone that can. The phone app in this repository refuses advisory questions
-this way (`ADVISORY_UNSUPPORTED` in `app/src/domain/verify.ts`) until it shows the deadline and plan.
+cannot read, so the person answers on a phone that can. The phone app in this repository declares the feature once
+the relay advertises it, and shows the deadline in local time with the time left, the plan, and how the round ended:
+a deadline passed by its own clock is never an outcome until the relay's `decision.expired` arrives, and nothing it
+shows says the agent was told or acted.
 
 **Fixtures.** `ADVISORY_QUESTION_FIXTURE` (an advisory question), `BLOCKING_APPROVAL_FIXTURE` (a gated approval that
 always waits) and `ROUND_CASES` (the transition table as event sequences, with what every implementation must

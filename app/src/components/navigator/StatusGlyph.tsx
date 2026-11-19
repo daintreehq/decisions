@@ -8,7 +8,16 @@ import { STATUS_LABEL } from '../../domain/lists.js';
  * the warning triangle for delivery
  * attention, a ring with a rising arrow for an answer still waiting to leave this device. Colour sits on the glyph only; the words are always available (visible or to screen readers).
  */
-export function StatusGlyph({ status, label = true }: { status: RowStatus; label?: boolean }) {
+export function StatusGlyph({
+  status,
+  label = true,
+  spoken,
+}: {
+  status: RowStatus;
+  label?: boolean;
+  /** Said in place of the status's own name, when the row knows better (a deadline passed on this phone only). */
+  spoken?: string;
+}) {
   return (
     <span className={`sglyph ${status}`}>
       <svg
@@ -70,7 +79,7 @@ export function StatusGlyph({ status, label = true }: { status: RowStatus; label
           <path d="M4.5 7.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1ZM5.8 7.5V5.6a2.2 2.2 0 0 1 4.4 0v1.9" />
         )}
       </svg>
-      {label && <span className="sr-only">{STATUS_LABEL[status]}</span>}
+      {label && <span className="sr-only">{spoken ?? STATUS_LABEL[status]}</span>}
     </span>
   );
 }

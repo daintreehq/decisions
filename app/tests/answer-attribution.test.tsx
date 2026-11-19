@@ -47,6 +47,7 @@ const view = (a: ActionView): QuestionView => ({
   originatingDeviceId: 'host',
   createdAt: iso(NOW - 3_600_000),
   expiresAt: null,
+  replyMode: 'blocking',
   proxyAbstained: false,
   createdSeq: 1,
   lastSeq: a.seq,
@@ -68,6 +69,7 @@ const view = (a: ActionView): QuestionView => ({
   },
   actions: [a],
   messages: [],
+  expiries: [],
   deliveries: {},
   attachmentsAvailable: {},
   integrityIssues: [],
@@ -220,7 +222,7 @@ describe("an answer made on the computer, as the person's", () => {
     expect(host.textContent).not.toMatch(/model answer/i);
   });
 
-  it('claims no requirement for a question it could not verify, such as an advisory one', () => {
+  it('claims no requirement for a question it could not verify, nor for an advisory one', () => {
     const verified = render(createElement(ActivityTimeline, { view: view(answer()), now: NOW }));
     expect(verified.textContent).toContain('Human decision required');
     const unreadable: QuestionView = {
@@ -229,11 +231,22 @@ describe("an answer made on the computer, as the person's", () => {
       revision: 0,
       content: null,
       actions: [],
-      verification: { ok: false, reason: 'this app cannot show an advisory question yet' },
+      verification: { ok: false, reason: 'signature or ciphertext does not match' },
     };
     const host = render(createElement(ActivityTimeline, { view: unreadable, now: NOW }));
     expect(host.textContent).toContain('Asked by your agent');
     expect(host.textContent).not.toContain('Human decision required');
+    // An advisory question can be `human-required`, but it never waits for the person: its plan says what happens.
+    const base = view(answer());
+    const advisory: QuestionView = {
+      ...base,
+      replyMode: 'advisory',
+      content: { ...base.content!, planned_fallback: 'Keep the current name.' },
+    };
+    const adv = render(createElement(ActivityTimeline, { view: advisory, now: NOW }));
+    expect(adv.textContent).not.toContain('Human decision required');
+    expect(adv.textContent).toContain('If no answer came in time, your agent planned to:');
+    expect(adv.textContent).toContain('Keep the current name.');
   });
 
   it('tells an unsent answer on this phone that it was answered on the computer first', () => {

@@ -82,6 +82,11 @@ const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
 const DECLINE_FEATURE: ProtocolFeature = 'person-declines-v1';
 /** The involvement preference: how involved the person wants agents to make them (docs/protocol.md section 20). */
 const INVOLVEMENT_FEATURE: ProtocolFeature = 'involvement-v1';
+/**
+ * Advisory questions: this app shows an advisory question's deadline and its agent's plan (docs/protocol.md section
+ * 21), so a host may ask one when this device is among the person's active ones.
+ */
+const ADVISORY_FEATURE: ProtocolFeature = 'advisory-deadlines-v1';
 
 /** A photo the composer hands over at Send: scaled, stripped and hashed, still plaintext. */
 export type OutgoingPhoto = PreparedPhoto;
@@ -246,6 +251,11 @@ export class AppController {
     return this.snap.info?.features?.includes(INVOLVEMENT_FEATURE) ?? false;
   }
 
+  /** Whether the relay validates advisory questions; until it does, this device never says it shows them. */
+  private advisoryServed(): boolean {
+    return this.snap.info?.features?.includes(ADVISORY_FEATURE) ?? false;
+  }
+
   /** Whether the relay sends the agent-stopped push; until it does, no push subscription declares it. */
   agentStoppedPushServed(): boolean {
     return this.snap.info?.features?.includes(AGENT_STOPPED_PUSH) ?? false;
@@ -300,6 +310,7 @@ export class AppController {
       ...(this.threadsServed() ? [THREAD_FEATURE] : []),
       ...(this.photosServed() ? [PHOTO_FEATURE] : []),
       ...(this.involvementServed() ? [INVOLVEMENT_FEATURE] : []),
+      ...(this.advisoryServed() ? [ADVISORY_FEATURE] : []),
     ];
   }
 
@@ -548,15 +559,23 @@ export class AppController {
         return self ? declineSettlement(e, this.store?.get(e.questionId), self) : null;
       },
       onRefused: (e) => {
-        if (e.kind !== 'decline') return;
-        // The relay knows more than this thread (an answer that won, a reopen): read it now, so nothing here is offered
-        // against the round that is gone.
+        // A refusal means the relay knows more than this thread (an answer that won, a withdrawal, a reopen, the expiry
+        // it committed): read it now, so nothing here is offered against the round that is gone.
         void this.sync?.catchUp().catch(() => undefined);
         // The asking desktop stopped taking declines since the device list was read: read it again, so Dismiss agrees.
-        if (e.refusalReason === CREATOR_MISSING_FEATURE)
+        if (e.kind === 'decline' && e.refusalReason === CREATOR_MISSING_FEATURE)
           void this.refreshDevices().catch(() => undefined);
       },
     };
+  }
+
+  /**
+   * A question's deadline passed by this device's clock while its thread still says open: read the relay now. It
+   * expires a due question whenever it is read, so how the round ended (the expiry, or an answer that beat it) arrives
+   * here rather than waiting for the next sync.
+   */
+  checkDeadline(): void {
+    void this.sync?.catchUp().catch(() => undefined);
   }
 
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */

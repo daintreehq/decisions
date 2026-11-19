@@ -1,11 +1,18 @@
 import {
   HUMAN_MESSAGE_ROLES,
   humanMessageSentOn,
+  isAdvisoryRound,
   isPersonDecline,
   threadAwaitsHuman,
   type ActionKind,
 } from '@daintreehq/decisions-protocol';
-import type { ActionView, QuestionStore, QuestionView, ThreadMessage } from './model.js';
+import type {
+  ActionView,
+  ExpiryView,
+  QuestionStore,
+  QuestionView,
+  ThreadMessage,
+} from './model.js';
 import { sanitizeText } from '../lib/safe-text.js';
 import { computerName } from './computer-name.js';
 import { NO_EPOCH_KEY } from './verify.js';
@@ -24,13 +31,14 @@ export function effectiveStatus(v: QuestionView, now = Date.now()): EffectiveSta
 }
 
 /**
- * The answer currently in force (last verified answer-bearing action). None survives a reopen: a question is reopened
- * only once it was withdrawn or expired, and the only answer either leaves behind is a model answer they voided.
+ * The answer currently in force (last verified answer-bearing action). None survives a withdrawal or a reopen: a
+ * desktop withdraws only an open or model-answered question, and a question is reopened only once it was withdrawn
+ * or expired, so the only answer either leaves behind is a model answer they voided.
  */
 export function currentAnswer(v: QuestionView): ActionView | null {
   for (let i = v.actions.length - 1; i >= 0; i--) {
     const a = v.actions[i]!;
-    if (a.verified && a.action === 'reopen') return null;
+    if (a.verified && (a.action === 'reopen' || a.action === 'cancel')) return null;
     if (a.verified && ANSWER_KINDS.includes(a.action) && a.content) return a;
   }
   return null;
@@ -91,6 +99,87 @@ export function declinedLabel(v: QuestionView): string | null {
   const a = closingCancel(v);
   return a ? (declineBy(a)?.label ?? null) : null;
 }
+
+/**
+ * The question is in the advisory round its signed create opened (docs/protocol.md section 21): if no answer commits
+ * by its deadline, its agent may go ahead with the plan it stated. A reopen opens a round that always waits, and an
+ * answer ends the round, so neither is advisory.
+ */
+export const advisoryRound = (v: Pick<QuestionView, 'replyMode' | 'revision'>): boolean =>
+  isAdvisoryRound({ advisory: v.replyMode === 'advisory', revision: v.revision });
+
+/**
+ * Where the current round's deadline stands for the person:
+ * - `none`: there is none, or the round ended before it (answered, declined or withdrawn), so it no longer applies;
+ * - `before`: still ahead;
+ * - `passed-here`: passed by this device's clock while the relay has not said so. An answer the relay committed before
+ *   it may still arrive and win, so nothing here says how the round ended;
+ * - `passed`: the relay expired the round (a `decision.expired` the store accepted at or after the signed deadline).
+ */
+export type DeadlinePhase = 'none' | 'before' | 'passed-here' | 'passed';
+
+export function deadlinePhase(v: QuestionView, now = Date.now()): DeadlinePhase {
+  if (v.status === 'expired') return 'passed';
+  if (v.status !== 'open' || !v.expiresAt) return 'none';
+  return now >= Date.parse(v.expiresAt) ? 'passed-here' : 'before';
+}
+
+/** How a deadline that passed reads: a line's title, what it means, and a row's short form. */
+export interface DeadlineWords {
+  title: string;
+  detail: string;
+  row: string;
+}
+
+/** A round the relay expired: an advisory one makes its agent's plan due, any other authorises nothing. */
+function expiredWords(v: QuestionView, e: Pick<ExpiryView, 'advisory'>): DeadlineWords {
+  if (e.advisory)
+    return {
+      title: 'No answer by the deadline',
+      detail:
+        'Your relay confirmed it, so your agent may now go ahead with its plan. This phone can’t see whether your agent has been told yet, or what it did.',
+      row: 'No answer · your agent may go ahead',
+    };
+  return {
+    title: 'Expired without an answer',
+    detail: `${
+      v.content?.kind === 'approval'
+        ? 'Nothing was approved, and the step stays blocked.'
+        : 'No answer reached your relay in time.'
+    } To decide now, ask your agent again from your computer.`,
+    row: 'Expired without an answer',
+  };
+}
+
+/**
+ * What to say about the current round's deadline once it has passed, or null while it hasn't (or no longer applies).
+ * Passing on this phone's clock is never the outcome: the relay decides whether an answer, `pending` from this device
+ * among them, reached it in time.
+ */
+export function deadlineWords(
+  v: QuestionView,
+  now = Date.now(),
+  pending = false,
+): DeadlineWords | null {
+  const phase = deadlinePhase(v, now);
+  if (phase === 'passed') {
+    const e = v.expiries.at(-1);
+    return expiredWords(v, e ?? { advisory: advisoryRound(v) });
+  }
+  if (phase !== 'passed-here') return null;
+  return {
+    title: 'The deadline passed on this phone',
+    detail: pending
+      ? 'Your relay will say whether your answer reached it in time.'
+      : advisoryRound(v)
+        ? 'Waiting for your relay to confirm. If no answer reached it in time, your agent may go ahead with its plan.'
+        : 'Waiting for your relay to confirm.',
+    row: 'Deadline passed on this phone',
+  };
+}
+
+/** An earlier round the relay expired, before the question was reopened: what happened then, without advice for now. */
+export const pastExpiryTitle = (v: QuestionView, e: ExpiryView): string => expiredWords(v, e).title;
 
 /** A question that can still be answered: open, verified and not past its deadline. */
 export const answerable = (v: QuestionView, now = Date.now()): boolean =>
