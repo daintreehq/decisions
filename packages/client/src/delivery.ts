@@ -424,15 +424,34 @@ export class DeliveryEngine {
     // human keeps the reason it has, and one whose earlier write may have reached the terminal keeps saying so.
     const unsupported = pending.map(unsupportedEntry).find((c) => c !== null) ?? null;
     let attention = 0;
-    if (
-      unsupported &&
-      q.delivery_status !== 'needs-attention' &&
-      q.delivery_status !== 'delivery-uncertain' &&
-      !unsettled.has(q.question_id) &&
-      !(await this.ctx.store.hasUncertainIntent(q.question_id))
-    ) {
-      await this.attention(q, unsupported, 'needs-attention');
-      attention = 1;
+    if (unsupported && !unsettled.has(q.question_id)) {
+      // On a fresh read under the lock the inbox writes under: a reopen or an answer applied since the pass read the
+      // row is never held over an entry it already replaced.
+      const now = await this.ctx.lock.run(async () => {
+        const row = await this.ctx.store.getQuestion(q.question_id);
+        const code =
+          row &&
+          this.pending(row)
+            .map(unsupportedEntry)
+            .find((c) => c !== null);
+        if (
+          !row ||
+          !code ||
+          row.delivery_status === 'needs-attention' ||
+          row.delivery_status === 'delivery-uncertain' ||
+          (await this.ctx.store.hasUncertainIntent(q.question_id))
+        )
+          return null;
+        await this.ctx.store.updateQuestion(q.question_id, {
+          delivery_status: 'needs-attention',
+          error_code: code,
+        });
+        return { row, code };
+      });
+      if (now) {
+        await this.reportAttention(now.row, now.code, 'needs-attention');
+        attention = 1;
+      }
     }
     const held =
       pending.length > 0 &&
@@ -1459,6 +1478,16 @@ export class DeliveryEngine {
     } else {
       await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
     }
+    await this.reportAttention(q, code, status);
+  }
+
+  /** Audit a question that now needs a human, and tell the relay when it holds a delivery to report on. */
+  private async reportAttention(
+    q: QuestionRow,
+    code: string,
+    status: 'needs-attention' | 'delivery-uncertain',
+  ): Promise<void> {
+    const { ctx } = this;
     await ctx.audit.log({
       event: 'delivery.attention',
       question_id: q.question_id,

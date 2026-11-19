@@ -105,6 +105,24 @@ describe('an answer entry this client does not understand', () => {
     expect(await env.store.hasUncertainIntent(env.questionId)).toBe(true);
   });
 
+  it('flags nothing once the entry it saw was replaced while the pass waited', async () => {
+    const env = await openQuestion();
+    await setEntries(env, [futureEntry()]);
+    let release!: () => void;
+    const held = env.bridge.ctx.lock.run(() => new Promise<void>((r) => (release = r)));
+    const drained = env.bridge.delivery.drain();
+    await tick(5);
+    // A reopen, say, applied before the pass gets the lock: nothing it can't type is pending any more.
+    await setEntries(env, []);
+    release();
+    await held;
+    expect((await drained).needsAttention).toBe(0);
+    expect((await env.store.getQuestion(env.questionId))!.delivery_status).not.toBe(
+      'needs-attention',
+    );
+    expect(await attentionAudits(env)).toHaveLength(0);
+  });
+
   it('holds an answer, or a decline, from a source this client does not expect', async () => {
     for (const [kind, source] of [
       ['answer', 'system'],
@@ -405,11 +423,14 @@ describe('a store a newer client wrote', () => {
       return getMeta(key);
     };
     const { bridge } = await setupBridge({ store });
+    // A start, a stop, and a start after the stop: each start reads the store.
     const a = bridge.start({ socket: false });
+    await tick(5);
+    await bridge.stop();
     const b = bridge.start({ socket: false });
     await tick(5);
-    expect(releases).toHaveLength(2);
     await bridge.stop();
+    expect(releases).toHaveLength(2);
     let idle = false;
     const settled = bridge.idle().then(() => void (idle = true));
     releases[1]!();
@@ -419,5 +440,35 @@ describe('a store a newer client wrote', () => {
     releases[0]!();
     await Promise.all([a, settled]);
     expect([idle, bridge.state]).toEqual([true, 'stopped']);
+  });
+
+  it('a start made while another admits the store is its second call', async () => {
+    for (const marker of [null, String(STORE_FORMAT + 1)]) {
+      const { store, release, read } = slowStore();
+      if (marker !== null) await store.setMeta(STORE_FORMAT_KEY, marker);
+      const reads = vi.spyOn(store, 'getMeta');
+      const { bridge } = await setupBridge({ store });
+      const first = bridge.start({ socket: false }).then(
+        () => 'started',
+        (e: unknown) => e,
+      );
+      await read;
+      const second = bridge.start({ socket: false }).then(
+        () => 'started',
+        (e: unknown) => e,
+      );
+      await tick(5);
+      expect(reads.mock.calls.filter(([k]) => k === STORE_FORMAT_KEY)).toHaveLength(1);
+      release();
+      const results = await Promise.all([first, second]);
+      if (marker === null) {
+        expect([results, bridge.state]).toEqual([['started', 'started'], 'running']);
+        await bridge.stop();
+      } else {
+        // Refused for both, and nothing started.
+        expect(results.map((r) => r instanceof StoreFormatError)).toEqual([true, true]);
+        expect(bridge.state).toBe('created');
+      }
+    }
   });
 });

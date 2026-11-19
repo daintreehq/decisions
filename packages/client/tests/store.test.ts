@@ -575,7 +575,7 @@ describe('SqliteLocalStore refuses a database a newer client wrote', () => {
       );
     }
     // A BLOB is no format either, whatever its bytes, and is left as it was.
-    for (const blob of ['01', '00']) {
+    for (const blob of ['01', '00', '31']) {
       const raw = new DatabaseSync(path);
       raw.exec(`UPDATE meta SET value = X'${blob}' WHERE key = '${STORE_FORMAT_KEY}'`);
       raw.close();

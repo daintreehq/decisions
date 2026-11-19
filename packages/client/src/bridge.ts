@@ -560,6 +560,8 @@ export class DecisionsBridge {
   private lifecycle = 0;
   /** The store's admissions `start` waits for, so `idle` waits for their reads too. */
   private readonly admissions = new Set<Promise<void>>();
+  /** The start admitting the store for this lifecycle: a call made meanwhile is its second call. */
+  private starting: { lifecycle: number; admission: Promise<void> } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
   /**
@@ -824,15 +826,24 @@ export class DecisionsBridge {
       throw new BridgeError('forbidden', 'this device was revoked from the relay');
     // A second call returns once a store that cannot be repaired has been reported, as the first does.
     if (this.state === 'running') return this.inbox.checkHistory();
-    // Nothing reads or writes the store before it is admitted. Another start, a stop or a revocation while it was being
-    // read wins: each moves the lifecycle on, and a start that lost to another returns as a second call does.
+    // A call made while the first admits the store is a second call: the first, which chose the transport, starts.
+    const first = this.starting;
+    if (first && first.lifecycle === this.lifecycle) {
+      await first.admission;
+      return this.running() ? this.inbox.checkHistory() : undefined;
+    }
+    // Nothing reads or writes the store before it is admitted. A stop or a revocation while it was being read wins:
+    // each moves the lifecycle on, and a start made after it admits the store again.
     const admitting = this.lifecycle;
     const admission = admitStoreFormat(this.ctx.store);
+    const starting = { lifecycle: admitting, admission };
+    this.starting = starting;
     this.admissions.add(admission);
     try {
       await admission;
     } finally {
       this.admissions.delete(admission);
+      if (this.starting === starting) this.starting = null;
     }
     if (admitting !== this.lifecycle) return this.running() ? this.inbox.checkHistory() : undefined;
     const run = ++this.lifecycle;

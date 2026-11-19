@@ -255,8 +255,9 @@ export class SqliteLocalStore implements LocalStore {
   private stmts = new Map<string, StatementSync>();
 
   /**
-   * Opens (or creates) the database at `path`. Throws `StoreFormatError`, leaving the file as it was, when a newer
-   * client wrote it: a schema version past this client's last step, or a data format past `STORE_FORMAT`.
+   * Opens (or creates) the database at `path`. Throws `StoreFormatError`, having migrated, stamped or changed none of
+   * its records, when a newer client wrote it: a schema version past this client's last step, or a data format past
+   * `STORE_FORMAT`.
    */
   constructor(path: string) {
     this.db = new DatabaseSync(path);
