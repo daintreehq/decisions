@@ -311,6 +311,8 @@ export class QuestionStore {
             view.replyMode = 'advisory';
             view.expiresAt = v.signed.record.expires_at;
             view.createdAt = v.signed.record.created_at;
+            // The relay's expiry is believed only for the question's signed host.
+            view.targetHostId = v.signed.record.target_host_id;
           }
           this.views.set(qid, view);
           break;
