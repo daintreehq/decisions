@@ -89,7 +89,13 @@ function parseArgs(argv) {
   return o;
 }
 
-const opts = parseArgs(process.argv.slice(2));
+let opts;
+try {
+  opts = parseArgs(process.argv.slice(2));
+} catch (e) {
+  console.error(`compat-check: ${e.message}`);
+  process.exit(2);
+}
 const failures = [];
 let current = 'setup';
 const step = (msg) => console.log(`\n> ${msg}`);
