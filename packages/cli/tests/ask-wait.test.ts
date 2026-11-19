@@ -211,7 +211,11 @@ describe('the outcome a wait reports', () => {
     const refused = v({
       ...expired,
       fallbackDue: true,
-      advisoryTimeout: timeout({ notice: 'needs-attention', injectionId: null, writeRefused: true }),
+      advisoryTimeout: timeout({
+        notice: 'needs-attention',
+        injectionId: null,
+        writeRefused: true,
+      }),
     });
     expect(outcomeOf(refused)).toBe('advisory-expired');
     expect(deliveryOf(refused, 'advisory-expired')).toBe('needs-attention');

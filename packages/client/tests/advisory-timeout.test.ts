@@ -608,7 +608,10 @@ describe('where the advisory notice goes', () => {
     expect(e.sink.typed).toHaveLength(0);
     const row = await e.row();
     expect(row.delivery_status).toBe('needs-attention');
-    expect(parseAnswers(row.answers_json)[0]).toMatchObject({ write_refused: true, delivered: false });
+    expect(parseAnswers(row.answers_json)[0]).toMatchObject({
+      write_refused: true,
+      delivered: false,
+    });
     const due = {
       fallbackDue: true,
       advisoryTimeout: {
