@@ -22,6 +22,7 @@ import {
 import { advisoryContentHolds, replyModeOfRow } from './advisory.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import { hostRef, type BridgeContext } from './context.js';
+import { isDeviceRevoked } from './errors.js';
 import {
   EVENT_ACTION,
   revokedKey,
@@ -30,7 +31,7 @@ import {
   type VerifiedMessage,
 } from './inbound.js';
 import { parseMessages, serializeMessages, type StoredMessage } from './messages.js';
-import { Mutex, TransientError } from './mutex.js';
+import { KeyUnavailableError, Mutex, TransientError } from './mutex.js';
 import { answerRuleViolation } from './policy.js';
 import type { QuestionRow } from './types.js';
 
@@ -100,12 +101,12 @@ const ROUNDS_RECONCILED = 'rounds-reconciled';
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
 
 /**
- * A transiently failing event is given up on (consumed with an error) only after this many attempts AND this long
- * since its first failure. Attempts come as fast as events arrive, so a count alone would let a short outage
- * (a relay restart, a rate limit) discard a valid answer.
+ * A key still missing after a reload that succeeded (`KeyUnavailableError`) is waited for only this many attempts AND
+ * this long since it was first missed, then the event is consumed with an error. Attempts come with every pump and
+ * socket event, so a count alone would end the wait for a rotation another process is still saving.
  */
-const MAX_TRANSIENT_ATTEMPTS = 5;
-const MIN_TRANSIENT_WINDOW_MS = 10 * 60_000;
+const MAX_KEY_ATTEMPTS = 5;
+const MIN_KEY_WINDOW_MS = 10 * 60_000;
 
 /** What the relay would hold for this question, derived only from events WE verified. */
 function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
@@ -126,11 +127,16 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
 /**
  * Persists ledger events BEFORE anything is acknowledged, then verifies and applies them strictly in seq
  * order and only up to the confirmed (contiguous) frontier. Unverifiable events are rejected and audited;
- * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order.
+ * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order, for as
+ * long as they last: such a failure says nothing about the event, so however long the relay, the device directory
+ * or the key store stays unreadable, a committed answer waits for it rather than being dropped. Only a key still
+ * missing once its source was read is waited for a bounded time (`MAX_KEY_ATTEMPTS`, `MIN_KEY_WINDOW_MS`).
  */
 export class Inbox {
   private readonly serial = new Mutex();
-  private readonly transientAttempts = new Map<number, { n: number; since: number }>();
+  private readonly keyAttempts = new Map<number, { n: number; since: number }>();
+  /** What this run last audited as deferred (event and kind of failure): logged once per hold, not on every retry. */
+  private deferred: string | null = null;
   /**
    * Rows written before reopens kept their deadline are repaired in the background (`reconcileRounds`), never in the
    * way of an event. Until a pass has settled them all, an expiry is judged by `roundDeadline` instead.
@@ -184,35 +190,53 @@ export class Inbox {
         if (batch.length === 0) return drain;
         for (const stored of batch) {
           const ev = JSON.parse(stored.json) as LedgerEvent;
+          let revoked = false;
           try {
             if (await this.apply(ev, stored.received_at)) drain = true;
           } catch (e) {
-            if (e instanceof TransientError) {
-              const prev = this.transientAttempts.get(ev.seq);
-              const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
-              this.transientAttempts.set(ev.seq, a);
-              if (
-                a.n < MAX_TRANSIENT_ATTEMPTS ||
-                this.ctx.now() - a.since < MIN_TRANSIENT_WINDOW_MS
-              ) {
-                // Leave it unprocessed and stop: later events must not overtake it.
+            if (e instanceof TransientError && this.keepWaiting(ev.seq, e)) {
+              // Leave it unprocessed and stop: later events must not overtake it.
+              const hold = `${ev.seq}:${e.name}`;
+              if (this.deferred !== hold) {
                 await this.ctx.audit.log({
                   event: 'event.deferred',
                   result: e.message.slice(0, 80),
                 });
-                return drain;
+                this.deferred = hold;
               }
+              return drain;
             }
             await this.ctx.audit.log({
               event: 'event.error',
               result: (e as Error).message.slice(0, 80),
             });
+            revoked = isDeviceRevoked(e);
           }
-          this.transientAttempts.delete(ev.seq);
+          this.keyAttempts.delete(ev.seq);
           await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
+          if (revoked) {
+            // A read for this event found the relay no longer accepts this device: stop, as a sync or the socket
+            // finding it would, rather than wait for the revocation to come up in the ledger.
+            this.cb.onRevokedSelf();
+            return drain;
+          }
         }
       }
     });
+  }
+
+  /**
+   * Whether an event held by a transient failure is still waited for. An outage (the relay, the device directory, the
+   * key store) is waited out however long it lasts: it says nothing about the event, so an answer the relay committed
+   * is never consumed for it. A key still missing after a reload that succeeded is waited for a bounded time, enough
+   * for a rotation another process is saving; one erased from the key store never comes back.
+   */
+  private keepWaiting(seq: number, e: TransientError): boolean {
+    if (!(e instanceof KeyUnavailableError)) return true;
+    const prev = this.keyAttempts.get(seq);
+    const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
+    this.keyAttempts.set(seq, a);
+    return a.n < MAX_KEY_ATTEMPTS || this.ctx.now() - a.since < MIN_KEY_WINDOW_MS;
   }
 
   /**

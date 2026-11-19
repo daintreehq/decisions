@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { generateEpochKeyBytes } from '@daintreehq/decisions-crypto';
+import { generateEpochKeyBytes, importEpochKey } from '@daintreehq/decisions-crypto';
 import {
   DecisionsBridge,
   MemoryKeyStore,
@@ -16,7 +16,7 @@ import { FakeRelay, FakeSink, makeIdentity, makePhone, origin } from './helpers.
  * (`decisions revoke`, `decisions rotate`, or Daintree's own settings action) rotates the content key while
  * this bridge keeps running.
  */
-async function ownerWithKeyStore() {
+async function ownerWithKeyStore(now?: () => number) {
   const identity = await makeIdentity();
   const keyStore = new MemoryKeyStore();
   await keyStore.save(identity.stored);
@@ -32,16 +32,18 @@ async function ownerWithKeyStore() {
     sleep: async () => {},
     maxRetries: 0,
   });
+  const store = new MemoryLocalStore();
   const bridge = new DecisionsBridge({
     identity,
     keyStore,
-    store: new MemoryLocalStore(),
+    store,
     sink,
     client,
     policy: new PolicyRegistry(),
     pumpIntervalMs: 0,
+    ...(now ? { now } : {}),
   });
-  return { identity, keyStore, relay, bridge };
+  return { identity, keyStore, relay, bridge, phone, sink, store };
 }
 
 async function ask(bridge: DecisionsBridge, question: string) {
@@ -90,5 +92,105 @@ describe('the owner bridge after a key rotation made by another process', () => 
     await bridge.catchUp();
     expect(epochOf(relay, await ask(bridge, 'Still?'))).toBe(1);
     expect((await loadIdentity(keyStore)).currentEpoch).toBe(1);
+  });
+
+  it('an answer under a committed epoch the key store does not hold yet waits while a rotation could still save it', async () => {
+    let clock = Date.now();
+    const { identity, keyStore, relay, bridge, phone, sink, store } = await ownerWithKeyStore(
+      () => clock,
+    );
+    const qid = await ask(bridge, 'Ship it?');
+    // The relay committed epoch 2 and the phone answers under it, but this store does not hold the key yet (another
+    // process is still saving its rotation, say): the answer waits, through many quick retries and through a few slow
+    // ones (a laptop asleep) that take longer than the window but are too few to end the wait.
+    const raw = generateEpochKeyBytes();
+    relay.epoch = 2;
+    const ev = await relay.answerEvent({
+      questionId: qid,
+      phone,
+      options: ['ok'],
+      epoch: await importEpochKey(raw, 2, true),
+    });
+    await bridge.catchUp();
+    await bridge.pump();
+    await bridge.pump();
+    clock += 15 * 60_000;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(0);
+    expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
+    // The key reaches the store: the next pump reloads it and delivers the answer.
+    await addEpoch(keyStore, identity, 2, raw, { makeCurrent: false });
+    clock += 30_000;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
+  });
+
+  it('a key that never reaches the store is waited for a while, then the events behind it go on', async () => {
+    let clock = Date.now();
+    const { relay, bridge, phone, sink, store } = await ownerWithKeyStore(() => clock);
+    const lost = await ask(bridge, 'Ship it?');
+    const other = await ask(bridge, 'And this?');
+    // Epoch 2 was erased from this store (a rotation saved from a stale copy of it): no reload brings it back, and
+    // waiting for it would hold every later event forever.
+    relay.epoch = 2;
+    const ev = await relay.answerEvent({
+      questionId: lost,
+      phone,
+      options: ['ok'],
+      epoch: await importEpochKey(generateEpochKeyBytes(), 2, true),
+    });
+    await relay.answerEvent({ questionId: other, phone, options: ['ok'] });
+    await bridge.catchUp();
+    for (let i = 0; i < 16; i++) {
+      clock += 30_000;
+      await bridge.pump();
+    }
+    expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
+    expect(sink.typed).toHaveLength(0);
+    for (let i = 0; i < 6; i++) {
+      clock += 30_000;
+      await bridge.pump();
+    }
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(other))!.local_status).toBe('human-answered');
+    expect((await store.getQuestion(lost))!.local_status).toBe('open');
+    expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(true);
+  });
+
+  it('a key store that cannot be read holds the answer however long, and it is delivered once it can', async () => {
+    let clock = Date.now();
+    const { identity, keyStore, relay, bridge, phone, sink, store } = await ownerWithKeyStore(
+      () => clock,
+    );
+    const qid = await ask(bridge, 'Ship it?');
+    const raw = generateEpochKeyBytes();
+    await addEpoch(keyStore, identity, 2, raw, { makeCurrent: false });
+    relay.epoch = 2;
+    await relay.answerEvent({
+      questionId: qid,
+      phone,
+      options: ['ok'],
+      epoch: await importEpochKey(raw, 2, true),
+    });
+    // The store holds the key, but reading it fails (a locked keychain, say) for an hour.
+    const load = keyStore.load.bind(keyStore);
+    let locked = true;
+    keyStore.load = async () => {
+      if (locked) throw new Error('keychain locked');
+      return load();
+    };
+    await bridge.catchUp();
+    for (let i = 0; i < 12; i++) {
+      clock += 5 * 60_000;
+      await bridge.pump();
+    }
+    expect(sink.typed).toHaveLength(0);
+    expect((await store.unprocessedEvents(10)).length).toBe(1);
+    locked = false;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
   });
 });

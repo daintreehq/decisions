@@ -150,6 +150,8 @@ export class FakeRelay {
   grants = new Map<string, EpochGrant[]>();
   /** Number of upcoming key-grant fetches that fail with a network error. */
   failGrants = 0;
+  /** While set, key-grant fetches get this status and body in place of the grants (a refusal or a broken reply). */
+  grantsReply: { status: number; body: Record<string, unknown> } | null = null;
   /** Phone image ciphertext served by `GET /attachments/{id}/content`, and the ids each download asked for. */
   blobs = new Map<string, Uint8Array>();
   downloads: string[] = [];
@@ -214,6 +216,8 @@ export class FakeRelay {
   holdDevices: Promise<void> | null = null;
   /** While true, `GET /devices` fails as an unreachable relay would. */
   devicesFail = false;
+  /** While set, `GET /devices` gets this status and body in place of the directory (a refusal or a broken reply). */
+  devicesReply: { status: number; body: Record<string, unknown> } | null = null;
   /** Called once the relay has committed a new question, before its receipt is sent (a slow reply). */
   onCreated: ((questionId: string) => void | Promise<void>) | null = null;
   /**
@@ -598,6 +602,7 @@ export class FakeRelay {
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;
       if (this.devicesFail) throw new TypeError('fetch failed');
+      if (this.devicesReply) return json(this.devicesReply.status, this.devicesReply.body);
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,
@@ -623,6 +628,7 @@ export class FakeRelay {
         this.failGrants--;
         throw new TypeError('fetch failed');
       }
+      if (this.grantsReply) return json(this.grantsReply.status, this.grantsReply.body);
       return json(200, { current_epoch: this.epoch, grants: this.grants.get(m[1]!) ?? [] });
     }
     if (method === 'GET' && p === '/api/v1/events') {

@@ -719,24 +719,31 @@ export class DecisionsBridge {
         this.hostKeys = keyStore;
       }
       ctx.client.identity = ctx.identity;
-      let next: Identity;
+      let grants;
       try {
-        next = await refreshHostGrants(ctx.client, keyStore);
+        ({ grants } = await ctx.client.keyGrants());
       } catch (e) {
-        // Unreachable relay: retry the event later, in order. Anything else (a grant the pinned owner did not
-        // seal, a changed identity) is permanent and fails closed.
-        if (e instanceof RelayError && e.retryable)
-          throw new TransientError(`epoch grants unavailable: ${e.message}`);
-        throw e;
+        // The grants could not be read: an unreachable relay, a refusal that can pass (a clock it could not correct, a
+        // relay being upgraded) or a reply that is no grant list. None of it says anything about the event, which is
+        // retried later, in order. Only the relay saying this device is revoked ends it.
+        if (isDeviceRevoked(e)) throw e;
+        throw new TransientError(`epoch grants unavailable: ${(e as Error).message}`);
       }
-      ctx.identity = next;
+      // What the grants say is final: one the pinned owner did not seal, or a changed identity, fails closed.
+      ctx.identity = await refreshHostGrants(ctx.client, keyStore, grants);
       return;
     }
     if (!o.keyStore) return;
-    const id =
-      announced !== undefined
-        ? await promoteEpoch(o.keyStore, announced)
-        : await loadIdentity(o.keyStore);
+    let id: Identity;
+    try {
+      id =
+        announced !== undefined
+          ? await promoteEpoch(o.keyStore, announced)
+          : await loadIdentity(o.keyStore);
+    } catch (e) {
+      // The key store could not be read (a locked keychain, a file mid-write): that says nothing about the event.
+      throw new TransientError(`key store unavailable: ${(e as Error).message}`);
+    }
     ctx.identity = id;
     ctx.client.identity = id;
   }

@@ -418,6 +418,76 @@ describe('A: transient failures retry in order; permanent ones do not', () => {
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
   });
+  it('an answer from a device not loaded yet outlasts a device-list outage of a day and is delivered after it', async () => {
+    let clock = Date.now();
+    const { bridge, relay, sink, qid, identity, store } = await asked({ now: () => clock });
+    await bridge.catchUp(); // the directory is loaded with the first phone only
+    const tablet = await makePhone(identity, 'tablet');
+    relay.devices.push(tablet.cert);
+    const ev = await relay.answerEvent({ questionId: qid, phone: tablet, options: ['approve'] });
+    relay.devicesFail = true;
+    await bridge.catchUp();
+    // The pump every 30 s for an hour, then hourly for a day, far past the old ten-minute window: the answer waits.
+    for (let i = 0; i < 144; i++) {
+      clock += i < 120 ? 30_000 : 60 * 60_000;
+      await bridge.pump();
+    }
+    expect(sink.typed).toHaveLength(0);
+    expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
+    expect((await store.getQuestion(qid))!.local_status).toBe('open');
+    // Held once, audited once: a day of retries does not fill the audit log.
+    const audit = await store.listAudit(1000);
+    expect(audit.filter((a) => a.event === 'event.deferred')).toHaveLength(1);
+    relay.devicesFail = false;
+    clock += 30_000;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+    const row = (await store.getQuestion(qid))!;
+    expect([row.local_status, row.question_revision]).toEqual([
+      'human-answered',
+      ev.question_revision,
+    ]);
+    expect((await store.listAudit(1000)).some((a) => a.event === 'event.error')).toBe(false);
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+  });
+  it('a directory reply that is no usable directory holds the answer like an outage, and it is delivered after', async () => {
+    let clock = Date.now();
+    const { bridge, relay, sink, qid, identity, store } = await asked({ now: () => clock });
+    await bridge.catchUp();
+    const tablet = await makePhone(identity, 'tablet');
+    relay.devices.push(tablet.cert);
+    const ev = await relay.answerEvent({ questionId: qid, phone: tablet, options: ['approve'] });
+    // No list, a list that is not one, and entries without a certificate.
+    for (const body of [{}, { devices: {} }, { devices: [{}] }, { devices: [null] }]) {
+      relay.devicesReply = { status: 200, body };
+      clock += 30_000;
+      await bridge.catchUp();
+      expect(sink.typed).toHaveLength(0);
+      expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
+    }
+    expect(await reasons(store)).toEqual([]);
+    expect((await store.listAudit(100)).some((a) => a.event === 'event.error')).toBe(false);
+    relay.devicesReply = null;
+    clock += 30_000;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+  });
+  it('a directory read refused because this device is revoked stops the bridge instead of waiting', async () => {
+    const { bridge, relay, sink, qid, identity } = await asked();
+    await bridge.catchUp();
+    const tablet = await makePhone(identity, 'tablet');
+    relay.devices.push(tablet.cert);
+    relay.push('device.approved', null, null, { cert: tablet.cert });
+    await relay.answerEvent({ questionId: qid, phone: tablet, options: ['approve'] });
+    relay.devicesReply = {
+      status: 401,
+      body: { code: 'not_authenticated', message: 'unknown or revoked device' },
+    };
+    await bridge.catchUp();
+    expect(bridge.state).toBe('revoked');
+    expect(sink.typed).toHaveLength(0);
+  });
   it('a permanent rejection is consumed (not retried forever)', async () => {
     const { bridge, relay, qid, phone, store } = await asked();
     await bridge.catchUp();
