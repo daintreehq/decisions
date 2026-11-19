@@ -12,9 +12,10 @@ export interface AnswerEntry {
   entry_id: string;
   /**
    * `declined`: the person dismissed the question, from a phone or tablet (a human-signed cancel) or on the owner
-   * desktop (its cancel with the signed `decline` flag); no content.
+   * desktop (its cancel with the signed `decline` flag); no content. `unpublished`: the question's deadline passed
+   * before it ever reached the relay, so no person saw it; written by this desktop (`source: system`), no content.
    */
-  kind: 'answer' | 'expired' | 'declined';
+  kind: 'answer' | 'expired' | 'declined' | 'unpublished';
   action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;
   /**
@@ -30,6 +31,11 @@ export interface AnswerEntry {
    */
   signer_device_id?: string;
   signer_role?: Role;
+  /**
+   * `unpublished` only: the question was advisory (protocol section 21) and the host's policy allowed its stated plan
+   * to go ahead at the deadline, so the agent is told it may carry the plan out. Nothing was decided or approved.
+   */
+  fallback_due?: boolean;
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;

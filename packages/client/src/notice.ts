@@ -96,7 +96,9 @@ function oneLine(s: string, max = 200): string {
 }
 
 export interface AnswerNoticeInput {
-  kind: 'answer' | 'expired' | 'declined';
+  kind: 'answer' | 'expired' | 'declined' | 'unpublished';
+  /** `unpublished` only: the advisory question's stated plan may go ahead (`AnswerEntry.fallback_due`). */
+  fallbackDue?: boolean;
   questionId: string;
   alias?: number;
   revision: number;
@@ -145,6 +147,18 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
       lines.push('authorised: no');
       lines.push(
         'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
+      );
+    } else if (n.kind === 'unpublished') {
+      lines.push('source: system');
+      lines.push('status: never-published');
+      lines.push('authorised: no');
+      lines.push(
+        'note: This question never reached the relay: its deadline passed before this computer could publish it, so the person never saw it and had no chance to answer. Nothing was decided or approved.',
+      );
+      lines.push(
+        n.fallbackDue
+          ? 'note: It was an advisory question. You may carry out the plan you stated, at your own discretion; the person did not choose it.'
+          : 'note: You are NOT authorised to continue the gated step; ask again if you still need an answer, or stop and report.',
       );
     } else if (n.kind === 'declined') {
       lines.push('source: human');

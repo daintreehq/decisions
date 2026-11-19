@@ -28,7 +28,7 @@ import {
   type SignedQuestion,
 } from '@daintreehq/decisions-protocol';
 import { signRequest } from '@daintreehq/decisions-crypto';
-import { RelayError } from './errors.js';
+import { RelayError, isUnsentError } from './errors.js';
 import type { Identity } from './identity.js';
 
 type ActionBodyShape = { protocol_version: 1; idempotency_key: string; action: SignedAction };
@@ -268,8 +268,11 @@ export class RelayClient {
     const aborted = () => opts.signal?.aborted === true || this.closed.signal.aborted;
     let skewRetried = false;
     let attempt = 0;
+    // Whether any attempt may have reached the relay: a request that failed only while connecting was never sent.
+    let maybeSent = false;
     for (;;) {
-      if (aborted()) throw new RelayError('network_error', 'request aborted', 0);
+      if (aborted())
+        throw new RelayError('network_error', 'request aborted', 0, { notSent: !maybeSent });
       const { authorization } = await signRequest({
         method,
         path,
@@ -299,11 +302,15 @@ export class RelayClient {
         });
       } catch (e) {
         link.done();
-        const err = new RelayError('network_error', (e as Error).message || 'network error', 0);
+        if (!isUnsentError(e)) maybeSent = true;
+        const err = new RelayError('network_error', (e as Error).message || 'network error', 0, {
+          notSent: !maybeSent,
+        });
         if (opts.retry === false || opts.once || attempt >= this.maxRetries || aborted()) throw err;
         await this.pause(backoffMs(attempt++), opts.signal);
         continue;
       }
+      maybeSent = true;
       let text: string;
       try {
         if (res.ok && opts.raw) return (await readRaw(res, opts.maxBytes)) as T;

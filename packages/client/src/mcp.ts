@@ -47,11 +47,13 @@ function decisionResult(v: DecisionView) {
     question_id: v.questionId,
     alias: v.alias,
     status: v.status,
+    publication: v.publication,
     requirement: v.requirement,
     workflow_gate_id: v.workflowGateId,
     provenance: v.provenance,
     answered_on: v.answeredOn,
     closed_reason: v.closedReason,
+    fallback_due: v.fallbackDue,
     choice: v.choice,
     text: v.text,
     reviewed_digests_match: v.reviewedDigestsMatch,
@@ -419,7 +421,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason, publication (whether it reached the relay) and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired and never-published never authorise anything.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -442,6 +444,19 @@ export const TOOLS = [
             'publish-failed',
           ],
         },
+        publication: {
+          type: 'string',
+          enum: [
+            'not-sent',
+            'possibly-committed',
+            'accepted',
+            'never-published',
+            'refused',
+            'unknown',
+          ],
+          description:
+            'Whether the question reached the relay: not-sent (queued on this computer), possibly-committed (it may have reached the relay but this computer could not confirm it; the outcome is unknown until the relay is reachable), accepted, never-published (the person never saw it) or refused. Accepted does not mean the person has seen it.',
+        },
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
         provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
@@ -453,9 +468,14 @@ export const TOOLS = [
         },
         closed_reason: {
           type: ['string', 'null'],
-          enum: ['declined', 'withdrawn', 'expired', null],
+          enum: ['declined', 'withdrawn', 'expired', 'never-published', null],
           description:
-            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop) or expired. None authorises anything.',
+            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop), expired, or never-published (its deadline passed before it reached the relay, so the person never saw it). None authorises anything.',
+        },
+        fallback_due: {
+          type: 'boolean',
+          description:
+            'True only when you may carry out the plan your advisory question stated, at your own discretion. It is never an answer or an approval.',
         },
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
@@ -795,11 +815,15 @@ export function createDecisionsMcpHandler(
             ? v.replyMode === 'advisory'
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
               : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : v.status === 'publish-failed'
-              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
-              : v.closedReason === 'declined'
-                ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-                : `q-${v.alias} is ${v.status}; no answer in force.`;
+            : v.closedReason === 'never-published'
+              ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so the person never saw it. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
+              : v.publication === 'possibly-committed'
+                ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
+                : v.status === 'publish-failed'
+                  ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
+                  : v.closedReason === 'declined'
+                    ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                    : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;
         return text(
           messages > 0
