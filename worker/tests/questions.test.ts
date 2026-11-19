@@ -10,6 +10,9 @@ import {
   events,
   inRoom,
   pairDevice,
+  PNG,
+  settle,
+  uploadImage,
   type World,
 } from './helpers.js';
 
@@ -65,6 +68,92 @@ describe('question creation', () => {
     });
     expect(retry.status).toBe(200);
     expect((await events(w.owner)).length).toBe(1);
+  });
+
+  it('a retry after the deadline replays the accepted create, answered or not, and changes nothing', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const deadline = Date.now() + 1_500;
+    const expiresAt = new Date(deadline).toISOString();
+    const post = (question: unknown, idempotencyKey: string) =>
+      w.owner.call('POST', '/api/v1/questions', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        question,
+      });
+
+    // One question with an image, left open until it expires; another answered in time.
+    const openId = newId();
+    const up = await uploadImage(w, openId, PNG);
+    const openKey = newId();
+    const open = await ask(w, {
+      questionId: openId,
+      idempotencyKey: openKey,
+      expiresAt,
+      attachmentIds: [up.attachmentId],
+    });
+    expect(open.res.status).toBe(201);
+    const answeredKey = newId();
+    const answered = await ask(w, { idempotencyKey: answeredKey, expiresAt });
+    expect(answered.res.status).toBe(201);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+
+    while (Date.now() <= deadline) await new Promise((r) => setTimeout(r, 50));
+    // A read commits the lazy expiry, so the ledger below holds still for the retries.
+    expect((await w.owner.call('GET', `/api/v1/questions/${openId}`)).json.status).toBe('expired');
+    await settle();
+    const ledger = () =>
+      inRoom((room) => ({
+        events: room.q(`SELECT seq, event_type, question_id FROM events ORDER BY seq`),
+        jobs: room.q(
+          `SELECT job_id, kind, question_id, run_at, status FROM scheduled_jobs
+           WHERE question_id IN (?, ?) ORDER BY job_id`,
+          openId,
+          answered.questionId,
+        ),
+        attachments: room.q(`SELECT attachment_id, question_id, state, bound FROM attachments`),
+        questions: room.q(
+          `SELECT question_id, status, revision, last_event_seq FROM questions ORDER BY question_id`,
+        ),
+      }));
+    const before = await ledger();
+
+    // The same command (key and body) replays its original receipt.
+    const replayOpen = await post(open.question, openKey);
+    expect(replayOpen.status).toBe(201);
+    expect(replayOpen.json).toEqual(open.res.json);
+    const replayAnswered = await post(answered.question, answeredKey);
+    expect(replayAnswered.status).toBe(201);
+    expect(replayAnswered.json).toEqual(answered.res.json);
+
+    // The same signed question under a fresh key reconciles to the question as it stands now.
+    const reconcileOpen = await post(open.question, newId());
+    expect(reconcileOpen.status).toBe(200);
+    expect(reconcileOpen.json).toMatchObject({ question_id: openId, status: 'expired' });
+    const reconcileAnswered = await post(answered.question, newId());
+    expect(reconcileAnswered.status).toBe(200);
+    expect(reconcileAnswered.json).toMatchObject({
+      question_id: answered.questionId,
+      status: 'human-answered',
+      revision: 1,
+    });
+
+    // Collisions stay collisions after the deadline: a reused key, or a reused question id.
+    const past = new Date(Date.now() - 1_000).toISOString();
+    const reusedKey = await ask(w, { idempotencyKey: openKey, expiresAt: past });
+    expect(reusedKey.res.status).toBe(409);
+    expect(reusedKey.res.json.code).toBe('idempotency_collision');
+    const reusedId = await ask(w, { questionId: openId, expiresAt: past });
+    expect(reusedId.res.status).toBe(409);
+    expect(reusedId.res.json.code).toBe('idempotency_collision');
+
+    // A new question that is already overdue is still refused.
+    const overdue = await ask(w, { expiresAt: past });
+    expect(overdue.res.status).toBe(400);
+    expect(overdue.res.json.code).toBe('validation_error');
+
+    // No second creation, push, job or attachment binding came of any of it.
+    expect(await ledger()).toEqual(before);
   });
 
   it('rejects tampered records: signature, digest, binding and expiry', async () => {
