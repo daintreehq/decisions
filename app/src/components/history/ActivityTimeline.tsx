@@ -210,8 +210,10 @@ function entries(v: QuestionView, now: number): Entry[] {
       kind: 'asked',
       at: v.createdAt,
       title: 'Asked by your agent',
+      // Only a verified question's requirement is known: an unreadable one (an advisory question this app cannot
+      // show, say) has a placeholder, and saying it waits for a person would be a claim nothing signed.
       body:
-        v.requirement === 'human-required' ? (
+        v.verification.ok && v.requirement === 'human-required' ? (
           <p className="tl-sub">Human decision required</p>
         ) : undefined,
     },

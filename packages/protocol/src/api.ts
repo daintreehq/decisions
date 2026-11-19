@@ -18,6 +18,8 @@ import {
   SettingsBody,
   ActionRecord,
   FeatureList,
+  SignedQuestion,
+  refineAdvisoryQuestion,
 } from './schema.js';
 import { SnapshotRefresh, SnapshotSharing } from './snapshot.js';
 import { MessageDeliveryInfo, MessageEntry } from './thread.js';
@@ -80,7 +82,7 @@ export const AttachmentInfo = z.object({
 export type AttachmentInfo = z.infer<typeof AttachmentInfo>;
 
 export const QuestionDetail = QuestionSummary.extend({
-  question: z.object({ record: QuestionRecord, envelope: CryptoEnvelope }),
+  question: SignedQuestion,
   actions: z.array(ActionLogEntry),
   attachments: z.array(AttachmentInfo),
   deliveries: z.array(DeliveryInfo),
@@ -339,13 +341,15 @@ export const WS_CLOSE = {
 
 /** Shapes of `LedgerEvent.data` per event type, for typed consumers. */
 export const EventData = {
-  created: z.object({
-    record: QuestionRecord,
-    envelope: CryptoEnvelope,
-    requirement: Requirement,
-    target_host_id: Id,
-    expires_at: IsoTime.nullable(),
-  }),
+  created: z
+    .object({
+      record: QuestionRecord,
+      envelope: CryptoEnvelope,
+      requirement: Requirement,
+      target_host_id: Id,
+      expires_at: IsoTime.nullable(),
+    })
+    .superRefine(refineAdvisoryQuestion),
   action: z.object({
     action: ActionKind,
     record: ActionRecord,

@@ -171,7 +171,7 @@ new question must still be due.
 Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opaque pane hash). Default expiry is
 chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the
 future and at most `LIMITS.maxQuestionExpiryMs` (366 days) away. `now >= expires_at` means expired (checked lazily
-on every read/write as well as by the alarm).
+on every read/write as well as by the alarm). An advisory question (section 21) needs a finite one.
 
 ### 6.1 Declining a question
 
@@ -463,12 +463,12 @@ phone image and reservation, pane snapshot and outstanding snapshot refresh. `ev
 A compatible relay MUST pass `worker/tests/*.test.ts` semantics: signature/replay rejection, CAS and first-answer-wins,
 proxy never satisfying `human-required`, idempotency, ordered event paging, revocation, reminder cancellation, a
 presence hold that never outlasts its bound,
-attachment integrity, no plaintext in storage, and feature filtering that keeps a 0.3.0 client parsing every page and
-frame (section 19).
+attachment integrity, no plaintext in storage, feature filtering that keeps a 0.3.0 client parsing every page and
+frame (section 19), and the advisory shape and round table of section 21.
 
-## Extensions: threads, phone images, pane snapshots and involvement
+## Extensions: threads, phone images, pane snapshots, involvement and advisory questions
 
-Sections 16 to 20 define four opt-in extensions, each named by a feature (section 19). Their shapes are in
+Sections 16 to 21 define five opt-in extensions, each named by a feature (section 19). Their shapes are in
 `thread.ts`, `snapshot.ts`, `involvement.ts`, `features.ts` and `schema.ts`, and in `schemas.json`. Their routes join `ROUTE_MANIFEST`
 and `openapi.json` when the relay serves them (the thread-message routes have); until a relay advertises a feature in
 `GET /info`, clients MUST NOT use it. `@daintreehq/decisions-protocol/fixtures` exports shared test data for relay, client and app tests: a thread
@@ -779,8 +779,11 @@ type fails its whole catch-up, and an unknown frame is dropped. So a relay sends
 understands.
 
 **Features** (`ProtocolFeature`): `thread-messages-v1`, `phone-images-v1`, `pane-snapshots-v1`,
-`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`, `presence-v1`, `agent-stopped-push-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
+`owner-desktop-answers-v1`, `involvement-v1`, `person-declines-v1`, `owner-desktop-messages-v1`, `owner-desktop-declines-v1`, `presence-v1`, `agent-stopped-push-v1`, `advisory-deadlines-v1`. Lists a client receives use `FeatureToken`, so a newer peer's unknown
 features parse and are ignored (`knownFeatures`).
+
+`advisory-deadlines-v1` filters no events. What it says depends on who declares it, and the relay checks none of the
+declarations when it admits a create (section 21).
 
 `owner-desktop-answers-v1` filters no events. A publishing desktop declares it to say it accepts the owner desktop's
 answers to its questions (section 2), and the relay checks that desktop's latest socket-ticket declaration before
@@ -853,6 +856,11 @@ events page still parses under 0.3.0 schemas, since they leave event data unchec
 and one that validates a question detail against its old `QuestionDetail` schema fails on a detail that lists it. The
 relay commits one only for a question whose publishing desktop declared `owner-desktop-answers-v1`, so a desktop that
 cannot read it never has one of its own to deliver.
+
+`EnvelopeAad.reply_mode` is the one new field that a 0.8.0 or older schema refuses, on purpose: it marks an advisory
+question, which such a reader must not show as one that waits for a decision (section 21). It appears only on an
+advisory question's create, which a host signs only when the relay and a paired phone or tablet declare
+`advisory-deadlines-v1`, and an events page still parses under 0.3.0 schemas.
 
 **Proof.** `@daintreehq/decisions-protocol/fixtures` exports `Legacy030` (the 0.3.0 schemas, frozen) and the 0.3.0
 desktop and phone catch-up loops. `packages/protocol/tests/features.test.ts` runs them against `buildEventsPage`, and
@@ -950,3 +958,163 @@ It is the agent's own account and nothing checks it. Phones show it as such, nev
 signed separately and is not visible to the relay, and its absence means only that no report was given, never that a
 consultation succeeded. A reader drops a malformed report rather than failing the question, and a 0.3.0 phone ignores
 it. Accepting a question never depends on it or on the preference's current revision.
+
+## 21. Advisory questions (`advisory-deadlines-v1`)
+
+A question is **blocking** by default: it waits for a decision, and its expiry authorises nothing. An **advisory**
+question asks for input on a step its agent may already take on its own ("Which fixture should I use? If I haven't
+heard in 15 minutes, I'll use the in-memory one."). An answer that commits before the deadline is delivered as usual.
+If none does, the asking host may tell its agent that the plan it stated is due. An advisory question never approves
+anything, and a step that needs approval is never asked this way.
+
+**Signed shape** (`schema.ts`):
+
+- **Mode.** `EnvelopeAad.reply_mode: "advisory"` on the create's `question-content` envelope (`record_type`
+  `question`, `revision` 0). Absent means blocking. It is optional with no default, so every blocking envelope
+  encrypts, digests and signs exactly as before (`replyModeOf`). AES-GCM authenticates it as part of the AAD, and the
+  envelope digest that covers it is signed into the record.
+- **Deadline.** The record's signed `expires_at`. It must be finite, and the relay checks it like any other
+  (section 6).
+- **No gate.** `workflow_gate_id_hash` is null.
+- **Plan.** `DecisionContentV1.planned_fallback`, the agent's plan in its own words: at most
+  `LIMITS.plannedFallbackChars` (1,000 UTF-16 code units, as JavaScript counts a string), not blank, inside the
+  encrypted content. The content parse drops a plan that breaks either rule, which leaves an advisory question with
+  no plan (refused below). It is bound to the question
+  and its first round because the ciphertext's AAD names the question id, revision 0 and sender, and the envelope digest
+  is signed into the record beside the deadline. The relay never sees it, and no hash of it is published, since a
+  short plan could be guessed from one.
+
+Every reader of a signed question (`SignedQuestion`, `EventData.created`, `QuestionDetail`) refuses an advisory
+question with a null deadline or a gate hash, and the mode on any other envelope (another record type, revision or
+purpose). The relay answers `400 validation_error`. A client treats such a question as malformed. Once it decrypts the
+content, a reader also refuses an advisory question that is an approval or has no plan, none sent or one the parse
+dropped (`advisoryContentIssue`),
+whoever signed it, and treats it as malformed: it is never shown as optional, nor with a plan it could not read.
+
+**Rounds.** The advisory round is the one the create opens, at revision 0 (`ADVISORY_ROUND_REVISION`,
+`isAdvisoryRound`). A reopen (owner desktop, revision r+1, with its own signed `expires_at`) opens a **blocking**
+round: it carries no plan, and its expiry authorises nothing. A new advisory ask is a new question.
+
+**Transition table** (`applyRoundEvent` in `state.ts`; cases in `ROUND_CASES`). `D` is the round's signed deadline.
+Every comparison uses the relay's commit time: `now >= D` is due, so an answer committed at exactly `D` is late. A
+committed answer stays timely however late a desktop receives it, and a reader replaying history never re-judges it
+by its own clock.
+
+The order is the relay's. The route's role check comes first, and a refusal there commits nothing. Then a due deadline
+commits (`RoundResult.expired`), because the relay sweeps due questions before it decides. Then the event applies to
+the round as it now stands (`transition`, or `error`). A relay that finds the deadline passed inside the submission's
+own transaction (it fell between the sweep and the decision) commits the expiry and answers `410 expired` whatever the
+action. The round is expired either way, and the submitter re-reads it. The table covers what the relay decides from the round alone. Once the table admits an event, and before the event
+commits, the relay also refuses a `confirm-proxy` that does not name the latest proxy answer (`400 validation_error`),
+a person's action the publishing desktop has not declared it accepts (`409 invalid_state` with
+`creator-missing-feature`, section 19), a human message on a question whose desktop takes no messages
+(`409 invalid_state`, section 16), phone images that do not bind (section 17), and a reopen past the open-question
+quota (`429 rate_limited`, checked before the reopen's deadline). A deadline that committed first stays committed.
+
+| Input                                       | Authority                                                        | From                         | Revision           | Result                                                                                                             |
+| ------------------------------------------- | ---------------------------------------------------------------- | ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Timely answer (`answer`)                    | the person: phone, tablet or owner desktop                       | `open`, committed before `D` | CAS `r` → `r+1`    | `human-answered`, delivered as an answer                                                                           |
+| Unanswered deadline                         | the relay, unsigned                                              | `open` at `now >= D`         | stays `r`          | `expired`: `advisory-unanswered` in the advisory round (the plan is due), `expired-unsatisfied` in any other round |
+| Verified decline (section 6.1)              | the person: phone, tablet, or owner desktop with `decline: true` | `open`                       | CAS `r`, stays `r` | `cancelled`, declined; the plan is never due                                                                       |
+| Withdrawal (a desktop's `cancel`)           | a desktop                                                        | `open` or `proxy-answered`   | CAS `r`, stays `r` | `cancelled`, withdrawn; the plan is never due                                                                      |
+| Reopen                                      | the owner desktop                                                | `cancelled` or `expired`     | CAS `r` → `r+1`    | `open`, a blocking round with the reopen's deadline                                                                |
+| Deletion (`DELETE /questions/{id}`)         | the owner desktop, authenticated and unsigned                    | any                          | none               | gone, with a `decision.deleted` tombstone; every later fresh command is `404 not_found`                            |
+| Competing proxy answer                      | a desktop's model (`proxy-ok`, `proxy-first`)                    | `open`, committed before `D` | CAS `r` → `r+1`    | `proxy-answered`; the deadline no longer applies, and the person confirms or overrides it as usual, after `D` too  |
+| Proxy abstains                              | a desktop's model                                                | `open`                       | CAS `r`, stays `r` | still `open`; the deadline stays armed                                                                             |
+| Follow-up message, either side (section 16) | the person, or the publishing desktop                            | `open` or answered           | none               | nothing changes: never an answer, and the round's deadline stands as it was                                        |
+
+Cancellation and expiry keep the revision, so revision equality alone never shows that a round is open.
+
+**A late phone submission** observes, and then re-reads the question (`GET /questions/{id}`) to show how it closed,
+never re-signing the old submission for a newer round. A fresh submission, by the question's current state:
+
+- unanswered and past `D` (the round expires first): an answer `410 expired`, a dismissal `409 invalid_state`, a
+  message `410 expired`. Any of them may instead get `410 expired` from the race above;
+- answered by a person: another answer `409 revision_conflict` with the latest revision and status, at either revision.
+  A message still posts, after `D` too;
+- answered by a proxy: an answer `409 revision_conflict`; the person confirms or overrides instead, after `D` too;
+- declined or withdrawn: an answer `409 invalid_state`; another cancel at the same revision is a `200` no-op;
+- reopened and open: an answer or cancel signed for the earlier round `409 revision_conflict`. Once that round expires too, an
+  answer is `410 expired`, whatever revision it names;
+- deleted: `404 not_found` (a role the route refuses is `403 forbidden` first).
+
+A retry is not a fresh submission. The same idempotency key with the same body returns the original receipt while
+the relay keeps it, even after the question changed or was deleted. The same signed action under a new key returns
+`200` with the question's current status and revision and the original event's seq while the question exists, and
+`404 not_found` once it was deleted. `applyRoundEvent` describes fresh submissions only.
+
+**Plan, notice and action** are three separate facts:
+
+- The **planned action** is the encrypted `planned_fallback` of question id and round 0: what the agent said it would
+  do. It is never an answer, a choice, an approval or a provenance.
+- The **delivered notice** is the asking host telling its agent, once, that no answer committed by the deadline.
+  `RoundTransition.fallbackDue` says the host may send it, not that it did. Whether it reached the agent is the host's
+  own delivery state, keyed by question id and round. The notice says that nothing was decided or approved and that
+  the agent may carry out the plan it stated, at its own discretion.
+- The **action actually taken** is never observed by Decisions. Neither the deadline nor the notice says the agent
+  acted. Only the agent's own later report could, and that report carries no authority.
+
+**A timeout is not an answer.** `decision.expired` is relay-asserted, unsigned, and carries no answer, choice or
+provenance. `advisory-unanswered` has `provenance: null`, `deliverable: false` and `trainable: false`. A host never
+records it as the person's answer, a proxy prediction or a decision-model example. The model learns only from a
+person's answer or override.
+
+**Host support and policy** (`advisoryRefusal` in `policy.ts`). A host signs an advisory question only when every one
+of these holds, and none of them defaults to true:
+
+- the relay lists `advisory-deadlines-v1` in `GET /info`;
+- the host application opted in (`BridgeOptions.advisoryDeadlines`, which also declares the feature);
+- the host's trusted policy allows it (`PolicyRegistryOptions.advisoryQuestions`, default false, never set by an agent);
+- at least one active phone or tablet declared `advisory-deadlines-v1` on its latest socket ticket (`GET /devices`);
+- the question names no workflow gate at all: none from its origin and none from the agent, registered or not;
+- its kind is not `approval`;
+- the deadline is finite;
+- the plan is valid.
+
+Otherwise the host signs nothing advisory. A refusal never turns the question into a blocking one on its own: the
+caller asks again without advice if it wants the person to decide. The requirement resolves as before
+(`enforceRequirement`), so an advisory question can be `human-required`, and its deadline never supplies an answer.
+
+**The feature** filters no events. In `GET /info` it says the relay validates advisory creates. On a desktop's socket
+ticket it says the host delivers advisory outcomes, and on a phone's or tablet's that the app shows the deadline and
+the plan. The relay checks no declaration when it admits a create, since the signer's own signature declares it. A
+phone's capability is the host's check (above).
+
+**Older and mixed versions.** A blocking question is unchanged everywhere. The mode sits in the strict AAD on purpose,
+so a reader that cannot explain it refuses the question rather than showing it as one that waits:
+
+- **Relay 0.8.0 or older** (no feature): its strict `EnvelopeAad` refuses the create with `400 validation_error`. A
+  host never sends one there.
+- **Phone or tablet 0.8.0 or older**: `EventData.created` fails on the AAD, so the app shows the question as one it
+  cannot read, never as an ordinary one, and the person cannot answer it on that device. Every other question reads
+  as before. A marker such a phone could ignore would show "Human decision required" next to the deadline, as if the
+  agent would wait, while the agent may go ahead at the deadline. (Its History may still label the unreadable entry
+  with that placeholder; the current app does not.)
+- **0.3.0 clients**: their page and frame schemas leave event data unchecked, so catch-up goes on. A client that
+  verifies the event rejects that one.
+- **Strict schema readers**: `schemas.json` closes `EnvelopeAad` and `DecisionContentV1`
+  (`additionalProperties: false`). A reader that validates against an older bundle refuses an advisory question's
+  envelope, and its content too. The current bundle lists `reply_mode` and `planned_fallback`. `QuestionRecord` is
+  unchanged. Like `ActionRecord`'s, the rules that span fields (where the mode may appear, the finite deadline, no gate,
+  the plan's non-blank text) are not in the JSON Schemas: a reader enforces them with this package's schemas.
+- **Desktops 0.8.0 or older** never sign an advisory question, and a host acts only on its own questions. An older
+  client refuses the advisory question where it validates the `decision.created` event or the question detail. A
+  `GET /questions` summary carries no envelope, so a client verifies the detail before it offers any action.
+- `@daintreehq/decisions-protocol/fixtures` freezes the 0.8.0 question reader (`Legacy080Question`), and
+  `worker/tests/advisory.test.ts` runs it, and the 0.3.0 catch-up loops, against the relay.
+
+**When a phone cannot explain the plan** (`advisoryPlanOf`). A phone that declares the feature shows the deadline and
+the plan. When it cannot decrypt the content (it holds no key for the content's epoch), it still reads the signed
+deadline and mode, and shows the deadline and says the agent may proceed after it, without naming what it will do. A
+decrypted plan that is missing or invalid, or an advisory approval, makes the question malformed rather than shown
+without its plan. In a round after the first it shows nothing advisory. A phone that does not declare the feature,
+whether older or merely without the advisory display, never shows the question as one that waits: it shows one it
+cannot read, so the person answers on a phone that can. The phone app in this repository refuses advisory questions
+this way (`ADVISORY_UNSUPPORTED` in `app/src/domain/verify.ts`) until it shows the deadline and plan.
+
+**Fixtures.** `ADVISORY_QUESTION_FIXTURE` (an advisory question), `BLOCKING_APPROVAL_FIXTURE` (a gated approval that
+always waits) and `ROUND_CASES` (the transition table as event sequences, with what every implementation must
+observe), as unsigned templates and plaintext content that each test encrypts and signs with its own keys.
+`packages/protocol/tests/advisory.test.ts` runs every case through `applyRoundEvent`, and
+`worker/tests/advisory.test.ts` holds the relay to the table's admission, timely answer, expiry, late answer, late
+dismissal and reopen rows.

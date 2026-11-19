@@ -103,6 +103,14 @@ export interface BridgeOptions {
    * once it understands the follow-up block (docs/daintree-integration-spec.md section 6.4).
    */
   followUps?: boolean;
+  /**
+   * The host delivers the outcome of an advisory question to its agents (protocol section 21): an answer as usual,
+   * or, when none commits by the deadline, a notice that the plan the agent stated is due. Declares
+   * `advisory-deadlines-v1` to the relay. Off by default, so the bridge never signs an advisory question: a host
+   * turns it on once its sink understands that notice, and its policy must allow them as well
+   * (`PolicyRegistryOptions.advisoryQuestions`).
+   */
+  advisoryDeadlines?: boolean;
   auditPath?: string;
   debugContent?: boolean;
   client?: RelayClient;
@@ -143,14 +151,16 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
  * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
- * `sent_from: computer`), and `pane-snapshots-v1` when snapshots are on.
+ * `sent_from: computer`), `pane-snapshots-v1` when snapshots are on, and `advisory-deadlines-v1` when the host
+ * delivers advisory outcomes.
  */
 export function bridgeFeatures(
-  o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
+  o: Pick<BridgeOptions, 'followUps' | 'snapshots' | 'advisoryDeadlines'> = {},
 ): readonly ProtocolFeature[] {
   const extra: ProtocolFeature[] = [
     ...(o.followUps ? (['thread-messages-v1', OWNER_MESSAGE_FEATURE] as const) : []),
     ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
+    ...(o.advisoryDeadlines ? (['advisory-deadlines-v1'] as const) : []),
   ];
   return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
 }

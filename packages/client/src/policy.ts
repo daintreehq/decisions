@@ -164,6 +164,12 @@ export interface PolicyRegistryOptions {
    * expires. Default 7 days (`DEFAULTS.questionExpiryMs`).
    */
   defaultQuestionExpiryMs?: number | null;
+  /**
+   * Whether an agent may ask an advisory question (protocol section 21): one with a reply deadline after which it
+   * may carry out the plan it stated. Default false, so every question waits for a decision. Even when true, a
+   * question under any gate, from its origin or named by the agent, is never advisory (`advisoryRefusal`).
+   */
+  advisoryQuestions?: boolean;
 }
 
 /**
@@ -175,8 +181,10 @@ export class PolicyRegistry {
   private gates = new Map<string, WorkflowGate>();
   private proxy: boolean;
   private expiryMs: number | null;
+  private advisory: boolean;
   constructor(opts: PolicyRegistryOptions = {}) {
     this.proxy = opts.proxyAllowlisted === true;
+    this.advisory = opts.advisoryQuestions === true;
     this.expiryMs =
       opts.defaultQuestionExpiryMs === undefined
         ? DEFAULTS.questionExpiryMs
@@ -195,6 +203,13 @@ export class PolicyRegistry {
   }
   set proxyAllowlisted(v: boolean) {
     this.proxy = v;
+  }
+  /** Whether the host's policy allows advisory questions (protocol section 21); false unless the host set it. */
+  get advisoryQuestions(): boolean {
+    return this.advisory;
+  }
+  set advisoryQuestions(v: boolean) {
+    this.advisory = v === true;
   }
   /**
    * How long a question with no origin gate waits when its agent asks for no expiry, in ms; null = it never

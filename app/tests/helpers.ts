@@ -140,6 +140,8 @@ export async function questionEvent(
     envelopeQuestionId?: string;
     /** Seal (and sign) the envelope for another purpose than question content. */
     purpose?: 'question-content' | 'answer-content';
+    /** Mark the question advisory in its envelope's AAD (docs/protocol.md section 21). */
+    replyMode?: 'advisory';
     tamper?: (e: { ciphertext: string }) => void;
   } = {},
 ): Promise<LedgerEvent> {
@@ -154,6 +156,7 @@ export async function questionEvent(
     revision: 0,
     senderDeviceId: signer.id,
     purpose: o.purpose ?? 'question-content',
+    ...(o.replyMode ? { replyMode: o.replyMode } : {}),
     plaintext: o.content ?? SAMPLE_CONTENT,
   });
   const requirement = o.requirement ?? 'human-required';
