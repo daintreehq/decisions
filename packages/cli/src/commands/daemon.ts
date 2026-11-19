@@ -59,11 +59,14 @@ export function parseSink(spec: string | undefined): SinkSpec {
   if (!spec || spec === 'stdout') return { kind: 'stdout' };
   if (spec.startsWith('file:') && spec.length > 5) return { kind: 'file', path: spec.slice(5) };
   if (spec.startsWith('exec:') && spec.length > 5) return { kind: 'exec', cmd: spec.slice(5) };
-  throw new CliError('--sink must be stdout, file:<path> or exec:<command>');
+  throw new CliError('--sink must be stdout, file:<path> or exec:<command>', 2);
 }
 
 /** Exit status an exec sink command uses to say "nothing done, try again later" (sysexits EX_TEMPFAIL). */
 export const EXEC_SINK_TEMPFAIL = 75;
+
+/** How long an `exec:` command has to exit after SIGTERM before it is killed. */
+const EXEC_KILL_GRACE_MS = 2_000;
 
 /**
  * Demo sink so the whole loop works without Daintree: prints, appends to a file, or pipes the notice to a
@@ -84,6 +87,8 @@ export const EXEC_SINK_TEMPFAIL = 75;
 export class DemoSink implements TerminalSink {
   /** `exec:` commands still running, so shutdown can end them instead of waiting on them. */
   private readonly running = new Set<ChildProcess>();
+  /** Shutting down: nothing more is written, and what was not written is held for the next receiver. */
+  private closed = false;
   constructor(
     private readonly spec: SinkSpec,
     /** Writes one line; when it returns a promise, the line counts as written only once that resolves. */
@@ -113,6 +118,7 @@ export class DemoSink implements TerminalSink {
     return true;
   }
   async inject(_t: TerminalTarget, text: string, injectionId?: string): Promise<InjectResult> {
+    if (this.closed) return { outcome: 'held', reason: 'sink_closed' };
     switch (this.spec.kind) {
       case 'stdout':
         try {
@@ -190,7 +196,15 @@ export class DemoSink implements TerminalSink {
    * process up. One that may already have acted settles as ambiguous, never retried.
    */
   close(): void {
-    for (const p of this.running) p.kill('SIGTERM');
+    this.closed = true;
+    const ending = [...this.running];
+    for (const p of ending) p.kill('SIGTERM');
+    if (ending.length === 0) return;
+    // A command that ignores SIGTERM is killed, so it can neither keep the process up nor settle after the store closed.
+    const timer = setTimeout(() => {
+      for (const p of ending) if (this.running.has(p)) p.kill('SIGKILL');
+    }, EXEC_KILL_GRACE_MS);
+    timer.unref();
   }
 
   async hasMarker(_t: TerminalTarget, injectionId: string): Promise<boolean> {
@@ -203,10 +217,13 @@ export class DemoSink implements TerminalSink {
   }
 }
 
+/** How often a CLI receiver sends what is queued, retries and delivers, beside its socket or polling. */
+const CLI_PUMP_MS = 5_000;
+
 export function buildBridge(
   rt: Runtime,
   sink: TerminalSink,
-  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver } = {},
+  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver; pumpIntervalMs?: number } = {},
 ): DecisionsBridge {
   return new DecisionsBridge({
     identity: rt.identity,
@@ -225,6 +242,8 @@ export function buildBridge(
     // A question is advisory only when its asker states a plan (`--planned-fallback`, `planned_fallback`), and never
     // under a gate or for an approval; the relay and a phone or tablet must support it as well.
     policy: extra.policy ?? new PolicyRegistry({ advisoryQuestions: true }),
+    // Only the receiver publishes: a question another `decisions` process asked meanwhile goes out within seconds.
+    pumpIntervalMs: extra.pumpIntervalMs ?? CLI_PUMP_MS,
     ...(rt.ctx.webSocket ? { webSocket: rt.ctx.webSocket } : {}),
     now: rt.ctx.now,
   });
@@ -286,6 +305,8 @@ export interface DaemonOptions {
   poll?: HttpPollOptions;
   /** How long `once` may take before it stops (tests); default two minutes. */
   onceDeadlineMs?: number;
+  /** How often the bridge sends what is queued and delivers (tests); default `CLI_PUMP_MS`. */
+  pumpIntervalMs?: number;
   mcp?: {
     port?: number;
     /** Path the MCP answers on, exactly (default `/mcp`). */
@@ -311,16 +332,19 @@ const ONCE_TIMED_OUT = 'listen --once did not finish within two minutes; stopped
 export const REVOKED =
   'This device was revoked from the relay. Stopped; re-pair or restore from a recovery kit.';
 
-/** How long shutting down waits for a sink write in flight to be recorded before the store closes. */
+/**
+ * How long stopping waits for the bridge's work in flight to be recorded. Longer than `EXEC_KILL_GRACE_MS`, so a
+ * command that ignores SIGTERM has been killed, and its outcome recorded, by then.
+ */
 const DRAIN_WAIT_MS = 5_000;
 
 /**
- * Ends a bridge's run and closes its store: the sink's commands are ended and the relay requests aborted first, then
- * the bridge stops, and the store closes only once the delivery in flight has recorded what its sink reported (an
- * `exec:` command that answers SIGTERM with exit 75 is held, not left for a restart to call uncertain), or after
- * `DRAIN_WAIT_MS`. `also` is other work on the store to wait for the same way.
+ * Ends a bridge's run without closing its store: the sink stops writing and its commands are ended, the relay requests
+ * are aborted, the bridge stops, and then this waits for what the bridge had in flight (a pump, applying events, a
+ * delivery) to record what happened (an `exec:` command that answers SIGTERM with exit 75 is held, not left for a
+ * restart to call uncertain), or for `DRAIN_WAIT_MS`. `also` is other work on the store to wait for the same way.
  */
-export async function closeBridge(
+export async function quiesceBridge(
   rt: Runtime,
   bridge: DecisionsBridge,
   sink: DemoSink,
@@ -331,13 +355,23 @@ export async function closeBridge(
   await bridge.stop();
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
-    Promise.all([bridge.delivery.idle(), ...also.map((p) => p.catch(() => undefined))]),
+    Promise.all([bridge.idle(), ...also.map((p) => p.catch(() => undefined))]),
     new Promise<void>((resolve) => {
       timer = setTimeout(resolve, DRAIN_WAIT_MS);
       (timer as { unref?: () => void }).unref?.();
     }),
   ]);
   clearTimeout(timer);
+}
+
+/** `quiesceBridge`, then the store closes. */
+export async function closeBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  await quiesceBridge(rt, bridge, sink, also);
   await rt.store.close();
 }
 
@@ -389,6 +423,7 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     resolver: o.mcp?.attachmentsDir
       ? new PaneDirectoryResolver(o.mcp.attachmentsDir)
       : noAttachmentsResolver,
+    ...(o.pumpIntervalMs !== undefined ? { pumpIntervalMs: o.pumpIntervalMs } : {}),
   });
   const http = o.once === true || o.socket === false;
   // One way to stop, whatever asks: a signal, the caller's `until`, a revocation or a sync no retry can fix. It
@@ -445,6 +480,8 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         authenticator: auth,
         ...(o.mcp.port !== undefined ? { port: o.mcp.port } : {}),
         ...(o.mcp.path !== undefined ? { path: o.mcp.path } : {}),
+        // Its sink is this process's terminal, a file or a command, never the agent's own terminal: agents check back.
+        answerArrival: 'poll',
         // This host resolves an id inside the pane's human-designated folder, not the agent's worktree, so it says so.
         attachmentIdDescription: o.mcp.attachmentsDir
           ? 'The relative path the human gave you of an image in the attachments folder set up for this terminal; nothing else can be attached.'

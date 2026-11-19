@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,10 +49,14 @@ async function env(o: { advisory?: boolean } = {}) {
   const proc = (over: Partial<Ctx> & { onLine?: (l: string) => void } = {}) => {
     const out: string[] = [];
     const err: string[] = [];
+    const calls: string[] = [];
     const ctx: Ctx = {
       home,
       json: over.json ?? true,
-      fetch: relay.fetch,
+      fetch: (async (u: unknown, init?: RequestInit) => {
+        calls.push(`${init?.method ?? 'GET'} ${new URL(String(u)).pathname}`);
+        return relay.fetch(u as string, init);
+      }) as typeof fetch,
       keyStore,
       out: (l) => void out.push(l),
       outAcked: async (l) => {
@@ -66,7 +71,7 @@ async function env(o: { advisory?: boolean } = {}) {
     };
     const records = () =>
       out.map((l) => JSON.parse(l) as { record: string } & Record<string, unknown>);
-    return { ctx, out, err, records };
+    return { ctx, out, err, calls, records };
   };
   const created = () => [...relay.questions.keys()];
   return { identity, relay, phone, home, clock, proc, created };
@@ -147,20 +152,60 @@ describe('the outcome a wait reports', () => {
       ],
     ];
     for (const [o, outcome] of cases) expect(outcomeOf(v(o))).toBe(outcome);
-    expect(new Set(Object.values(OUTCOME_EXIT)).size).toBe(Object.keys(OUTCOME_EXIT).length);
-    expect(OUTCOME_EXIT.answered).toBe(0);
+    expect(OUTCOME_EXIT).toEqual({
+      answered: 0,
+      declined: 10,
+      withdrawn: 11,
+      expired: 12,
+      'advisory-expired': 13,
+      'never-published': 14,
+      refused: 15,
+      'wait-timeout': 16,
+    });
   });
 
   it('waits while an advisory plan is not settled, and calls a withheld one a plain expiry', () => {
-    const expired = { status: 'expired' as const, closedReason: 'expired' as const };
+    const expired = {
+      status: 'expired' as const,
+      closedReason: 'expired' as const,
+      replyMode: 'advisory' as const,
+      plannedFallback: 'I will use the in-memory fixture.',
+      expiresAt: '2026-11-19T10:15:00.000Z',
+    };
+    // This computer still reads the relay (a reopen may be on its way): not settled, whatever the notice says.
+    for (const notice of ['pending', 'delivered'] as const)
+      expect(
+        outcomeOf(v({ ...expired, fallbackDue: false, advisoryTimeout: timeout({ notice }) })),
+      ).toBeNull();
+    // Settled where this process receives; a process that only reads waits for the receiver's notice.
+    const due = v({
+      ...expired,
+      fallbackDue: true,
+      advisoryTimeout: timeout({ notice: 'pending' }),
+    });
+    expect(outcomeOf(due, { receiving: true })).toBe('advisory-expired');
+    expect(outcomeOf(due)).toBeNull();
     expect(
       outcomeOf(
-        v({ ...expired, fallbackDue: false, advisoryTimeout: timeout({ notice: 'pending' }) }),
+        v({ ...expired, fallbackDue: true, advisoryTimeout: timeout({ notice: 'uncertain' }) }),
       ),
-    ).toBeNull();
-    expect(
-      outcomeOf(v({ ...expired, advisoryTimeout: timeout({ disposition: 'fallback-withheld' }) })),
-    ).toBe('expired');
+    ).toBe('advisory-expired');
+    const withheld = v({
+      ...expired,
+      advisoryTimeout: timeout({ disposition: 'fallback-withheld', notice: 'pending' }),
+    });
+    expect(outcomeOf(withheld)).toBe('expired');
+    expect(deliveryOf(withheld, 'expired')).toBe('pending');
+    // An earlier round's timeout no longer describes a reopened question that expired again.
+    const reopened = v({
+      ...expired,
+      revision: 1,
+      replyMode: 'blocking',
+      advisoryTimeout: timeout({ revision: 0, notice: 'uncertain' }),
+      deliveryStatus: 'terminal-delivered',
+    });
+    expect(outcomeOf(reopened)).toBe('expired');
+    expect(deliveryOf(reopened, 'expired')).toBe('delivered');
   });
 
   it('keeps the notice apart from the outcome: an uncertain write leaves the answer, and an open question waits', () => {
@@ -186,7 +231,8 @@ describe('the outcome a wait reports', () => {
     expect(parseWaitTimeout('1s')).toBe(1_000);
     expect(parseWaitTimeout('15m')).toBe(15 * MIN);
     expect(parseWaitTimeout('365d')).toBe(365 * 24 * 60 * MIN);
-    for (const bad of ['0s', '366d', '1.5m', '10', 'm', '-1s']) {
+    expect(parseWaitTimeout('2h')).toBe(120 * MIN);
+    for (const bad of ['0s', '366d', '8761h', '1.5m', '10', 'm', '-1s']) {
       const e = (() => {
         try {
           parseWaitTimeout(bad);
@@ -263,6 +309,13 @@ describe('decisions ask', () => {
       (x: unknown) => x,
     );
     expect((loose as CliError).exitCode).toBe(2);
+    const option = await ask(p.ctx, {}, { question: 'q', option: ['nolabel'] }).catch(
+      (x: unknown) => x,
+    );
+    expect((option as CliError).exitCode).toBe(2);
+    const sink = await ask(p.ctx, {}, { question: 'q', sink: 'pipe' }).catch((x: unknown) => x);
+    expect((sink as CliError).exitCode).toBe(2);
+    expect(p.out).toEqual([]);
     expect(e.created()).toHaveLength(0);
   });
 
@@ -297,6 +350,22 @@ describe('decisions ask', () => {
     expect((refused as CliError).message).toMatch(/^not_supported: relay-unsupported/);
     expect((refused as CliError).exitCode).toBe(1);
     expect(old.created()).toHaveLength(0);
+
+    // A relay that supports advice, and no phone or tablet that can show it.
+    const readerless = await env({ advisory: true });
+    readerless.relay.deviceFeatures.clear();
+    const r = readerless.proc();
+    const none = await ask(
+      r.ctx,
+      {},
+      {
+        question: 'Which fixture?',
+        expiresIn: '15m',
+        plannedFallback: "I'll use the in-memory fixture.",
+      },
+    ).catch((x: unknown) => x);
+    expect((none as CliError).message).toMatch(/^not_supported: no-capable-reader/);
+    expect(r.out).toEqual([]);
   });
 });
 
@@ -326,6 +395,7 @@ describe('decisions ask --wait', () => {
     const recs = p.records();
     expect(recs.map((r) => r.record)).toEqual(['asked', 'notice', 'result']);
     expect(recs[1]!.text).toContain('Go ahead');
+    expect(recs[2]!.question_id).toBe(recs[0]!.question_id);
     expect(recs[2]).toMatchObject({
       outcome: 'answered',
       exit_code: 0,
@@ -467,9 +537,11 @@ describe('decisions ask --wait', () => {
     expect(e.relay.calls.some((c) => c.path.includes(id) && c.method !== 'GET')).toBe(false);
 
     const t = e.proc({ json: false });
+    const t0 = Date.now();
     expect(await waitCmd(t.ctx, {}, id, { waitTimeout: '1s', stopped: never(), ...QUICK })).toBe(
       16,
     );
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(950);
     expect(t.out.join('\n')).toMatch(
       /Outcome: wait-timeout \(exit 16\)\.\nStopped waiting here after --wait-timeout 1s; nothing was cancelled\. q-1 is open\./,
     );
@@ -488,9 +560,13 @@ describe('recovering an outcome by ID', () => {
     await daemon(listener.ctx, {}, { once: true });
     expect(listener.out.join('\n')).toContain('Yes, merge it');
 
-    // The asker comes back later and waits by ID: the outcome is already settled, and nothing is typed here.
+    // The asker comes back later and waits by ID: the outcome is already settled, so nothing is read from the relay,
+    // nothing is typed here, and it does not wait for a tick.
     const later = e.proc();
-    expect(await waitCmd(later.ctx, {}, id, { stopped: never(), ...QUICK })).toBe(0);
+    expect(await waitCmd(later.ctx, {}, id, { stopped: never(), ...QUICK, tickMs: 60_000 })).toBe(
+      0,
+    );
+    expect(later.calls).toEqual([]);
     expect(later.records().map((r) => r.record)).toEqual(['result']);
     expect(result(later.records())).toMatchObject({
       outcome: 'answered',
@@ -500,6 +576,7 @@ describe('recovering an outcome by ID', () => {
 
     const got = e.proc();
     await getCmd(got.ctx, {}, id);
+    expect(got.calls).toEqual([]);
     expect(JSON.parse(got.out[0]!)).toMatchObject({
       question_id: id,
       outcome: 'answered',
@@ -523,7 +600,16 @@ describe('recovering an outcome by ID', () => {
     const listener = e.proc({ json: false });
     let release!: () => void;
     const until = new Promise<void>((r) => (release = r));
-    const listening = daemon(listener.ctx, {}, { socket: false, poll: FAST, until });
+    const listening = daemon(
+      listener.ctx,
+      {},
+      {
+        socket: false,
+        poll: FAST,
+        pumpIntervalMs: 20,
+        until,
+      },
+    );
     await vi.waitFor(() => expect(listener.out.join('\n')).toMatch(/Listening for answers/));
 
     const p = e.proc();
@@ -537,10 +623,15 @@ describe('recovering an outcome by ID', () => {
     expect(result(p.records())).toMatchObject({ outcome: 'answered', text: 'Answer one' });
     expect(['pending', 'delivered']).toContain(result(p.records()).delivery);
     await vi.waitFor(() => expect(listener.out.join('\n')).toContain('Answer one'));
+    // It only asked: the listener published the question and read the relay.
+    expect(p.calls.filter((c) => c === 'POST /api/v1/questions' || c.includes('/events'))).toEqual(
+      [],
+    );
 
     const q = e.proc();
     const w2 = ask(q.ctx, {}, { question: 'Second?', wait: true, stopped: never(), ...QUICK });
     await vi.waitFor(() => expect(e.created()).toHaveLength(2));
+    expect(q.calls.filter((c) => c.includes('/events'))).toEqual([]);
     release();
     await listening;
     await vi.waitFor(() => expect(q.err.join('\n')).toMatch(/receiving here from now on/));
@@ -548,6 +639,41 @@ describe('recovering an outcome by ID', () => {
     expect(await w2).toBe(0);
     expect(q.records().map((r) => r.record)).toEqual(['asked', 'notice', 'result']);
     expect(listener.out.join('\n')).not.toContain('Answer two');
+  });
+
+  it('asks once for two asks at once with the same correlation id', async () => {
+    const e = await env();
+    const [a, b] = [e.proc(), e.proc()];
+    const same = { question: 'Tabs?', correlationId: 'once', stopped: never() };
+    await Promise.all([ask(a.ctx, {}, same), ask(b.ctx, {}, same)]);
+    const ids = [a.records()[0]!.question_id, b.records()[0]!.question_id];
+    expect(ids[0]).toBe(ids[1]);
+    expect([a.records()[0]!.duplicate, b.records()[0]!.duplicate].sort()).toEqual([false, true]);
+    expect(e.created()).toEqual([ids[0]]);
+  });
+
+  it('takes the receiver lock only from a process that does not hold it, until that process ends', async () => {
+    const e = await env();
+    await ask(e.proc().ctx, {}, { question: 'q', stopped: never() });
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.argv[1]); db.exec('BEGIN EXCLUSIVE'); process.stdout.write('held'); setInterval(() => {}, 1000);",
+        join(e.home, 'receiver.lock'),
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    await new Promise<void>((resolve) => holder.stdout!.once('data', () => resolve()));
+    try {
+      const busy = await daemon(e.proc().ctx, {}, { once: true }).catch((x: unknown) => x);
+      expect((busy as CliError).message).toMatch(/already receiving for this state directory/);
+    } finally {
+      holder.kill('SIGKILL');
+      await new Promise((r) => holder.once('exit', r));
+    }
+    // Released by the operating system when the holder died, without any unlock.
+    await daemon(e.proc().ctx, {}, { once: true });
   });
 
   it('runs one receiver per state directory', async () => {
@@ -582,6 +708,7 @@ describe('the standalone flow through decisions mcp', () => {
       {
         socket: false,
         poll: FAST,
+        pumpIntervalMs: 20,
         sink: `file:${notices}`,
         until,
         mcp: { port: 0 },
@@ -602,22 +729,35 @@ describe('the standalone flow through decisions mcp', () => {
       });
       return (
         (await r.json()) as {
-          result: { isError?: boolean; structuredContent: Record<string, unknown> };
+          result: {
+            isError?: boolean;
+            content: { text: string }[];
+            structuredContent: Record<string, unknown>;
+          };
         }
       ).result;
     };
     try {
-      const asked = await vi.waitFor(async () => {
-        const r = await call('ask_human', {
-          question: 'Which fixture should I use?',
-          expires_in: '15m',
-          planned_fallback: 'I will use the in-memory fixture.',
-          correlation_id: 'fixture-choice',
+      const asked = await vi
+        .waitFor(async () => {
+          const r = await call('ask_human', {
+            question: 'Which fixture should I use?',
+            expires_in: '15m',
+            planned_fallback: 'I will use the in-memory fixture.',
+            correlation_id: 'fixture-choice',
+          });
+          // The first ask may come before the background read of what advice needs: it is retried.
+          expect(r.isError).toBeFalsy();
+          return r;
+        })
+        .then((r) => {
+          // Nothing here types into the agent's terminal: it is told to check back with get_decision.
+          expect(r.content[0]!.text).toContain(
+            'This host does not type the answer into your terminal',
+          );
+          expect(r.content[0]!.text).not.toContain('arrives as a new message in this terminal');
+          return r.structuredContent;
         });
-        // The first ask may come before the background read of what advice needs: it is retried.
-        expect(r.isError).toBeFalsy();
-        return r.structuredContent;
-      });
       expect(asked).toMatchObject({ reply_mode: 'advisory', status: 'queued' });
       const id = asked.question_id as string;
       await vi.waitFor(() => expect(e.created()).toEqual([id]));

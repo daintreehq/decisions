@@ -172,6 +172,10 @@ class Rerun {
     private readonly task: () => Promise<void>,
     private readonly onError: (e: Error) => void,
   ) {}
+  /** Settles once the run in progress, and any it was kicked for, have finished; never rejects. */
+  idle(): Promise<void> {
+    return this.loop ?? Promise.resolve();
+  }
   kick(): Promise<void> {
     this.again = true;
     this.loop ??= (async () => {
@@ -802,6 +806,27 @@ export class DecisionsBridge {
       }),
     ]);
     clearTimeout(timer);
+  }
+
+  /**
+   * Settles once the work this bridge already started has finished: a pump or sync in flight, applying what it read,
+   * and delivering, with what the sink reported recorded. For a host that has stopped the bridge (and ended its sink's
+   * commands) and is about to close the store; never rejects. Work started after it is called is not waited for.
+   */
+  async idle(): Promise<void> {
+    const quiet = (p: Promise<unknown> | null | undefined) =>
+      (p ?? Promise.resolve()).then(
+        () => undefined,
+        () => undefined,
+      );
+    await Promise.all([
+      quiet(this.pumping),
+      quiet(this.syncing),
+      quiet(this.paging?.pass),
+      this.applier.idle(),
+      this.deliverer.idle(),
+    ]);
+    await this.delivery.idle();
   }
 
   private stopPolling(): void {

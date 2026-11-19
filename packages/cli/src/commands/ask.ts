@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import {
   BridgeError,
+  RelayError,
   adjustmentText,
   askedResult,
   decisionResult,
@@ -22,6 +23,7 @@ import {
   cliOrigin,
   closeBridge,
   parseSink,
+  quiesceBridge,
   reportSyncs,
 } from './daemon.js';
 
@@ -84,14 +86,23 @@ function currentAdvisoryTimeout(v: DecisionView) {
 }
 
 /**
- * The question's outcome, or null while there is none yet to report. A create whose reply was lost
- * (`possibly-committed`) is never concluded here, whatever the clock says; neither is an advisory deadline whose plan
- * this computer may yet let go ahead, while it still reads the relay (a reopen may be on its way).
+ * The question's outcome, or null while there is none yet to report. A queued question is never concluded here,
+ * whatever the clock says, a create whose reply was lost (`possibly-committed`) included; neither is an advisory
+ * deadline whose plan this computer may yet let go ahead while it still reads the relay (a reopen may be on its way).
+ *
+ * `receiving`: this process runs the bridge that reads the relay, so its own view of the ledger decides that. A process
+ * that does not (another one receives, or `get`) cannot see a replay under way there, so it takes the plan as due only
+ * once the receiver has written, or may have written, its notice.
  */
-export function outcomeOf(v: DecisionView): QuestionOutcome | null {
-  if (v.publication === 'possibly-committed') return null;
+export function outcomeOf(
+  v: DecisionView,
+  o: { receiving?: boolean } = {},
+): QuestionOutcome | null {
   const advisory = currentAdvisoryTimeout(v);
-  if (advisory?.disposition === 'fallback-due' && !v.fallbackDue) return null;
+  if (advisory?.disposition === 'fallback-due') {
+    if (!v.fallbackDue) return null;
+    if (!o.receiving && advisory.notice === 'pending') return null;
+  }
   switch (v.status) {
     case 'human-answered':
     case 'proxy-answered':
@@ -177,102 +188,141 @@ interface WaitArgs {
   timeoutMs: number | null;
   /** How this process receives once it holds the lock. */
   start: { socket: false; poll: HttpPollOptions | true } | { socket?: true };
-  stopped: Promise<StopSignal>;
+  /** Set the moment a signal arrives (`Halt`), and the wake that goes with it. */
+  halt: Halt;
+  /** Starting the bridge, once this process receives: shutdown waits for it. */
+  starting: Promise<unknown>[];
   tickMs?: number;
   settleMs?: number;
 }
 
+/** A stop request, readable at once: set from the signal handler itself, not a later callback. */
+export interface Halt {
+  signal: StopSignal | null;
+  /** Called when `signal` is set. */
+  onStop: (() => void) | null;
+}
+
 /**
- * Waits for the question's outcome, reading this computer's copy of it now (it may have settled before this wait
- * began, or in another process on the same store), whenever the bridge says something moved, and every `tickMs`.
- * While another process receives for the state directory, this one only reads; once that one exits, this one takes
- * over and receives itself. Its own sink gets `settleMs` to write the outcome's notice before the wait reports.
- * Stopping (the wait timeout, a signal) never cancels the question: a final read still reports an outcome that came.
+ * Waits for the question's outcome, reading this computer's copy of it first (it may have settled before this wait
+ * began, or in another process on the same store), then whenever the bridge says something moved, and every `tickMs`.
+ * An outcome already there is reported without receiving anything. Otherwise, while another process receives for the
+ * state directory, this one only reads; when none does (or once that one exits) this one receives, starting its bridge
+ * in the background so a slow start never holds up a signal, the timeout or an outcome another process records. Its
+ * own sink gets `settleMs` (within the wait's budget) to write the outcome's notice. Stopping never cancels the
+ * question.
  */
 async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
-  const { ctx, bridge } = a;
+  const { ctx, bridge, halt } = a;
   // Set from listeners, so kept in an object the compiler does not narrow across awaits.
-  const ended: { fatal: CliError | null; stop: StopSignal | null } = { fatal: null, stop: null };
+  const ended: { fatal: CliError | null } = { fatal: null };
   let finalSince: number | null = null;
   let wake!: () => void;
   let woken = new Promise<void>((r) => (wake = r));
+  const fail = (e: CliError) => {
+    ended.fatal ??= e;
+    wake();
+  };
   const offs = [
     bridge.on('delivered', (id) => id === a.questionId && wake()),
     bridge.on('sync', (s) => {
       if (s.outcome === 'fatal')
-        ended.fatal ??= new CliError(
-          `stopped waiting: the relay refuses this client (${s.reason}); update decisions`,
+        fail(
+          new CliError(
+            `stopped waiting: the relay refuses this client (${s.reason}); update decisions`,
+          ),
         );
       wake();
     }),
-    bridge.on('state', (s) => {
-      if (s !== 'revoked') return;
-      ended.fatal ??= new CliError(REVOKED);
-      wake();
+    // Over the socket, a relay that speaks another protocol version ends the socket for good.
+    bridge.on('error', (e) => {
+      if (e instanceof RelayError && e.code === 'upgrade_required')
+        fail(new CliError('stopped waiting: the relay needs a newer decisions; update decisions'));
     }),
+    bridge.on('state', (s) => s === 'revoked' && fail(new CliError(REVOKED))),
   ];
-  void a.stopped.then((sig) => {
-    ended.stop ??= sig;
-    wake();
-  });
+  halt.onStop = () => wake();
   const timer = setInterval(() => wake(), a.tickMs ?? TICK_MS);
   let receiving = false;
   let observing = false;
+  let attention = false;
+  const remaining = (now: number) =>
+    a.timeoutMs === null ? Infinity : a.timeoutMs - (now - a.since);
   try {
     for (;;) {
-      if (!receiving && !ended.fatal && !ended.stop) {
-        // Already held (an `ask` that took it before asking), or free now: this process receives.
-        if (a.lock.tryAcquire()) {
-          receiving = true;
-          if (observing)
-            ctx.err('[decisions] the other receiver stopped; receiving here from now on');
-          await bridge.start(a.start);
-        } else if (!observing) {
-          observing = true;
-          ctx.err(
-            '[decisions] another decisions process receives for this state directory: its sink gets the notice, and this wait reads the outcome from the shared state',
-          );
-        }
-      }
       const view = await bridge.getDecision(a.questionId, a.pane);
-      const outcome = outcomeOf(view);
+      const outcome = outcomeOf(view, { receiving });
       const now = performance.now();
       if (outcome) {
         const delivery = deliveryOf(view, outcome);
         finalSince ??= now;
+        // Only this process's own sink is waited for, and never past the wait's budget.
         const settling =
           receiving &&
           delivery === 'pending' &&
-          now - finalSince < (a.settleMs ?? SETTLE_MS) &&
-          !ended.stop &&
+          now - finalSince < Math.min(a.settleMs ?? SETTLE_MS, remaining(finalSince)) &&
+          !halt.signal &&
           !ended.fatal;
         if (!settling) return { outcome, view, delivery };
       } else {
         if (ended.fatal) throw ended.fatal;
-        if (ended.stop)
-          return { outcome: 'interrupted', view, delivery: 'none', signal: ended.stop };
-        if (a.timeoutMs !== null && now - a.since >= a.timeoutMs)
-          return { outcome: 'wait-timeout', view, delivery: 'none' };
+        if (halt.signal)
+          return { outcome: 'interrupted', view, delivery: 'none', signal: halt.signal };
+        if (remaining(now) <= 0) return { outcome: 'wait-timeout', view, delivery: 'none' };
+        if (!attention && view.deliveryStatus === 'needs-attention') {
+          attention = true;
+          ctx.err(
+            `[decisions] q-${view.alias} needs attention: something could not be accepted or written for it (see \`decisions status\`). This wait goes on until it has an outcome${a.timeoutMs === null ? '; --wait-timeout bounds it' : ''}.`,
+          );
+        }
+        if (!receiving) {
+          // Already held (an `ask` that took it before asking), or free now: this process receives.
+          if (a.lock.tryAcquire()) {
+            receiving = true;
+            if (observing)
+              ctx.err('[decisions] the other receiver stopped; receiving here from now on');
+            a.starting.push(
+              bridge.start(a.start).catch((e: Error) => ctx.err(`warning: ${e.message}`)),
+            );
+          } else if (!observing) {
+            observing = true;
+            ctx.err(
+              '[decisions] another decisions process receives for this state directory: its sink gets the notice, and this wait reads the outcome from the shared state',
+            );
+          }
+        }
       }
       await woken;
       woken = new Promise<void>((r) => (wake = r));
     }
   } finally {
+    halt.onStop = null;
     clearInterval(timer);
     for (const off of offs) off();
   }
 }
 
-/** Reads SIGINT and SIGTERM as a request to stop waiting, from now until `off`. */
-function stopSignals(): { stopped: Promise<StopSignal>; off: () => void } {
-  let resolve!: (s: StopSignal) => void;
-  const stopped = new Promise<StopSignal>((r) => (resolve = r));
-  const onInt = () => resolve('SIGINT');
-  const onTerm = () => resolve('SIGTERM');
+/**
+ * Reads SIGINT and SIGTERM (or, in tests, `stopped`) as a request to stop, from now until `off`, recording it in the
+ * returned `Halt` the moment it arrives.
+ */
+function stopSignals(stopped?: Promise<StopSignal>): { halt: Halt; off: () => void } {
+  const halt: Halt = { signal: null, onStop: null };
+  const stop = (s: StopSignal) => {
+    if (halt.signal) return;
+    halt.signal = s;
+    halt.onStop?.();
+  };
+  if (stopped) {
+    void stopped.then(stop);
+    return { halt, off: () => undefined };
+  }
+  const onInt = () => stop('SIGINT');
+  const onTerm = () => stop('SIGTERM');
   process.once('SIGINT', onInt);
   process.once('SIGTERM', onTerm);
   return {
-    stopped,
+    halt,
     off: () => {
       process.off('SIGINT', onInt);
       process.off('SIGTERM', onTerm);
@@ -389,7 +439,7 @@ export interface WaitCommandOptions {
   settleMs?: number;
 }
 
-/** Everything one `ask` or `wait` run holds, and its way out. */
+/** Everything one `ask` or `wait` run holds, and its ways out. */
 async function openWaiter(
   ctx: Ctx,
   g: GlobalOptions,
@@ -398,13 +448,12 @@ async function openWaiter(
 ) {
   const spec = parseSink(o.sink);
   // Installed before anything can take time, so a signal is a stop request, never an exit with the question unread.
-  const signals = o.stopped ? null : stopSignals();
-  const stopped = o.stopped ?? signals!.stopped;
+  const signals = stopSignals(o.stopped);
   let rt: Runtime;
   try {
     rt = await openRuntime(ctx, g);
   } catch (e) {
-    signals?.off();
+    signals.off();
     throw e;
   }
   const lock = ReceiverLock.forHome(ctx.home);
@@ -415,17 +464,25 @@ async function openWaiter(
   bridge.on('socket', (s, d) => ctx.err(`[relay] ${s}${d ? ` (${d})` : ''}`));
   reportSyncs(ctx, bridge);
   const also: Promise<unknown>[] = [];
+  let quiet: Promise<void> | null = null;
+  /** Stop receiving and writing, and let what was in flight record itself; the store stays open to be read. */
+  const quiesce = () => {
+    stopping = true;
+    quiet ??= quiesceBridge(rt, bridge, sink, also);
+    return quiet;
+  };
   return {
     rt,
     lock,
     bridge,
-    stopped,
+    halt: signals.halt,
     also,
+    quiesce,
     close: async () => {
-      stopping = true;
-      signals?.off();
+      signals.off();
       try {
-        await closeBridge(rt, bridge, sink, also);
+        await quiesce();
+        await rt.store.close();
       } finally {
         lock.release();
       }
@@ -436,25 +493,67 @@ async function openWaiter(
 const startOf = (o: { socket?: boolean; poll?: HttpPollOptions }): WaitArgs['start'] =>
   o.socket === false ? { socket: false, poll: o.poll ?? true } : {};
 
+type Waiter = Awaited<ReturnType<typeof openWaiter>>;
+
 /**
- * `decisions ask`: commit the question locally, print its receipt at once (before anything is sent), then publish it,
- * or with `--wait` wait for its outcome. Returns the exit status.
+ * Waits, then reports. Before the result is written, this process stops receiving and lets its sink settle, so the
+ * record says how the notice's write really ended and no notice follows it; it then reads the question once more, and
+ * an outcome that came meanwhile (even as a signal or the timeout stopped the wait) is the one reported.
+ */
+async function waitAndReport(
+  ctx: Ctx,
+  w: Waiter,
+  a: Omit<WaitArgs, 'ctx' | 'bridge' | 'lock' | 'halt' | 'starting'>,
+): Promise<number> {
+  let res: WaitResult;
+  try {
+    res = await waitForOutcome({
+      ...a,
+      ctx,
+      bridge: w.bridge,
+      lock: w.lock,
+      halt: w.halt,
+      starting: w.also,
+    });
+  } catch (e) {
+    throw cliErrorOf(e);
+  }
+  await w.quiesce();
+  const view = await w.bridge.getDecision(a.questionId, a.pane).catch(() => null);
+  const outcome = view ? outcomeOf(view, { receiving: false }) : null;
+  if (view && outcome) res = { outcome, view, delivery: deliveryOf(view, outcome) };
+  else if (view && res.outcome !== 'interrupted' && res.outcome !== 'wait-timeout')
+    res = { ...res, delivery: deliveryOf(view, res.outcome) };
+  await writeLine(ctx, ctx.json ? JSON.stringify(resultRecord(res)) : resultText(res, a.timeoutMs));
+  return exitCodeOf(res);
+}
+
+/** How long `ask` waits for another `ask` in the same state directory to finish registering. */
+const REGISTER_WAIT_MS = 60_000;
+
+/**
+ * `decisions ask`: commit the question locally, print its receipt at once (before this process sends anything), then
+ * publish it, or with `--wait` wait for its outcome. Returns the exit status.
  */
 export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<number> {
   // Usage errors before anything opens.
   const options = (o.option ?? []).map((s) => {
     const i = s.indexOf('=');
-    if (i < 1) throw new CliError(`--option must look like id=Label, got "${s}"`);
+    if (i < 1) throw new CliError(`--option must look like id=Label, got "${s}"`, 2);
     return { id: s.slice(0, i), label: s.slice(i + 1) };
   });
   if (o.waitTimeout !== undefined && !o.wait)
     throw new CliError('--wait-timeout only applies with --wait', 2);
   const timeoutMs = o.waitTimeout !== undefined ? parseWaitTimeout(o.waitTimeout) : null;
   const w = await openWaiter(ctx, g, o, humanFileResolver);
-  const ended: { stop: StopSignal | null } = { stop: null };
-  void w.stopped.then((s) => (ended.stop = s));
+  // Two asks at once with the same correlation id: the second sees what the first committed.
+  const registering = o.correlationId !== undefined ? ReceiverLock.forRegistration(ctx.home) : null;
   try {
-    // A receiver elsewhere publishes and delivers; this process then only publishes what it asked, and only reads.
+    if (registering && !(await registering.acquire(REGISTER_WAIT_MS)))
+      throw new CliError(
+        'another decisions ask in this state directory did not finish registering',
+      );
+    // Receiving elsewhere, this process only asks and reads: that receiver publishes, within seconds.
     w.lock.tryAcquire();
     let r: RegisterResult;
     try {
@@ -479,6 +578,8 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
       });
     } catch (e) {
       throw cliErrorOf(e);
+    } finally {
+      registering?.release();
     }
     const since = performance.now();
     const text = askedCliText(r);
@@ -489,43 +590,40 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
         : text,
     );
     if (!o.wait) {
-      if (!ended.stop) {
+      if (w.lock.held && !w.halt.signal) {
         let timer: ReturnType<typeof setTimeout> | undefined;
-        const send = w.lock.held ? w.bridge.pump() : w.bridge.publisher.flush();
+        let wake!: () => void;
+        const stopped = new Promise<void>((resolve) => (wake = resolve));
+        w.halt.onStop = wake;
+        const send = w.bridge.pump();
         w.also.push(send);
         await Promise.race([
           send.catch((e: Error) => ctx.err(`warning: ${e.message}`)),
-          w.stopped,
+          stopped,
           new Promise<void>((resolve) => (timer = setTimeout(resolve, PUBLISH_MS))),
         ]);
         clearTimeout(timer);
+        w.halt.onStop = null;
       }
       if (!ctx.json)
         ctx.out(
           w.lock.held
             ? 'The outcome is delivered by a running `decisions listen` (or `decisions mcp`), or here with --wait.'
-            : 'Another decisions process receives for this state directory: its sink gets the outcome.',
+            : 'Another decisions process receives for this state directory: it publishes the question, and its sink gets the outcome.',
         );
-      return ended.stop ? SIGNAL_EXIT[ended.stop] : 0;
+      return w.halt.signal ? SIGNAL_EXIT[w.halt.signal] : 0;
     }
-    // Receiving elsewhere: publish what was asked here at once rather than at that receiver's next pass.
-    if (!w.lock.held) w.also.push(w.bridge.publisher.flush().catch(() => undefined));
-    const res = await waitForOutcome({
-      ctx,
-      bridge: w.bridge,
-      lock: w.lock,
+    return await waitAndReport(ctx, w, {
       questionId: r.questionId,
       pane: paneIdentityOf(cliOrigin()),
       since,
       timeoutMs,
       start: startOf(o),
-      stopped: w.stopped,
       ...(o.tickMs !== undefined ? { tickMs: o.tickMs } : {}),
       ...(o.settleMs !== undefined ? { settleMs: o.settleMs } : {}),
     });
-    await writeLine(ctx, ctx.json ? JSON.stringify(resultRecord(res)) : resultText(res, timeoutMs));
-    return exitCodeOf(res);
   } finally {
+    registering?.release();
     await w.close();
   }
 }
@@ -542,28 +640,19 @@ export async function waitCmd(
   const w = await openWaiter(ctx, g, o);
   try {
     const pane = paneIdentityOf(cliOrigin(o.pane ?? 'cli'));
-    let res: WaitResult;
-    try {
-      // An unknown question fails here, before this process takes over receiving for anything else.
-      await w.bridge.getDecision(questionId, pane);
-      res = await waitForOutcome({
-        ctx,
-        bridge: w.bridge,
-        lock: w.lock,
-        questionId,
-        pane,
-        since,
-        timeoutMs,
-        start: startOf(o),
-        stopped: w.stopped,
-        ...(o.tickMs !== undefined ? { tickMs: o.tickMs } : {}),
-        ...(o.settleMs !== undefined ? { settleMs: o.settleMs } : {}),
-      });
-    } catch (e) {
+    // An unknown question fails here, before this process takes over receiving for anything else.
+    await w.bridge.getDecision(questionId, pane).catch((e: unknown) => {
       throw cliErrorOf(e);
-    }
-    await writeLine(ctx, ctx.json ? JSON.stringify(resultRecord(res)) : resultText(res, timeoutMs));
-    return exitCodeOf(res);
+    });
+    return await waitAndReport(ctx, w, {
+      questionId,
+      pane,
+      since,
+      timeoutMs,
+      start: startOf(o),
+      ...(o.tickMs !== undefined ? { tickMs: o.tickMs } : {}),
+      ...(o.settleMs !== undefined ? { settleMs: o.settleMs } : {}),
+    });
   } finally {
     await w.close();
   }

@@ -177,6 +177,12 @@ const OUTBOX_SCAN = 1_000;
  */
 const SPOOL_GRACE_MS = 24 * 60 * 60_000;
 
+/**
+ * How long a registration that asked to wait for what advice needs (`RegisterOptions.awaitAdvisorySupport`) waits for
+ * that read: the relay's `/info` and the device directory, each with a 10-second deadline of their own.
+ */
+const ADVISORY_SUPPORT_WAIT_MS = 25_000;
+
 /** A create's item went while it was being sent (withdrawn or settled): it is not written back, and not sent. */
 class CreateWithdrawn extends Error {}
 /** A create's deadline passed before it was first sent: it goes no further, and is settled as never published. */
@@ -742,22 +748,37 @@ export class Publisher {
     >,
     awaitSupport = false,
   ): Promise<void> {
-    const facts = {
+    // The host's own rules, read now: again after any wait below, since the host may change them meanwhile.
+    const localFacts = () => ({
       ...q,
       hostSupport: this.advisory?.hostSupport === true,
       policyAllows: this.ctx.policy.advisoryQuestions,
-    };
+    });
+    let facts = localFacts();
     const local = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
     if (local) throw advisoryError(local);
     const unknown = (k: AdvisorySupportSnapshot) =>
       k.relay === null || (k.relay && k.reader === null);
     let known = await this.advisory!.known();
     if (awaitSupport && unknown(known)) {
-      await this.advisory!.refreshIfDue();
+      // One read, bounded here whatever the fetch does with its abort signal.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.advisory!.refreshIfDue(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ADVISORY_SUPPORT_WAIT_MS);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+      facts = localFacts();
+      const again = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
+      if (again) throw advisoryError(again);
       known = await this.advisory!.known();
     }
     if (known.relay === null || unknown(known)) {
-      void this.advisory!.refreshIfDue();
+      // A caller that waited for a read is not handed a second one: it asks again when it chooses.
+      if (!awaitSupport) void this.advisory!.refreshIfDue();
       throw advisoryError('support-unknown');
     }
     const remote = advisoryRefusal({

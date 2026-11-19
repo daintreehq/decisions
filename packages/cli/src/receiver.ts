@@ -22,6 +22,14 @@ export class ReceiverLock {
     return new ReceiverLock(join(home, 'receiver.lock'));
   }
 
+  /**
+   * Serialises `decisions ask` registrations in one state directory, so two at once with the same `--correlation-id`
+   * cannot both find no earlier question and ask it twice. Held only while registering.
+   */
+  static forRegistration(home: string): ReceiverLock {
+    return new ReceiverLock(join(home, 'register.lock'));
+  }
+
   get held(): boolean {
     return this.db !== null;
   }
@@ -41,6 +49,16 @@ export class ReceiverLock {
     return true;
   }
 
+  /** Takes the lock, trying again every 50 ms for up to `timeoutMs`; false if it never came free. */
+  async acquire(timeoutMs: number): Promise<boolean> {
+    const until = Date.now() + timeoutMs;
+    while (!this.tryAcquire()) {
+      if (Date.now() >= until) return false;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return true;
+  }
+
   release(): void {
     const db = this.db;
     if (!db) return;
@@ -56,4 +74,4 @@ export class ReceiverLock {
 
 /** What a receiving command says when another process already receives for the state directory. */
 export const RECEIVER_BUSY =
-  'another decisions process (listen, mcp, or an ask --wait or wait with nothing else receiving) is already receiving for this state directory (--home): run one receiver per state directory, or stop that one first';
+  'another decisions process (listen, mcp, a wait, or an ask while it publishes) is already receiving for this state directory (--home): run one receiver per state directory, or stop that one first';
