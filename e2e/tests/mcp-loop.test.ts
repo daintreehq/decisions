@@ -15,14 +15,7 @@ import {
   type RunningMcp,
 } from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
-import {
-  PaneSink,
-  callTool,
-  connect,
-  openFromInbox,
-  pairPhone,
-  paneOrigin,
-} from './mcp-agent.js';
+import { PaneSink, callTool, connect, openFromInbox, pairPhone, paneOrigin } from './mcp-agent.js';
 
 const PORT = 8797;
 const MOUNT = '/mcp/decisions';

@@ -49,7 +49,7 @@ export class TestClock {
   advance(ms: number): Promise<void> {
     if (!Number.isSafeInteger(ms) || ms < 0) throw new Error(`cannot advance the clock by ${ms}`);
     const move = this.moving.then(async () => {
-      for (let left = ms; left > 0; ) {
+      for (let left = ms; left > 0;) {
         const step = Math.min(left, STEP_MS);
         this.offsetMs += step;
         await this.setRelay(this.offsetMs);

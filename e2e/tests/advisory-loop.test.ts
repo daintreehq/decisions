@@ -345,7 +345,11 @@ describe.skipIf(!chromiumPath)(
         ...fixture,
         question_id: id,
         expires_at: expiresAt,
-        advisory_timeout: { ...fixture.advisory_timeout, deadline: expiresAt, injection_id: injectionId },
+        advisory_timeout: {
+          ...fixture.advisory_timeout,
+          deadline: expiresAt,
+          injection_id: injectionId,
+        },
       });
       expect((await relayClient.getQuestion(id)).status).toBe('expired');
     });
