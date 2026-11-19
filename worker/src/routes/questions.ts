@@ -256,12 +256,16 @@ export const createQuestion: Handler = async (room, c) => {
           'question id already exists with different content',
         );
       }
+      // A deadline may have passed since the sweep: expire it now, as an action would, so the reply is current.
+      const q = expireQuestionNow(room, existing)
+        ? room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, record.question_id)!
+        : existing;
       return json(200, {
-        question_id: existing.question_id,
-        revision: existing.revision,
-        status: existing.status,
-        event_seq: existing.last_event_seq,
-        created_at: iso(existing.created_at),
+        question_id: q.question_id,
+        revision: q.revision,
+        status: q.status,
+        event_seq: q.last_event_seq,
+        created_at: iso(q.created_at),
       });
     }
     // Only a new question must still be due. A retry of one already taken, answered above, may arrive after its

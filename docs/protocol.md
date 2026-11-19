@@ -164,8 +164,9 @@ wins**, later answers get `409 revision_conflict {latest_revision, status}`.
 
 Idempotency: a repeated `idempotency_key` with identical body returns the original receipt; a different body is
 `409 idempotency_collision`. Duplicate `(question_id, action_id)` is also idempotent. A create's retry is recognised
-before its deadline is checked: past `expires_at`, the same key and body still return the original receipt, and the
-same signed record under a new key still returns the question as it stands. Only a new question must still be due.
+before its deadline is checked: past `expires_at`, the same key and body still return the original receipt while the
+relay keeps it (30 days), and the same signed record under any other key returns the question as it stands. Only a
+new question must still be due.
 
 Limits (`LIMITS`): 100 open questions per installation, 10 per `origin_ref` (opaque pane hash). Default expiry is
 chosen by the desktop (`expires_at`, `null` = never). A finite `expires_at` on a create or a reopen must be in the
