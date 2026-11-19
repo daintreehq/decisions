@@ -54,6 +54,12 @@ export interface AnswerEntry {
    * reopen has replaced the round; the notice is never typed again on its own.
    */
   uncertain_injection_id?: string;
+  /**
+   * An advisory notice only: its sink refused a write this host had admitted (the ledger had settled for its round, as
+   * for a write that lands), so nothing was typed and a person has to decide. Kept with the entry so a process that
+   * does not receive can tell the plan was settled; a retry clears it.
+   */
+  write_refused?: boolean;
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;

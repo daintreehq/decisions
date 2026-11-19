@@ -600,6 +600,96 @@ describe('where the advisory notice goes', () => {
     expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
   });
 
+  it('a write its sink refused needs a person, and lets the plan go ahead in every process that reads it', async () => {
+    const e = await advised();
+    e.sink.injectBehaviour = { unavailable: 'rejected' };
+    await e.expire();
+    expect(e.sink.injectCalls).toBe(1);
+    expect(e.sink.typed).toHaveLength(0);
+    const row = await e.row();
+    expect(row.delivery_status).toBe('needs-attention');
+    expect(parseAnswers(row.answers_json)[0]).toMatchObject({ write_refused: true, delivered: false });
+    const due = {
+      fallbackDue: true,
+      advisoryTimeout: {
+        disposition: 'fallback-due',
+        notice: 'needs-attention',
+        writeRefused: true,
+        injectionId: null,
+      },
+    };
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject(due);
+    // A bridge on the same store that never reads the relay itself, as another process is, reads the same.
+    expect(await e.restart().getDecision(e.qid)).toMatchObject(due);
+    // It was admitted once the ledger had settled for its round: a read that fails later takes nothing back.
+    e.relay.down = 1;
+    await expect(e.bridge.catchUp()).rejects.toThrow();
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject(due);
+    expect((await getDecisionOverMcp(e.bridge, e.qid)).structuredContent).toMatchObject({
+      fallback_due: true,
+      advisory_timeout: { disposition: 'fallback-due', notice: 'needs-attention' },
+    });
+    // Nothing was typed, so it says what the host allows now.
+    e.policy.advisoryQuestions = false;
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      fallbackDue: false,
+      advisoryTimeout: { disposition: 'fallback-withheld', writeRefused: true },
+    });
+
+    // A notice that needs a person without a write being admitted (its pane gone) proves nothing to such a reader.
+    const f = await advised();
+    f.sink.panes.clear();
+    await f.expire();
+    expect(await f.bridge.getDecision(f.qid)).toMatchObject({
+      fallbackDue: true,
+      advisoryTimeout: { notice: 'needs-attention', writeRefused: false },
+    });
+    expect((await f.restart().getDecision(f.qid)).fallbackDue).toBe(false);
+  });
+
+  it('a retry takes the refusal back, and a reopen supersedes a refused notice', async () => {
+    const e = await advised();
+    e.sink.injectBehaviour = { unavailable: 'rejected' };
+    await e.expire();
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.writeRefused).toBe(true);
+    // Sent again, it waits for its pane like any notice not yet typed, and is then typed once.
+    e.sink.injectBehaviour = 'ok';
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.bridge.retryDelivery(e.qid);
+    expect(parseAnswers((await e.row()).answers_json)[0]!.write_refused).toBeUndefined();
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout).toMatchObject({
+      notice: 'pending',
+      writeRefused: false,
+    });
+    expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(false);
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(1);
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout).toMatchObject({
+      notice: 'delivered',
+      writeRefused: false,
+    });
+
+    const f = await advised();
+    f.sink.injectBehaviour = { unavailable: 'rejected' };
+    await f.expire();
+    await f.relay.plainActionEvent({
+      questionId: f.qid,
+      signer: f.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    await f.bridge.catchUp();
+    const reopened = {
+      status: 'open',
+      revision: 1,
+      fallbackDue: false,
+      advisoryTimeout: { revision: 0, notice: 'superseded', writeRefused: false },
+    };
+    expect(await f.bridge.getDecision(f.qid)).toMatchObject(reopened);
+    expect(await f.restart().getDecision(f.qid)).toMatchObject(reopened);
+  });
+
   it('reading a question starts no clock: the two-minute hold is timed from when its notice waits', async () => {
     const e = await advised();
     // Polled while open, before this desktop has read the relay in full, as an agent polling get_decision does.

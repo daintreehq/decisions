@@ -349,8 +349,8 @@ export interface DecisionView {
    * round's deadline passed unanswered (`advisoryTimeout`, `fallback-due`), or the question never reached the relay
    * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
    * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
-   * desktop to read the relay (a reopen may be on its way). It is never an answer or an approval: the person decided
-   * nothing.
+   * desktop to read the relay (a reopen may be on its way), unless its sink refused a write admitted after that read
+   * (`advisoryTimeout.writeRefused`). It is never an answer or an approval: the person decided nothing.
    */
   fallbackDue: boolean;
   /**
@@ -415,6 +415,12 @@ export interface AdvisoryTimeoutView {
   notice: 'pending' | 'delivered' | 'uncertain' | 'needs-attention' | 'superseded';
   /** The write that delivered the notice, or that may have; null otherwise. */
   injectionId: string | null;
+  /**
+   * True when the notice needs attention because its sink refused a write this host had admitted, once it had read the
+   * relay for the notice's round as for a write that lands: the plan is settled as for a written notice, although
+   * nothing was typed. False otherwise, a notice that needs attention for another reason (its pane gone) included.
+   */
+  writeRefused: boolean;
   /** Always `unobserved`: Decisions never sees whether the agent carried out the plan. */
   agentAction: 'unobserved';
 }
@@ -1405,10 +1411,11 @@ export class DecisionsBridge {
       allowed: this.ctx.policy.advisoryQuestions,
     };
     // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
-    // ahead here either.
+    // ahead here either. One whose admitted write its sink refused was settled as a typed one is: it waits no more.
     const noticeWaits =
       timeout?.inForce === true &&
-      (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention');
+      (timeout.view.notice === 'pending' ||
+        (timeout.view.notice === 'needs-attention' && !timeout.view.writeRefused));
     // Read (and the hold timed from now, if it is not yet) only once a notice waits; an earlier unsettled read wins.
     const held = noticeWaits
       ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
@@ -1566,6 +1573,7 @@ export class DecisionsBridge {
             : notice === 'uncertain'
               ? (e.uncertain_injection_id ?? null)
               : null,
+        writeRefused: notice === 'needs-attention' && e.write_refused === true,
         agentAction: 'unobserved',
       },
     };
