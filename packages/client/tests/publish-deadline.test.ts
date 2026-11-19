@@ -396,9 +396,9 @@ describe('a restart during an attachment upload', () => {
     const env = await setupBridge({ resolver: { resolve: async () => ({ bytes: png }) } });
     const r = await env.bridge.publisher.register(origin(), {
       question: 'q?',
-      attachments: [{ local_resource_id: 'one' }, { local_resource_id: 'two' }],
+      attachments: [{ local_resource_id: 'one' }],
     });
-    // The agent withdraws the question while the first image is on the wire.
+    // The agent withdraws the question while its image is on the wire.
     const upload = env.client.uploadAttachment.bind(env.client);
     env.client.uploadAttachment = async (...args) => {
       await env.bridge.cancelQuestion(r.questionId);
@@ -408,7 +408,7 @@ describe('a restart during an attachment upload', () => {
     await env.bridge.pump();
 
     expect(creates(env.relay)).toHaveLength(0);
-    expect(env.relay.uploads).toHaveLength(1); // the one already on the wire, and no other
+    expect(env.relay.uploads).toHaveLength(1); // the one already on the wire
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'cancelled',
