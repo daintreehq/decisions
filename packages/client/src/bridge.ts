@@ -26,7 +26,12 @@ import {
 import { PresenceReporter } from './presence.js';
 import { AgentStoppedPusher, type AgentStoppedPushResult } from './agent-stopped.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
-import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
+import {
+  Publisher,
+  type CreatePayload,
+  type PostMessageResult,
+  type RegisterResult,
+} from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
 import {
   DeclineQuestionInput,
@@ -85,7 +90,7 @@ import {
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
 import { AdvisorySupport } from './advisory.js';
 import type { LocalStore } from './store.js';
-import type { QuestionOrigin, QuestionRow } from './types.js';
+import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
 
 export interface BridgeOptions {
   identity: Identity;
@@ -273,10 +278,27 @@ export type ThreadEntryView =
       } | null;
     };
 
+/**
+ * Whether a question reached the relay, from the evidence this desktop keeps durably:
+ * - `not-sent`: queued, and provably never sent (no create request has been attempted);
+ * - `possibly-committed`: queued, and a create request may have reached the relay, but no reply or history has
+ *   confirmed it: its outcome is unknown until the relay can be reached;
+ * - `accepted`: the relay acknowledged it (a receipt or its history). Nothing more: not that the person saw it;
+ * - `never-published`: it never reached the relay, so it never reached the person's phone and no answer to it was
+ *   recorded: its deadline passed first (`closedReason: never-published`), or it was withdrawn before it was sent
+ *   (`closedReason: withdrawn`);
+ * - `refused`: the relay refused it for good (`status: publish-failed`);
+ * - `unknown`: imported history, or a row too old or damaged to tell.
+ */
+export type PublicationState =
+  'not-sent' | 'possibly-committed' | 'accepted' | 'never-published' | 'refused' | 'unknown';
+
 export interface DecisionView {
   questionId: string;
   alias: number;
   status: QuestionRow['local_status'];
+  /** Whether the question reached the relay (`PublicationState`). */
+  publication: PublicationState;
   requirement: QuestionRow['requirement'];
   deliveryStatus: QuestionRow['delivery_status'];
   revision: number;
@@ -311,9 +333,16 @@ export interface DecisionView {
   /**
    * Why a closed question is closed without an answer: `declined` when the person dismissed it (from a phone or
    * tablet, or on the computer through the owner desktop's signed decline), `withdrawn` when a desktop cancelled it,
-   * `expired` when its deadline passed. Null otherwise. None of them authorises anything.
+   * `expired` when its deadline passed, `never-published` when its deadline passed before it ever reached the relay,
+   * so no answer to it was recorded (`status: publish-failed`). Null otherwise. None of them authorises anything.
    */
-  closedReason: 'declined' | 'withdrawn' | 'expired' | null;
+  closedReason: 'declined' | 'withdrawn' | 'expired' | 'never-published' | null;
+  /**
+   * True only when the agent was told it may carry out the plan its advisory question stated: so far, an advisory
+   * question that never reached the relay before its deadline, under a host policy that allows advisory questions
+   * (protocol section 21). It is never an answer or an approval: the person decided nothing.
+   */
+  fallbackDue: boolean;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
   choice: string | null;
   /** The free text of the answer in force ('' when none). */
@@ -516,6 +545,7 @@ export class DecisionsBridge {
         onOwnerAnswer: (r) => this.notify('answer', r),
         onOwnerDecline: (r) => this.notify('decline', r),
         onOwnerFollowUp: (r) => this.notify('followUp', r),
+        onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
       },
       this.advisory,
     );
@@ -660,6 +690,8 @@ export class DecisionsBridge {
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
     await this.delivery.recover();
+    // Images a crash left with no queued create to use them.
+    await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
     // Stopped or revoked while recovering: nothing may start sending in the background now.
     if (run !== this.lifecycle) return;
     this.snapshots.start();
@@ -1162,7 +1194,11 @@ export class DecisionsBridge {
 
   /** Opens the answers in memory to build the view; nothing decrypted is written back. */
   private async view(row: QuestionRow): Promise<DecisionView> {
+    const create = (await this.ctx.store.outboxFor(row.question_id)).find(
+      (o) => o.kind === 'create',
+    );
     const entries = await openAnswers(this.ctx, row);
+    const unpublished = entries.find((e) => e.kind === 'unpublished');
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1204,6 +1240,7 @@ export class DecisionsBridge {
       questionId: row.question_id,
       alias: row.alias,
       status: row.local_status,
+      publication: publicationOf(row, create, !!unpublished),
       requirement: row.requirement,
       deliveryStatus: row.delivery_status,
       revision: row.question_revision,
@@ -1227,7 +1264,13 @@ export class DecisionsBridge {
             : 'withdrawn'
           : row.local_status === 'expired'
             ? 'expired'
-            : null,
+            : row.local_status === 'publish-failed' && unpublished
+              ? 'never-published'
+              : null,
+      fallbackDue:
+        !row.history_only &&
+        row.local_status === 'publish-failed' &&
+        unpublished?.fallback_due === true,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
       // Only a human answer that carried its own content attests to the images the phone displayed.
@@ -1369,7 +1412,14 @@ export class DecisionsBridge {
 
   private async deliverNow(): Promise<void> {
     const before = await this.ctx.store.listQuestions({
-      status: ['open', 'proxy-answered', 'human-answered', 'expired', 'cancelled'],
+      status: [
+        'open',
+        'proxy-answered',
+        'human-answered',
+        'expired',
+        'cancelled',
+        'publish-failed',
+      ],
     });
     const r = await this.delivery.drain();
     if (r.delivered > 0) {
@@ -1686,6 +1736,13 @@ export class DecisionsBridge {
   private async maybeRunProxy(questionId: string): Promise<void> {
     const row = await this.ctx.store.getQuestion(questionId);
     if (!row || row.requirement === 'human-required' || !this.o.proxy) return;
+    // A create replayed well after its deadline: the relay has expired it, so a proxy answer could only be refused.
+    // The allowance keeps a round this clock reads as just past due but the relay's may not.
+    if (
+      row.expires_at !== null &&
+      Date.parse(row.expires_at) + LIMITS.requestSkewMs <= this.ctx.now()
+    )
+      return;
     await this.runProxy(questionId);
   }
 
@@ -1822,4 +1879,29 @@ export class DecisionsBridge {
 export function abstainCode(reason: string): string {
   const head = (reason.split(/[:\s]/, 1)[0] ?? '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 60);
   return head || 'abstained';
+}
+
+/**
+ * Where a question stands with the relay (`PublicationState`), from its row, its queued create if any, and whether it
+ * was settled as never published.
+ */
+function publicationOf(
+  row: QuestionRow,
+  create: OutboxItem | undefined,
+  unpublished: boolean,
+): PublicationState {
+  if (row.history_only) return 'unknown';
+  switch (row.local_status) {
+    case 'queued':
+      if (!create) return 'unknown';
+      return (create.payload as CreatePayload).maybePublished ? 'possibly-committed' : 'not-sent';
+    case 'publish-failed':
+      return unpublished ? 'never-published' : 'refused';
+    case 'cancelled':
+      // Withdrawn before its create was ever sent (`enqueueCancel`): no relay event was ever applied to it. A
+      // withdrawal the relay took arrives as an event, which records its seq.
+      return row.remote_event_seq === null ? 'never-published' : 'accepted';
+    default:
+      return 'accepted';
+  }
 }

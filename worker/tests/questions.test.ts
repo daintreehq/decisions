@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CREATOR_MISSING_FEATURE, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import {
+  CREATE_NEVER_COMMITTED,
+  CREATOR_MISSING_FEATURE,
+  LIMITS,
+  PROTOCOL_VERSION,
+} from '@daintreehq/decisions-protocol';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import {
   act,
@@ -166,6 +171,69 @@ describe('question creation', () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('says an overdue create was never committed only when nothing of the question ever reached it', async () => {
+    const w = await claimRelay();
+    const deadline = Date.now() + 60_000;
+    const expiresAt = new Date(deadline).toISOString();
+    const post = (question: unknown, idempotencyKey: string) =>
+      w.owner.call('POST', '/api/v1/questions', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        question,
+      });
+    // One question taken and then deleted (its tombstone stays), one taken before every question was wiped.
+    const deleted = await ask(w, { expiresAt });
+    expect(deleted.res.status).toBe(201);
+    expect((await w.owner.call('DELETE', `/api/v1/questions/${deleted.questionId}`)).status).toBe(
+      200,
+    );
+    const wipedKey = newId();
+    const wiped = await ask(w, { idempotencyKey: wipedKey, expiresAt });
+    expect(wiped.res.status).toBe(201);
+    await settle();
+
+    const real = Date.now.bind(Date);
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => real() + 61_000);
+    try {
+      // A question never seen here: refused, and the relay says it never took it.
+      const fresh = await ask(w, { expiresAt });
+      expect(fresh.res.status).toBe(400);
+      expect(fresh.res.json.details).toEqual({ reason: CREATE_NEVER_COMMITTED });
+
+      // A deleted question sent again under a fresh key: its tombstone shows it was taken.
+      const again = await post(deleted.question, newId());
+      expect(again.status).toBe(400);
+      expect(again.json.details).toBeUndefined();
+
+      // After a wipe of every question, its own retry is refused, but nothing can show it was never taken.
+      const wipe = await w.owner.call('POST', '/api/v1/admin/delete-data', {
+        protocol_version: PROTOCOL_VERSION,
+        confirm: 'DELETE',
+        scope: 'questions',
+      });
+      expect(wipe.status).toBe(200);
+      const retry = await post(wiped.question, wipedKey);
+      expect(retry.status).toBe(400);
+      expect(retry.json.details).toBeUndefined();
+      const later = await ask(w, { expiresAt });
+      expect(later.res.status).toBe(400);
+      expect(later.res.json.details).toBeUndefined();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('says nothing about a create made before the relay began keeping a record of every question', async () => {
+    const w = await claimRelay();
+    // A relay upgraded from before the rule: it may have wiped questions with no record of it.
+    await inRoom((room) =>
+      room.run(`UPDATE meta SET value = ? WHERE key = 'never_committed_from'`, String(Date.now())),
+    );
+    const overdue = await ask(w, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect(overdue.res.status).toBe(400);
+    expect(overdue.res.json.details).toBeUndefined();
   });
 
   it('checks the deadline when the create commits, not when it arrives', async () => {

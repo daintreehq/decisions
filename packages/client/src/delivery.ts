@@ -588,6 +588,7 @@ export class DeliveryEngine {
     const e = { ...i.entry, ...i.content };
     return formatAnswerNotice({
       kind: e.kind,
+      ...(e.fallback_due ? { fallbackDue: true } : {}),
       questionId: i.q.question_id,
       alias: i.q.alias,
       revision: e.revision,
@@ -1202,6 +1203,8 @@ export class DeliveryEngine {
       requirement: q.requirement,
       result: code,
     });
+    // A question that never reached the relay has no delivery there to report on.
+    if (q.local_status === 'publish-failed') return;
     const rev = Math.max(1, ...this.pending(q).map((e) => e.revision), q.question_revision);
     try {
       await ctx.client.deliveriesFailed({

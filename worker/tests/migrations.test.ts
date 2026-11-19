@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { newId } from '@daintreehq/decisions-crypto';
-import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
+import { NEVER_COMMITTED_FROM_META, SCHEMA_VERSION, migrate } from '../src/db/schema.js';
 import {
   PNG,
   act,
@@ -329,5 +329,30 @@ describe('schema migrations', () => {
       expect(() => migrate(sql)).toThrow(/newer than this Worker/);
       sql.exec(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
     });
+  });
+
+  it('counts whole history from the start on a new relay, and from the upgrade on one that predates the record', async () => {
+    await claimRelay();
+    const marker = await inRoom((_room, state) => {
+      const sql = state.storage.sql;
+      const read = () =>
+        (
+          sql
+            .exec(`SELECT value FROM meta WHERE key = ?`, NEVER_COMMITTED_FROM_META)
+            .toArray()[0] as { value: string } | undefined
+        )?.value;
+      const fresh = read();
+      // Back to a relay deployed before the record: schema 6, no marker.
+      sql.exec(`DELETE FROM meta WHERE key = ?`, NEVER_COMMITTED_FROM_META);
+      sql.exec(`UPDATE meta SET value = '6' WHERE key = 'schema_version'`);
+      const before = Date.now();
+      migrate(sql);
+      const upgraded = read();
+      migrate(sql); // a later start keeps it
+      return { fresh, upgraded, again: read(), before };
+    });
+    expect(marker.fresh).toBe('0');
+    expect(Number(marker.upgraded)).toBeGreaterThanOrEqual(marker.before);
+    expect(marker.again).toBe(marker.upgraded);
   });
 });
