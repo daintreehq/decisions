@@ -183,10 +183,22 @@ const SPOOL_GRACE_MS = 24 * 60 * 60_000;
  */
 const ADVISORY_SUPPORT_WAIT_MS = 25_000;
 
+/** How long the read of a question whose create the relay refused may take (`relayHolds`). */
+const CREATE_CHECK_TIMEOUT_MS = 15_000;
+
 /** A create's item went while it was being sent (withdrawn or settled): it is not written back, and not sent. */
 class CreateWithdrawn extends Error {}
 /** A create's deadline passed before it was first sent: it goes no further, and is settled as never published. */
 class CreateOverdue extends Error {}
+/**
+ * The relay refused a create that may already be on it, and could not be asked whether it holds the question
+ * (`error`): the create stays queued, possibly committed, and is sent and the relay asked again.
+ */
+class CreateUnconfirmed extends Error {
+  constructor(readonly error: RelayError) {
+    super(error.message);
+  }
+}
 
 /**
  * Where trusted policy gave a question something other than what its agent asked for. `requested` is null when the
@@ -1812,13 +1824,14 @@ export class Publisher {
           const receipt = await this.sendCreate(item);
           created.push(item.question_id);
           // A retry after a lost reply replays the original receipt, which can be older than the history already
-          // applied (an answer, an expiry): only a question still queued takes it. Under the lock, like the inbox.
+          // applied (an answer, an expiry): only a question still queued takes it. Under the lock, like the inbox. A
+          // question the relay holds without a receipt takes its creation's seq from its history.
           await ctx.lock.run(async () => {
             const row = await ctx.store.getQuestion(item.question_id);
             if (row?.local_status !== 'queued') return;
             await ctx.store.updateQuestion(item.question_id, {
               local_status: 'open',
-              remote_event_seq: receipt.event_seq,
+              ...(receipt ? { remote_event_seq: receipt.event_seq } : {}),
               error_code: null,
             });
           });
@@ -1850,9 +1863,15 @@ export class Publisher {
           pendingByQuestion.delete(item.question_id);
           continue;
         }
+        // A refused create whose question the relay could not be asked about yet is retried as a transient failure.
+        const unconfirmed = e instanceof CreateUnconfirmed;
         const err =
-          e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
-        if (err.retryable) {
+          e instanceof CreateUnconfirmed
+            ? e.error
+            : e instanceof RelayError
+              ? e
+              : new RelayError('network_error', (e as Error).message, 0);
+        if (err.retryable || unconfirmed) {
           let next =
             ctx.now() +
             Math.max(err.retryAfterMs ?? 0, backoffMs(item.attempts + 1, 2000, 300_000));
@@ -1935,9 +1954,10 @@ export class Publisher {
    * Upload a create's images, then send it. Each step is checked against the item as stored, under `ctx.lock`: a
    * create withdrawn or settled meanwhile is never written back or sent (`CreateWithdrawn`), and one whose deadline
    * passed before it was first sent goes no further, with no stale image uploaded (`CreateOverdue`). Once claimed
-   * (`maybePublished`), the relay may hold the question whatever becomes of the reply.
+   * (`maybePublished`), the relay may hold the question whatever becomes of the reply, or of a refusal: null when it
+   * refused the create yet holds the question (`relayHolds`).
    */
-  private async sendCreate(item: OutboxItem): Promise<CommandReceipt> {
+  private async sendCreate(item: OutboxItem): Promise<CommandReceipt | null> {
     const { ctx } = this;
     const p = item.payload as CreatePayload;
     for (const a of p.attachments) {
@@ -1975,9 +1995,14 @@ export class Publisher {
     // From here on the relay may have committed the question even if we never see the reply.
     await this.checkpointCreate(item, p, true);
     this.inflight.add(item.question_id);
-    let receipt;
+    let receipt: CommandReceipt | null;
     try {
-      receipt = await ctx.client.createQuestion(item.id, p.signed);
+      receipt = await ctx.client.createQuestion(item.id, p.signed).catch(async (e: unknown) => {
+        if (!(e instanceof RelayError) || e.retryable) throw e;
+        if (e.status === 400 && e.details?.reason === CREATE_NEVER_COMMITTED) throw e;
+        await this.relayHolds(item.question_id, e, p.signed.record.signature);
+        return null;
+      });
     } finally {
       this.inflight.delete(item.question_id);
     }
@@ -1985,9 +2010,37 @@ export class Publisher {
     await ctx.audit.log({
       event: 'question.published',
       question_id: item.question_id,
-      result: 'ok',
+      result: receipt ? 'ok' : 'held',
     });
     return receipt;
+  }
+
+  /**
+   * After the relay refused a create that may already be on it: returns when the relay holds this very question (its
+   * record carries this create's signature), so only the receipt was lost; a relay that checks the deadline before the
+   * receipt, as 0.8.0 does, refuses the retry of a question it took. Throws `refusal` when the relay holds no such
+   * question, holds another, or will not say, and `CreateUnconfirmed` when it cannot be read for now (a transient
+   * failure, or this device's signature refused), for the create to be sent and the relay asked again.
+   */
+  private async relayHolds(
+    questionId: string,
+    refusal: RelayError,
+    signature: string,
+  ): Promise<void> {
+    let detail: { question?: { record?: { question_id?: unknown; signature?: unknown } } } | null;
+    try {
+      detail = await this.ctx.client.getQuestion(questionId, {
+        retry: false,
+        timeoutMs: CREATE_CHECK_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const err =
+        e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
+      if (err.retryable || err.code === 'not_authenticated') throw new CreateUnconfirmed(err);
+      throw refusal;
+    }
+    const record = detail?.question?.record;
+    if (record?.question_id !== questionId || record.signature !== signature) throw refusal;
   }
 
   /**

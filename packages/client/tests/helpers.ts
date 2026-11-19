@@ -576,6 +576,7 @@ export class FakeRelay {
         question_id: m[1],
         status: state.status,
         revision: state.revision,
+        question: q.signed,
         actions: this.cancelLog.get(m[1]!) ?? [],
       });
     }
