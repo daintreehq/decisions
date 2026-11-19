@@ -359,7 +359,7 @@ function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
   return new Promise((done) => {
     const child = spawn(process.execPath, [side.bin, '--home', home, ...argv], {
       cwd: side.dir,
-      env: { ...process.env, DECISIONS_HOME: '', NO_COLOR: '1', ...env },
+      env: { ...process.env, DECISIONS_HOME: '', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -380,22 +380,29 @@ function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
     }, timeoutMs);
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      const json = stdout
-        .split('\n')
-        .filter((l) => l.trim().startsWith('{'))
-        .map((l) => {
-          try {
-            return JSON.parse(l);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean);
+      // One pretty-printed object (`setup`, `host`, `devices`, `get`), or one object per line (`ask`, `wait`).
+      let json;
+      try {
+        json = [JSON.parse(stdout)];
+      } catch {
+        json = stdout
+          .split('\n')
+          .filter((l) => l.trim().startsWith('{'))
+          .map((l) => {
+            try {
+              return JSON.parse(l);
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+      }
       done({ code, signal, timedOut, stdout, stderr, json, last: json.at(-1) ?? null });
     });
   });
 }
-const tail = (r) => `exit ${r.code}${r.timedOut ? ' (timed out)' : ''}; stderr: ${r.stderr.slice(-600)}`;
+const tail = (r) =>
+  `exit ${r.code}${r.timedOut ? ' (timed out)' : ''}; stderr: ${r.stderr.slice(-600)}`;
 
 /**
  * `decisions ask` that runs until its question has an outcome: once it prints the question id, `act(id)` plays the
@@ -448,14 +455,38 @@ async function pairPhone(owner, phoneActor, home, name) {
 const notices = (state, questionId) =>
   state.typed.filter((t) => t.text.includes(`question_id: ${questionId}`));
 
-/** A bridge's own health: no error event, no request the relay refused, nothing audited as rejected. */
-function checkBridgeHealth(state, who) {
+/** Audit events (packages/client/src/audit.ts callers) that say something went wrong. */
+const PROBLEMS = new Set([
+  'event.rejected',
+  'event.error',
+  'inject.threw',
+  'inject.unavailable',
+  'delivery.attention',
+  'question.unpublished',
+  'round.ambiguous',
+  'round.unreconciled',
+  'rounds.unreconciled',
+]);
+
+/**
+ * A bridge's own health: no error event, no request the relay refused, and nothing in its audit that says something
+ * went wrong, but for a refusal of a question in `refusable` (one it is meant to refuse rather than misread).
+ */
+function checkBridgeHealth(state, who, refusable = []) {
   check(state.errors.length === 0, `${who} reported no error`, show(state.errors));
-  check(state.refused.length === 0, `the relay refused none of ${who}'s requests`, show(state.refused));
-  const rejected = state.audit.filter((a) =>
-    /reject|malformed|invalid|unverified/i.test(String(a.kind ?? a.event ?? a.type ?? '')),
+  check(
+    state.refused.length === 0,
+    `the relay refused none of ${who}'s requests`,
+    show(state.refused),
   );
-  check(rejected.length === 0, `${who} audited nothing as rejected or malformed`, show(rejected));
+  const counts = {};
+  for (const a of state.audit) counts[a.event] = (counts[a.event] ?? 0) + 1;
+  console.log(`  ${who}'s audit: ${show(counts)}`);
+  const problems = state.audit.filter(
+    (a) =>
+      PROBLEMS.has(a.event) && !(a.event === 'event.rejected' && refusable.includes(a.question_id)),
+  );
+  check(problems.length === 0, `${who}'s audit records no problem`, show(problems));
 }
 
 /* ---------------------------------------------------------------- scenarios */
@@ -503,7 +534,11 @@ async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, por
         });
       },
     );
-    check(answered.acted.status === 201, 'the phone answers the old CLI question', show(answered.acted));
+    check(
+      answered.acted.status === 201,
+      'the phone answers the old CLI question',
+      show(answered.acted),
+    );
     const typed1 = existsSync(sink) ? readFileSync(sink, 'utf8') : '';
     check(
       answered.code === 0 &&
@@ -530,7 +565,11 @@ async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, por
       },
       { timeoutMs: 90_000 },
     );
-    check(declined.acted.status === 200 || declined.acted.status === 201, 'the phone declines the old CLI question', show(declined.acted));
+    check(
+      declined.acted.status === 200 || declined.acted.status === 201,
+      'the phone declines the old CLI question',
+      show(declined.acted),
+    );
     const typed2 = readFileSync(sink, 'utf8').slice(typed1.length);
     check(
       declined.code === 0 &&
@@ -542,10 +581,24 @@ async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, por
 
     // A Remote Host on the new version, enrolled by the old owner: it can ask what the old desktop cannot read.
     const hostHome = scratch('home-1-host');
-    const req = await cli(NEW, hostHome, ['--json', 'host', 'request', '--label', 'Compat new host']);
-    must(req.code === 0 && req.last?.request, `${NEW.label} CLI requests a Remote Host enrollment`, tail(req));
+    const req = await cli(NEW, hostHome, [
+      '--json',
+      'host',
+      'request',
+      '--label',
+      'Compat new host',
+    ]);
+    must(
+      req.code === 0 && req.last?.request,
+      `${NEW.label} CLI requests a Remote Host enrollment`,
+      tail(req),
+    );
     const enr = await cli(OLD, home, ['--json', 'host', 'enroll', '--yes', req.last.request]);
-    must(enr.code === 0 && enr.last?.response, `${OLD.label} owner enrolls the ${NEW.label} Remote Host`, tail(enr));
+    must(
+      enr.code === 0 && enr.last?.response,
+      `${OLD.label} owner enrolls the ${NEW.label} Remote Host`,
+      tail(enr),
+    );
     const acc = await cli(NEW, hostHome, ['--json', 'host', 'accept', enr.last.response]);
     must(acc.code === 0, `${NEW.label} Remote Host accepts the enrollment`, tail(acc));
     const devices = await cli(OLD, home, ['--json', 'devices']);
@@ -592,12 +645,20 @@ async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, por
     );
     const advId = adv.asked.questionId;
     const advOnPhone = await neu.call('phoneQuestion', { name: 'phone', questionId: advId });
-    must(advOnPhone.reply_mode === 'advisory', 'the relay commits it as advisory', show(advOnPhone));
+    must(
+      advOnPhone.reply_mode === 'advisory',
+      'the relay commits it as advisory',
+      show(advOnPhone),
+    );
     const plain = await neu.call('bridgeAsk', {
       name: 'host',
       input: { question: 'Compat 1: a blocking question from the new host' },
     });
-    must(plain.asked, `the ${NEW.label} Remote Host asks an ordinary question after it`, show(plain));
+    must(
+      plain.asked,
+      `the ${NEW.label} Remote Host asks an ordinary question after it`,
+      show(plain),
+    );
     const plainId = plain.asked.questionId;
     await neu.call('phoneQuestion', { name: 'phone', questionId: plainId });
 
@@ -687,8 +748,11 @@ async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, por
       20_000,
       `the ${OLD.label} bridge's cursor to reach ${ledger.highWater}`,
     ).catch((e) => (fail(e.message), null));
-    if (caught) ok(`the ${OLD.label} bridge's cursor passed the advisory question (${caught.cursor})`);
-    checkBridgeHealth(await old.call('bridgeState', { name: 'owner' }), `the ${OLD.label} bridge`);
+    if (caught)
+      ok(`the ${OLD.label} bridge's cursor passed the advisory question (${caught.cursor})`);
+    checkBridgeHealth(await old.call('bridgeState', { name: 'owner' }), `the ${OLD.label} bridge`, [
+      advId,
+    ]);
   } finally {
     await old.stop();
     await neu.stop();
@@ -858,7 +922,11 @@ async function newDesktopOldRelay({ OLD, NEW, oldRelay, port }) {
           ],
         },
       });
-      must(r.asked?.replyMode === 'blocking', `the ${NEW.label} bridge asks "${question}"`, show(r));
+      must(
+        r.asked?.replyMode === 'blocking',
+        `the ${NEW.label} bridge asks "${question}"`,
+        show(r),
+      );
       const id = r.asked.questionId;
       const q = await neu.call('phoneQuestion', { name: 'phone', questionId: id });
       const res =
@@ -956,7 +1024,11 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
       onPhone[id] = await neu.call('phoneQuestion', { name: 'phone', questionId: id });
       must(onPhone[id].status === 'open', `question ${id} is open on the ${OLD.label} relay`);
     }
-    check(onPhone[B].expires_at === shortDeadline, `B carries its signed deadline`, show(onPhone[B]));
+    check(
+      onPhone[B].expires_at === shortDeadline,
+      `B carries its signed deadline`,
+      show(onPhone[B]),
+    );
 
     // A reopen made before the upgrade: the person declines C, and the old owner reopens it with a new deadline.
     const dc = await neu.call('phoneDecline', {
@@ -966,8 +1038,14 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
       publisher: pre.deviceId,
     });
     must(dc.status === 200 || dc.status === 201, 'the phone declines C', show(dc));
-    await neu.call('phoneQuestion', { name: 'phone', questionId: C, want: { status: 'cancelled' } });
-    const reopenedC = new Date(Date.now() + 3 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, '.000Z');
+    await neu.call('phoneQuestion', {
+      name: 'phone',
+      questionId: C,
+      want: { status: 'cancelled' },
+    });
+    const reopenedC = new Date(Date.now() + 3 * 86_400_000)
+      .toISOString()
+      .replace(/\.\d{3}Z$/, '.000Z');
     const rc = await old.call('ownerReopen', {
       home,
       questionId: C,
@@ -1002,7 +1080,10 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
     ]) {
       const v = await neu.call('bridgeView', { name: 'post', questionId: id });
       check(
-        v.status === 'open' && v.revision === 0 && v.expiresAt === deadline && v.replyMode === 'blocking',
+        v.status === 'open' &&
+          v.revision === 0 &&
+          v.expiresAt === deadline &&
+          v.replyMode === 'blocking',
         `the ${NEW.label} host reads ${id === A ? 'A' : 'B'} as the open question it was`,
         show(v),
       );
@@ -1050,7 +1131,10 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
 
     // The relay moves to the new version on the same storage, as `decisions update` does.
     const left = Date.parse(shortDeadline) - Date.now();
-    must(left > 15_000, `B is still open when the relay is upgraded (${Math.round(left / 1000)} s left)`);
+    must(
+      left > 15_000,
+      `B is still open when the relay is upgraded (${Math.round(left / 1000)} s left)`,
+    );
     await relay.stop();
     relay = await startRelay(newRelay, port, persist, '3-new');
     const features = (await info(relay.origin)).features ?? [];
@@ -1072,7 +1156,9 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
       'B to expire',
     );
     check(
-      expiredB.closedReason === 'expired' && expiredB.fallbackDue === false && expiredB.replyMode === 'blocking',
+      expiredB.closedReason === 'expired' &&
+        expiredB.fallbackDue === false &&
+        expiredB.replyMode === 'blocking',
       'B expires as a question that waited for a decision: nothing is due',
       show(expiredB),
     );
@@ -1085,7 +1171,9 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${NEW.label} host to type B's expiry`,
     );
     check(
-      typedB.length === 1 && typedB[0].text.includes('status: expired') && !typedB[0].text.includes('advisory'),
+      typedB.length === 1 &&
+        typedB[0].text.includes('status: expired') &&
+        !typedB[0].text.includes('advisory'),
       `the ${NEW.label} host types B's expiry once, as an expiry`,
       show(typedB),
     );
@@ -1126,7 +1214,11 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
         30_000,
         `the ${NEW.label} host to read ${name}'s answer`,
       );
-      check(v.provenance === 'human' && v.text === `Compat answer ${name}`, `getDecision reports ${name}'s answer`, show(v));
+      check(
+        v.provenance === 'human' && v.text === `Compat answer ${name}`,
+        `getDecision reports ${name}'s answer`,
+        show(v),
+      );
     }
     const final = await neu.call('bridgeState', { name: 'post' });
     check(

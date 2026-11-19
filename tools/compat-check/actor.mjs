@@ -317,10 +317,7 @@ const ops = {
 
   async ownerInvite({ home }) {
     const identity = await loadIdentity(home);
-    const invite = await client.createPairingInvite(
-      new client.RelayClient({ identity }),
-      'phone',
-    );
+    const invite = await client.createPairingInvite(new client.RelayClient({ identity }), 'phone');
     return {
       pairingId: invite.pairingId,
       secret: invite.payload.s,
