@@ -196,15 +196,45 @@ describe('how a dismissal from this device settled (docs/protocol.md section 6.1
     expect(refused({ errorCode: 'expired', outcome: { status: 'changed' } })).toEqual({
       status: 'changed',
     });
+    // A later answer the thread already shows never stands in for why a same-revision refusal happened.
+    expect(view().status).toBe('human-answered');
+    expect(refused({ errorCode: 'invalid_state' })).toEqual({ status: 'expired' });
+  });
+
+  it('attributes a refusal to what closed its own round, not to where the question is now', async () => {
+    const { w, s, id, view } = await setup();
+    // Withdrawn at 0, reopened at 1, answered at 2: the relay's conflict names the answer.
+    await s.ingest(await actionEvent(w, { questionId: id, action: 'cancel' }));
+    await s.ingest(await actionEvent(w, { questionId: id, action: 'reopen', expectedRevision: 0 }));
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: id,
+        action: 'answer',
+        expectedRevision: 1,
+        signer: w.owner,
+      }),
+    );
+    const e = entry(id, {
+      state: 'conflicted',
+      attempts: 1,
+      errorCode: 'revision_conflict',
+      latestRevision: 2,
+      latestStatus: 'human-answered',
+    });
+    expect(declineSettlement(e, view(), w.phone.id)).toMatchObject({ status: 'withdrawn' });
+    // A decline signed for the reopened round is never settled by the cancel that closed the earlier one.
+    const later = entry(id, { state: 'committed', expectedRevision: 1 });
+    expect(declineSettlement(later, view(), w.phone.id)).toEqual({ status: 'changed' });
   });
 
   it('waits rather than guess while the thread is being rebuilt or the closer is unverified', async () => {
     const { w, s, id, view } = await setup();
-    // A refusal is read from the relay's answer, a 2xx only from the thread: no question, nothing to wait for.
-    expect(declineSettlement(entry(id, { state: 'committed' }), undefined, w.phone.id)).toBe(
-      'accepted',
-    );
+    // A thread being rebuilt has no question for a moment, then only its earlier events: a 2xx waits for the round.
+    expect(declineSettlement(entry(id, { state: 'committed' }), undefined, w.phone.id)).toBeNull();
     expect(declineSettlement(entry(id, { state: 'queued' }), undefined, w.phone.id)).toBeNull();
+    expect(
+      declineSettlement(entry(id, { state: 'committed', expectedRevision: 1 }), view(), w.phone.id),
+    ).toBeNull();
     // A cancel nobody here can verify: never attributed to anyone, and it closes nothing here.
     await s.ingest(await cancelWithId(w, id, newId(), w.phone, 0, true));
     expect(view().status).toBe('open');

@@ -341,11 +341,26 @@ export class Outbox {
     return this.flush();
   }
 
-  private async persist(e: OutboxEntry): Promise<void> {
-    const sealed = await seal(this.cacheKey, e, label(e.id));
-    // Let go while it was being sealed (settled from the thread meanwhile): it is never written back.
-    if (this.entries.get(e.id) !== e) return;
-    await this.write(e, sealed);
+  /** Each entry's writes in turn, so a slower seal of an earlier state never lands over a later one. */
+  private writes = new Map<string, Promise<void>>();
+
+  private persist(e: OutboxEntry): Promise<void> {
+    const next = (this.writes.get(e.id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        // Sealed as it stands when its turn comes: the last write holds the latest state.
+        const sealed = await seal(this.cacheKey, e, label(e.id));
+        // Let go meanwhile (settled from the thread): it is never written back.
+        if (this.entries.get(e.id) !== e) return;
+        await this.write(e, sealed);
+      });
+    this.writes.set(e.id, next);
+    next
+      .finally(() => {
+        if (this.writes.get(e.id) === next) this.writes.delete(e.id);
+      })
+      .catch(() => undefined);
+    return next;
   }
 
   private write(e: OutboxEntry, sealed: Awaited<ReturnType<typeof seal>>): Promise<unknown> {
@@ -562,7 +577,17 @@ export class Outbox {
       e.attempts++;
       // A decline remembers that it went out before it goes: after a restart mid-send it is shown as unconfirmed,
       // since the relay may have taken it, never as one that was not sent.
-      if (e.kind === 'decline') await this.persist(e);
+      if (e.kind === 'decline') {
+        try {
+          await this.persist(e);
+        } catch {
+          // Not written, so not sent: it waits as it was for the next flush.
+          e.state = 'queued';
+          e.attempts--;
+          this.changed();
+          return;
+        }
+      }
       this.changed();
       let photoPhase = false;
       try {
@@ -627,12 +652,22 @@ export class Outbox {
         // Network trouble or relay hiccup: keep it queued and stop, order matters. Photos part-way up say so, and
         // try again on their own while the device thinks it is online.
         e.state = 'queued';
-        if (e.images?.length) {
-          const online = typeof navigator === 'undefined' || navigator.onLine !== false;
-          // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.
-          if (photoPhase && online) this.trouble.add(e.id);
-          if (online) this.scheduleRetry();
+        // The thread already holds the decline this send was for (it arrived while the answer was lost): settled.
+        if (e.kind === 'decline' && this.hooks.declineSettlement?.(e) === 'accepted') {
+          await this.discard(e.id);
+          return;
         }
+        const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+        // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.
+        if (e.images?.length && photoPhase && online) this.trouble.add(e.id);
+        // A dismissal the person confirmed (this one, or one waiting behind it) is tried again on its own too, never
+        // left for a trigger that may not come.
+        if (
+          online &&
+          (e.images?.length ||
+            this.list().some((x) => x.kind === 'decline' && x.state === 'queued'))
+        )
+          this.scheduleRetry();
         await this.persist(e);
         this.changed();
         return;

@@ -75,27 +75,25 @@ function fromRefusal(e: OutboxEntry, v: QuestionView | undefined): DeclineOutcom
       return { status: 'expired' };
     case 'not_found':
       return { status: 'gone' };
-    case 'revision_conflict':
+    case 'revision_conflict': {
+      // The round the person saw closed and the question moved on: what closed that round, when the thread holds it,
+      // says more than where the question is now (withdrawn, reopened and then answered reads as withdrawn).
+      const closer = v && otherCloser(e, v);
+      if (closer) return closer;
       switch (e.latestStatus) {
         case 'human-answered':
         case 'proxy-answered':
           return { status: 'answered' };
         case 'expired':
           return { status: 'expired' };
-        case 'cancelled':
-          // Reopened and closed again since: what closed the person's round says more, when the thread has it.
-          return (v && otherCloser(e, v)) ?? { status: 'changed' };
         default:
           return { status: 'changed' };
       }
-    case 'invalid_state': {
-      // Refused at the revision the person saw from a state it does not name: answered (which a later revision would
-      // have reported as a conflict) or, in practice, expired by the relay's sweep.
-      const s = v?.status;
-      return s === 'human-answered' || s === 'proxy-answered'
-        ? { status: 'answered' }
-        : { status: 'expired' };
     }
+    case 'invalid_state':
+      // Refused at the revision the person saw from a state it does not name. An answer to that round moves the
+      // revision (a conflict, above), so this is the relay's sweep having expired it, whatever the thread says now.
+      return { status: 'expired' };
     default:
       return { status: 'rejected', code: e.errorCode ?? 'unknown' };
   }
@@ -105,8 +103,7 @@ function fromRefusal(e: OutboxEntry, v: QuestionView | undefined): DeclineOutcom
  * How a decline from this device has settled, read from its entry and the thread: `accepted` once the thread holds
  * the very decline it signed (it is then the thread's own and its entry can go), an outcome to keep when something
  * else settled the round first, or null while the thread can't yet say (the relay's answer has not been read back, or
- * the cancel that closed the round is not verified yet). A missing question is only ever read as gone for a decline
- * the relay took, since a thread being rebuilt has none for a moment.
+ * the cancel that closed the round is not verified yet, or the thread is still being rebuilt).
  */
 export function declineSettlement(
   e: OutboxEntry,
@@ -119,8 +116,9 @@ export function declineSettlement(
   if (e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired')
     return fromRefusal(e, v);
   if (e.state !== 'committed') return null;
-  // Taken by the relay, and the question is gone: there is nothing left to show it against.
-  if (!v) return 'accepted';
+  // Not read back yet: a thread being rebuilt replays its events one by one, so a missing question or an earlier
+  // revision is never taken for what settled the round.
+  if (!v || v.revision < e.expectedRevision) return null;
   const closer = otherCloser(e, v);
   if (closer) return closer;
   // Still open at the round it was signed against: not read back yet. A cancelled round whose closer is not verified
@@ -160,17 +158,13 @@ export function declineProgressText(
   switch (st.kind) {
     case 'queued':
       return {
-        text: 'Dismissal saved on this device, not sent yet.',
-        note: online
-          ? 'The question stays open everywhere else until it sends.'
-          : 'It sends when you’re back online. The question stays open everywhere else until then.',
+        text: 'Your dismissal is saved on this device and hasn’t been sent.',
+        note: online ? undefined : 'It sends when you’re back online.',
       };
     case 'unconfirmed':
       return {
-        text: 'Dismissal saved on this device. Your relay hasn’t confirmed it yet.',
-        note: online
-          ? 'Trying again. The question may still be open everywhere else.'
-          : 'It is tried again when you’re back online. The question may still be open everywhere else.',
+        text: 'Your dismissal is saved on this device. Your relay hasn’t confirmed it yet.',
+        note: online ? 'It is sent again shortly.' : 'It is sent again when you’re back online.',
       };
     case 'sending':
       return { text: 'Sending your dismissal…' };

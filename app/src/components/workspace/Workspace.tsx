@@ -185,6 +185,14 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     ? declineStanding(declineEntry, view, app.getSnapshot().config?.deviceId ?? '')
     : null;
   const dismissing = !!decline && declineActive(decline);
+  // How it settled is said once, when it settles while the person is here: the note may be out of view.
+  if (declineEntry && decline) {
+    if (dismissing) declinesSeenActive.add(declineEntry.id);
+    else if (declinesSeenActive.delete(declineEntry.id) && decline.kind === 'settled') {
+      const text = declineOutcomeText(decline.outcome);
+      queueMicrotask(() => announce(text));
+    }
+  }
   // An answer the relay has committed is the thread's own from then on, even while its local copy is being let go.
   const committed = new Set(view.actions.map((a) => a.actionId));
   const onItsWay = (e: OutboxEntry) =>
@@ -669,6 +677,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     !pendingEntry &&
     pendingMessages.length === 0 &&
     !dismissing &&
+    !busy &&
     app.declinesFor(view)
   )
     menu.push({
@@ -1284,7 +1293,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             </span>
           </div>
           <div className="row">
-            {!closedThread && e.errorCode !== 'payload_too_large' && (
+            {!closedThread && e.errorCode !== 'payload_too_large' && !dismissing && (
               <button
                 type="button"
                 className="btn small"
@@ -1349,7 +1358,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             }}
             note={handOverNote}
             onRetry={
-              e.refusedAt === 'image' && e.errorCode === 'image_lost'
+              e.refusedAt === 'image' && e.errorCode === 'image_lost' && !dismissing
                 ? () => void app.outbox?.retry(e.id)
                 : undefined
             }
@@ -1780,6 +1789,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
               onClick={() => {
                 if (declineAt === null || declining) return;
                 const at = declineAt;
+                // The device list may have changed since the sheet opened: the asking desktop must still take one.
+                if (!app.declinesFor(view)) {
+                  setDeclineError(
+                    'The computer that asked this can’t take a dismissal until its Daintree is updated. The question stays open until it expires.',
+                  );
+                  return;
+                }
                 setDeclining(true);
                 setDeclineError(null);
                 if (dictation.isActive()) void dictation.stop();
@@ -1855,6 +1871,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
 
 /** Entries whose photos have been announced as uploaded. */
 const uploadedAnnounced = new Set<string>();
+/** Dismissals seen on their way, so how one settled is announced once, when it does. */
+const declinesSeenActive = new Set<string>();
 
 function hasWords(d: { text: string; reason: string; selected: string[]; photos?: unknown[] }) {
   return !!(d.text.trim() || d.reason.trim() || d.selected.length || d.photos?.length);

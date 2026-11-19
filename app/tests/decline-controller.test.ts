@@ -29,6 +29,7 @@ type Inside = {
   store: QuestionStore | null;
   outbox: Outbox | null;
   sync: unknown;
+  epochKeys: unknown;
   refreshDevices(): Promise<void>;
   resume(): void;
   outboxHooks(): OutboxHooks;
@@ -72,6 +73,8 @@ async function phone(
     q?: Awaited<ReturnType<typeof openQuestion>>;
     dbName?: string;
     cacheKey?: CryptoKey;
+    /** How long a failed send waits before the outbox tries again on its own; never, by default. */
+    retryDelays?: number[];
   } = {},
 ) {
   const q = o.q ?? (await openQuestion());
@@ -83,6 +86,7 @@ async function phone(
   const refresh = vi.fn(async () => undefined);
   inside(c).refreshDevices = refresh;
   inside(c).keys = { signingPrivate: w.phone.keys.signing.privateKey };
+  inside(c).epochKeys = w.epochs;
   inside(c).snap.config = { installationId: w.installationId, deviceId: w.phone.id };
   inside(c).store = store;
   /** Events the relay committed that this phone has not read yet. */
@@ -115,7 +119,7 @@ async function phone(
       }) as never,
     }),
     inside(c).outboxHooks(),
-    [],
+    o.retryDelays ?? [],
   );
   inside(c).outbox = outbox;
   const unsubscribe = store.subscribe(() => outbox.reconcile());
@@ -336,6 +340,8 @@ describe('a dismissal queued on this device until it settles', () => {
     await p.idle();
     expect(p.standing()).toEqual({ kind: 'settled', outcome: { status: 'answered' } });
     expect(p.posts).toHaveLength(2);
+    // Only a desktop that no longer takes declines sends the phone to read the device list again.
+    expect(p.refresh).not.toHaveBeenCalled();
     // Kept as a note until the person lets it go, and never sent again.
     await p.outbox.retry(p.outbox.list()[0]!.id);
     await p.outbox.flush();
@@ -374,7 +380,10 @@ describe('a dismissal queued on this device until it settles', () => {
     };
     await p.outbox.flush();
     await p.idle();
-    expect(p.standing()).toMatchObject({ kind: 'settled', outcome: { status: 'withdrawn' } });
+    expect(p.standing()).toEqual({
+      kind: 'settled',
+      outcome: { status: 'withdrawn', label: 'Withdrawn on studio-mac' },
+    });
     // Reopened since: the note still says what happened to the round it was signed for.
     await p.store.ingest(
       await actionEvent(p.w, { questionId: p.view.id, action: 'reopen', expectedRevision: 0 }),
@@ -457,6 +466,22 @@ describe('a dismissal queued on this device until it settles', () => {
         status: 'open',
       });
     };
+    // An answer of the person's the relay refused earlier: its words stay, whatever happens to dismissals.
+    const refusedAnswer = await p.outbox.enqueue({
+      id: 'answer_refused',
+      questionId: p.view.id,
+      kind: 'answer',
+      path: `/questions/${p.view.id}/answer`,
+      bodyText: '{}',
+      idempotencyKey: 'idem_answer_refused',
+      expectedRevision: 0,
+      selected: ['yes'],
+      text: 'kept words',
+      reason: '',
+    });
+    await p.outbox.flush();
+    await p.idle();
+    expect(p.outbox.list()[0]).toMatchObject({ id: refusedAnswer.id, state: 'conflicted' });
     const first = await p.c.declineQuestion(p.view, 0);
     await p.idle();
     expect(p.standing()).toEqual({ kind: 'settled', outcome: { status: 'changed' } });
@@ -475,9 +500,82 @@ describe('a dismissal queued on this device until it settles', () => {
     expect(second.id).not.toBe(first.id);
     expect(second.recordId).not.toBe(first.recordId);
     expect(JSON.parse(second.bodyText).action.record.expected_revision).toBe(1);
-    // The note about the first goes with it; the second settles as declined.
+    // The note about the first goes with it; the second settles as declined. The refused answer stays.
     await p.idle();
-    expect(p.outbox.list().map((e: OutboxEntry) => e.id)).toEqual([]);
+    expect(p.outbox.list().map((e: OutboxEntry) => e.id)).toEqual([refusedAnswer.id]);
+    expect(p.store.get(p.view.id)!.status).toBe('cancelled');
+  });
+
+  it('is remembered as sent from the moment it goes, so a restart mid-send never calls it unsent', async () => {
+    const p = await phone();
+    // The request leaves and nothing comes back: the app is closed while it hangs.
+    let posted = false;
+    p.relay.answer = () => {
+      posted = true;
+      return new Promise(() => undefined);
+    };
+    const e = await p.c.declineQuestion(p.view, 0);
+    await vi.waitFor(() => expect(posted).toBe(true));
+    await vi.waitFor(async () => {
+      const reread = new Outbox(p.db, p.cacheKey, () => ({ jsonRaw: (async () => ({})) as never }));
+      await reread.load();
+      expect(reread.list()).toMatchObject([{ id: e.id, state: 'queued', attempts: 1 }]);
+    });
+  });
+
+  it('admits one of an answer and a dismissal confirmed at the same moment, never both', async () => {
+    const p = await phone();
+    const [answer, dismissal] = await Promise.allSettled([
+      p.c.submit({
+        view: p.view,
+        kind: 'answer',
+        expectedRevision: 0,
+        selected: ['yes'],
+        text: 'go',
+        reviewedDigests: [],
+      }),
+      p.c.declineQuestion(p.view, 0),
+    ]);
+    expect(answer.status).toBe('fulfilled');
+    expect(dismissal).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(DeclineBlockedError),
+    });
+    expect(p.outbox.list().map((e) => e.kind)).toEqual(['answer']);
+
+    // And the other way round: the dismissal first, the answer refused.
+    const q = await phone();
+    const [d2, a2] = await Promise.allSettled([
+      q.c.declineQuestion(q.view, 0),
+      q.c.submit({
+        view: q.view,
+        kind: 'answer',
+        expectedRevision: 0,
+        selected: ['yes'],
+        text: 'go',
+        reviewedDigests: [],
+      }),
+    ]);
+    expect(d2.status).toBe('fulfilled');
+    expect(a2).toMatchObject({ status: 'rejected', reason: expect.any(DeclineInFlightError) });
+    expect(q.outbox.list().map((e) => e.kind)).toEqual(['decline']);
+  });
+
+  it('tries again on its own after a relay hiccup, with nothing else to prompt it', async () => {
+    const p = await phone({ retryDelays: [5] });
+    let first = true;
+    p.relay.answer = async (body) => {
+      if (first) {
+        first = false;
+        throw new RelayError('unavailable', 503, 'try later');
+      }
+      return p.commit(body);
+    };
+    await p.c.declineQuestion(p.view, 0);
+    await vi.waitFor(() => expect(p.posts).toHaveLength(2));
+    await p.idle();
+    expect(p.posts[1]!.body).toBe(p.posts[0]!.body);
+    expect(p.outbox.list()).toEqual([]);
     expect(p.store.get(p.view.id)!.status).toBe('cancelled');
   });
 });
