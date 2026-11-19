@@ -794,15 +794,17 @@ describe('recovering an outcome by ID', () => {
 
 describe('a late retry refused by a relay that checks the deadline before the receipt (0.8.0)', () => {
   type Env = Awaited<ReturnType<typeof env>>;
-  /** Run after each test, passed or failed: every gate opened and every process stopped. */
+  /** Run after each test, passed or failed: every gate opened, then every process stopped. */
+  const opens: (() => void)[] = [];
   const cleanups: (() => unknown)[] = [];
   afterEach(async () => {
+    for (const f of opens.splice(0)) f();
     for (const f of cleanups.splice(0).reverse()) await f();
   });
   const gate = () => {
     let open!: () => void;
     const shut = new Promise<void>((r) => (open = r));
-    cleanups.push(() => open());
+    opens.push(() => open());
     return { shut, open };
   };
   /** A command that stops as a signal would when the test says so, or when the test ends. */

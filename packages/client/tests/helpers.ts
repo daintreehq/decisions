@@ -283,6 +283,8 @@ export class FakeRelay {
   failDetail = 0;
   /** The status and code every upcoming `GET /questions/{id}` is refused with, until cleared. */
   rejectDetail: { status: number; code: string } | null = null;
+  /** Run as each `GET /questions/{id}` arrives, before the relay looks at it. */
+  onDetail: (() => Promise<void>) | null = null;
   /** The signature each committed answer or decline carried, by action id. */
   committedSignatures = new Map<string, string>();
   /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
@@ -567,6 +569,7 @@ export class FakeRelay {
       return this.decline(m[1]!, body as { idempotency_key: string; action: SignedAction });
     }
     if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
+      await this.onDetail?.();
       if (this.failDetail > 0) {
         this.failDetail--;
         throw new TypeError('fetch failed');

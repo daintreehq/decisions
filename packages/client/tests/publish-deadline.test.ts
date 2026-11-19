@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { buildSignedQuestion, encryptEnvelope } from '@daintreehq/decisions-crypto';
 import {
   DecisionsBridge,
@@ -348,7 +348,9 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     });
     expect(await env.store.outboxFor(questionId)).toHaveLength(0);
     expect((await env.store.getQuestion(questionId))!.remote_event_seq).toBeNull();
-    expect((await env.store.listAudit(50)).map((a) => a.event)).toContain('question.published');
+    expect(await env.store.listAudit(50)).toContainEqual(
+      expect.objectContaining({ event: 'question.published', result: 'held' }),
+    );
 
     await env.bridge.catchUp();
     expect(await env.bridge.getDecision(questionId)).toMatchObject({
@@ -381,6 +383,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       [
         [401, 'not_authenticated'],
         [403, 'forbidden'],
+        [404, 'unknown_error'],
         [426, 'upgrade_required'],
       ] as const
     ).map(
@@ -396,19 +399,28 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     ),
     [
       'the read shows no signed question',
-      'malformed_question',
+      'unknown_error',
       (relay: FakeRelay, id: string) =>
         reshape(relay, id, () => undefined as unknown as SignedQuestion),
     ],
     [
+      'the read shows the question without a signature',
+      'unknown_error',
+      (relay: FakeRelay, id: string) =>
+        reshape(relay, id, (q) => ({ ...q, record: { ...q.record, signature: '' } })),
+    ],
+    [
       'the read shows this signature under another id',
-      'malformed_question',
+      'unknown_error',
       (relay: FakeRelay, id: string) =>
         reshape(relay, id, (q) => ({ ...q, record: { ...q.record, question_id: 'q_other' } })),
     ],
   ] as const)(
     'keeps a refused create queued, possibly committed, and asks again, while %s',
     async (_why, code, fail) => {
+      // Half the backoff's range, so the retry is due strictly later.
+      const jitter = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      onTestFinished(() => jitter.mockRestore());
       const { env, questionId, retry, reads, now } = await refusedLateRetry();
       const undo = fail(env.relay, questionId);
       await retry();
@@ -434,6 +446,24 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       });
     },
   );
+
+  it('drops the leftover create when the history arrives while the relay is being asked', async () => {
+    const { env, questionId, retry, reads } = await refusedLateRetry();
+    env.relay.onDetail = async () => {
+      env.relay.onDetail = null;
+      await env.bridge.catchUp();
+    };
+    env.relay.failDetail = 1;
+    await retry();
+    expect(reads()).toBe(1);
+    expect(await env.bridge.getDecision(questionId)).toMatchObject({
+      status: 'human-answered',
+      publication: 'accepted',
+      choice: 'a',
+    });
+    // Nothing is left to hold up what is queued behind it.
+    expect(await env.store.outboxFor(questionId)).toHaveLength(0);
+  });
 
   it('keeps the refusal when the relay shows another question under the id', async () => {
     const { env, questionId, retry, reads } = await refusedLateRetry();

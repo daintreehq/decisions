@@ -1881,6 +1881,8 @@ export class Publisher {
           const deadline = item.kind === 'create' ? deadlineOf(p) : null;
           if (deadline !== null && !p.maybePublished) next = Math.min(next, deadline);
           await ctx.store.recordOutboxFailure(item.id, err.code, next);
+          // A relay that cannot be reached takes nothing else either; one that will not say holds up only this item.
+          if (!err.retryable) continue;
           break;
         }
         if (item.kind === 'owner-answer') {
@@ -2000,9 +2002,17 @@ export class Publisher {
       receipt = await ctx.client.createQuestion(item.id, p.signed).catch(async (e: unknown) => {
         if (!(e instanceof RelayError) || e.retryable) throw e;
         if (e.status === 400 && e.details?.reason === CREATE_NEVER_COMMITTED) throw e;
-        // A question whose history this desktop already applied needs no word from the relay: the leftover create goes.
-        if ((await ctx.store.getQuestion(item.question_id))?.local_status !== 'queued') throw e;
-        await this.relayHolds(item.question_id, e, p.signed.record.signature);
+        // A question whose history this desktop applied, before the read or during it, needs no word from the relay:
+        // the leftover create goes.
+        const applied = async () =>
+          (await ctx.store.getQuestion(item.question_id))?.local_status !== 'queued';
+        if (await applied()) throw e;
+        try {
+          await this.relayHolds(item.question_id, e, p.signed.record.signature);
+        } catch (u) {
+          if (u instanceof CreateUnconfirmed && (await applied())) throw e;
+          throw u;
+        }
         return null;
       });
     } finally {
@@ -2045,12 +2055,16 @@ export class Publisher {
     const record = (
       detail as { question?: { record?: { question_id?: unknown; signature?: unknown } } } | null
     )?.question?.record;
-    if (record?.question_id === questionId && typeof record.signature === 'string') {
+    if (
+      record?.question_id === questionId &&
+      typeof record.signature === 'string' &&
+      record.signature
+    ) {
       if (record.signature === signature) return;
       throw refusal;
     }
     throw new CreateUnconfirmed(
-      new RelayError('malformed_question', 'the relay did not show the question it holds', 0),
+      new RelayError('unknown_error', 'the relay did not show the question it holds', 0),
     );
   }
 
