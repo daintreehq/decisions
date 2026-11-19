@@ -128,9 +128,9 @@ describe('the round transition table (section 21)', () => {
     const tr = applyRoundEvent(c.start, c.steps[0]!.event);
     expect(tr.outcome).toBe('answered');
     // Replayed long after the deadline, the deadline check is a no-op on the answered round.
-    expect(applyRoundEvent(tr.state, { type: 'deadline', at: c.start.expiresAt! + 86_400_000 }).outcome).toBe(
-      'unchanged',
-    );
+    expect(
+      applyRoundEvent(tr.state, { type: 'deadline', at: c.start.expiresAt! + 86_400_000 }).outcome,
+    ).toBe('unchanged');
   });
 
   it('only the first round of an advisory question is advisory', () => {
@@ -222,8 +222,10 @@ describe('the signed advisory contract', () => {
       expect(c.question).toBe(base.question);
     }
     expect(
-      DecisionContentV1.parse({ ...base, planned_fallback: 'x'.repeat(LIMITS.plannedFallbackChars) })
-        .planned_fallback,
+      DecisionContentV1.parse({
+        ...base,
+        planned_fallback: 'x'.repeat(LIMITS.plannedFallbackChars),
+      }).planned_fallback,
     ).toHaveLength(LIMITS.plannedFallbackChars);
   });
 
@@ -235,7 +237,9 @@ describe('the signed advisory contract', () => {
       fallback: content.planned_fallback,
     });
     expect(advisoryPlanOf(q, 1, content)).toBeNull();
-    expect(advisoryPlanOf(q, 0, DecisionContentV1.parse({ ...content, planned_fallback: ' ' }))).toEqual({
+    expect(
+      advisoryPlanOf(q, 0, DecisionContentV1.parse({ ...content, planned_fallback: ' ' })),
+    ).toEqual({
       deadline: q.record.expires_at,
       fallback: null,
     });

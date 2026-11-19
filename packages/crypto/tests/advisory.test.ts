@@ -72,7 +72,10 @@ describe('the advisory question signature (protocol section 21)', () => {
     await expect(decryptEnvelope(stripped, keys)).rejects.toThrow(/decryption failed/);
     const moved: CryptoEnvelope = { ...q.envelope, aad: { ...q.envelope.aad, revision: 1 } };
     expect(await verifyRecordAndEnvelope(q.record, moved, pub)).toBe(false);
-    const later = { ...q.record, expires_at: new Date(Date.parse(q.record.expires_at!) + 60_000).toISOString() };
+    const later = {
+      ...q.record,
+      expires_at: new Date(Date.parse(q.record.expires_at!) + 60_000).toISOString(),
+    };
     expect(await verifyRecordAndEnvelope(later, q.envelope, pub)).toBe(false);
   });
 

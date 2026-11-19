@@ -343,7 +343,10 @@ const ADVISORY_DEADLINE = at(-15 * 60);
 
 const questionRecord = (
   question_id: string,
-  extra: Pick<UnsignedQuestionRecord, 'requirement' | 'workflow_gate_id_hash' | 'policy_version' | 'expires_at'>,
+  extra: Pick<
+    UnsignedQuestionRecord,
+    'requirement' | 'workflow_gate_id_hash' | 'policy_version' | 'expires_at'
+  >,
 ): UnsignedQuestionRecord => ({
   v: 1,
   type: 'question',
@@ -518,7 +521,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: { type: 'action', action: 'answer', role: 'owner-desktop', expectedRevision: 0, at: T0 + MIN },
+        event: {
+          type: 'action',
+          action: 'answer',
+          role: 'owner-desktop',
+          expectedRevision: 0,
+          at: T0 + MIN,
+        },
         outcome: 'answered',
         error: null,
         after: { status: 'human-answered', revision: 1 },
@@ -531,7 +540,11 @@ export const ROUND_CASES: RoundCase[] = [
   {
     name: 'an unanswered advisory deadline makes the plan due, and nothing else',
     start: ADVISORY_ROUND,
-    steps: [settled(D - 1, open()), unanswered, settled(D + MIN, { status: 'expired', revision: 0 })],
+    steps: [
+      settled(D - 1, open()),
+      unanswered,
+      settled(D + MIN, { status: 'expired', revision: 0 }),
+    ],
   },
   {
     name: 'a blocking deadline stays unsatisfied',
@@ -554,7 +567,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: { type: 'action', action: 'cancel', role: 'phone', expectedRevision: 0, at: D - MIN },
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'phone',
+          expectedRevision: 0,
+          at: D - MIN,
+        },
         outcome: 'declined',
         error: null,
         after: { status: 'cancelled', revision: 0 },
@@ -565,7 +584,13 @@ export const ROUND_CASES: RoundCase[] = [
       },
       {
         // A retry from any device is a no-op: a decline is never relabelled a withdrawal.
-        event: { type: 'action', action: 'cancel', role: 'owner-desktop', expectedRevision: 0, at: D - 1 },
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'owner-desktop',
+          expectedRevision: 0,
+          at: D - 1,
+        },
         outcome: 'unchanged',
         error: null,
         after: { status: 'cancelled', revision: 0 },
@@ -617,7 +642,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: { type: 'action', action: 'cancel', role: 'desktop-host', expectedRevision: 0, at: D - MIN },
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'desktop-host',
+          expectedRevision: 0,
+          at: D - MIN,
+        },
         outcome: 'withdrawn',
         error: null,
         after: { status: 'cancelled', revision: 0 },
@@ -668,7 +699,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: { ...ADVISORY_ROUND, status: 'cancelled' },
     steps: [
       {
-        event: { type: 'action', action: 'reopen', role: 'owner-desktop', expectedRevision: 0, at: D + MIN },
+        event: {
+          type: 'action',
+          action: 'reopen',
+          role: 'owner-desktop',
+          expectedRevision: 0,
+          at: D + MIN,
+        },
         outcome: 'reopened',
         error: null,
         after: open(1),
@@ -702,7 +739,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: { ...ADVISORY_ROUND, requirement: 'proxy-ok' },
     steps: [
       {
-        event: { type: 'action', action: 'proxy-answer', role: 'desktop-host', expectedRevision: 0, at: D - 1 },
+        event: {
+          type: 'action',
+          action: 'proxy-answer',
+          role: 'desktop-host',
+          expectedRevision: 0,
+          at: D - 1,
+        },
         outcome: 'proxy-answered',
         error: null,
         after: { status: 'proxy-answered', revision: 1 },
@@ -720,7 +763,13 @@ export const ROUND_CASES: RoundCase[] = [
         after: { status: 'proxy-answered', revision: 1 },
       },
       {
-        event: { type: 'action', action: 'override', role: 'phone', expectedRevision: 1, at: D + MIN },
+        event: {
+          type: 'action',
+          action: 'override',
+          role: 'phone',
+          expectedRevision: 1,
+          at: D + MIN,
+        },
         outcome: 'overridden',
         error: null,
         after: { status: 'human-answered', revision: 2 },
@@ -735,7 +784,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: { ...ADVISORY_ROUND, requirement: 'proxy-first' },
     steps: [
       {
-        event: { type: 'action', action: 'proxy-abstain', role: 'desktop-host', expectedRevision: 0, at: T0 + MIN },
+        event: {
+          type: 'action',
+          action: 'proxy-abstain',
+          role: 'desktop-host',
+          expectedRevision: 0,
+          at: T0 + MIN,
+        },
         outcome: 'proxy-abstained',
         error: null,
         after: open(),
@@ -797,10 +852,21 @@ export const ROUND_CASES: RoundCase[] = [
         fallbackDue: true,
         trainable: false,
       },
-      { event: phoneAnswer(D + MIN), outcome: null, error: 'expired', after: { status: 'expired', revision: 0 } },
+      {
+        event: phoneAnswer(D + MIN),
+        outcome: null,
+        error: 'expired',
+        after: { status: 'expired', revision: 0 },
+      },
       {
         // A dismissal sent once the round expired finds it closed.
-        event: { type: 'action', action: 'cancel', role: 'phone', expectedRevision: 0, at: D + MIN },
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'phone',
+          expectedRevision: 0,
+          at: D + MIN,
+        },
         outcome: null,
         error: 'invalid_state',
         after: { status: 'expired', revision: 0 },
@@ -824,9 +890,20 @@ export const ROUND_CASES: RoundCase[] = [
     name: 'a second answer conflicts with the first',
     start: ADVISORY_ROUND,
     steps: [
-      { event: phoneAnswer(D - 2 * MIN), outcome: 'answered', error: null, after: { status: 'human-answered', revision: 1 } },
       {
-        event: { type: 'action', action: 'answer', role: 'tablet', expectedRevision: 0, at: D - MIN },
+        event: phoneAnswer(D - 2 * MIN),
+        outcome: 'answered',
+        error: null,
+        after: { status: 'human-answered', revision: 1 },
+      },
+      {
+        event: {
+          type: 'action',
+          action: 'answer',
+          role: 'tablet',
+          expectedRevision: 0,
+          at: D - MIN,
+        },
         outcome: null,
         error: 'revision_conflict',
         after: { status: 'human-answered', revision: 1 },

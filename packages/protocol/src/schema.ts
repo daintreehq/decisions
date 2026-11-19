@@ -316,7 +316,10 @@ export type ActionRecord = z.infer<typeof ActionRecord>;
  * that breaks them.
  */
 export function refineAdvisoryQuestion(
-  q: { record: Pick<QuestionRecord, 'expires_at' | 'workflow_gate_id_hash'>; envelope: Pick<CryptoEnvelope, 'aad'> },
+  q: {
+    record: Pick<QuestionRecord, 'expires_at' | 'workflow_gate_id_hash'>;
+    envelope: Pick<CryptoEnvelope, 'aad'>;
+  },
   ctx: z.RefinementCtx,
 ): void {
   if (replyModeOf(q.envelope) !== 'advisory') return;

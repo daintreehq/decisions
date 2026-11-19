@@ -399,7 +399,8 @@ function dueDeadline(s: RoundState, at: number): RoundTransition | null {
 export function applyRoundEvent(state: RoundState | null, ev: RoundEvent): RoundTransition {
   if (state === null) throw new ApiError('not_found', 'no such question');
   if (ev.type === 'delete') {
-    if (ev.role !== 'owner-desktop') throw new ApiError('forbidden', `role ${ev.role} may not delete`);
+    if (ev.role !== 'owner-desktop')
+      throw new ApiError('forbidden', `role ${ev.role} may not delete`);
     return {
       state: null,
       outcome: 'deleted',
@@ -449,7 +450,10 @@ export function applyRoundEvent(state: RoundState | null, ev: RoundEvent): Round
   let expiresAt = state.expiresAt;
   if (ev.action === 'reopen') {
     expiresAt = ev.expiresAt ?? null;
-    if (expiresAt !== null && (expiresAt <= ev.at || expiresAt > ev.at + LIMITS.maxQuestionExpiryMs)) {
+    if (
+      expiresAt !== null &&
+      (expiresAt <= ev.at || expiresAt > ev.at + LIMITS.maxQuestionExpiryMs)
+    ) {
       throw new ApiError('validation_error', 'expires_at must be in the future (or null)');
     }
   }

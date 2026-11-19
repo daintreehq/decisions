@@ -173,7 +173,9 @@ describe('advisory questions (section 21)', () => {
     expect(tr.state).toMatchObject({ status: d.json.status, revision: d.json.revision });
 
     // A late dismissal finds the round closed.
-    expect((await act(w, phone, 'cancel', a.questionId, 0, { content: null })).res.status).toBe(409);
+    expect((await act(w, phone, 'cancel', a.questionId, 0, { content: null })).res.status).toBe(
+      409,
+    );
   });
 
   it('a reopen opens a blocking round at revision 1', async () => {
@@ -203,7 +205,9 @@ describe('advisory questions (section 21)', () => {
     const a = await askAdvisory(w);
     const b = await ask(w);
     const page = (after: number) =>
-      phone.call('GET', '/api/v1/events', undefined, `after=${after}&limit=100`).then((r) => r.json);
+      phone
+        .call('GET', '/api/v1/events', undefined, `after=${after}&limit=100`)
+        .then((r) => r.json);
     const desk = await legacyDesktopCatchUp(page);
     const tel = await legacyPhoneCatchUp(page);
     for (const run of [desk, tel]) {
