@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { LedgerEvent } from '@daintreehq/decisions-protocol';
+import { bytesToBase64Url, type LedgerEvent } from '@daintreehq/decisions-protocol';
 import {
   buildSignedAction,
   generateEpochKeyBytes,
@@ -15,6 +15,7 @@ import {
   PolicyRegistry,
   RelayClient,
   createPairingInvite,
+  importIdentity,
   revokeAndRotate,
   rotateEpoch,
   type Identity,
@@ -279,7 +280,7 @@ describe('a desktop-host bridge after a key rotation', () => {
     expect(sink.typed).toHaveLength(1);
   });
 
-  it('a burst of failed grant fetches never discards the answer; only a long outage gives up on it', async () => {
+  it('a failed grant fetch never discards the answer behind it, however long the outage lasts', async () => {
     let clock = Date.now();
     const { relay, owner, phone, host, bridge, sink, store } = await hostWorld({
       now: () => clock,
@@ -297,18 +298,65 @@ describe('a desktop-host bridge after a key rotation', () => {
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
 
-    // A second rotation the relay keeps failing for well past the retry window is eventually consumed, so it
-    // cannot block the inbox forever.
+    // A second rotation the relay keeps failing for an hour, far past the ten minutes an earlier bridge gave it, with
+    // an answer under its epoch behind it: both wait, in order, and the answer is delivered once grants can be read.
+    const later = await ask(bridge, { question: 'And this?' });
     const r3 = await rotate(owner, relay, host);
     keyRotated(relay, r3.epoch);
+    await relay.answerEvent({ questionId: later, phone, options: ['reject'], epoch: r3.key });
     relay.failGrants = 1_000;
     await bridge.catchUp();
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 12; i++) {
       clock += 5 * 60_000;
-      await bridge.inbox.processPending();
+      await bridge.pump();
     }
+    expect((await store.unprocessedEvents(10)).length).toBe(2);
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(later))!.local_status).toBe('open');
+    relay.failGrants = 0;
+    await bridge.pump();
     expect(await store.unprocessedEvents(10)).toEqual([]);
-    expect((await store.listAudit(200)).some((a) => a.event === 'event.error')).toBe(true);
+    expect(bridge.ctx.identity.currentEpoch).toBe(r3.epoch);
+    expect(sink.typed).toHaveLength(2);
+    expect(sink.typed[1]!.text).toContain('choice: reject');
+    expect((await store.getQuestion(later))!.local_status).toBe('human-answered');
+    expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(false);
+  });
+
+  it('rejects an answer under an epoch from before it was enrolled, and the events behind it go on', async () => {
+    // Enrolled after the owner rotated to epoch 2: enrollment grants only the current epoch, so epoch 1 never reaches
+    // this Host, from the relay or anywhere else.
+    const owner = await makeIdentity();
+    const relay = new FakeRelay(owner);
+    await relay.initOwner();
+    const phone = await makePhone(owner);
+    relay.devices.push(phone.cert);
+    const host = await makeHost(owner, relay);
+    const r = await rotate(owner, relay, host);
+    const deviceId = host.identity.config.deviceId;
+    const grants = relay.grants.get(deviceId)!.filter((g) => g.key_epoch === r.epoch);
+    relay.grants.set(deviceId, grants);
+    const stored = (await host.keyStore.load())!;
+    await host.keyStore.save({
+      ...stored,
+      epochs: [{ epoch: r.epoch, raw: bytesToBase64Url(r.raw) }],
+      currentEpoch: r.epoch,
+      host: { ...stored.host!, grants },
+    });
+    const identity = await importIdentity((await host.keyStore.load())!);
+    const { bridge, sink, store } = bridgeFor(identity, relay, { keyStore: host.keyStore });
+    const stale = await ask(bridge);
+    const fresh = await ask(bridge, { question: 'And this?' });
+    // A phone seals its answer to the first under epoch 1, which the relay allows (it refuses only epochs ahead of
+    // its own): waiting for that key would hold every later event forever.
+    await relay.answerEvent({ questionId: stale, phone, options: ['approve'] });
+    await relay.answerEvent({ questionId: fresh, phone, options: ['reject'], epoch: r.key });
+    await bridge.catchUp();
+    expect(await rejections(store)).toEqual(['key-epoch-not-granted']);
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    expect(sink.typed[0]!.text).toContain('choice: reject');
+    expect((await store.getQuestion(stale))!.local_status).toBe('open');
   });
 
   it('refuses a grant that is not sealed by the pinned owner and delivers nothing under that epoch', async () => {

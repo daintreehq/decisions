@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { generateEpochKeyBytes } from '@daintreehq/decisions-crypto';
+import { generateEpochKeyBytes, importEpochKey } from '@daintreehq/decisions-crypto';
 import {
   DecisionsBridge,
   MemoryKeyStore,
@@ -16,7 +16,7 @@ import { FakeRelay, FakeSink, makeIdentity, makePhone, origin } from './helpers.
  * (`decisions revoke`, `decisions rotate`, or Daintree's own settings action) rotates the content key while
  * this bridge keeps running.
  */
-async function ownerWithKeyStore() {
+async function ownerWithKeyStore(now?: () => number) {
   const identity = await makeIdentity();
   const keyStore = new MemoryKeyStore();
   await keyStore.save(identity.stored);
@@ -32,16 +32,18 @@ async function ownerWithKeyStore() {
     sleep: async () => {},
     maxRetries: 0,
   });
+  const store = new MemoryLocalStore();
   const bridge = new DecisionsBridge({
     identity,
     keyStore,
-    store: new MemoryLocalStore(),
+    store,
     sink,
     client,
     policy: new PolicyRegistry(),
     pumpIntervalMs: 0,
+    ...(now ? { now } : {}),
   });
-  return { identity, keyStore, relay, bridge };
+  return { identity, keyStore, relay, bridge, phone, sink, store };
 }
 
 async function ask(bridge: DecisionsBridge, question: string) {
@@ -90,5 +92,36 @@ describe('the owner bridge after a key rotation made by another process', () => 
     await bridge.catchUp();
     expect(epochOf(relay, await ask(bridge, 'Still?'))).toBe(1);
     expect((await loadIdentity(keyStore)).currentEpoch).toBe(1);
+  });
+
+  it('an answer under a committed epoch the key store does not hold yet waits for the key, however long', async () => {
+    let clock = Date.now();
+    const { identity, keyStore, relay, bridge, phone, sink, store } = await ownerWithKeyStore(
+      () => clock,
+    );
+    const qid = await ask(bridge, 'Ship it?');
+    // The relay committed epoch 2 and the phone answers under it, but this store does not hold the key yet (a
+    // concurrent rotation's save overwritten by another process, say): the answer waits, far past ten minutes.
+    const raw = generateEpochKeyBytes();
+    relay.epoch = 2;
+    const ev = await relay.answerEvent({
+      questionId: qid,
+      phone,
+      options: ['ok'],
+      epoch: await importEpochKey(raw, 2, true),
+    });
+    await bridge.catchUp();
+    for (let i = 0; i < 40; i++) {
+      clock += 30_000;
+      await bridge.pump();
+    }
+    expect(sink.typed).toHaveLength(0);
+    expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
+    // The key reaches the store: the next pump reloads it and delivers the answer.
+    await addEpoch(keyStore, identity, 2, raw, { makeCurrent: false });
+    clock += 30_000;
+    await bridge.pump();
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
   });
 });

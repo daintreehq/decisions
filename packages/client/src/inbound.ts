@@ -122,6 +122,10 @@ export class EventVerifier {
     } catch (e) {
       throw new TransientError(`device directory unavailable: ${(e as Error).message}`);
     }
+    // A reply without a device list is no directory at all: it says nothing about the event, so it waits like an
+    // unreachable relay rather than failing the event it was read for.
+    if (!Array.isArray(list?.devices))
+      throw new TransientError('device directory unavailable: no device list');
     const { identity } = ctx;
     const pin = identity.owner;
     const next = new Map<string, DirEntry>();
@@ -183,7 +187,10 @@ export class EventVerifier {
 
   /**
    * Decrypt an inbound envelope under its exact binding. A key epoch this identity does not hold yet is reloaded
-   * once (rotated by another process) and otherwise throws `TransientError`, so the event is retried in order.
+   * once (rotated by another process) and otherwise throws `TransientError`, so the event is retried in order until
+   * the key arrives. An epoch older than the first one this identity was given is rejected instead: a grant is only
+   * ever sealed for the epoch current when it is made, so a Host enrolled after it can never be given its key, and
+   * waiting for it would hold the ledger forever.
    */
   private async decrypt(
     envelope: CryptoEnvelope,
@@ -205,8 +212,12 @@ export class EventVerifier {
     }
     // Rotated by another process: reload epoch material, then try once more.
     await ctx.refreshIdentity?.();
-    if (!ctx.identity.epochs.has(envelope.key_epoch))
+    if (!ctx.identity.epochs.has(envelope.key_epoch)) {
+      const held = [...ctx.identity.epochs.keys()];
+      if (held.length > 0 && envelope.key_epoch < Math.min(...held))
+        return { ok: false, reason: 'key-epoch-not-granted' };
       throw new TransientError(`missing epoch key ${envelope.key_epoch}`);
+    }
     try {
       return { raw: await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding) };
     } catch {

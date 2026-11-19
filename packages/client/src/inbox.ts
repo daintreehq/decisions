@@ -99,14 +99,6 @@ const ROUNDS_RECONCILED = 'rounds-reconciled';
 /** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
 
-/**
- * A transiently failing event is given up on (consumed with an error) only after this many attempts AND this long
- * since its first failure. Attempts come as fast as events arrive, so a count alone would let a short outage
- * (a relay restart, a rate limit) discard a valid answer.
- */
-const MAX_TRANSIENT_ATTEMPTS = 5;
-const MIN_TRANSIENT_WINDOW_MS = 10 * 60_000;
-
 /** What the relay would hold for this question, derived only from events WE verified. */
 function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
   switch (s) {
@@ -126,11 +118,14 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
 /**
  * Persists ledger events BEFORE anything is acknowledged, then verifies and applies them strictly in seq
  * order and only up to the confirmed (contiguous) frontier. Unverifiable events are rejected and audited;
- * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order.
+ * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order, for as
+ * long as they last: such a failure says nothing about the event, so however long the relay or the device directory
+ * stays unreachable, a committed answer waits for it rather than being dropped.
  */
 export class Inbox {
   private readonly serial = new Mutex();
-  private readonly transientAttempts = new Map<number, { n: number; since: number }>();
+  /** The event this run last audited as deferred: a long outage is logged once per held event, not on every retry. */
+  private deferredSeq: number | null = null;
   /**
    * Rows written before reopens kept their deadline are repaired in the background (`reconcileRounds`), never in the
    * way of an event. Until a pass has settled them all, an expiry is judged by `roundDeadline` instead.
@@ -188,27 +183,23 @@ export class Inbox {
             if (await this.apply(ev, stored.received_at)) drain = true;
           } catch (e) {
             if (e instanceof TransientError) {
-              const prev = this.transientAttempts.get(ev.seq);
-              const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
-              this.transientAttempts.set(ev.seq, a);
-              if (
-                a.n < MAX_TRANSIENT_ATTEMPTS ||
-                this.ctx.now() - a.since < MIN_TRANSIENT_WINDOW_MS
-              ) {
-                // Leave it unprocessed and stop: later events must not overtake it.
+              // Leave it unprocessed and stop: later events must not overtake it. It is never given up on, so an
+              // outage of any length cannot consume an answer the relay committed; what is permanently wrong with an
+              // event is a rejection, never a `TransientError`.
+              if (this.deferredSeq !== ev.seq) {
+                this.deferredSeq = ev.seq;
                 await this.ctx.audit.log({
                   event: 'event.deferred',
                   result: e.message.slice(0, 80),
                 });
-                return drain;
               }
+              return drain;
             }
             await this.ctx.audit.log({
               event: 'event.error',
               result: (e as Error).message.slice(0, 80),
             });
           }
-          this.transientAttempts.delete(ev.seq);
           await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
         }
       }
