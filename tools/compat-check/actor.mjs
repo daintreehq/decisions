@@ -82,16 +82,12 @@ function recordingFetch(refused) {
     const res = await fetch(input, init);
     if (!res.ok) {
       const url = new URL(typeof input === 'string' ? input : input.url);
-      const body = await res
-        .clone()
-        .text()
-        .catch(() => '');
-      refused.push({
-        method: init?.method ?? 'GET',
-        path: url.pathname,
-        status: res.status,
-        body: body.slice(0, 300),
-      });
+      const entry = { method: init?.method ?? 'GET', path: url.pathname, status: res.status };
+      refused.push(entry);
+      // The body is sampled on the side, so the client gets the response as soon as it came.
+      void Promise.race([res.clone().text(), sleep(2000).then(() => '')])
+        .then((body) => (entry.body = body.slice(0, 300)))
+        .catch(() => undefined);
     }
     return res;
   };
@@ -225,6 +221,8 @@ class Phone {
       status: found.status,
       revision: found.revision,
       expires_at: found.expires_at ?? null,
+      /** The deadline signed into the create, which the current round keeps until a reopen. */
+      signed_expires_at: found.question.record.expires_at,
       reply_mode: found.question.envelope.aad.reply_mode ?? null,
       originating_device_id: found.question.record.originating_device_id,
       content,
@@ -312,6 +310,8 @@ const ops = {
       out[name] = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version;
     }
     out.resolved = import.meta.resolve('@daintreehq/decisions-client');
+    // Whether this side's protocol has advisory questions at all (0.8.0 and older do not).
+    out.knowsAdvisory = protocol.ProtocolFeature.options.includes('advisory-deadlines-v1');
     return out;
   },
 
@@ -374,6 +374,11 @@ const ops = {
     const rc = new client.RelayClient({ identity });
     const want = new Set(questionIds);
     const seen = {};
+    const issueOf = (r) => {
+      if (r.success) return null;
+      const i = r.error.issues[0];
+      return { path: (i?.path ?? []).join('.'), code: i?.code ?? null, keys: i?.keys ?? [] };
+    };
     let after = 0;
     let highWater = 0;
     for (;;) {
@@ -381,10 +386,12 @@ const ops = {
       for (const ev of page.events) {
         if (ev.event_type !== 'decision.created' || !want.has(ev.question_id)) continue;
         const r = protocol.EventData.created.safeParse(ev.data);
+        const creates = (seen[ev.question_id]?.creates ?? 0) + 1;
         seen[ev.question_id] = {
           seq: ev.seq,
+          creates,
           created: r.success,
-          createdIssue: r.success ? null : (r.error.issues[0]?.path ?? []).join('.'),
+          createdIssue: issueOf(r),
         };
       }
       highWater = page.high_water_seq;
@@ -396,9 +403,10 @@ const ops = {
       const detail = protocol.QuestionDetail.safeParse(await rc.getQuestion(id));
       out[id] = {
         inLedger: id in seen,
+        creates: 0,
         ...(seen[id] ?? {}),
         detail: detail.success,
-        detailIssue: detail.success ? null : (detail.error.issues[0]?.path ?? []).join('.'),
+        detailIssue: issueOf(detail),
       };
     }
     return { questions: out, highWater };
@@ -435,19 +443,31 @@ const ops = {
     return { deviceId: identity.config.deviceId, features: [...(bridge.features ?? [])] };
   },
 
-  /** `registerQuestion` as a host app calls it; a refusal is returned, not thrown. */
+  /** `registerQuestion` as a host app calls it; its refusal is returned, anything after it is thrown. */
   async bridgeAsk({ name, input, awaitAdvisorySupport = false }) {
     const b = bridges.get(name);
+    let r;
     try {
-      const r = await b.bridge.registerQuestion({
+      r = await b.bridge.registerQuestion({
         origin: originOf(b.pane),
         input,
         ...(awaitAdvisorySupport ? { awaitAdvisorySupport: true } : {}),
       });
-      await b.bridge.pump();
-      return { asked: r };
     } catch (e) {
       return { refused: errorOf(e) };
+    }
+    await b.bridge.pump();
+    return { asked: r };
+  },
+
+  /** Whether the bridge holds the question as one of its own (`getDecision` refuses one it does not). */
+  async bridgeKnows({ name, questionId }) {
+    try {
+      await bridges.get(name).bridge.getDecision(questionId);
+      return true;
+    } catch (e) {
+      if (e?.code === 'not_found') return false;
+      throw e;
     }
   },
 
@@ -463,14 +483,23 @@ const ops = {
   async bridgeState({ name }) {
     const b = bridges.get(name);
     let audit = [];
+    let lines = [];
     try {
-      audit = readFileSync(b.auditPath, 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l));
-    } catch {
-      /* no audit yet */
+      lines = readFileSync(b.auditPath, 'utf8').split('\n');
+    } catch (e) {
+      // Nothing audited yet is an empty audit; a read error is reported.
+      if (e?.code !== 'ENOENT') throw e;
     }
+    // Only the last line may be one still being written; a torn line anywhere else is reported.
+    const last = lines.length - 1;
+    lines.forEach((l, i) => {
+      if (!l) return;
+      try {
+        audit.push(JSON.parse(l));
+      } catch (e) {
+        if (i !== last) throw e;
+      }
+    });
     return {
       typed: b.sink.typed,
       refused: b.refused,
@@ -490,6 +519,9 @@ const ops = {
     if (!b) return false;
     bridges.delete(name);
     await b.bridge.stop();
+    // Let work already started finish writing before the store closes (`idle` is newer than 0.8.0).
+    if (typeof b.bridge.idle === 'function') await b.bridge.idle();
+    else await sleep(500);
     await b.store.close?.();
     return true;
   },
