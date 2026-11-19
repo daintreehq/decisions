@@ -9,6 +9,7 @@ import {
   DecisionsBridge,
   PolicyRegistry,
   RelayClient,
+  ADVISORY_LEDGER_WAIT_MS,
   TokenMapAuthenticator,
   currentDisposition,
   parseAnswers,
@@ -574,6 +575,53 @@ describe('where the advisory notice goes', () => {
     expect(e.sink.typed[0]!.text).toContain('disposition: fallback-due');
   });
 
+  it('waits two minutes at most for a read that does not get through', async () => {
+    const e = await advised();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    e.relay.down = 1;
+    await expect(e.bridge.catchUp()).rejects.toThrow();
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    e.setNow(e.now + ADVISORY_LEDGER_WAIT_MS - 1);
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    e.setNow(e.now + 1);
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(1);
+  });
+
+  it('a read over HTTP that ends while a socket replay goes on never releases it', async () => {
+    FakeSocket.instances = [];
+    const e = await advised({ webSocket: (u) => new FakeSocket(u) });
+    e.setNow(T0 + 16 * MIN);
+    await e.bridge.start();
+    await e.bridge.pump();
+    const expired = e.relay.expiryEvent({ questionId: e.qid });
+    await tick(10);
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.recv({
+      t: 'hello',
+      protocol_version: PROTOCOL_VERSION,
+      device_id: e.identity.config.deviceId,
+      role: 'owner-desktop',
+      key_epoch: 1,
+      high_water: expired.seq + 1,
+      server_time: new Date().toISOString(),
+    });
+    for (const ev of e.relay.events.filter((x) => x.seq <= expired.seq))
+      ws.recv({ t: 'event', event: ev });
+    await until(async () => (await e.row()).local_status === 'expired');
+    // An HTTP catch-up reads to the relay's end while the socket's replay has not caught up.
+    await e.bridge.catchUp();
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    ws.recv({ t: 'caught_up', high_water: expired.seq, has_more: false });
+    await until(async () => e.sink.typed.length > 0);
+    expect(e.sink.typed).toHaveLength(1);
+  });
+
   it('is typed when a socket replay that brought it ends, with nothing else to wake it', async () => {
     FakeSocket.instances = [];
     const e = await advised({ webSocket: (u) => new FakeSocket(u) });
@@ -635,6 +683,40 @@ describe('where the advisory notice goes', () => {
       revision: 1,
       advisoryTimeout: { notice: 'superseded' },
     });
+  });
+
+  it('checks the ledger again after the intent is written: an event stored meanwhile still holds it', async () => {
+    const e = await advised();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    const reopened = await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    const putIntent = e.store.putIntent.bind(e.store);
+    // A read stores the reopen outside the delivery lock, while the intent is being written.
+    e.store.putIntent = async (i) => {
+      await e.store.insertEvent({
+        seq: reopened.seq,
+        event_id: reopened.event_id,
+        event_type: reopened.event_type,
+        json: JSON.stringify(reopened),
+        received_at: e.now,
+        processed_at: null,
+      });
+      return putIntent(i);
+    };
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    // Nothing was written: its intent is closed and holds nothing back.
+    expect(await e.store.hasUncertainIntent(e.qid)).toBe(false);
+    expect((await e.store.openIntents()).filter((i) => i.state === 'intent')).toEqual([]);
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(0);
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.notice).toBe('superseded');
   });
 
   it('waits for a socket replay to end: a later event of it may reopen the round', async () => {
@@ -853,6 +935,37 @@ describe('a deletion while the advisory notice is being written', () => {
   });
 });
 
+describe('a deletion and a crash while the advisory notice is being written', () => {
+  it('a crash with no marker found keeps the notice uncertain, never superseded', async () => {
+    const e = await advised();
+    let entered!: () => void;
+    const reached = new Promise<void>((r) => (entered = r));
+    // The intent is written, then the process dies with nothing found on screen.
+    e.sink.inject = async () => {
+      entered();
+      return new Promise<InjectResult>(() => {});
+    };
+    e.relay.expiryEvent({ questionId: e.qid });
+    e.setNow(T0 + 16 * MIN);
+    void e.bridge.catchUp();
+    await reached;
+    e.relay.push('decision.deleted', e.qid, null, {});
+    void e.bridge.catchUp();
+    await until(async () => (await e.row()).local_status === 'cancelled');
+    await e.bridge.stop();
+    e.sink.inject = Object.getPrototypeOf(e.sink).inject.bind(e.sink);
+    const again = e.restart();
+    await again.start({ socket: false });
+    const v = await again.getDecision(e.qid);
+    expect(v.advisoryTimeout).toMatchObject({
+      notice: 'uncertain',
+      injectionId: expect.any(String),
+    });
+    expect(await e.store.hasUncertainIntent(e.qid)).toBe(false);
+    expect(e.sink.typed).toHaveLength(0);
+  });
+});
+
 describe('a crash around the advisory notice', () => {
   it('before anything was attempted: typed once after the restart, and get_decision says so', async () => {
     const e = await advised();
@@ -861,16 +974,20 @@ describe('a crash around the advisory notice', () => {
     await e.bridge.stop();
     const again = e.restart();
     await again.start({ socket: false });
+    // Nothing has been read from the relay since the restart: a reopen may be waiting there, so neither the terminal
+    // nor get_decision lets the plan go ahead yet.
     expect(await again.getDecision(e.qid)).toMatchObject({
-      fallbackDue: true,
+      fallbackDue: false,
       advisoryTimeout: { disposition: 'fallback-due', notice: 'pending', deadline: DEADLINE },
     });
+    const waiting = await getDecisionOverMcp(again, e.qid);
+    expect(waiting.content[0]!.text).toContain('not settled yet');
     e.sink.panes.get('pane-1')!.idle = true;
-    // Nothing has been read from the relay since the restart: a reopen may be waiting there.
     await again.notifyPaneIdle();
     expect(e.sink.typed).toHaveLength(0);
     await again.catchUp();
     expect(e.sink.typed).toHaveLength(1);
+    expect((await again.getDecision(e.qid)).fallbackDue).toBe(true);
     expect((await again.getDecision(e.qid)).advisoryTimeout?.notice).toBe('delivered');
   });
 

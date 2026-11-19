@@ -842,9 +842,12 @@ export function createDecisionsMcpHandler(
           : v.status === 'expired'
             ? v.fallbackDue
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
-              : v.advisoryTimeout?.revision === v.revision
-                ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
-                : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+              : v.advisoryTimeout?.revision === v.revision &&
+                  v.advisoryTimeout.disposition === 'fallback-due'
+                ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
+                : v.advisoryTimeout?.revision === v.revision
+                  ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
+                  : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.closedReason === 'never-published'
               ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
               : v.publication === 'possibly-committed'

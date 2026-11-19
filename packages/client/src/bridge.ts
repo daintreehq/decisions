@@ -338,8 +338,9 @@ export interface DecisionView {
    * True only when the agent may carry out the plan its advisory question stated (protocol section 21): the advisory
    * round's deadline passed unanswered (`advisoryTimeout`, `fallback-due`), or the question never reached the relay
    * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
-   * keeps what it said; one still to be typed follows the policy as it is now. It is never an answer or an approval:
-   * the person decided nothing.
+   * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
+   * desktop to read the relay (a reopen may be on its way). It is never an answer or an approval: the person decided
+   * nothing.
    */
   fallbackDue: boolean;
   /**
@@ -500,11 +501,12 @@ export class DecisionsBridge {
    */
   private paging: { pass: Promise<number>; abortable: boolean } | null = null;
   /**
-   * The ledger may hold events this desktop has not read: a socket replay started and has not ended, a page read
-   * failed part-way, or nothing has been read in full since the bridge started. An advisory notice waits meanwhile
-   * (`DeliveryOptions.replaying`), since a later event may replace the round it closed.
+   * What this desktop knows of the ledger, for an advisory notice (`ledgerUnsettled`): a socket replay is under way
+   * (from its first segment, or a gap's, to its last), and whether a read reached the relay's end since this run
+   * started and since a read last failed part-way.
    */
-  private ledgerUnread = true;
+  private socketReplay = false;
+  private ledgerRead = false;
   /** The one HTTP sync in flight (`sync`). */
   private syncing: Promise<HttpSyncStatus> | null = null;
   /** Set while this run polls the relay over HTTP (`start({ socket: false, poll })`). */
@@ -613,12 +615,7 @@ export class DecisionsBridge {
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
       advisoryOutcomes: o.advisoryDeadlines === true,
-      // The ledger may hold a later event (a reopen, a deletion) for the round an advisory notice closed: one not read
-      // yet, or read and not yet applied (a gap waits for the events before it).
-      replaying: async () =>
-        this.ledgerUnread ||
-        this.paging !== null ||
-        (await this.ctx.store.unprocessedEvents(1)).length > 0,
+      replaying: () => this.ledgerUnsettled(),
     });
     this.socket = new RelaySocket({
       client,
@@ -629,8 +626,9 @@ export class DecisionsBridge {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => {
-          // A replay is under way until its last segment is caught up.
-          if (s === 'syncing') this.ledgerUnread = true;
+          // A replay is under way until its last segment is caught up; a socket that closes abandons it.
+          this.socketReplay = s === 'syncing' || (s === 'live' && this.socketReplay);
+          if (s === 'syncing') this.ledgerRead = false;
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
@@ -733,6 +731,8 @@ export class DecisionsBridge {
     this.httpAbort = new AbortController();
     this.state = 'running';
     this.advisory.start();
+    // This run has read nothing yet: a reopen may be waiting at the relay for an advisory notice still to type.
+    this.ledgerRead = false;
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
@@ -1249,6 +1249,11 @@ export class DecisionsBridge {
     const entries = await openAnswers(this.ctx, row);
     const unpublished = entries.find((e) => e.kind === 'unpublished');
     const timeout = this.advisoryTimeout(row, entries);
+    // A notice waiting for the ledger (a reopen may be on its way) does not let the plan go ahead here either.
+    const waiting =
+      timeout?.inForce === true &&
+      timeout.view.notice === 'pending' &&
+      (await this.delivery.ledgerHolds());
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1320,7 +1325,7 @@ export class DecisionsBridge {
       fallbackDue:
         !row.history_only &&
         ((row.local_status === 'publish-failed' && unpublished?.fallback_due === true) ||
-          (timeout?.inForce === true && timeout.view.disposition === 'fallback-due')),
+          (timeout?.inForce === true && timeout.view.disposition === 'fallback-due' && !waiting)),
       advisoryTimeout: timeout?.view ?? null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
@@ -1465,6 +1470,20 @@ export class DecisionsBridge {
     return out.sort((a, b) => a.seq - b.seq).map((x) => x.entry);
   }
 
+  /**
+   * The ledger may hold a later event (a reopen, a deletion) for the round an advisory notice closed, so the notice
+   * waits (`DeliveryOptions.replaying`): a read of the relay is under way, a read failed part-way or none reached the
+   * relay's end since this run started, or a stored event is still to be applied.
+   */
+  private async ledgerUnsettled(): Promise<boolean> {
+    return (
+      this.socketReplay ||
+      this.paging !== null ||
+      !this.ledgerRead ||
+      (await this.ctx.store.unprocessedEvents(1)).length > 0
+    );
+  }
+
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */
   async notifyPaneIdle(): Promise<DrainResult> {
     return this.delivery.drain();
@@ -1553,7 +1572,8 @@ export class DecisionsBridge {
     // A frame of a replay is applied but not delivered: a later frame of the same replay (a reopen) may replace
     // what it closed. The pump after the replay's last segment delivers whatever is still in force.
     const drain = await this.inbox.processPending();
-    if (drain && this.socket.currentState !== 'syncing') await this.deliverNow();
+    if (this.socket.currentState !== 'syncing' && (drain || this.delivery.takeReplayHold()))
+      await this.deliverNow();
     if (await this.inbox.hasGap()) await this.recoverGap();
   }
 
@@ -1568,9 +1588,12 @@ export class DecisionsBridge {
       /* closed */
     }
     if (!hasMore) {
-      // Read in full: the pump applies and delivers what the replay brought, advisory notices included.
-      this.ledgerUnread = false;
+      // Read in full: the pump applies and delivers what the replay brought, advisory notices included. A pump
+      // already running when the replay ended may have held one: it is delivered now.
+      this.socketReplay = false;
+      this.ledgerRead = true;
       await this.pump();
+      if (this.delivery.takeReplayHold()) await this.deliverNow();
     } else await this.inbox.processPending();
   }
 
@@ -1588,7 +1611,7 @@ export class DecisionsBridge {
     this.lastGap = { cursor, at: this.ctx.now() };
     try {
       if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing') {
-        this.ledgerUnread = true;
+        this.socketReplay = true;
         this.socket.syncFrom(cursor);
       } else await this.catchUp();
     } catch (e) {
@@ -1648,12 +1671,12 @@ export class DecisionsBridge {
     const pass = this.pageEvents(req)
       .then(
         (cursor) => {
-          this.ledgerUnread = false;
+          this.ledgerRead = true;
           return cursor;
         },
         (e: unknown) => {
           // Read part-way: what the pages after it hold is unknown until a read gets through.
-          this.ledgerUnread = true;
+          this.ledgerRead = false;
           throw e;
         },
       )

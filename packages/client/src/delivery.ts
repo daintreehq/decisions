@@ -70,12 +70,19 @@ export interface DeliveryOptions {
    */
   advisoryOutcomes?: boolean;
   /**
-   * True while the ledger may hold events this desktop has not read and applied (a replay or a page read under way,
-   * one that ended part-way, a gap): an advisory notice waits, since a later event (a reopen, a deletion) may replace
-   * the round it closed. The host drains again once it is false (`takeReplayHold`).
+   * True while the ledger may hold events this desktop has not read and applied (a read under way, one that ended
+   * part-way or none yet, a stored event not applied): an advisory notice waits, since a later event (a reopen, a
+   * deletion) may replace the round it closed. The host drains again once it is false (`takeReplayHold`); a wait
+   * never lasts past `ADVISORY_LEDGER_WAIT_MS`.
    */
   replaying?: () => boolean | Promise<boolean>;
 }
+
+/**
+ * The longest advisory notices wait for the ledger to settle (`DeliveryOptions.replaying`), so a read that never
+ * finishes, or an event that cannot be applied, never strands them.
+ */
+export const ADVISORY_LEDGER_WAIT_MS = 2 * 60_000;
 
 export interface DrainResult {
   delivered: number;
@@ -201,6 +208,8 @@ export class DeliveryEngine {
   private readonly closureWrites = new Map<string, Promise<void>>();
   /** An advisory notice waited for the ledger to be read (`DeliveryOptions.replaying`). */
   private replayHeld = false;
+  /** When advisory notices started waiting for the ledger; null while it is settled. */
+  private ledgerWaitSince: number | null = null;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -214,9 +223,22 @@ export class DeliveryEngine {
     return held;
   }
 
-  /** Whether an advisory notice must wait for the ledger to be read; remembered so the host drains again. */
-  private async heldForReplay(): Promise<boolean> {
+  /** Whether an advisory notice still to be typed would wait for the ledger now (`get_decision` asks; no effects). */
+  async ledgerHolds(): Promise<boolean> {
     if (!(await this.o.replaying?.())) return false;
+    const since = this.ledgerWaitSince;
+    return since === null || this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
+  }
+
+  /** Whether an advisory notice must wait for the ledger; remembered so the host drains again. */
+  private async heldForReplay(): Promise<boolean> {
+    if (!(await this.o.replaying?.())) {
+      this.ledgerWaitSince = null;
+      return false;
+    }
+    const now = this.ctx.now();
+    if (this.ledgerWaitSince === null || now < this.ledgerWaitSince) this.ledgerWaitSince = now;
+    if (now - this.ledgerWaitSince >= ADVISORY_LEDGER_WAIT_MS) return false;
     this.replayHeld = true;
     return true;
   }
@@ -430,6 +452,7 @@ export class DeliveryEngine {
     // reopen meanwhile made it a round that waits for a decision.
     const now = (await this.ctx.store.getQuestion(q.question_id)) ?? q;
     if (
+      this.o.advisoryOutcomes === true &&
       now.question_revision === ADVISORY_ROUND_REVISION &&
       (replyModeOfRow(now) === 'advisory' || this.pending(now).some(isAdvisoryNotice)) &&
       (q.origin.agent_session_id === null || target.agentSessionId !== q.origin.agent_session_id)
@@ -792,8 +815,8 @@ export class DeliveryEngine {
     const allows = () => this.o.advisoryOutcomes === true && ctx.policy.advisoryQuestions;
     const admitted = await ctx.lock.run(async (): Promise<boolean | 'held'> => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
-      if (chunk.some((i) => i.kind === 'answer' && isAdvisoryNotice(i.entry)))
-        if (await this.heldForReplay()) return 'held';
+      const advisory = chunk.some((i) => i.kind === 'answer' && isAdvisoryNotice(i.entry));
+      if (advisory && (await this.heldForReplay())) return 'held';
       const rows = new Map<string, QuestionRow>();
       const host = { outcomes: this.o.advisoryOutcomes === true, allowed: allows() };
       let stale = false;
@@ -889,13 +912,14 @@ export class DeliveryEngine {
           if (isClosure(i.entry)) closing.add(i.q.question_id);
         }
       }
-      // The policy is a setting the host may change at any await above: read again after the last one, a notice
-      // that would now be withheld is not typed. Its intents are closed (nothing was written) and the next pass
-      // records it withheld.
-      if (advisoryDue && !allows()) {
+      // The ledger and the policy can change at any await above (a read stores a reopen outside this lock; the host
+      // changes a setting): both are read again after the last one. A notice that must wait, or would now be
+      // withheld, is not typed: its intents are closed (nothing was written), and the next pass records it withheld.
+      const wait = advisory && (await this.heldForReplay());
+      if (wait || (advisoryDue && !allows())) {
         for (const i of chunk)
           await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
-        return false;
+        return wait ? 'held' : false;
       }
       for (const id of closing) this.closureWrites.set(id, writing);
       return true;
@@ -1288,22 +1312,7 @@ export class DeliveryEngine {
       // carried also keeps the attempt, so the uncertainty outlives a reopen of its round (`get_decision`); the row
       // is read again under the lock so nothing the inbox appended meanwhile is lost.
       await ctx.lock.run(async () => {
-        const intent = await ctx.store.getIntent(uncertainIntentId);
-        const row = await ctx.store.getQuestion(q.question_id);
-        const entries = row ? parseAnswers(row.answers_json) : [];
-        let marked = false;
-        const next = entries.map((e) => {
-          // A deletion meanwhile stopped it from being typed again, not the write that may have reached the screen.
-          if (
-            !intent ||
-            e.revision !== intent.answer_revision ||
-            !isAdvisoryNotice(e) ||
-            e.delivered
-          )
-            return e;
-          marked = true;
-          return { ...e, uncertain_injection_id: uncertainIntentId };
-        });
+        const marked = await this.markUncertain(q.question_id, uncertainIntentId);
         await ctx.store.settleIntent(
           uncertainIntentId,
           { state: 'uncertain', updated_at: ctx.now() },
@@ -1311,7 +1320,7 @@ export class DeliveryEngine {
           {
             delivery_status: status,
             error_code: code,
-            ...(marked ? { answers_json: serializeAnswers(next) } : {}),
+            ...(marked ? { answers_json: marked } : {}),
           },
         );
       });
@@ -1342,6 +1351,24 @@ export class DeliveryEngine {
     } catch {
       /* informational for the phone; local state is authoritative */
     }
+  }
+
+  /**
+   * The question's answers with the advisory notice an intent may have typed marked `uncertain_injection_id`, or null
+   * when it carried none. A deletion or reopen meanwhile stopped the notice from being typed again, not the write that
+   * may have reached the screen. Runs under ctx.lock, on a fresh read.
+   */
+  private async markUncertain(questionId: string, injectionId: string): Promise<string | null> {
+    const intent = await this.ctx.store.getIntent(injectionId);
+    const row = await this.ctx.store.getQuestion(questionId);
+    if (!intent || !row) return null;
+    let marked = false;
+    const next = parseAnswers(row.answers_json).map((e) => {
+      if (e.revision !== intent.answer_revision || !isAdvisoryNotice(e) || e.delivered) return e;
+      marked = true;
+      return { ...e, uncertain_injection_id: injectionId };
+    });
+    return marked ? serializeAnswers(next) : null;
   }
 
   /**
@@ -1467,11 +1494,16 @@ export class DeliveryEngine {
         await this.ack(intent.injection_id);
         reconciled++;
       } else if (supersededClosure(q, intent.answer_revision)) {
-        // A closure notice of a round a reopen has since replaced: content-free, and no longer to be typed, so
-        // whether it reached the screen holds nothing back. The new round's answers must not wait on it.
-        await ctx.store.updateIntent(intent.injection_id, {
-          state: 'abandoned',
-          updated_at: ctx.now(),
+        // A closure notice of a round a reopen (or deletion) has since replaced: content-free, and no longer to be
+        // typed, so whether it reached the screen holds nothing back. The new round's answers must not wait on it. An
+        // advisory notice still keeps the attempt, so get_decision says it may have been typed.
+        await ctx.lock.run(async () => {
+          const marked = await this.markUncertain(q.question_id, intent.injection_id);
+          if (marked) await ctx.store.updateQuestion(q.question_id, { answers_json: marked });
+          await ctx.store.updateIntent(intent.injection_id, {
+            state: 'abandoned',
+            updated_at: ctx.now(),
+          });
         });
         await ctx.audit.log({
           event: 'delivery.superseded',
@@ -1526,18 +1558,21 @@ export class DeliveryEngine {
     const q = await this.ctx.store.getQuestion(questionId);
     if (!q) return;
     // Only answers that still have somewhere to go: a retry for a follow-up leaves a delivered answer's state alone.
-    if (
-      this.pending(q).length > 0 ||
-      q.delivery_status === 'needs-attention' ||
-      q.delivery_status === 'delivery-uncertain'
-    ) {
-      const entries = parseAnswers(q.answers_json).map((e) => (e.deliver && !e.delivered ? e : e));
-      await this.ctx.store.updateQuestion(questionId, {
-        delivery_status: 'desktop-received',
-        error_code: null,
-        answers_json: serializeAnswers(entries),
-      });
-    }
+    // Read again under the lock delivery settles a write under, and only the status written: a copy of the answers
+    // read before a write settled would bring an answer typed meanwhile back as pending.
+    await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(questionId);
+      if (
+        row &&
+        (this.pending(row).length > 0 ||
+          row.delivery_status === 'needs-attention' ||
+          row.delivery_status === 'delivery-uncertain')
+      )
+        await this.ctx.store.updateQuestion(questionId, {
+          delivery_status: 'desktop-received',
+          error_code: null,
+        });
+    });
     await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(questionId);
       if (!row) return;
