@@ -68,9 +68,12 @@ export function entryScript(relayDir) {
  * Runs in every document of the phone's browser context before the app's own scripts (Playwright `addInitScript`),
  * so it must be self-contained. Headless Chromium has no push service, so `PushManager` hands out `sub` instead: none
  * until the app subscribes, then the same one in every document of the context. Everything else passes through,
- * reported to the `__compatTrace` binding as it starts: each subscription the app sends the relay, each message it
- * posts a service worker, and the registration's workers at that moment, read synchronously so a later change cannot
- * hide which worker was active when the app acted.
+ * reported to the `__compatTrace` binding: each subscription the app sends the relay, as it starts; each message it
+ * posts a service worker; for a `FEATURES` question, the answer the worker gave the app and when the app stopped
+ * waiting for one (it closes its end of the channel). Each entry carries the registration's workers as this document
+ * saw them at that moment (`waiting` is null when the registration is not known yet), and a subscription also what
+ * the active worker had answered the app (`activeAnswered`), so a later change cannot hide which worker the app acted
+ * under.
  */
 export function phoneFixture(sub) {
   const doc = Math.random().toString(36).slice(2, 10);
@@ -103,8 +106,8 @@ export function phoneFixture(sub) {
     };
   }
   const workers = () => ({
-    waiting: !!reg?.waiting,
-    installing: !!reg?.installing,
+    waiting: reg ? !!reg.waiting : null,
+    installing: reg ? !!reg.installing : null,
     active: reg?.active?.state ?? null,
   });
   const role = (w) =>
@@ -117,16 +120,56 @@ export function phoneFixture(sub) {
           : w === reg.installing
             ? 'installing'
             : 'other';
+  // The answers each worker gave the app's `FEATURES` question, read from the app's own channel (the app keeps one
+  // end and transfers the other), so nothing here asks a worker anything itself.
+  const answered = new WeakMap();
+  const ends = new WeakMap();
+  const asking = new WeakMap();
+  if (typeof MessageChannel !== 'undefined') {
+    const Channel = window.MessageChannel;
+    const Tracked = function MessageChannel() {
+      const ch = new Channel();
+      ends.set(ch.port2, ch.port1);
+      return ch;
+    };
+    Tracked.prototype = Channel.prototype;
+    window.MessageChannel = Tracked;
+    const close = MessagePort.prototype.close;
+    MessagePort.prototype.close = function () {
+      const q = asking.get(this);
+      if (q && !q.settled) {
+        q.settled = true;
+        report({
+          kind: 'sw-settled',
+          target: q.target,
+          answered: answered.has(q.worker),
+          ...workers(),
+        });
+      }
+      return close.call(this);
+    };
+  }
   if (typeof ServiceWorker !== 'undefined') {
     const post = ServiceWorker.prototype.postMessage;
     ServiceWorker.prototype.postMessage = function (message, ...rest) {
-      report({
-        kind: 'sw-message',
-        type: typeof message?.type === 'string' ? message.type : null,
-        target: role(this),
-        ...workers(),
-      });
-      return post.call(this, message, ...rest);
+      const type = typeof message?.type === 'string' ? message.type : null;
+      const target = role(this);
+      const state = workers();
+      // Sent first: a message the browser refused is not one the app sent.
+      const result = post.call(this, message, ...rest);
+      report({ kind: 'sw-message', type, target, ...state });
+      const transfer = Array.isArray(rest[0]) ? rest[0] : (rest[0]?.transfer ?? []);
+      const mine = type === 'FEATURES' ? transfer.map((p) => ends.get(p)).find(Boolean) : null;
+      if (mine) {
+        const worker = this;
+        asking.set(mine, { worker, target, settled: false });
+        mine.addEventListener('message', (e) => {
+          const features = Array.isArray(e.data?.features) ? e.data.features : [];
+          answered.set(worker, features);
+          report({ kind: 'sw-answer', target, features, ...workers() });
+        });
+      }
+      return result;
     };
   }
 
@@ -178,18 +221,20 @@ export function phoneFixture(sub) {
         } catch {
           /* reported as a body with nothing in it */
         }
+        if (!body || typeof body !== 'object') body = {};
         report({
           kind: 'push-post',
-          endpoint: body?.endpoint ?? null,
-          p256dh: body?.p256dh ?? null,
-          auth: body?.auth ?? null,
+          endpoint: body.endpoint ?? null,
+          p256dh: body.p256dh ?? null,
+          auth: body.auth ?? null,
           features:
-            body && 'features' in body
+            'features' in body
               ? Array.isArray(body.features)
                 ? body.features
                 : 'not a list'
               : null,
           ...workers(),
+          activeAnswered: reg?.active ? (answered.get(reg.active) ?? null) : null,
         });
       }
     } catch {
@@ -202,68 +247,90 @@ export function phoneFixture(sub) {
 
 /**
  * What the phone's trace says about its agent-stopped declaration (`phoneFixture` entries, plus the run's own
- * `{ kind: 'phase', name: 'restart', at }` from just before the person applied the update). Every problem is listed:
- * the phone subscribes once and keeps that subscription; no subscription it sends declares the push before the
- * update is applied, or while the new worker still waits; the updated page under the old worker was seen asking that
- * worker what it can show; the updated phone declares; and nothing sent after the declaration withdraws it.
+ * `{ kind: 'phase', name: 'restart', at }` from just before the person applied the update). `mixedDoc` is the document
+ * the run saw load the new app while the old worker was still active and the new one waited; `requests` is how many
+ * subscriptions the browser itself saw the phone send, so a trace that lost one is not taken as complete. Every
+ * problem is listed:
+ * - the phone subscribes once, keeps that subscription, and the released app sent it before the update;
+ * - in `mixedDoc`, before the update was applied, the app asked the active (old) worker what it can show, and that
+ *   question settled with no answer;
+ * - no subscription declares the push before the update is applied, nor unless, when it was sent, nothing was
+ *   waiting and the active worker had told the app it can show one;
+ * - the updated phone declares, and nothing sent after the declaration withdraws it.
  */
-export function judgeDeclarations(trace, sub) {
+export function judgeDeclarations(trace, sub, { mixedDoc, requests } = {}) {
   const problems = [];
   const restart = trace.find((e) => e.kind === 'phase' && e.name === 'restart');
   if (!restart) problems.push('the trace has no restart: the update was never applied');
   const restartAt = restart?.at ?? Infinity;
 
-  const subscribes = trace.filter((e) => e.kind === 'subscribe').length;
-  if (subscribes !== 1)
+  const subscribes = trace.filter((e) => e.kind === 'subscribe');
+  if (subscribes.length !== 1)
     problems.push(
-      `the phone subscribed ${subscribes} times; it subscribes once and keeps that subscription`,
+      `the phone subscribed ${subscribes.length} times; it subscribes once and keeps that subscription`,
     );
   if (trace.some((e) => e.kind === 'unsubscribe'))
     problems.push('the phone dropped its push subscription');
 
   const posts = trace.filter((e) => e.kind === 'push-post');
+  if (requests !== undefined && posts.length < requests)
+    problems.push(
+      `the browser saw ${requests} subscriptions sent, but the trace has ${posts.length}: it is incomplete`,
+    );
   for (const p of posts)
     if (p.endpoint !== sub.endpoint || p.p256dh !== sub.p256dh || p.auth !== sub.auth)
       problems.push(`a subscription sent at ${p.at} names another endpoint or other keys`);
-  if (!posts.some((p) => p.at < restartAt && p.features === null))
+  const subscribedAt = subscribes[0]?.at ?? Infinity;
+  if (!posts.some((p) => p.at >= subscribedAt && p.at < restartAt && p.features === null))
     problems.push('the released app never sent its subscription');
 
   const declares = (p) => Array.isArray(p.features) && p.features.includes(AGENT_STOPPED);
+  const canShow = (p) =>
+    Array.isArray(p.activeAnswered) && p.activeAnswered.includes(AGENT_STOPPED);
   for (const p of posts) {
     if (p.features !== null && !Array.isArray(p.features))
       problems.push(`a subscription sent at ${p.at} has features that are not a list`);
     if (!declares(p)) continue;
-    if (p.at < restartAt)
+    const where = `a subscription sent at ${p.at} (${p.path}) declared ${AGENT_STOPPED}`;
+    if (p.at < restartAt) problems.push(`${where} before the update was applied`);
+    if (p.waiting !== false)
       problems.push(
-        `a subscription sent at ${p.at} (${p.path}) declared ${AGENT_STOPPED} before the update was applied`,
+        p.waiting
+          ? `${where} while the new worker was still waiting`
+          : `${where} with the worker state unknown`,
       );
-    if (p.waiting)
-      problems.push(
-        `a subscription sent at ${p.at} (${p.path}) declared ${AGENT_STOPPED} while the new worker was still waiting`,
-      );
+    if (!canShow(p))
+      problems.push(`${where} though the active worker had not told the app it can show one`);
   }
 
-  const asked = trace.find(
-    (e) =>
-      e.kind === 'sw-message' &&
-      e.type === 'FEATURES' &&
-      e.target === 'active' &&
-      e.waiting &&
-      e.at < restartAt,
-  );
-  if (!asked)
+  const inMixed = (e) => e.doc === mixedDoc && e.at < restartAt && e.target === 'active';
+  const asked = trace.find((e) => e.kind === 'sw-message' && e.type === 'FEATURES' && inMixed(e));
+  if (!mixedDoc || !asked)
     problems.push(
-      'no updated page was seen asking the still-active old worker what it can show before the update was applied',
+      'the updated page under the old worker was not seen asking that worker what it can show before the update was applied',
     );
+  const settled = trace.find((e) => e.kind === 'sw-settled' && inMixed(e));
+  if (asked && !settled)
+    problems.push(
+      'the question to the old worker was not seen to settle before the update was applied',
+    );
+  if (trace.some((e) => e.kind === 'sw-answer' && inMixed(e) && declares(e)))
+    problems.push(`the old worker answered that it can show ${AGENT_STOPPED}`);
 
-  const declaration = posts.find((p) => declares(p) && p.at >= restartAt && !p.waiting) ?? null;
+  const declaration =
+    posts.find((p) => declares(p) && p.at >= restartAt && p.waiting === false && canShow(p)) ??
+    null;
   if (!declaration) problems.push(`the updated phone never declared ${AGENT_STOPPED}`);
   else {
-    const withdrawn = posts.find((p) => p.at > declaration.at && !declares(p));
+    const i = posts.indexOf(declaration);
+    const withdrawn = posts.find(
+      (p, j) =>
+        j !== i && !declares(p) && (p.at > declaration.at || (p.at === declaration.at && j > i)),
+    );
     if (withdrawn)
       problems.push(
         `a subscription sent at ${withdrawn.at} (${withdrawn.path}) after the declaration withdraws it`,
       );
   }
-  return { problems, declaration, asked: asked ?? null };
+  return { problems, declaration, asked: asked ?? null, settled: settled ?? null };
 }

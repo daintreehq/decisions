@@ -469,7 +469,15 @@ function startActor(side, label) {
 function startBrowser(label) {
   mayStart(`browser ${label}`);
   const { chromium, executablePath } = loadChromium();
-  const launched = chromium.launch({ executablePath, headless: true, timeout: 90_000 });
+  // The runner owns the signals: it stops every relay, actor and browser itself (`onSignal`).
+  const launched = chromium.launch({
+    executablePath,
+    headless: true,
+    timeout: 90_000,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+  });
   launched.catch(() => undefined);
   let stopping = null;
   const stop = () =>
@@ -1561,16 +1569,18 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
 
 /**
  * 4. A phone with the old app still loaded while its relay moves to the new version, until the app updates in place.
- * The phone is the released app in Chromium; only its push subscription is a fixture (phone-app.mjs).
+ * The phone is the released app in Chromium; only its push subscription is a fixture (phone-app.mjs). Returns
+ * 'skipped' when the old side already has advice or agent-stopped pushes: this is the upgrade from neither.
  */
 async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
   const vars = { PUSH_ENDPOINT_ALLOW: PUSH_HOST };
   const persist = scratch('persist-4');
   let relay = await startRelay(oldRelay, port, persist, '4-old', vars);
   const neu = startActor(NEW, '4-new');
-  const browser = startBrowser('4');
+  let browser = null;
   const phoneLog = createWriteStream(join(logs, 'phone-4.jsonl'));
   const keep = (entry) => phoneLog.write(`${JSON.stringify(entry)}\n`);
+  const reading = new Set();
   const pathOf = (url) => {
     try {
       return new URL(url).pathname;
@@ -1584,7 +1594,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       console.log(
         `  skip: the ${OLD.label} relay already has ${ADVISORY} or ${AGENT_STOPPED}; this scenario is the upgrade from a phone app that has neither`,
       );
-      return;
+      return 'skipped';
     }
     const oldEntry = entryScript(oldRelay);
     const newEntry = entryScript(newRelay);
@@ -1593,6 +1603,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${OLD.label} and ${NEW.label} phone apps are different builds`,
       oldEntry,
     );
+    browser = startBrowser('4');
     const home = scratch('home-4-owner');
     await setupOwner(NEW, home, relay.origin, `Compat ${NEW.label} owner`);
 
@@ -1601,6 +1612,8 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     const trace = [];
     const net = [];
     const pageErrors = [];
+    const pages = new WeakMap();
+    let subscriptionPosts = 0;
     const context = await (
       await browser.launched
     ).newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'allow' });
@@ -1615,6 +1628,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
         const entry = {
           src: 'pageerror',
           at: Date.now(),
+          page: pages.get(page) ?? null,
           path: pathOf(page.url()),
           message: e.message.slice(0, 500),
         };
@@ -1626,7 +1640,22 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
           keep({ src: 'console', at: Date.now(), type: m.type(), text: m.text().slice(0, 500) });
       });
     });
-    // Request and response bodies only where a check reads them; never a header, query or invitation fragment.
+    // Each request is timed when it starts and named by the page that made it, so a response that arrives late is
+    // never taken for one sent after it. Bodies only where a check reads them; never a header, query or fragment.
+    const started = new WeakMap();
+    const API = '/api/v1/';
+    context.on('request', (req) => {
+      const path = pathOf(req.url());
+      if (!path?.startsWith(API)) return;
+      let page = null;
+      try {
+        page = pages.get(req.frame().page()) ?? null;
+      } catch {
+        /* a service worker's request has no frame */
+      }
+      started.set(req, { at: Date.now(), page });
+      if (req.method() === 'POST' && path === '/api/v1/push/subscriptions') subscriptionPosts++;
+    });
     const READ = new Set([
       '/api/v1/push/subscriptions',
       '/api/v1/socket-ticket',
@@ -1634,15 +1663,10 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     ]);
     context.on('response', (res) => {
       const path = pathOf(res.url());
-      if (!path?.startsWith('/api/v1/')) return;
+      if (!path?.startsWith(API)) return;
       const req = res.request();
-      const entry = {
-        src: 'net',
-        at: Date.now(),
-        method: req.method(),
-        path,
-        status: res.status(),
-      };
+      const from = started.get(req) ?? { at: Date.now(), page: null };
+      const entry = { src: 'net', ...from, method: req.method(), path, status: res.status() };
       if (!READ.has(path)) {
         net.push(entry);
         keep(entry);
@@ -1655,7 +1679,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
         /* no JSON body */
       }
       if (path === '/api/v1/socket-ticket') entry.features = sent?.features ?? null;
-      if (path === '/api/v1/push/subscriptions' && sent)
+      if (path === '/api/v1/push/subscriptions' && sent && typeof sent === 'object')
         entry.sent = {
           endpoint: sent.endpoint ?? null,
           features: 'features' in sent ? sent.features : null,
@@ -1675,10 +1699,12 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
                     : j),
               () => undefined,
             );
-      void read.finally(() => {
+      const done = read.finally(() => {
+        reading.delete(done);
         net.push(entry);
         keep(entry);
       });
+      reading.add(done);
     });
     const seen = (pred, ms, what) => until(() => net.find(pred), ms, what);
     const docOf = (page) => page.evaluate(() => window.__compatDoc);
@@ -1698,22 +1724,30 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       if (Date.now() - nudged < 4000) return;
       nudged = Date.now();
       await page
-        .evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+        .evaluate(() => {
+          if (document.visibilityState === 'visible')
+            document.dispatchEvent(new Event('visibilitychange'));
+        })
         .catch(() => undefined);
     };
-    const openOnPhone = async (page, q, { inApp }) => {
-      if (inApp) await goInApp(page, '/');
-      else await page.goto(`${relay.origin}/`);
-      const row = page.locator('main').getByText(q.question).first();
+    // Home lists `qs` (after any new items are let in), and `q` is opened from it.
+    const listed = async (page, qs) => {
+      const rows = qs.map((q) => page.locator('main').getByText(q.question).first());
       await until(
         async () => {
           const pill = page.locator('main .nav-new');
           if (await pill.isVisible().catch(() => false)) await pill.click().catch(() => undefined);
-          return row.isVisible().catch(() => false);
+          for (const row of rows) if (!(await row.isVisible().catch(() => false))) return false;
+          return true;
         },
         30_000,
-        `"${q.question}" listed on the phone`,
+        `${qs.map((q) => `"${q.question}"`).join(' and ')} listed on the phone`,
       );
+      return rows;
+    };
+    const openOnPhone = async (page, q) => {
+      await goInApp(page, '/');
+      const [row] = await listed(page, [q]);
       await row.click();
       await page.waitForURL((u) => u.pathname === `/q/${q.id}`, { timeout: 20_000 });
     };
@@ -1729,9 +1763,12 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       );
       return notices(await settled(neu, 'owner'), id);
     };
+    const readers = (list) =>
+      list.filter((d) => (d.role === 'phone' || d.role === 'tablet') && !d.revoked_at);
 
     // The released app pairs with the new desktop, and subscribes to pushes, on the old relay.
     const tab = await context.newPage();
+    pages.set(tab, 'cached');
     const invite = await neu.call('ownerInvite', { home });
     await tab.goto(invite.url);
     await tab.getByRole('button', { name: 'Pair this device' }).click();
@@ -1747,9 +1784,13 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${OLD.label} phone app pairs through its own screens, with the code the desktop computes, under its own service worker`,
       await entryOf(tab),
     );
-    const phones = (await neu.call('ownerDevices', { home })).filter((d) => d.role === 'phone');
-    must(phones.length === 1, 'one phone is paired', show(phones));
-    const phoneId = phones[0].device_id;
+    const paired = readers(await neu.call('ownerDevices', { home }));
+    must(
+      paired.length === 1 && paired[0].role === 'phone',
+      'one phone is paired, and no other phone or tablet',
+      show(paired),
+    );
+    const phoneId = paired[0].device_id;
 
     await tab.goto(`${relay.origin}/settings/notifications`);
     const subscribeAt = Date.now();
@@ -1763,7 +1804,9 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       subscribed.status === 201 &&
         subscribed.sent?.endpoint === sub.endpoint &&
         subscribed.sent.features === null &&
-        subscribed.body?.enabled === true,
+        subscribed.body?.enabled === true &&
+        typeof subscribed.body.subscription_id === 'string' &&
+        subscribed.body.subscription_id.length > 0,
       `the ${OLD.label} app subscribes to pushes, declaring nothing`,
       show(subscribed),
     );
@@ -1773,12 +1816,17 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     await tab.goto(`${relay.origin}/`);
     await tab.getByRole('main').waitFor({ timeout: 20_000 });
     const cachedDoc = await docOf(tab);
+    must(typeof cachedDoc === 'string' && cachedDoc.length > 0, 'the cached page is traced');
+    // Everything the old app does below is attributed to this page, so it must still be the same document.
     const stillCached = async (when) => {
-      const [doc, entry] = [await docOf(tab), await entryOf(tab)];
-      check(
-        doc === cachedDoc && entry === oldEntry,
+      const now = await tab.evaluate(() => ({
+        doc: window.__compatDoc,
+        entry: document.querySelector('script[type="module"][src]')?.getAttribute('src'),
+      }));
+      must(
+        now.doc === cachedDoc && now.entry === oldEntry,
         `the phone still runs the ${OLD.label} app it loaded before the relay was upgraded (${when})`,
-        `document ${doc} (kept ${cachedDoc}), ${entry}`,
+        `${show(now)}; kept ${cachedDoc}`,
       );
     };
 
@@ -1791,6 +1839,30 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       features.includes(ADVISORY) && features.includes(AGENT_STOPPED),
       `the relay now runs the ${NEW.label} bundle, with ${ADVISORY} and ${AGENT_STOPPED}`,
       show(features),
+    );
+    // The cached page asks the new relay for a socket ticket, declaring only what the released app knows.
+    const cachedTickets = (e) =>
+      e.page === 'cached' && e.at >= swappedAt && e.path === '/api/v1/socket-ticket';
+    await until(
+      async () => {
+        await nudge(tab);
+        return net.find((e) => cachedTickets(e) && e.status === 200);
+      },
+      90_000,
+      'the cached page to get a socket ticket from the new relay',
+    );
+    await stillCached('after the relay was upgraded');
+    const listedNow = await neu.call('ownerDevices', { home });
+    const phone = listedNow.find((d) => d.device_id === phoneId);
+    check(
+      readers(listedNow).length === 1 &&
+        phone &&
+        !phone.revoked_at &&
+        phone.push_enabled === true &&
+        !phone.features.includes(ADVISORY) &&
+        !phone.features.includes(AGENT_STOPPED),
+      `the new relay lists the cached phone as the only phone or tablet, with push on, declaring neither ${ADVISORY} nor ${AGENT_STOPPED}`,
+      show(listedNow),
     );
 
     // An advisory ask from the CLI, before anything else runs on this home: the only phone cannot show one.
@@ -1808,7 +1880,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     ]);
     check(
       advisoryCli.code === 1 &&
-        advisoryCli.json.length === 0 &&
+        advisoryCli.stdout.trim() === '' &&
         /not_supported: no-capable-reader/.test(advisoryCli.stderr),
       `${NEW.label} \`ask --planned-fallback\` is refused as not_supported: no-capable-reader (exit 1), with no receipt`,
       tail(advisoryCli),
@@ -1824,29 +1896,13 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       auditDir,
     });
     const bridgeAt = Date.now();
-    // The phone reconnects to the new relay and reads the desktop's declarations (Dismiss needs person-declines-v1).
-    const ticket = await until(
-      async () => {
-        await nudge(tab);
-        return net.find(
-          (e) => e.at >= swappedAt && e.path === '/api/v1/socket-ticket' && e.status === 200,
-        );
-      },
-      90_000,
-      'the phone to reconnect to the new relay',
-    );
-    check(
-      Array.isArray(ticket.features) &&
-        !ticket.features.includes(ADVISORY) &&
-        !ticket.features.includes(AGENT_STOPPED),
-      `the ${OLD.label} app reconnects to the new relay, declaring neither ${ADVISORY} nor ${AGENT_STOPPED} (${show(ticket.features)})`,
-      show(ticket),
-    );
+    // The phone reads the desktop's declarations from the new relay (Dismiss needs person-declines-v1).
     await until(
       async () => {
         await nudge(tab);
         return net.find(
           (e) =>
+            e.page === 'cached' &&
             e.at >= bridgeAt &&
             e.path === '/api/v1/devices' &&
             e.body?.some?.(
@@ -1856,17 +1912,6 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       },
       60_000,
       "the phone to read the desktop's declarations from the new relay",
-    );
-    const listed = await neu.call('ownerDevices', { home });
-    const phone = listed.find((d) => d.device_id === phoneId);
-    check(
-      listed.filter((d) => d.role === 'phone' && !d.revoked_at).length === 1 &&
-        phone &&
-        !phone.revoked_at &&
-        phone.push_enabled === true &&
-        !phone.features.includes(ADVISORY),
-      `the new relay lists the cached phone as the only phone, with push on and no ${ADVISORY}`,
-      show(listed),
     );
 
     // Push: the subscription the old relay stored is kept, declares nothing, and is sent no agent-stopped push.
@@ -1882,6 +1927,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       await goInApp(tab, '/settings/notifications');
       const r = await seen(
         (e) =>
+          e.page === 'cached' &&
           e.at >= at &&
           e.method === 'GET' &&
           e.path === '/api/v1/push/subscriptions' &&
@@ -1912,9 +1958,13 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(refusedPush),
     );
     const after = await readSubscriptions('after it');
-    check(untouched(after), `nothing was sent to the ${OLD.label} app's subscription`, show(after));
+    check(
+      untouched(after),
+      `the relay recorded no send to the ${OLD.label} app's subscription`,
+      show(after),
+    );
 
-    // Advice from the library: refused for the same reason, and nothing reaches the relay or the phone.
+    // Advice from the library: refused for the same reason, and nothing reaches the relay.
     const advisoryLib = await neu.call('bridgeAsk', {
       name: 'owner',
       input: {
@@ -1930,7 +1980,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     });
     check(
       advisoryLib.refused?.code === 'not_supported' &&
-        advisoryLib.refused.message.startsWith('no-capable-reader'),
+        advisoryLib.refused.message.startsWith('no-capable-reader:'),
       `the ${NEW.label} library refuses the advisory ask as not_supported: no-capable-reader`,
       show(advisoryLib),
     );
@@ -1970,7 +2020,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       );
       asked[key] = { id: r.asked.questionId, question };
     }
-    await openOnPhone(tab, asked.A, { inApp: true });
+    await openOnPhone(tab, asked.A);
     await answerOnPhone(tab, /In memory/);
     const typedA = await typedFor(asked.A.id, `the ${NEW.label} bridge to type A's answer`);
     check(
@@ -1980,66 +2030,86 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${OLD.label} app answers an ordinary question, and the ${NEW.label} desktop types the answer once`,
       show(typedA),
     );
-    await openOnPhone(tab, asked.B, { inApp: true });
+    await openOnPhone(tab, asked.B);
     await tab.locator('.ws-head').getByRole('button', { name: 'More' }).click();
     await tab.getByRole('menuitem', { name: 'Dismiss question…' }).click();
     await tab.getByRole('button', { name: 'Dismiss question' }).click();
     await tab
       .getByRole('dialog', { name: 'Dismiss this question?' })
       .waitFor({ state: 'hidden', timeout: 30_000 });
-    await tab.getByText('Declined by you').first().waitFor({ timeout: 30_000 });
+    await tab.getByText('Declined by you', { exact: true }).first().waitFor({ timeout: 30_000 });
     const typedB = await typedFor(asked.B.id, `the ${NEW.label} bridge to type B's decline`);
     check(
       typedB.length === 1 && noticeSays(typedB[0], { declined: true }, 'compat-4'),
       `the ${OLD.label} app declines an ordinary question, and the ${NEW.label} desktop types the decline once`,
       show(typedB),
     );
+    // Home has synced past both, which were asked after the advisory refusals: nothing else came with them.
+    await goInApp(tab, '/');
+    await listed(tab, [asked.A, asked.B]);
     check(
       (await tab.locator('main').getByText(advisory).count()) === 0,
-      'the refused advisory question never shows on the phone',
+      "the refused advisory question is not on the phone's Home",
+    );
+    const onRelay = (await neu.call('ownerQuestions', { home })).sort();
+    check(
+      onRelay.join(',') === [...before, asked.A.id, asked.B.id].sort().join(','),
+      'the relay holds only the two ordinary questions beside what it had',
+      show(onRelay),
     );
     await stillCached('after answering and declining');
 
-    // The phone updates in place. A second page of the same phone loads the new app while the old worker still
-    // controls it (the new one waits, as it does while any page it controls is open); then the cached page closes.
-    const updated = await context.newPage();
-    await updated.goto(`${relay.origin}/settings/about`);
-    await updated.waitForFunction(
-      async () => {
-        const reg = await navigator.serviceWorker.getRegistration();
-        return !!reg?.waiting && !!reg.active && navigator.serviceWorker.controller === reg.active;
-      },
+    // The phone updates in place. The browser finds the new worker while the cached page is open, so it waits; a
+    // second page of the same phone then loads the new app under the old worker, and the cached page closes.
+    await tab.evaluate(async () => {
+      await (await navigator.serviceWorker.getRegistration())?.update();
+    });
+    await tab.waitForFunction(
+      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
       null,
       { timeout: 60_000, polling: 500 },
     );
+    await stillCached('once the new worker waits');
+    const updated = await context.newPage();
+    pages.set(updated, 'updated');
+    await updated.goto(`${relay.origin}/settings/about`);
+    const mixed = await updated.evaluate(async () => {
+      const reg = await navigator.serviceWorker.getRegistration();
+      return {
+        doc: window.__compatDoc,
+        entry: document.querySelector('script[type="module"][src]')?.getAttribute('src'),
+        waiting: !!reg?.waiting,
+        oldControls: !!reg?.active && navigator.serviceWorker.controller === reg.active,
+      };
+    });
     must(
-      (await entryOf(updated)) === newEntry,
-      `the phone loads the ${NEW.label} app while the ${OLD.label} service worker is still active and the new one waits`,
-      await entryOf(updated),
+      mixed.entry === newEntry && mixed.waiting && mixed.oldControls && mixed.doc,
+      `the phone loads the ${NEW.label} app while the ${OLD.label} service worker controls it and the new one waits`,
+      show(mixed),
     );
-    const mixedDoc = await docOf(updated);
-    await stillCached('before it closes');
+    const mixedDoc = mixed.doc;
     await tab.close();
-    const asking = await until(
+    // The new app asks the active worker whether it can show an agent-stopped push; the old one never answers, and
+    // the app gives up after two seconds (app/src/features/push.ts WORKER_ASK_MS) and closes its end.
+    await until(
       () =>
         trace.find(
           (e) =>
             e.doc === mixedDoc &&
-            e.kind === 'sw-message' &&
-            e.type === 'FEATURES' &&
+            e.kind === 'sw-settled' &&
             e.target === 'active' &&
-            e.waiting,
+            !e.answered &&
+            e.waiting === true,
         ),
       30_000,
-      'the new app to ask the active (old) worker whether it can show an agent-stopped push',
-    ).catch((e) => (fail(e.message), null));
-    if (asking) ok('the new app asks the active worker, still the old one, what it can show');
-    // The app gives an older worker's silence two seconds (app/src/features/push.ts WORKER_ASK_MS).
-    await sleep(4000);
-    const stillWaiting = await updated.evaluate(
-      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      'the new app to ask the old, still-active worker what it can show, and give up waiting',
+    ).catch((e) => fail(e.message));
+    must(
+      await updated.evaluate(
+        async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      ),
+      'the new worker is still waiting',
     );
-    must(stillWaiting, 'the new worker is still waiting');
     const heldPush = await neu.call('bridgeAgentStopped', { name: 'owner' });
     check(
       heldPush.outcome === 'no-subscription',
@@ -2070,33 +2140,37 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
         show(declared),
       );
     await until(
-      () => trace.find((e) => e.kind === 'doc' && e.at > restartAt),
+      async () => {
+        const d = await docOf(updated).catch(() => null);
+        return d && d !== mixedDoc;
+      },
       30_000,
       'the phone to reload into the update',
     );
     await updated.waitForLoadState('load');
-    const judged = judgeDeclarations(trace, sub);
-    for (const problem of judged.problems) fail(problem);
-    if (!judged.problems.length)
-      ok(
-        `the trace agrees: one subscription, declared only by the updated app under the new worker (${trace.length} entries)`,
-      );
-    const reg = await updated.evaluate(async () => {
+    const now = await updated.evaluate(async () => {
       const r = await navigator.serviceWorker.getRegistration();
       return {
+        entry: document.querySelector('script[type="module"][src]')?.getAttribute('src'),
         waiting: !!r?.waiting,
         controlled: !!r?.active && navigator.serviceWorker.controller === r.active,
       };
     });
     check(
-      !reg.waiting && reg.controlled && (await entryOf(updated)) === newEntry,
+      !now.waiting && now.controlled && now.entry === newEntry,
       `the phone now runs the ${NEW.label} app under the ${NEW.label} worker`,
-      show(reg),
+      show(now),
     );
+    // Each later page must be the new app too, or what it shows says nothing about the update.
+    const onNewApp = async (what) =>
+      must((await entryOf(updated)) === newEntry, `the ${NEW.label} app shows ${what}`);
+
     const rowsAt = Date.now();
     await updated.goto(`${relay.origin}/settings/notifications`);
+    await onNewApp('its notification settings');
     const read = await seen(
       (e) =>
+        e.page === 'updated' &&
         e.at >= rowsAt &&
         e.method === 'GET' &&
         e.path === '/api/v1/push/subscriptions' &&
@@ -2114,28 +2188,43 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(declaredRows),
     );
     if (declared) {
+      // `failed` is a send the relay attempted for an eligible subscription: the phone's is the only one there is.
       const sentPush = await neu.call('bridgeAgentStopped', { name: 'owner' });
       check(
         sentPush.outcome === 'failed',
-        `an agent-stopped push now goes to the updated phone's subscription (failed: ${PUSH_HOST} never answers)`,
+        `the relay now picks the updated phone's subscription for an agent-stopped push and tries to send it (failed: ${PUSH_HOST} never answers)`,
         show(sentPush),
       );
     }
 
     // The questions from before the update show as they ended, and the declined one is reopened and answered.
     const unreadable = /Not readable here|Could not verify/;
+    const title = updated.locator('#q-title');
     await updated.goto(`${relay.origin}/q/${asked.A.id}`);
-    await updated.getByText(asked.A.question).first().waitFor({ timeout: 30_000 });
-    const answerA = updated.locator('#ws-answer').filter({ hasText: 'In memory' });
-    await answerA.getByText('Your answer').first().waitFor({ timeout: 30_000 });
+    await onNewApp('question A');
+    await title.getByText(asked.A.question, { exact: true }).waitFor({ timeout: 30_000 });
+    const answerA = updated.locator('#ws-answer');
+    await answerA
+      .locator('.bubble-label')
+      .getByText('Your answer', { exact: true })
+      .waitFor({ timeout: 30_000 });
+    await answerA
+      .locator('.answer-choice')
+      .getByText('In memory', { exact: true })
+      .waitFor({ timeout: 30_000 });
     await answerA.getByText('Typed into the terminal').first().waitFor({ timeout: 30_000 });
     check(
       !unreadable.test(await updated.locator('main').innerText()),
       `the ${NEW.label} app shows A as the person answered it in the ${OLD.label} app, typed into the terminal`,
     );
     await updated.goto(`${relay.origin}/q/${asked.B.id}`);
-    await updated.getByText(asked.B.question).first().waitFor({ timeout: 30_000 });
-    await updated.getByText('Declined by you').first().waitFor({ timeout: 30_000 });
+    await onNewApp('question B');
+    await title.getByText(asked.B.question, { exact: true }).waitFor({ timeout: 30_000 });
+    await updated
+      .locator('main')
+      .getByText('Declined by you', { exact: true })
+      .first()
+      .waitFor({ timeout: 30_000 });
     check(
       !unreadable.test(await updated.locator('main').innerText()),
       `the ${NEW.label} app shows B, declined in the ${OLD.label} app, as declined by the person`,
@@ -2172,12 +2261,26 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the ${NEW.label} bridge to type the answer to B's reopened round`,
     ).catch((e) => fail(e.message));
     const final = await settled(neu, 'owner');
-    const roundTwo = notices(final, asked.B.id).filter((n) => n.fields.revision === '2');
+    const all = { A: notices(final, asked.A.id), B: notices(final, asked.B.id) };
+    const roundTwo = all.B.filter((n) => n.fields.revision === '2');
     check(
-      roundTwo.length === 1 && noticeSays(roundTwo[0], { choice: 'no', text: '' }, 'compat-4'),
-      `the reopened question is answered in the ${NEW.label} app and typed once`,
-      show(roundTwo),
+      all.A.length === 1 &&
+        all.B.length === 2 &&
+        all.B.filter((n) => noticeSays(n, { declined: true }, 'compat-4')).length === 1 &&
+        roundTwo.length === 1 &&
+        noticeSays(roundTwo[0], { choice: 'no', text: '' }, 'compat-4'),
+      `through the whole run the ${NEW.label} desktop typed A's answer once, B's decline once, and the answer to B's reopened round once`,
+      show(all),
     );
+
+    // The whole trace, now that nothing more is asked of the phone.
+    await Promise.allSettled([...reading]);
+    const judged = judgeDeclarations(trace, sub, { mixedDoc, requests: subscriptionPosts });
+    for (const problem of judged.problems) fail(problem);
+    if (!judged.problems.length)
+      ok(
+        `the trace agrees: one subscription, declared only by the updated app once the new worker said it can show the push (${trace.length} entries, ${subscriptionPosts} sent)`,
+      );
     check(
       pageErrors.length === 0,
       'neither app had an uncaught error',
@@ -2186,13 +2289,17 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     checkBridgeHealth(final, `the ${NEW.label} bridge`);
   } catch (e) {
     // What each page showed when the scenario stopped, beside phone-4.jsonl.
-    const browserNow = await browser.launched.catch(() => null);
+    const browserNow = await browser?.launched.catch(() => null);
     let n = 0;
     for (const context of browserNow?.contexts() ?? [])
       for (const page of context.pages()) {
         n++;
         await page
-          .screenshot({ path: join(logs, `phone-4-page-${n}.png`), fullPage: true })
+          .screenshot({
+            path: join(logs, `phone-4-page-${n}.png`),
+            fullPage: true,
+            timeout: 10_000,
+          })
           .catch(() => undefined);
         const text = await page
           .locator('body')
@@ -2203,8 +2310,9 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     throw e;
   } finally {
     await neu.stop();
-    await browser.stop();
+    await browser?.stop();
     await relay.stop();
+    await Promise.allSettled([...reading]);
     await new Promise((r) => phoneLog.end(r));
   }
 }
@@ -2230,6 +2338,8 @@ process.on('SIGTERM', onSignal(143));
 
 let OLD;
 let NEW;
+/** Scenarios that did not apply to these versions (a scenario's `run` returned 'skipped'): never counted as run. */
+const skipped = [];
 const started = Date.now();
 try {
   // A missing browser is found now, not after the installs.
@@ -2245,7 +2355,11 @@ try {
     current = `${n}`;
     step(`${n}. ${title} (${OLD.label} ${opts.old}, ${NEW.label} ${NEW.from})`);
     try {
-      await run({ OLD, NEW, oldRelay, newRelay, port: opts.port + (n - 1) * 10 });
+      const result = await run({ OLD, NEW, oldRelay, newRelay, port: opts.port + (n - 1) * 10 });
+      if (result === 'skipped') {
+        ran--;
+        skipped.push(n);
+      }
     } catch (e) {
       fail(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2253,7 +2367,8 @@ try {
     }
   }
   current = 'run';
-  if (ran === 0) fail('no scenario ran');
+  if (ran === 0)
+    fail(`no scenario ran${skipped.length ? ` (skipped: ${skipped.join(', ')})` : ''}`);
 } catch (e) {
   fail(e instanceof Error ? e.message : String(e));
 } finally {
@@ -2268,6 +2383,8 @@ try {
           .join('\n')}`
       : `${label}: not installed`;
   console.log(`\n${record(OLD, 'old')}\n${record(NEW, 'new')}\n${minutes} min, logs in ${logs}`);
+  if (skipped.length)
+    console.log(`Skipped scenario ${skipped.join(', ')}: it does not apply to these versions`);
   if (opts.keep || failures.length) console.log(`Kept ${work}`);
   else rmSync(work, { recursive: true, force: true });
 }
