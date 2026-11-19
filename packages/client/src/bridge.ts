@@ -733,6 +733,9 @@ export class DecisionsBridge {
    * Reconcile interrupted injections, connect the socket, start the retry timer. Without a socket
    * (`socket: false`) the host reads events itself (`catchUp`, `sync`), or passes `poll` to have the bridge
    * sync over HTTP continuously, starting now, until it stops or is revoked.
+   *
+   * A stopped bridge can be started again, and delivers again once a write still in flight from before the stop has
+   * settled. A revoked one cannot: `start` throws `forbidden`.
    */
   async start(opts: { socket?: boolean; poll?: HttpPollOptions | true } = {}): Promise<void> {
     if (opts.poll && opts.socket !== false)
@@ -740,6 +743,9 @@ export class DecisionsBridge {
         'validation_error',
         'HTTP polling replaces the socket: pass socket: false',
       );
+    // Revocation is final for this bridge, also once a stop has replaced its state: nothing reads or types again.
+    if (this.revokedSeen)
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
     if (this.state === 'running') return;
     const run = ++this.lifecycle;
     this.httpAbort = new AbortController();
@@ -752,11 +758,18 @@ export class DecisionsBridge {
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
+    // A drain from before a stop may still be writing: recovery would take its open intent for a crash, and delivery
+    // reopened now would let it type on. So recovery, and with it delivery, waits for that drain to settle.
+    await this.delivery.idle();
+    if (run !== this.lifecycle) return;
     await this.delivery.recover();
     // Images a crash left with no queued create to use them.
     await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
     // Stopped or revoked while recovering: nothing may start sending in the background now.
     if (run !== this.lifecycle) return;
+    // The last stop closed delivery; this run reopens it, only now that recovery has run.
+    const reopened = this.delivery.stopped;
+    this.delivery.stopped = false;
     this.snapshots.start();
     this.involvement.start();
     this.presence.start();
@@ -775,6 +788,8 @@ export class DecisionsBridge {
       (this.timer as { unref?: () => void }).unref?.();
     }
     void this.pump().catch((e) => this.emitError(e as Error));
+    // A pump that drained while delivery was still closed typed nothing, and the one above may only have joined it.
+    if (reopened) void this.deliverer.kick();
   }
 
   /**

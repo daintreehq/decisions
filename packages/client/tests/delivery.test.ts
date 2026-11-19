@@ -1,12 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DEFAULTS } from '@daintreehq/decisions-protocol';
 import {
   PolicyRegistry,
   fakeResumeAdapter,
   parseAnswers,
+  type InjectResult,
   type TerminalTarget,
 } from '../src/index.js';
-import { origin, setupBridge, makePhone } from './helpers.js';
+import { origin, setupBridge, makePhone, tick } from './helpers.js';
 
 async function asked(
   extra: Parameters<typeof setupBridge>[0] = {},
@@ -513,5 +514,110 @@ describe('verification: forged or unauthorised events never reach a terminal', (
     await expect(
       bridge.registerQuestion({ origin: origin(), input: { question: 'q' } }),
     ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+});
+
+describe('restarting a stopped bridge', () => {
+  it('types an answer that arrives after the restart', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await bridge.start({ socket: false });
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(1);
+    expect(sink.typed[0]!.text).toContain(`question_id: ${qid}`);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('types an answer stored while it was stopped once it starts again', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(0);
+    await bridge.start({ socket: false });
+    await bridge.catchUp();
+    await bridge.idle();
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('waits for a write still in flight from before the stop, then types the answer once', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    const write = sink.inject.bind(sink);
+    let calls = 0;
+    let release!: (r: InjectResult) => void;
+    sink.inject = (t, text, id) => {
+      if (++calls === 1) return new Promise<InjectResult>((r) => (release = r));
+      return write(t, text, id);
+    };
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    const reading = bridge.catchUp();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await bridge.stop();
+    let started = false;
+    const starting = bridge.start({ socket: false }).then(() => (started = true));
+    await tick(20);
+    // Recovery would take the open write for a crash and flag the answer uncertain.
+    expect(started).toBe(false);
+    release({ outcome: 'held', reason: 'busy' });
+    await reading;
+    await starting;
+    await bridge.idle();
+    expect(sink.typed).toHaveLength(1);
+    expect(await store.getQuestion(qid)).toMatchObject({
+      delivery_status: 'terminal-delivered',
+      error_code: null,
+    });
+    await bridge.stop();
+  });
+
+  it('stays closed when stopped again while it recovers', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
+    const open = store.openIntents.bind(store);
+    let recovering = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    store.openIntents = async () => {
+      recovering = true;
+      await gate;
+      return open();
+    };
+    const starting = bridge.start({ socket: false });
+    await vi.waitFor(() => expect(recovering).toBe(true));
+    await bridge.stop();
+    release();
+    await starting;
+    await bridge.notifyPaneIdle();
+    await bridge.idle();
+    expect(bridge.state).toBe('stopped');
+    expect(sink.typed).toHaveLength(0);
+  });
+
+  it('a revoked bridge cannot be started again, before or after a stop', async () => {
+    const { bridge, relay, phone, sink, qid, identity } = await asked();
+    relay.push('device.revoked', null, null, { device_id: identity.config.deviceId, key_epoch: 2 });
+    await bridge.start({ socket: false });
+    await bridge.catchUp();
+    expect(bridge.state).toBe('revoked');
+    await expect(bridge.start({ socket: false })).rejects.toMatchObject({ code: 'forbidden' });
+    expect(bridge.state).toBe('revoked');
+    await bridge.stop();
+    await expect(bridge.start({ socket: false })).rejects.toMatchObject({ code: 'forbidden' });
+    expect(bridge.state).toBe('stopped');
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp().catch(() => {});
+    await bridge.notifyPaneIdle();
+    expect(sink.typed).toHaveLength(0);
   });
 });
