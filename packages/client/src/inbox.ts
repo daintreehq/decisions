@@ -446,8 +446,10 @@ export class Inbox {
         })
         .catch(() => undefined);
     } finally {
-      if (settled) this.reconcileDone = true;
-      else this.reconcileAfter = ctx.now() + 60_000;
+      if (settled) {
+        this.reconcileDone = true;
+        this.reopened.clear();
+      } else this.reconcileAfter = ctx.now() + 60_000;
     }
   }
 
@@ -697,7 +699,6 @@ export class Inbox {
       case 'reopen': {
         // A new round: its signed deadline (null: never) replaces the last one, and a closure notice of an earlier
         // round that was not typed yet never will be: the question is open again.
-        this.reopened.add(row.question_id);
         const answers_json = serializeAnswers(withdrawClosures(entries, t.revision));
         // Best effort: a write it could not release keeps holding the question, never the reopen itself.
         const released = await this.releaseClosureWrites({
@@ -711,6 +712,8 @@ export class Inbox {
           answers_json,
           ...(released ? { delivery_status: 'desktop-received' as const, error_code: null } : {}),
         });
+        // Only once the row holds the reopen's deadline does the background pass leave it alone.
+        if (!this.reconcileDone) this.reopened.add(row.question_id);
         return false;
       }
       case 'proxy-abstain':
