@@ -72,12 +72,14 @@ export async function sendNotification(
   for (const listed of subs) {
     if (opts.skip?.has(listed.subscription_id)) continue;
     // Each send awaits, and meanwhile an endpoint further down the list may have been subscribed again (new keys,
-    // or a declaration withdrawn by an older app), disabled or revoked: read it again just before sending.
+    // or a declaration withdrawn by an older app, under a new id if it was removed first), disabled or revoked:
+    // read the device's row for it again just before sending.
     const sub = room.q1<SubRow>(
-      `${SUB_FROM} WHERE s.subscription_id = ? AND ${where}`,
-      listed.subscription_id,
+      `${SUB_FROM} WHERE s.device_id = ? AND s.endpoint = ? AND ${where}`,
+      listed.device_id,
+      listed.endpoint,
     );
-    if (!sub) continue;
+    if (!sub || opts.skip?.has(sub.subscription_id)) continue;
     let status: number | null = null;
     try {
       status = await sendWebPush(

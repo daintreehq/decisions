@@ -41,7 +41,8 @@ export const subscribe: Handler = async (room, c) => {
   }
   // Every subscription replaces the endpoint's declaration: one from an app that declares nothing clears it.
   const capable = knownFeatures(b.features).has(AGENT_STOPPED) ? 1 : 0;
-  const id = await room.tx(() => {
+  /** Adds or refreshes this device's row for the endpoint, inside the caller's transaction. */
+  const register = (): string => {
     const n = room.q1<{ n: number }>(
       `SELECT COUNT(*) AS n FROM push_subscriptions WHERE device_id = ?`,
       auth.deviceId,
@@ -74,6 +75,17 @@ export const subscribe: Handler = async (room, c) => {
       b.auth,
       nowMs(),
       capable,
+    );
+    return sid;
+  };
+  const id = await room.tx(() => {
+    const sid = register();
+    // The declaration is the endpoint's service worker's, not one device row's: a row this browser left under an
+    // earlier pairing that was never revoked follows it too.
+    room.run(
+      `UPDATE push_subscriptions SET agent_stopped_capable = ? WHERE endpoint = ?`,
+      capable,
+      b.endpoint,
     );
     return sid;
   });

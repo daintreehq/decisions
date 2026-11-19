@@ -688,9 +688,10 @@ export type PresenceBody = z.infer<typeof PresenceBody>;
 
 /**
  * `POST /push/agent-stopped` (owner desktop, `agent-stopped-push-v1`, section 11): asks for an `agent-stopped` push.
- * It carries nothing about which agent stopped, where, or how many.
+ * It carries nothing about which agent stopped, where, or how many, and any other field is refused rather than
+ * dropped, so a host app that tries to say more finds out.
  */
-export const AgentStoppedPushBody = z.object({
+export const AgentStoppedPushBody = z.strictObject({
   protocol_version: z.literal(PROTOCOL_VERSION),
 });
 export type AgentStoppedPushBody = z.infer<typeof AgentStoppedPushBody>;

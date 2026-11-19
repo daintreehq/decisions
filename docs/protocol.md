@@ -380,32 +380,38 @@ no `/presence` route and pushes as it always has; a client MUST NOT send presenc
 they were away with `POST /push/agent-stopped` `AgentStoppedPushBody {protocol_version}` →
 `200 AgentStoppedPushResponse {outcome}`. Only the owner desktop asks (`403 forbidden` for any other role), and the
 request names nothing: which agent stopped, in which pane or project, how many and why all stay on the computer, as do
-which stops count, whether the person is away and their setting, which belong to the host app. The push is
-`{"type":"agent-stopped"}`; no question id or any other field fits `PushPayload`.
+which stops count, whether the person is away and their setting, which belong to the host app. The body is strict, so
+any other field is `400 validation_error`. The push is `{"type":"agent-stopped"}`; no question id or any other field
+fits `PushPayload`. From each request, sent or dropped, the relay learns that some agent on the owner computer
+stopped, and when, and, since the desktop asks only while the person is away, that they probably were.
 
 It goes only to an endpoint that declared it can show one, by subscribing with `features` listing
 `agent-stopped-push-v1`. Each subscription replaces its endpoint's declaration, so the same endpoint subscribed again
-without it, by an older app, receives none, and every endpoint from before the relay knew the feature starts unable. A
-device's socket-ticket declaration does not count: one device holds up to five endpoints, and the service worker that
-shows a push can be an older build than the page that declared, so a phone app declares only what its active service
-worker can show. `PushSubscriptionInfo.features` says what the relay applied. The relay reads each endpoint again just
-before sending to it, so a declaration withdrawn while a push is going out to other endpoints applies at once.
+without it, by an older app, receives none, and every endpoint from before the relay knew the feature starts unable.
+The declaration belongs to the endpoint, so it also covers a row the same browser left under an earlier pairing that
+was never revoked. A device's socket-ticket declaration does not count: one device holds up to five endpoints, and the
+service worker that shows a push can be an older build than the page that declared, so a phone app MUST declare only
+what its active service worker can show. `PushSubscriptionInfo.features` says what the relay applied. The relay reads
+each endpoint again just before sending to it, so a declaration withdrawn while a push is going out to other endpoints
+applies at once.
 
 The relay drops the request, with the `outcome`:
 
 - `quiet-hours` during quiet hours, never deferred: an agent that stopped at 2am is no news at 7am. The presence hold
   does not apply, since the desktop asks only while the person is away;
 - `no-subscription` when no endpoint can show it;
-- `rate-limited` when it accepted one within the last `agentStoppedPushWindowMs` (60 s), whoever asked.
+- `rate-limited` when it accepted one within the last `agentStoppedPushWindowMs` (60 s).
 
 Otherwise it accepts the request, which starts a new window, and sends with `Urgency: high`, a TTL of
-`agentStoppedPushTtlSeconds` (600 s) and the fixed `Topic: agent-stopped`: a push service holds at most the latest one
-for a phone that is offline, and drops it unsent after ten minutes. The outcome is `sent` when a push service took it
-for at least one endpoint and `failed` when none did; a failed push still used the window. Every outcome is final, and
-the desktop never retries a request: quiet hours and an empty endpoint list use no window, so the next stop is asked
-for as usual. No job or event comes of a request, and the relay keeps only when it last accepted one, for up to two
-days or until `POST /admin/delete-data` with scope `everything`. A relay that does not advertise
-`agent-stopped-push-v1` has no such route; a desktop MUST NOT ask it.
+`agentStoppedPushTtlSeconds` (600 s) and the fixed `Topic: agent-stopped`: for each endpoint of a phone that is
+offline, a push service holds at most the latest one, and drops it unsent within ten minutes. The outcome is `sent`
+when a push service took it for at least one endpoint and `failed` when none did; a failed push still used the window.
+Every outcome is final. A desktop MUST NOT retry a request, whatever its outcome, nor after a refusal that comes before
+the route runs, such as a `429 rate_limited` from the relay's per-device request budget. Quiet hours and an empty
+endpoint list use no window, so the next stop is asked for as usual. No job or event comes of a request, and the relay keeps
+only when it last accepted one, until its daily cleanup once that is a day old, or `POST /admin/delete-data` with
+scope `everything`. A relay that does not advertise `agent-stopped-push-v1` has no such route; a desktop MUST NOT ask
+it.
 
 ## 12. Deliveries
 

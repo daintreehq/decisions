@@ -310,6 +310,12 @@ describe('schema migrations', () => {
       features: ['agent-stopped-push-v1'],
     });
     expect(again.json.features).toEqual(['agent-stopped-push-v1']);
+    const read = await phone.call('GET', '/api/v1/push/subscriptions');
+    expect(
+      read.json.subscriptions.find(
+        (s: { subscription_id: string }) => s.subscription_id === again.json.subscription_id,
+      ).features,
+    ).toEqual(['agent-stopped-push-v1']);
   });
 
   it('refuses a database newer than the Worker', async () => {
