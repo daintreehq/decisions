@@ -58,6 +58,7 @@ import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
 import { applyTheme, DEFAULT_PREFS, type LocalPrefs } from './prefs.js';
 import { checkInvite } from '../data/pairing.js';
+import { AGENT_STOPPED_PUSH, declareAgentStoppedPush } from '../features/push.js';
 import type { PairingInvitePayload, ProtocolFeature } from '@daintreehq/decisions-protocol';
 
 /** The extension this app understands: pane snapshots, read for each question's observed agent state. */
@@ -126,6 +127,9 @@ export class AppController {
     revokeUrl: (u) => URL.revokeObjectURL(u),
   });
   private swReg: ServiceWorkerRegistration | null = null;
+  /** A declaration of the agent-stopped push is on its way; `pushDeclarationAgain` asks for one more pass after it. */
+  private pushDeclaring = false;
+  private pushDeclarationAgain = false;
   private bound = false;
 
   constructor(private readonly origin: string = globalThis.location?.origin ?? '') {
@@ -190,6 +194,7 @@ export class AppController {
       .then((info) => {
         const before = this.declaredFeatures().join(',');
         this.patch({ info });
+        this.declarePushFeatures();
         // Info can arrive after sync has started: declare the features now and read what was missed.
         if (this.declaredFeatures().join(',') !== before && this.sync?.running) {
           this.sync.redeclare();
@@ -234,6 +239,41 @@ export class AppController {
   /** Whether the relay keeps the involvement preference; until it does, nothing reads or offers it. */
   involvementServed(): boolean {
     return this.snap.info?.features?.includes(INVOLVEMENT_FEATURE) ?? false;
+  }
+
+  /** Whether the relay sends the agent-stopped push; until it does, no push subscription declares it. */
+  agentStoppedPushServed(): boolean {
+    return this.snap.info?.features?.includes(AGENT_STOPPED_PUSH) ?? false;
+  }
+
+  /**
+   * Declare the agent-stopped push on this browser's existing push subscription once the relay serves it and the active
+   * service worker can show it, so an app updated in place says so without the person turning notifications on again.
+   * It needs a ready pairing, `GET /info` and the worker registration, which arrive in any order, so each of them asks,
+   * as does a worker taking over this page; only one pass runs at a time, and a request during it gets one more.
+   */
+  declarePushFeatures(): void {
+    if (this.pushDeclaring) {
+      this.pushDeclarationAgain = true;
+      return;
+    }
+    const relay = this.relay;
+    const reg = this.swReg;
+    if (!relay || !reg || this.snap.phase !== 'ready' || !this.agentStoppedPushServed()) return;
+    this.pushDeclaring = true;
+    // A revoked or wiped pairing keeps nothing it started: the relay it was declaring to is no longer this one.
+    const current = () => this.relay === relay && this.swReg === reg && this.snap.phase === 'ready';
+    void declareAgentStoppedPush(relay, reg, {
+      served: () => this.agentStoppedPushServed(),
+      current,
+    })
+      .catch(() => undefined)
+      .finally(() => {
+        this.pushDeclaring = false;
+        if (!this.pushDeclarationAgain) return;
+        this.pushDeclarationAgain = false;
+        this.declarePushFeatures();
+      });
   }
 
   /**
@@ -462,6 +502,7 @@ export class AppController {
     }));
     this.patch({ phase: 'ready', config, syncing: true });
     this.bindPageEvents();
+    this.declarePushFeatures();
     // The socket's ticket declares the features the relay advertises, so give `GET /info` a moment first; if it
     // answers later, the sync engine redeclares on a new socket.
     await Promise.race([this.infoLoaded, new Promise((r) => setTimeout(r, 1500))]);
@@ -1036,7 +1077,12 @@ export class AppController {
     reg.addEventListener('updatefound', () => {
       reg.installing?.addEventListener('statechange', check);
     });
+    // A newer worker taking over (another tab applied the update) may be one this page's subscription can declare.
+    navigator.serviceWorker.addEventListener('controllerchange', this.onControllerChange);
+    this.declarePushFeatures();
   }
+
+  private readonly onControllerChange = () => this.declarePushFeatures();
 
   /** Ask the browser to look for a newer app now. A found update raises `updateAvailable` once it has installed. */
   async checkForUpdate(): Promise<void> {
