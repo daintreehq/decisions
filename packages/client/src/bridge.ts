@@ -483,9 +483,12 @@ function deliveredKind(beforeJson: string, afterJson: string): DeliveredKind {
         ? 'answer'
         : e.kind === 'declined'
           ? 'decline'
-          : e.advisory_disposition !== undefined || e.fallback_due === true
-            ? 'advisory-timeout'
-            : 'expiry',
+          : e.kind === 'unpublished'
+            ? // Never-published notices read the same whether or not the plan may go ahead.
+              'notice'
+            : e.advisory_disposition !== undefined
+              ? 'advisory-timeout'
+              : 'expiry',
     );
   }
   return kinds.size === 1 ? [...kinds][0]! : 'notice';

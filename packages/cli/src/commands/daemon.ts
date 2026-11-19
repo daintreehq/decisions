@@ -402,6 +402,10 @@ export function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
   });
 }
 
+/** The listener's line for one settled delivery, naming what it carried. */
+export const deliveredLine = (id: string, what: DeliveredKind): string =>
+  `✓ delivered ${DELIVERED_LABEL[what]} for ${id}`;
+
 const DELIVERED_LABEL: Record<DeliveredKind, string> = {
   answer: 'answer',
   decline: 'decline',
@@ -473,7 +477,7 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
   let mcp: RunningMcp | null = null;
   let token: string | null = null;
   try {
-    bridge.on('delivered', (id, what) => ctx.out(`✓ delivered ${DELIVERED_LABEL[what]} for ${id}`));
+    bridge.on('delivered', (id, what) => ctx.out(deliveredLine(id, what)));
     bridge.on('error', (e) => !stopping && ctx.err(`warning: ${e.message}`));
     bridge.on('socket', (s, d) => ctx.err(`[relay] ${s}${d ? ` (${d})` : ''}`));
     bridge.on('state', (s) => {
