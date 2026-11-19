@@ -260,6 +260,18 @@ export class DeliveryEngine {
     return true;
   }
 
+  /**
+   * Settles once the drain in flight, if any, has finished and recorded what its sink reported; never rejects. A host
+   * that stops the bridge and ends its sink's commands waits on it before closing the store, so a write the sink
+   * answers while shutting down (an `exec:` command's exit 75) is still recorded.
+   */
+  idle(): Promise<void> {
+    return (this.running ?? Promise.resolve()).then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
   /** Serialised: concurrent callers share one pass plus at most one follow-up pass. */
   async drain(): Promise<DrainResult> {
     if (this.stopped) return EMPTY();

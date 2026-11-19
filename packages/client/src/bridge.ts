@@ -30,6 +30,7 @@ import {
   Publisher,
   type CreatePayload,
   type PostMessageResult,
+  type RegisterOptions,
   type RegisterResult,
 } from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
@@ -832,15 +833,26 @@ export class DecisionsBridge {
 
   /* ---------------- Daintree-facing API ---------------- */
 
-  /** Commits locally and returns immediately; publishing happens in the background. */
-  async registerQuestion(args: {
-    origin: QuestionOrigin;
-    input: unknown;
-  }): Promise<RegisterResult> {
+  /**
+   * Commits locally and returns immediately; publishing happens in the background. `pump: false` leaves the publishing
+   * to the host (`pump`, or `publisher.flush` alone when another process on the same store receives), so nothing is
+   * sent or delivered before the host has told its caller the question id.
+   */
+  async registerQuestion(
+    args: {
+      origin: QuestionOrigin;
+      input: unknown;
+    } & RegisterOptions & { pump?: boolean },
+  ): Promise<RegisterResult> {
     if (this.state === 'revoked')
       throw new BridgeError('forbidden', 'this device was revoked from the relay');
-    const r = await this.publisher.register(args.origin, args.input);
-    if (!r.duplicate) void this.pump().catch((e) => this.emitError(e as Error));
+    const r = await this.publisher.register(
+      args.origin,
+      args.input,
+      args.awaitAdvisorySupport ? { awaitAdvisorySupport: true } : {},
+    );
+    if (!r.duplicate && args.pump !== false)
+      void this.pump().catch((e) => this.emitError(e as Error));
     return r;
   }
 

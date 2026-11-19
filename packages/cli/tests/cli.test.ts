@@ -14,14 +14,8 @@ import {
 import { PROTOCOL_VERSION, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
-import {
-  DemoSink,
-  ask,
-  cliOrigin,
-  daemon,
-  mcpAddLines,
-  parseSink,
-} from '../src/commands/daemon.js';
+import { DemoSink, cliOrigin, daemon, mcpAddLines, parseSink } from '../src/commands/daemon.js';
+import { ask } from '../src/commands/ask.js';
 import {
   deleteData,
   doctor,

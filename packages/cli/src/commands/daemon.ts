@@ -28,7 +28,8 @@ import {
   type GlobalOptions,
   type Runtime,
 } from '../runtime.js';
-import { PaneDirectoryResolver, humanFileResolver, noAttachmentsResolver } from '../resolvers.js';
+import { RECEIVER_BUSY, ReceiverLock } from '../receiver.js';
+import { PaneDirectoryResolver, noAttachmentsResolver } from '../resolvers.js';
 
 /**
  * The origin the CLI uses for everything it asks itself. Each named demo "pane" lives as long as the
@@ -87,6 +88,11 @@ export class DemoSink implements TerminalSink {
     private readonly spec: SinkSpec,
     /** Writes one line; when it returns a promise, the line counts as written only once that resolves. */
     private readonly out: (line: string) => void | Promise<void>,
+    /**
+     * `json`: standard output carries one JSON record per line (`ask --json`, `wait --json`), so the stdout sink writes
+     * each notice as a `{"record":"notice"}` line and an `exec:` command's own output goes to standard error.
+     */
+    private readonly opts: { json?: boolean } = {},
   ) {}
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     if (o.host_id !== 'cli') return { state: 'gone' };
@@ -106,11 +112,15 @@ export class DemoSink implements TerminalSink {
   async isIdle(): Promise<boolean> {
     return true;
   }
-  async inject(_t: TerminalTarget, text: string, _injectionId?: string): Promise<InjectResult> {
+  async inject(_t: TerminalTarget, text: string, injectionId?: string): Promise<InjectResult> {
     switch (this.spec.kind) {
       case 'stdout':
         try {
-          await this.out('\n' + text + '\n');
+          await this.out(
+            this.opts.json
+              ? JSON.stringify({ record: 'notice', injection_id: injectionId ?? null, text })
+              : '\n' + text + '\n',
+          );
           return { outcome: 'delivered', proof: 'stdout' };
         } catch {
           return { outcome: 'ambiguous', reason: 'stdout_write_failed' };
@@ -147,7 +157,11 @@ export class DemoSink implements TerminalSink {
     return new Promise<InjectResult>((resolve) => {
       let spawned = false;
       let inputWritten = false;
-      const p = spawn(cmd, { shell: true, stdio: ['pipe', 'inherit', 'inherit'] });
+      // Under --json, standard output belongs to the records: the command's own output goes to standard error.
+      const p = spawn(cmd, {
+        shell: true,
+        stdio: ['pipe', this.opts.json ? 2 : 'inherit', 'inherit'],
+      });
       this.running.add(p);
       p.on('exit', () => this.running.delete(p));
       p.on('spawn', () => (spawned = true));
@@ -166,8 +180,9 @@ export class DemoSink implements TerminalSink {
         else resolve({ outcome: 'delivered', proof: 'exec:exit-0' });
       });
       // A command that exits before reading its input raises EPIPE on stdin; the exit decides the outcome.
-      p.stdin.on('error', () => undefined);
-      p.stdin.end(data, (err?: Error | null) => (inputWritten = !err));
+      const stdin = p.stdin!; // piped: never null
+      stdin.on('error', () => undefined);
+      stdin.end(data, (err?: Error | null) => (inputWritten = !err));
     });
   }
   /**
@@ -203,10 +218,13 @@ export function buildBridge(
     spool: new FileSpool(join(rt.ctx.home, 'spool')),
     // Default: no attachments. Callers choose between the human's unrestricted --attach and a pane folder.
     resolver: extra.resolver ?? noAttachmentsResolver,
-    // The CLI's sinks type the library's text as given, follow-up blocks included.
+    // The CLI's sinks type the library's text as given, follow-up blocks and advisory notices included.
     followUps: true,
+    advisoryDeadlines: true,
     auditPath: rt.auditPath,
-    policy: extra.policy ?? new PolicyRegistry(),
+    // A question is advisory only when its asker states a plan (`--planned-fallback`, `planned_fallback`), and never
+    // under a gate or for an approval; the relay and a phone or tablet must support it as well.
+    policy: extra.policy ?? new PolicyRegistry({ advisoryQuestions: true }),
     ...(rt.ctx.webSocket ? { webSocket: rt.ctx.webSocket } : {}),
     now: rt.ctx.now,
   });
@@ -290,8 +308,38 @@ export interface DaemonOptions {
 const ONCE_DEADLINE_MS = 120_000;
 const ONCE_TIMED_OUT = 'listen --once did not finish within two minutes; stopped';
 
-const REVOKED =
+export const REVOKED =
   'This device was revoked from the relay. Stopped; re-pair or restore from a recovery kit.';
+
+/** How long shutting down waits for a sink write in flight to be recorded before the store closes. */
+const DRAIN_WAIT_MS = 5_000;
+
+/**
+ * Ends a bridge's run and closes its store: the sink's commands are ended and the relay requests aborted first, then
+ * the bridge stops, and the store closes only once the delivery in flight has recorded what its sink reported (an
+ * `exec:` command that answers SIGTERM with exit 75 is held, not left for a restart to call uncertain), or after
+ * `DRAIN_WAIT_MS`. `also` is other work on the store to wait for the same way.
+ */
+export async function closeBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  sink.close();
+  rt.client.close();
+  await bridge.stop();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.all([bridge.delivery.idle(), ...also.map((p) => p.catch(() => undefined))]),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DRAIN_WAIT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    }),
+  ]);
+  clearTimeout(timer);
+  await rt.store.close();
+}
 
 /** Seconds until `at`, for a status line. */
 const secondsUntil = (at: number, now: number) => Math.max(0, Math.round((at - now) / 1000));
@@ -300,7 +348,7 @@ const secondsUntil = (at: number, now: number) => Math.max(0, Math.round((at - n
  * Reports a polling listener's HTTP syncs on stderr: the first success, each failure with its retry, and the
  * recovery. Only codes, cursors and times: nothing of any question.
  */
-function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
+export function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
   let last: HttpSyncStatus['outcome'] | null = null;
   bridge.on('sync', (s) => {
     if (s.outcome === 'ok' && last !== 'ok')
@@ -325,8 +373,17 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
       throw new CliError(`--path: ${(e as Error).message}`);
     }
   }
+  const sinkSpec = parseSink(o.sink);
   const rt = await openRuntime(ctx, g);
-  const sink = new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out);
+  // One receiver per state directory: a second would deliver beside this one and take its writes for crashed ones.
+  const lock = ReceiverLock.forHome(ctx.home);
+  try {
+    if (!lock.tryAcquire()) throw new CliError(RECEIVER_BUSY);
+  } catch (e) {
+    await rt.store.close();
+    throw e;
+  }
+  const sink = new DemoSink(sinkSpec, ctx.outAcked ?? ctx.out);
   // Agents reach files only through a folder the human designated (per pane), never by naming a path.
   const bridge = buildBridge(rt, sink, {
     resolver: o.mcp?.attachmentsDir
@@ -450,76 +507,10 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     stopping = true;
     sink.close();
     await mcp?.close();
-    rt.client.close();
-    await bridge.stop();
-    await rt.store.close();
-  }
-}
-
-export async function ask(
-  ctx: Ctx,
-  g: GlobalOptions,
-  o: {
-    question: string;
-    context?: string;
-    option?: string[];
-    require?: string;
-    attach?: string[];
-    wait?: boolean;
-    sink?: string;
-    until?: Promise<void>;
-  },
-): Promise<void> {
-  const rt = await openRuntime(ctx, g);
-  const bridge = buildBridge(rt, new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out), {
-    resolver: humanFileResolver,
-  });
-  try {
-    const options = (o.option ?? []).map((s) => {
-      const i = s.indexOf('=');
-      if (i < 1) throw new CliError(`--option must look like id=Label, got "${s}"`);
-      return { id: s.slice(0, i), label: s.slice(i + 1) };
-    });
-    const r = await bridge.registerQuestion({
-      origin: cliOrigin(),
-      input: {
-        question: o.question,
-        ...(o.context ? { context: o.context } : {}),
-        ...(options.length ? { options } : {}),
-        ...(o.require ? { requested_requirement: o.require } : {}),
-        ...(o.attach?.length
-          ? { attachments: o.attach.map((p) => ({ local_resource_id: p })) }
-          : {}),
-      },
-    });
-    await bridge.pump();
-    ctx.out(
-      ctx.json
-        ? JSON.stringify({
-            question_id: r.questionId,
-            alias: r.alias,
-            enforced_requirement: r.requirement,
-          })
-        : `Asked as q-${r.alias} (${r.questionId}), requirement: ${r.requirement}.`,
-    );
-    if (!o.wait) {
-      ctx.out(
-        ctx.json
-          ? ''
-          : 'The answer is delivered by a running `decisions listen`. Use --wait to wait here.',
-      );
-      return;
+    try {
+      await closeBridge(rt, bridge, sink);
+    } finally {
+      lock.release();
     }
-    await bridge.start();
-    const done = new Promise<void>((resolve) => {
-      bridge.on('delivered', (id) => id === r.questionId && resolve());
-    });
-    await Promise.race([
-      done,
-      o.until ?? new Promise<void>((resolve) => process.once('SIGINT', () => resolve())),
-    ]);
-  } finally {
-    await bridge.stop();
-    await rt.store.close();
   }
 }

@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { RelayError } from '@daintreehq/decisions-client';
 import { CliError, makeCtx, type GlobalOptions } from './runtime.js';
-import { ask, daemon } from './commands/daemon.js';
+import { daemon } from './commands/daemon.js';
+import { ask, getCmd, waitCmd } from './commands/ask.js';
 import {
   deleteData,
   doctor,
@@ -25,6 +26,9 @@ const collect = (v: string, prev: string[] = []) => [...prev, v];
 
 const NO_SOCKET_HELP =
   'without a live socket: poll the relay over HTTP every 15 s instead, backing off to at most a minute while it is unreachable';
+
+const WAIT_HELP =
+  'exits with the outcome: 0 answered, 10 declined, 11 withdrawn, 12 expired, 13 advisory-expired (your plan may go ahead), 14 never-published, 15 refused, 16 wait-timeout, 130/143 on SIGINT/SIGTERM; 1 error, 2 usage. With --json, stdout is one JSON record per line and the last is {"record":"result"} (docs/operations.md)';
 
 const SINK_HELP =
   'stdout | file:<path> | exec:<command> (the command reads the answer on stdin; exit 0 = delivered, 75 = retry later, anything else = may have been delivered, never retried)';
@@ -48,10 +52,13 @@ export function buildProgram(): Command {
       ...(o.keyPassphraseEnv ? { passphraseEnv: o.keyPassphraseEnv } : {}),
     };
   };
+  // A command that returns a number exits with it: an outcome, not an error, so nothing is printed for it.
   const run =
-    (fn: (ctx: ReturnType<typeof makeCtx>, g: GlobalOptions) => Promise<void>) => async () => {
+    (fn: (ctx: ReturnType<typeof makeCtx>, g: GlobalOptions) => Promise<void | number>) =>
+    async () => {
       const g = opts();
-      await fn(makeCtx(g), g);
+      const code = await fn(makeCtx(g), g);
+      if (typeof code === 'number') process.exitCode = code;
     };
 
   program
@@ -242,7 +249,9 @@ export function buildProgram(): Command {
 
   program
     .command('ask <question>')
-    .description('Ask a question from the command line.')
+    .description(
+      'Ask a question from the command line. Prints its receipt (question ID, deadline, plan) at once.',
+    )
     .option('--context <text>')
     .option('--option <id=label>', 'an answer option (repeatable)', collect)
     .option(
@@ -250,9 +259,55 @@ export function buildProgram(): Command {
       'human-required | proxy-ok | proxy-first (can only strengthen policy)',
     )
     .option('--attach <file>', 'attach an image (repeatable)', collect)
-    .option('--wait', 'stay connected until the answer is delivered')
+    .option(
+      '--expires-in <duration>',
+      'reply window from now: a whole number and s, m, h or d, from 61s to 365d, such as 15m (not with --expires-at)',
+    )
+    .option('--expires-at <time>', 'a fixed deadline, as an ISO 8601 time (not with --expires-in)')
+    .option(
+      '--planned-fallback <plan>',
+      'ask for advice, not a decision: what you will do if no answer arrives by the deadline (never for an approval)',
+    )
+    .option(
+      '--correlation-id <id>',
+      'makes a retry safe: the same id and request return the original question and deadline',
+    )
+    .option('--wait', `wait here for the question's outcome; ${WAIT_HELP}`)
+    .option(
+      '--wait-timeout <duration>',
+      'with --wait: stop waiting after this long (1s to 365d), leaving the question open',
+    )
     .option('--sink <sink>', SINK_HELP, 'stdout')
+    .option('--no-socket', NO_SOCKET_HELP)
     .action((q, o) => run((c, g) => ask(c, g, { question: q, ...o }))());
+
+  program
+    .command('wait <questionId>')
+    .description(
+      `Wait for the outcome of a question asked earlier (after a restart, or a lost --wait); ${WAIT_HELP}`,
+    )
+    .option(
+      '--pane <name>',
+      'whose question: cli (decisions ask, the default) or mcp (asked through decisions mcp)',
+    )
+    .option(
+      '--wait-timeout <duration>',
+      'stop waiting after this long (1s to 365d), leaving the question open',
+    )
+    .option('--sink <sink>', SINK_HELP, 'stdout')
+    .option('--no-socket', NO_SOCKET_HELP)
+    .action((id, o) => run((c, g) => waitCmd(c, g, id, o))());
+
+  program
+    .command('get <questionId>')
+    .description(
+      "Show where a question stands from this computer's copy, without waiting (the get_decision fields, plus the outcome a wait would report now).",
+    )
+    .option(
+      '--pane <name>',
+      'whose question: cli (decisions ask, the default) or mcp (asked through decisions mcp)',
+    )
+    .action((id, o) => run((c, g) => getCmd(c, g, id, o))());
 
   program
     .command('status')

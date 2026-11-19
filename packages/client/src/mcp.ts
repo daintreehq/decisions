@@ -42,7 +42,7 @@ export class TokenMapAuthenticator implements PaneAuthenticator {
 }
 
 /** The `get_decision` structured result: the decision fields first, in the MCP surface's snake_case. */
-function decisionResult(v: DecisionView) {
+export function decisionResult(v: DecisionView) {
   return {
     question_id: v.questionId,
     alias: v.alias,
@@ -126,6 +126,39 @@ function decisionResult(v: DecisionView) {
   };
 }
 
+/**
+ * The `get_decision` result text: where the question stands, in words, and how many follow-ups its thread holds. The
+ * CLI's `decisions get` and `decisions ask --wait` print the same words.
+ */
+export function decisionText(v: DecisionView): string {
+  const summary = v.provenance
+    ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+    : v.status === 'expired'
+      ? v.fallbackDue
+        ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
+        : v.advisoryTimeout?.revision === v.revision &&
+            v.advisoryTimeout.disposition === 'fallback-due'
+          ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
+          : v.advisoryTimeout?.revision === v.revision
+            ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
+            : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+      : v.closedReason === 'never-published'
+        ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
+        : v.publication === 'possibly-committed'
+          ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
+          : v.publication === 'never-published' && v.closedReason === 'withdrawn'
+            ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
+            : v.status === 'publish-failed'
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
+              : v.closedReason === 'declined'
+                ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                : `q-${v.alias} is ${v.status}; no answer in force.`;
+  const messages = v.thread.filter((t) => t.kind === 'message').length;
+  return messages > 0
+    ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
+    : summary;
+}
+
 /** The `get_involvement` structured result: every field present, null where it does not apply. */
 function involvementResult(v: InvolvementView) {
   const on = v.status === 'available' ? v : null;
@@ -193,7 +226,7 @@ const policyName = (a: Pick<PolicyAdjustment, 'source' | 'gateId'>) =>
   a.source === 'gate' ? `the workflow gate ${a.gateId}` : 'the host';
 
 /** One change policy made, in words. */
-function adjustmentText(a: PolicyAdjustment): string {
+export function adjustmentText(a: PolicyAdjustment): string {
   const by = policyName(a);
   if (a.field === 'expires_at')
     return a.requested === null
@@ -249,7 +282,7 @@ export function askedText(r: AskedReceipt): string {
 }
 
 /** The `ask_human` structured result: the question and the plan that applies to it, in the MCP surface's snake_case. */
-function askedResult(r: AskedReceipt, instruction: string) {
+export function askedResult(r: AskedReceipt, instruction: string) {
   return {
     question_id: r.questionId,
     status: r.status,
@@ -837,35 +870,7 @@ export function createDecisionsMcpHandler(
         if (typeof args.question_id !== 'string')
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
-        const summary = v.provenance
-          ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
-          : v.status === 'expired'
-            ? v.fallbackDue
-              ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
-              : v.advisoryTimeout?.revision === v.revision &&
-                  v.advisoryTimeout.disposition === 'fallback-due'
-                ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
-                : v.advisoryTimeout?.revision === v.revision
-                  ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
-                  : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : v.closedReason === 'never-published'
-              ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
-              : v.publication === 'possibly-committed'
-                ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
-                : v.publication === 'never-published' && v.closedReason === 'withdrawn'
-                  ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
-                  : v.status === 'publish-failed'
-                    ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
-                    : v.closedReason === 'declined'
-                      ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-                      : `q-${v.alias} is ${v.status}; no answer in force.`;
-        const messages = v.thread.filter((t) => t.kind === 'message').length;
-        return text(
-          messages > 0
-            ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
-            : summary,
-          decisionResult(v),
-        );
+        return text(decisionText(v), decisionResult(v));
       }
       if (name === 'cancel_question') {
         if (typeof args.question_id !== 'string')
