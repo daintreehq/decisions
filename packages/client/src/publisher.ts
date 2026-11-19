@@ -7,7 +7,6 @@ import {
   HumanMessageContentV1,
   LIMITS,
   MESSAGE_RECORD_TYPE,
-  advisoryContentIssue,
   advisoryRefusal,
   canonicalize,
   knownFeatures,
@@ -44,7 +43,7 @@ import {
   shapeForGates,
   validateOptions,
 } from './content.js';
-import type { AdvisorySupport } from './advisory.js';
+import { advisoryContentHolds, type AdvisorySupport } from './advisory.js';
 import {
   MemorySpool,
   gateHash,
@@ -2131,22 +2130,13 @@ export class Publisher {
       signed.record.expires_at === null
     )
       return false;
-    try {
-      const raw = await openQuestionContent(this.ctx, {
-        question_id: row.question_id,
-        content_sealed: JSON.stringify(envelope),
-      });
-      const content = DecisionContentV1.safeParse(raw);
-      // The policy is read again once the content is open: a host that turned advice off meanwhile authorises nothing.
-      return (
-        content.success &&
-        advisoryContentIssue({ envelope }, content.data) === null &&
-        this.advisory?.hostSupport === true &&
-        this.ctx.policy.advisoryQuestions
-      );
-    } catch {
-      return false;
-    }
+    const holds = await advisoryContentHolds(
+      this.ctx,
+      row.question_id,
+      JSON.stringify(envelope),
+    );
+    // The policy is read again once the content is open: a host that turned advice off meanwhile authorises nothing.
+    return holds && this.advisory?.hostSupport === true && this.ctx.policy.advisoryQuestions;
   }
 
   private closed(questionId: string): void {

@@ -37,6 +37,21 @@ export interface AnswerEntry {
    * to go ahead at the deadline, so the agent is told it may carry the plan out. Nothing was decided or approved.
    */
   fallback_due?: boolean;
+  /**
+   * `expired` only: the expiry closed the advisory round of an advisory question (protocol section 21) on a host that
+   * delivers advisory outcomes, so the agent is told in its own notice, never the blocking expiry block.
+   * `fallback-due`: the host's policy lets the stated plan go ahead; `fallback-withheld`: it does not. Absent on an
+   * ordinary expiry. Delivery may only ever turn `fallback-due` into `fallback-withheld` (or drop it, for a host that
+   * no longer delivers advisory outcomes) before the notice is typed, never the other way. Nothing was decided or
+   * approved either way.
+   */
+  advisory_disposition?: AdvisoryDisposition;
+  /**
+   * An advisory notice only: the attempt whose write may or may not have reached the terminal (an ambiguous sink
+   * answer, or a crash recovery that found no marker). Kept with the entry so `get_decision` still says so once a
+   * reopen has replaced the round; the notice is never typed again on its own.
+   */
+  uncertain_injection_id?: string;
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;
@@ -57,6 +72,22 @@ export interface AnswerEntry {
    * bookkeeping in clear, like the rest of the entry: no alt text or digest, only the host's path.
    */
   stored_images?: { attachment_id: string; path: string }[];
+}
+
+/** What an advisory question's unanswered deadline lets the asking agent do (`AnswerEntry.advisory_disposition`). */
+export type AdvisoryDisposition = 'fallback-due' | 'fallback-withheld';
+
+/**
+ * The disposition an advisory expiry notice not yet typed may still carry, as the host stands now: `fallback-due`
+ * becomes `fallback-withheld` once its policy no longer allows advice, and none at all (an ordinary expiry) once it no
+ * longer delivers advisory outcomes, whose notice its sink may not read. Never upgraded.
+ */
+export function currentDisposition(
+  d: AdvisoryDisposition | undefined,
+  host: { outcomes: boolean; allowed: boolean },
+): AdvisoryDisposition | undefined {
+  if (d === undefined || !host.outcomes) return undefined;
+  return d === 'fallback-due' && !host.allowed ? 'fallback-withheld' : d;
 }
 
 /** The content of an answer. Held in memory only; at rest it is sealed into `AnswerEntry.sealed`. */
@@ -129,6 +160,10 @@ export function parseAnswers(json: string): AnswerEntry[] {
   }
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
+
+/** An expiry notice of an advisory round, typed as the advisory notice (`advisory_disposition`). */
+export const isAdvisoryNotice = (e: Pick<AnswerEntry, 'kind' | 'advisory_disposition'>): boolean =>
+  e.kind === 'expired' && e.advisory_disposition !== undefined;
 
 /** A content-free notice that closed a round without an answer: an expiry, or the person's decline. */
 export const isClosure = (e: Pick<AnswerEntry, 'kind'>): boolean =>

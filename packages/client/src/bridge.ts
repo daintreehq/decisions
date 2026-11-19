@@ -44,7 +44,15 @@ import {
   ownerMessageItemId,
   type OwnerFollowUpResult,
 } from './owner-message.js';
-import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
+import {
+  answeredOn,
+  closureInForce,
+  currentDisposition,
+  isAdvisoryNotice,
+  sameDigests,
+  type AdvisoryDisposition,
+  type OpenAnswerEntry,
+} from './answers.js';
 import {
   openAnswers,
   openMessageContent,
@@ -88,7 +96,7 @@ import {
   type SnapshotPublishResult,
 } from './snapshots.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
-import { AdvisorySupport } from './advisory.js';
+import { AdvisorySupport, replyModeOfRow } from './advisory.js';
 import type { LocalStore } from './store.js';
 import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
 
@@ -205,17 +213,6 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
   'person-declines-v1',
   'owner-desktop-declines-v1',
 ];
-
-/** A question's reply mode, from the AAD of the envelope it was published with (readable without opening it). */
-function replyModeOfRow(row: Pick<QuestionRow, 'content_sealed'>): ReplyMode {
-  if (!row.content_sealed) return 'blocking';
-  try {
-    const env = JSON.parse(row.content_sealed) as { aad?: { reply_mode?: unknown } };
-    return env.aad?.reply_mode === 'advisory' ? 'advisory' : 'blocking';
-  } catch {
-    return 'blocking';
-  }
-}
 
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
@@ -338,11 +335,18 @@ export interface DecisionView {
    */
   closedReason: 'declined' | 'withdrawn' | 'expired' | 'never-published' | null;
   /**
-   * True only when the agent was told it may carry out the plan its advisory question stated: so far, an advisory
-   * question that never reached the relay before its deadline, under a host policy that allows advisory questions
-   * (protocol section 21). It is never an answer or an approval: the person decided nothing.
+   * True only when the agent may carry out the plan its advisory question stated (protocol section 21): the advisory
+   * round's deadline passed unanswered (`advisoryTimeout`, `fallback-due`), or the question never reached the relay
+   * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
+   * keeps what it said; one still to be typed follows the policy as it is now. It is never an answer or an approval:
+   * the person decided nothing.
    */
   fallbackDue: boolean;
+  /**
+   * What happened when the advisory round's deadline passed unanswered, kept after a reopen; null for every other
+   * question, and for imported history.
+   */
+  advisoryTimeout: AdvisoryTimeoutView | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
   choice: string | null;
   /** The free text of the answer in force ('' when none). */
@@ -372,6 +376,36 @@ export interface DecisionView {
    * one with its own delivery state. A message never changes the answer in force reported above.
    */
   thread: ThreadEntryView[];
+}
+
+/**
+ * An advisory question's unanswered deadline, as three separate facts (protocol section 21): the deadline elapsed
+ * (`deadline`, the signed one the relay's expiry was checked against); the host told, or will tell, its agent
+ * (`disposition` and `notice`); and what the agent then did, which Decisions never observes (`agentAction`).
+ */
+export interface AdvisoryTimeoutView {
+  /** The round that expired: the advisory round, 0. */
+  revision: number;
+  /** The round's signed deadline that elapsed (ISO 8601, UTC). */
+  deadline: string;
+  /**
+   * What the notice says, or will say: `fallback-due` lets the stated plan go ahead, at the agent's discretion;
+   * `fallback-withheld` does not (the host's policy does not allow advice, or the question could not be read as
+   * advisory). Neither is an answer.
+   */
+  disposition: AdvisoryDisposition;
+  /**
+   * The notice's delivery to the asking agent: `pending` (waiting for its pane, its host or the end of a replay),
+   * `delivered` (the sink proved the write, or a restart found it on screen), `uncertain` (a write may or may not have
+   * reached the terminal; it is never typed again on its own), `needs-attention` (nothing was typed and a person has
+   * to decide), `superseded` (a reopen or deletion replaced the round before anything was typed). Delivered proves
+   * the agent's terminal received it, never that the agent acted on it.
+   */
+  notice: 'pending' | 'delivered' | 'uncertain' | 'needs-attention' | 'superseded';
+  /** The write that delivered the notice, or that may have; null otherwise. */
+  injectionId: string | null;
+  /** Always `unobserved`: Decisions never sees whether the agent carried out the plan. */
+  agentAction: 'unobserved';
 }
 
 /**
@@ -565,13 +599,16 @@ export class DecisionsBridge {
         onInvolvementHint: () => this.involvement.hint(),
         closureWrite: (id) => this.delivery.closureWrite(id),
       },
-      { messages: !!o.followUps },
+      { messages: !!o.followUps, advisoryOutcomes: o.advisoryDeadlines === true },
     );
     this.delivery = new DeliveryEngine(this.ctx, {
       sink: o.sink,
       ...(o.adapters ? { adapters: o.adapters } : {}),
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
+      advisoryOutcomes: o.advisoryDeadlines === true,
+      // The socket's replay of missed events: a later frame of it may reopen the round an advisory notice closed.
+      replaying: () => this.socket.currentState === 'syncing',
     });
     this.socket = new RelaySocket({
       client,
@@ -1199,6 +1236,7 @@ export class DecisionsBridge {
     );
     const entries = await openAnswers(this.ctx, row);
     const unpublished = entries.find((e) => e.kind === 'unpublished');
+    const timeout = this.advisoryTimeout(row, entries);
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1269,8 +1307,9 @@ export class DecisionsBridge {
               : null,
       fallbackDue:
         !row.history_only &&
-        row.local_status === 'publish-failed' &&
-        unpublished?.fallback_due === true,
+        ((row.local_status === 'publish-failed' && unpublished?.fallback_due === true) ||
+          (timeout?.inForce === true && timeout.view.disposition === 'fallback-due')),
+      advisoryTimeout: timeout?.view ?? null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
       // Only a human answer that carried its own content attests to the images the phone displayed.
@@ -1293,6 +1332,54 @@ export class DecisionsBridge {
           createdAt: e.created_at,
         })),
       thread: await this.thread(row, entries),
+    };
+  }
+
+  /**
+   * The advisory round's unanswered deadline, if it had one, with whether its notice still describes the question.
+   * Imported history has none: its entries were never delivered by this desktop.
+   */
+  private advisoryTimeout(
+    row: QuestionRow,
+    entries: OpenAnswerEntry[],
+  ): { view: AdvisoryTimeoutView; inForce: boolean } | null {
+    const e = entries.findLast(isAdvisoryNotice);
+    if (!e?.advisory_disposition || row.history_only) return null;
+    const inForce = e.deliver && closureInForce(e, row);
+    // A notice still to be typed says what the host allows when it is typed (delivery checks again before then).
+    const disposition =
+      e.delivered || !inForce
+        ? e.advisory_disposition
+        : (currentDisposition(e.advisory_disposition, {
+            outcomes: this.advisory.hostSupport,
+            allowed: this.ctx.policy.advisoryQuestions,
+          }) ?? 'fallback-withheld');
+    const notice: AdvisoryTimeoutView['notice'] = e.delivered
+      ? 'delivered'
+      : inForce
+        ? row.delivery_status === 'delivery-uncertain'
+          ? 'uncertain'
+          : row.delivery_status === 'needs-attention'
+            ? 'needs-attention'
+            : 'pending'
+        : e.uncertain_injection_id
+          ? 'uncertain'
+          : 'superseded';
+    return {
+      inForce,
+      view: {
+        revision: e.revision,
+        deadline: e.created_at,
+        disposition,
+        notice,
+        injectionId:
+          notice === 'delivered'
+            ? (e.injection_id ?? null)
+            : notice === 'uncertain'
+              ? (e.uncertain_injection_id ?? null)
+              : null,
+        agentAction: 'unobserved',
+      },
     };
   }
 

@@ -7,6 +7,8 @@ import {
 import {
   answeredOn,
   closureInForce,
+  currentDisposition,
+  isAdvisoryNotice,
   isClosure,
   parseAnswers,
   supersededClosure,
@@ -60,6 +62,16 @@ export interface DeliveryOptions {
   maxBatchBytes?: number;
   /** Where verified phone images go on the host's disk. Without it, each is listed as unavailable. */
   phoneImages?: PhoneImageStore;
+  /**
+   * The host delivers advisory outcomes (`BridgeOptions.advisoryDeadlines`). Off, an advisory notice not yet typed is
+   * typed as the ordinary expiry block, which every sink reads.
+   */
+  advisoryOutcomes?: boolean;
+  /**
+   * True while the relay is replaying events this desktop missed: an advisory notice waits for the replay to end,
+   * since a later event of the same replay (a reopen, a deletion) may replace the round it closed.
+   */
+  replaying?: () => boolean;
 }
 
 export interface DrainResult {
@@ -289,6 +301,7 @@ export class DeliveryEngine {
       (q.delivery_status === 'needs-attention' ||
         q.delivery_status === 'delivery-uncertain' ||
         unsettled.has(q.question_id) ||
+        (pending.some(isAdvisoryNotice) && this.o.replaying?.() === true) ||
         (await this.ctx.store.hasUncertainIntent(q.question_id)));
     const barrier = held ? Math.min(...pending.map(seqOf)) : Infinity;
     const messages: StoredMessage[] = [];
@@ -392,6 +405,14 @@ export class DeliveryEngine {
     // And on its original host: the relay keeps naming the host the question was published for, and the inbox
     // checks the relay's host-bound claims (an expiry, a snapshot refresh) against this origin.
     if (target.hostId !== q.origin.host_id) return { attention: 'resume_wrong_host' };
+    // An advisory notice tells the agent it may carry out the plan IT stated: only the session that asked may hear
+    // it, so a resume must bring back that very session, known by its id. Another session in the same worktree
+    // never stated the plan.
+    if (
+      this.pending(q).some(isAdvisoryNotice) &&
+      (q.origin.agent_session_id === null || target.agentSessionId !== q.origin.agent_session_id)
+    )
+      return { attention: 'resume_wrong_session' };
     const origin: QuestionOrigin = {
       ...q.origin,
       host_id: target.hostId,
@@ -589,6 +610,9 @@ export class DeliveryEngine {
     return formatAnswerNotice({
       kind: e.kind,
       ...(e.fallback_due ? { fallbackDue: true } : {}),
+      ...(isAdvisoryNotice(e)
+        ? { disposition: e.advisory_disposition!, deadline: e.created_at }
+        : {}),
       questionId: i.q.question_id,
       alias: i.q.alias,
       revision: e.revision,
@@ -732,17 +756,27 @@ export class DeliveryEngine {
     // 0b. Every answer and message must still be one to type: fetching images takes time, and a cancellation,
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
     //     the inbox applies cancellations and deletions under, so none lands between them. A closure notice
-    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink.
+    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink. An
+    //     advisory notice must still say what the host allows now: one its policy no longer allows is withheld (and
+    //     typed as an ordinary expiry once the host no longer delivers advisory outcomes), recorded here, and the
+    //     chunk is built again from the store.
     let written!: () => void;
     const writing = new Promise<void>((r) => (written = r));
     const closing = new Set<string>();
     const admitted = await ctx.lock.run(async () => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
       const rows = new Map<string, QuestionRow>();
+      const host = {
+        outcomes: this.o.advisoryOutcomes === true,
+        allowed: ctx.policy.advisoryQuestions,
+      };
+      let stale = false;
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
         if (row) rows.set(q.question_id, row);
-        const answers = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
+        const answers = new Map(
+          (row ? this.pending(row) : []).map((e) => [e.entry_id, e] as const),
+        );
         const messages = new Set(
           row
             ? parseMessages(row.messages_json)
@@ -750,15 +784,39 @@ export class DeliveryEngine {
                 .map((m) => m.message_id)
             : ([] as string[]),
         );
+        const withheld = new Map<string, AnswerEntry['advisory_disposition']>();
         for (const i of chunk) {
           if (i.q.question_id !== q.question_id) continue;
-          const live =
-            i.kind === 'answer'
-              ? answers.has(i.entry.entry_id)
-              : messages.has(i.message.message_id);
-          if (!live) return false;
+          if (i.kind === 'message') {
+            if (!messages.has(i.message.message_id)) return false;
+            continue;
+          }
+          const e = answers.get(i.entry.entry_id);
+          if (!e || e.advisory_disposition !== i.entry.advisory_disposition) return false;
+          const now = currentDisposition(e.advisory_disposition, host);
+          if (now !== e.advisory_disposition) withheld.set(e.entry_id, now);
+        }
+        if (row && withheld.size > 0) {
+          await ctx.store.updateQuestion(row.question_id, {
+            answers_json: serializeAnswers(
+              parseAnswers(row.answers_json).map((e) => {
+                if (!withheld.has(e.entry_id)) return e;
+                const { advisory_disposition: _was, ...rest } = e;
+                const now = withheld.get(e.entry_id);
+                return now ? { ...rest, advisory_disposition: now } : rest;
+              }),
+            ),
+          });
+          await ctx.audit.log({
+            event: 'delivery.advisory-withheld',
+            question_id: row.question_id,
+            requirement: row.requirement,
+            result: host.outcomes ? 'policy-disallowed' : 'host-unsupported',
+          });
+          stale = true;
         }
       }
+      if (stale) return false;
       const now = ctx.now();
       // 1a. Each follow-up names its attempt first, so recovery can find it from the attempt alone. Nothing is
       //     typed yet: a crash before its intent is written only leaves it waiting, as it was.
@@ -1187,13 +1245,37 @@ export class DeliveryEngine {
     const { ctx } = this;
     if (uncertainIntentId) {
       // Intent state and the question's delivery state change in ONE atomic write: no crash window in which
-      // the question is still deliverable while its intent is already marked uncertain.
-      await ctx.store.settleIntent(
-        uncertainIntentId,
-        { state: 'uncertain', updated_at: ctx.now() },
-        q.question_id,
-        { delivery_status: status, error_code: code },
-      );
+      // the question is still deliverable while its intent is already marked uncertain. An advisory notice the write
+      // carried also keeps the attempt, so the uncertainty outlives a reopen of its round (`get_decision`); the row
+      // is read again under the lock so nothing the inbox appended meanwhile is lost.
+      await ctx.lock.run(async () => {
+        const intent = await ctx.store.getIntent(uncertainIntentId);
+        const row = await ctx.store.getQuestion(q.question_id);
+        const entries = row ? parseAnswers(row.answers_json) : [];
+        let marked = false;
+        const next = entries.map((e) => {
+          if (
+            !intent ||
+            e.revision !== intent.answer_revision ||
+            !isAdvisoryNotice(e) ||
+            e.delivered ||
+            !e.deliver
+          )
+            return e;
+          marked = true;
+          return { ...e, uncertain_injection_id: uncertainIntentId };
+        });
+        await ctx.store.settleIntent(
+          uncertainIntentId,
+          { state: 'uncertain', updated_at: ctx.now() },
+          q.question_id,
+          {
+            delivery_status: status,
+            error_code: code,
+            ...(marked ? { answers_json: serializeAnswers(next) } : {}),
+          },
+        );
+      });
     } else {
       await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
     }
@@ -1205,6 +1287,9 @@ export class DeliveryEngine {
     });
     // A question that never reached the relay has no delivery there to report on.
     if (q.local_status === 'publish-failed') return;
+    // Nor has an advisory notice: it is no answer, and the relay keeps no delivery of it.
+    const owed = this.pending(q);
+    if (owed.length > 0 && owed.every(isAdvisoryNotice)) return;
     const rev = Math.max(1, ...this.pending(q).map((e) => e.revision), q.question_revision);
     try {
       await ctx.client.deliveriesFailed({

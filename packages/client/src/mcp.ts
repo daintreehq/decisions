@@ -54,6 +54,16 @@ function decisionResult(v: DecisionView) {
     answered_on: v.answeredOn,
     closed_reason: v.closedReason,
     fallback_due: v.fallbackDue,
+    advisory_timeout: v.advisoryTimeout
+      ? {
+          revision: v.advisoryTimeout.revision,
+          deadline: v.advisoryTimeout.deadline,
+          disposition: v.advisoryTimeout.disposition,
+          notice: v.advisoryTimeout.notice,
+          injection_id: v.advisoryTimeout.injectionId,
+          agent_action: v.advisoryTimeout.agentAction,
+        }
+      : null,
     choice: v.choice,
     text: v.text,
     reviewed_digests_match: v.reviewedDigestsMatch,
@@ -475,7 +485,25 @@ export const TOOLS = [
         fallback_due: {
           type: 'boolean',
           description:
-            'True only when you may carry out the plan your advisory question stated, at your own discretion. It is never an answer or an approval.',
+            'True only when you may carry out the plan your advisory question stated, at your own discretion: its deadline passed unanswered (or it never reached the relay) and this host allows it. It is never an answer or an approval.',
+        },
+        advisory_timeout: {
+          type: ['object', 'null'],
+          description:
+            "What happened when your advisory question's deadline passed unanswered; null otherwise. Three separate facts: the deadline elapsed (deadline); this host told you, or will (disposition: fallback-due lets your stated plan go ahead, fallback-withheld does not; notice: how that notice's delivery to your terminal stands); and what you then did, which is never observed (agent_action). Kept after a reopen.",
+          properties: {
+            revision: { type: 'integer' },
+            deadline: { type: 'string' },
+            disposition: { type: 'string', enum: ['fallback-due', 'fallback-withheld'] },
+            notice: {
+              type: 'string',
+              enum: ['pending', 'delivered', 'uncertain', 'needs-attention', 'superseded'],
+              description:
+                'pending: waiting to be typed; delivered: typed into your terminal (not proof that you acted on it); uncertain: it may or may not have been typed, and is never typed again on its own; needs-attention: it could not be typed and a person has to decide; superseded: the round was reopened or deleted before it was typed.',
+            },
+            injection_id: { type: ['string', 'null'] },
+            agent_action: { type: 'string', enum: ['unobserved'] },
+          },
         },
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
@@ -812,9 +840,11 @@ export function createDecisionsMcpHandler(
         const summary = v.provenance
           ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
-            ? v.replyMode === 'advisory'
+            ? v.fallbackDue
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
-              : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+              : v.advisoryTimeout?.revision === v.revision
+                ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
+                : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.closedReason === 'never-published'
               ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
               : v.publication === 'possibly-committed'
