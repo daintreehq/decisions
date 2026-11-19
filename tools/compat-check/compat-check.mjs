@@ -239,6 +239,12 @@ async function stageReleasedRelay(version, side) {
     differ.map(([rel]) => rel).join(', '),
   );
   // And nothing more: Wrangler's README beside the bundled Worker is the only file the npm package does not ship.
+  const maps = Object.keys(manifest.files).filter((rel) => rel.endsWith('.map'));
+  must(
+    maps.every((rel) => existsSync(join(dir, rel))),
+    `the release has the source maps the npm relay package has`,
+    maps.filter((rel) => !existsSync(join(dir, rel))).join(', '),
+  );
   const listed = new Set([...Object.keys(manifest.files), 'wrangler.json', 'worker/README.md']);
   const extra = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile())
@@ -314,8 +320,14 @@ async function startRelay(dir, port, persist, label) {
   child.stdout.pipe(log);
   child.stderr.pipe(log);
   let exited = false;
-  child.once('exit', () => (exited = true));
-  child.on('error', (e) => log.write(`\nspawn error: ${e.message}\n`));
+  // Settles when Wrangler exits, or when it never started (a spawn error with no process).
+  const gone = new Promise((done) => {
+    child.once('exit', done);
+    child.on('error', (e) => {
+      log.write(`\nspawn error: ${e.message}\n`);
+      if (child.pid === undefined) done();
+    });
+  }).then(() => (exited = true));
   let stopping = null;
   // The whole process group: Wrangler and the workerd it started.
   const group = (signal) => {
@@ -326,13 +338,15 @@ async function startRelay(dir, port, persist, label) {
     }
   };
   const stop = () =>
-    (stopping ??= new Promise((done) => {
+    (stopping ??= (async () => {
       running.delete(handle);
-      if (exited) return (group('SIGKILL'), done());
-      child.once('exit', () => (group('SIGKILL'), done()));
-      group('SIGTERM');
-      setTimeout(() => group('SIGKILL'), 5000).unref();
-    }));
+      if (!exited) {
+        group('SIGTERM');
+        setTimeout(() => group('SIGKILL'), 5000).unref();
+        await gone;
+      }
+      group('SIGKILL');
+    })());
   const handle = { stop };
   running.add(handle);
   const origin = `http://127.0.0.1:${port}`;
@@ -372,13 +386,21 @@ function startActor(side, label) {
     else p.reject(new Error(`${label}: ${error.code ? `${error.code}: ` : ''}${error.message}`));
   });
   let exited = false;
-  child.on('exit', (code, signal) => {
+  let markGone;
+  const gone = new Promise((r) => (markGone = r));
+  const ended = (why) => {
+    if (exited) return;
     exited = true;
-    for (const p of pending.values()) p.reject(new Error(`${label} exited (${code ?? signal})`));
+    for (const p of pending.values()) p.reject(new Error(`${label} ${why}`));
     pending.clear();
+    markGone();
+  };
+  child.on('exit', (code, signal) => ended(`exited (${code ?? signal})`));
+  // A send on a channel that just closed is reported here (and rejected by `exit`); a spawn that failed never exits.
+  child.on('error', (e) => {
+    log.write(`\nactor error: ${e.message}\n`);
+    if (child.pid === undefined) ended(`did not start: ${e.message}`);
   });
-  // A send on a channel that just closed is reported here; the pending call is rejected by `exit`.
-  child.on('error', (e) => log.write(`\nactor error: ${e.message}\n`));
   const call = (op, args = {}, timeoutMs = 60_000) =>
     new Promise((resolve_, reject) => {
       if (exited || !child.connected) return reject(new Error(`${label} is not running (${op})`));
@@ -400,14 +422,14 @@ function startActor(side, label) {
   let stopping = null;
   // Disconnecting lets the actor stop its bridges and close its stores before it exits.
   const stop = () =>
-    (stopping ??= new Promise((done) => {
+    (stopping ??= (async () => {
       running.delete(handle);
-      if (exited) return done();
-      child.once('exit', () => done());
+      if (exited) return;
       if (child.connected) child.disconnect();
       else child.kill('SIGTERM');
       setTimeout(() => child.kill('SIGKILL'), 15_000).unref();
-    }));
+      await gone;
+    })());
   const handle = { stop };
   running.add(handle);
   return { call, stop, label };
@@ -433,12 +455,17 @@ function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
       child.kill('SIGTERM');
       setTimeout(() => !closed && child.kill('SIGKILL'), 5000).unref();
     };
-    let finished;
+    const waiting = [];
     const handle = {
-      stop: () => (kill(), new Promise((r) => (closed ? r() : (finished = r)))),
+      stop: () => (kill(), new Promise((r) => (closed ? r() : waiting.push(r)))),
     };
     running.add(handle);
-    child.on('error', () => undefined);
+    // A CLI that could not be started never closes: finish it here.
+    child.on('error', (e) => {
+      if (child.pid !== undefined) return;
+      stderr += `\nspawn error: ${e.message}`;
+      finish(null, null);
+    });
     let stdout = '';
     let stderr = '';
     let partial = '';
@@ -455,18 +482,24 @@ function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
       timedOut = true;
       kill();
     }, timeoutMs);
-    child.on('close', (code, signal) => {
+    child.on('close', (code, signal) => finish(code, signal));
+    function finish(code, signal) {
+      if (closed) return;
       clearTimeout(timer);
       closed = true;
       running.delete(handle);
-      finished?.();
-      writeFileSync(
-        join(
-          logs,
-          `cli-${String(n).padStart(2, '0')}-${side.label}-${argv.find((a) => !a.startsWith('-'))}.log`,
-        ),
-        `$ decisions --home ${home} ${argv.join(' ')}\nexit ${code ?? signal}${timedOut ? ' (timed out)' : ''}\n--- stdout\n${stdout}\n--- stderr\n${stderr}`,
-      );
+      for (const r of waiting.splice(0)) r();
+      try {
+        writeFileSync(
+          join(
+            logs,
+            `cli-${String(n).padStart(2, '0')}-${side.label}-${argv.find((a) => !a.startsWith('-'))}.log`,
+          ),
+          `$ decisions --home ${home} ${argv.join(' ')}\nexit ${code ?? signal}${timedOut ? ' (timed out)' : ''}\n--- stdout\n${stdout}\n--- stderr\n${stderr}`,
+        );
+      } catch (e) {
+        console.log(`  (could not keep the log of CLI run ${n}: ${e.message})`);
+      }
       // One pretty-printed object (`setup`, `host`, `devices`, `get`), or one object per line (`ask`, `wait`).
       let json;
       try {
@@ -485,7 +518,7 @@ function cli(side, home, argv, { env = {}, timeoutMs = 120_000, onLine } = {}) {
           .filter(Boolean);
       }
       done({ code, signal, timedOut, stdout, stderr, json, last: json.at(-1) ?? null });
-    });
+    }
   });
 }
 const tail = (r) =>
@@ -580,7 +613,14 @@ function noticeSays(n, want, pane) {
   if (pane && n.pane !== pane) return false;
   const f = n.fields;
   if (want.declined) return f.status === 'declined' && f.authorised === 'no';
-  if (want.expired) return f.status === 'expired' && f.authorised === 'no' && !f.disposition;
+  // An expiry that waited for a decision: nothing in it may say a plan can go ahead.
+  if (want.expired)
+    return (
+      f.status === 'expired' &&
+      f.authorised === 'no' &&
+      !f.disposition &&
+      !/advisory|plan|fallback/i.test(n.text)
+    );
   return f.source === 'human' && f.choice === want.choice && n.text.includes(want.text);
 }
 
@@ -1073,7 +1113,7 @@ async function newDesktopOldRelay({ OLD, NEW, oldRelay, port }) {
       await neu.call('bridgePump', { name: 'owner' });
       const after = (await neu.call('ownerQuestions', { home })).sort();
       check(
-        show(after) === show(before),
+        after.join(',') === before.join(','),
         'neither refused advisory ask put a question on the relay',
         `${show(before)} before, ${show(after)} after`,
       );
@@ -1449,7 +1489,12 @@ async function hostUpgrade({ OLD, NEW, oldRelay, newRelay, port }) {
     ).catch((e) => fail(e.message));
     const final = await settled(neu, 'post');
     check(
-      answeredIn(final, B, 'B').length === 1 && answeredIn(final, C, 'C').length === 1,
+      // One notice for each reopened round's answer, anywhere: a second one in another pane counts too.
+      [B, C].every(
+        (id) => notices(final, id).filter((n) => n.fields.revision === '2').length === 1,
+      ) &&
+        answeredIn(final, B, 'B').length === 1 &&
+        answeredIn(final, C, 'C').length === 1,
       `the ${NEW.label} host types the answers to both reopened rounds, once each`,
       show([...notices(final, B), ...notices(final, C)]),
     );
