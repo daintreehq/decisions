@@ -1,6 +1,20 @@
 import { ApiError } from './errors.js';
-import type { ActionKind, Provenance, QuestionStatus, Requirement, Role } from './schema.js';
-import { DESKTOP_ROLES, HUMAN_ANSWER_ROLES, HUMAN_ROLES } from './schema.js';
+import { LIMITS } from './limits.js';
+import type {
+  ActionKind,
+  EventType,
+  Provenance,
+  QuestionStatus,
+  Requirement,
+  Role,
+} from './schema.js';
+import {
+  ADVISORY_ROUND_REVISION,
+  DESKTOP_ROLES,
+  HUMAN_ANSWER_ROLES,
+  HUMAN_ROLES,
+} from './schema.js';
+import { applyMessage, type MessageSide } from './thread.js';
 
 export interface QuestionState {
   status: QuestionStatus;
@@ -242,3 +256,225 @@ export function applyAction(
 
 export const isTerminalStatus = (s: QuestionStatus): boolean =>
   s === 'human-answered' || s === 'cancelled' || s === 'expired';
+
+/* ---------- rounds and advisory deadlines (docs/protocol.md section 21) ---------- */
+
+/**
+ * A question's current round, as the relay holds it. A round opens with the create (revision 0) or a reopen, and
+ * `expiresAt` is that round's signed deadline: the create's `expires_at`, or the reopen's.
+ */
+export interface RoundState extends QuestionState {
+  /** The current round's deadline, in ms of relay time; null = it never expires. */
+  expiresAt: number | null;
+  /** The signed create's reply mode was `advisory` (`replyModeOf`). Only its first round is advisory. */
+  advisory: boolean;
+}
+
+/** True while the round is the advisory round the signed create opened; a reopened round always waits. */
+export const isAdvisoryRound = (s: Pick<RoundState, 'advisory' | 'revision'>): boolean =>
+  s.advisory && s.revision === ADVISORY_ROUND_REVISION;
+
+/**
+ * One input to a question's round, with the authority behind it. `at` is relay time in ms: when the relay commits
+ * it, never when a client receives it, so replaying committed history never re-judges an answer by a later clock.
+ */
+export type RoundEvent =
+  /** A signed action whose signature and signer certificate were verified; `role` is the certified role. */
+  | {
+      type: 'action';
+      action: ActionKind;
+      role: Role;
+      expectedRevision: number;
+      /** The signed record's `decline` flag. */
+      decline?: true;
+      /** `reopen` only: the signed new deadline, in ms; null or absent = none. */
+      expiresAt?: number | null;
+      at: number;
+    }
+  /** The relay's deadline check (its alarm or a lazy sweep). Relay-asserted and unsigned: it answers nothing. */
+  | { type: 'deadline'; at: number }
+  /** A verified thread message (section 16). It never answers, and it never moves the round or its deadline. */
+  | {
+      type: 'message';
+      side: MessageSide;
+      role: Role;
+      signerIsPublisher: boolean;
+      messageCount: number;
+      at: number;
+    }
+  /** `DELETE /questions/{id}`: authenticated, unsigned, with no `expected_revision`. */
+  | { type: 'delete'; role: Role };
+
+/**
+ * What a round event means. `advisory-unanswered` and `expired-unsatisfied` are both an expiry with no answer:
+ * only the first lets the asking host tell its agent that the plan it stated is due.
+ */
+export type RoundOutcome =
+  | 'answered'
+  | 'overridden'
+  | 'proxy-answered'
+  | 'proxy-abstained'
+  | 'proxy-confirmed'
+  | 'declined'
+  | 'withdrawn'
+  | 'reopened'
+  | 'advisory-unanswered'
+  | 'expired-unsatisfied'
+  | 'message'
+  | 'deleted'
+  | 'unchanged';
+
+/**
+ * Who stands behind a transition: `person` (an answer, override, confirmation, decline or human message, signed on a
+ * phone, a tablet or the owner desktop), `proxy` (a desktop's model), `desktop` (a withdrawal, reopen, agent message
+ * or delete), or `relay` (a deadline, on the relay's clock and unsigned).
+ */
+export type RoundAuthority = 'person' | 'proxy' | 'desktop' | 'relay';
+
+export interface RoundTransition {
+  /** The round after the event; null once the question is deleted. */
+  state: RoundState | null;
+  outcome: RoundOutcome;
+  authority: RoundAuthority;
+  /** The answer's provenance; null for everything that is not an answer, a deadline above all. */
+  provenance: Provenance | null;
+  /** The event carries an answer the asking desktop must deliver. */
+  deliverable: boolean;
+  /**
+   * True only for `advisory-unanswered`: the asking host may now tell its agent that the plan it stated is due. It
+   * is not an answer, a choice or an approval, and it says nothing about whether a notice reached the agent or
+   * whether the agent acted on the plan.
+   */
+  fallbackDue: boolean;
+  /** The decision model may learn from this: only a person's answer or override, never a deadline. */
+  trainable: boolean;
+  /** The ledger event the relay appends, or null when it appends none (a no-op, or a deadline not yet due). */
+  eventType: EventType | null;
+  /**
+   * Set when the submitted event itself was refused after the relay committed the round's due deadline in the
+   * same transaction: the transition is that deadline's, and the submitter observes this error (`410 expired`).
+   * Every other refusal throws, and nothing commits.
+   */
+  refusal: ApiError | null;
+}
+
+const OUTCOME: Record<Transition['eventType'], RoundOutcome> = {
+  'decision.answer.committed': 'answered',
+  'decision.answer.overridden': 'overridden',
+  'decision.proxy.committed': 'proxy-answered',
+  'decision.proxy.abstained': 'proxy-abstained',
+  'decision.proxy.confirmed': 'proxy-confirmed',
+  'decision.cancelled': 'withdrawn',
+  'decision.reopened': 'reopened',
+};
+
+/** The relay's deadline transition at `at`, or null when the round is not open or not yet due. */
+function dueDeadline(s: RoundState, at: number): RoundTransition | null {
+  if (s.status !== 'open' || s.expiresAt === null || at < s.expiresAt) return null;
+  const advisory = isAdvisoryRound(s);
+  return {
+    state: { ...s, status: 'expired' },
+    outcome: advisory ? 'advisory-unanswered' : 'expired-unsatisfied',
+    authority: 'relay',
+    provenance: null,
+    deliverable: false,
+    fallbackDue: advisory,
+    trainable: false,
+    eventType: 'decision.expired',
+    refusal: null,
+  };
+}
+
+/**
+ * The executable transition table for one question round (docs/protocol.md section 21), for every reader that
+ * replays or decides a round: the relay, the publishing desktop, the phone app and Daintree. It adds the deadline,
+ * deletion, messages and the advisory outcome to `applyAction` and `applyMessage`, and refuses exactly what they
+ * refuse, with the same errors. `state` null means the question was deleted (`404 not_found`).
+ *
+ * A due deadline commits before anything else at the same instant: a submission at or after an open round's
+ * deadline returns the deadline's transition with `refusal` set to `410 expired`, as the relay commits the expiry and
+ * refuses the submission in one transaction. A late answer on a round already expired throws `expired`, a late
+ * decline `invalid_state`, a late proxy answer `revision_conflict`, all as `applyAction` does.
+ */
+export function applyRoundEvent(state: RoundState | null, ev: RoundEvent): RoundTransition {
+  if (state === null) throw new ApiError('not_found', 'no such question');
+  if (ev.type === 'delete') {
+    if (ev.role !== 'owner-desktop') throw new ApiError('forbidden', `role ${ev.role} may not delete`);
+    return {
+      state: null,
+      outcome: 'deleted',
+      authority: 'desktop',
+      provenance: null,
+      deliverable: false,
+      fallbackDue: false,
+      trainable: false,
+      eventType: 'decision.deleted',
+      refusal: null,
+    };
+  }
+  const due = dueDeadline(state, ev.at);
+  if (ev.type === 'deadline') {
+    return (
+      due ?? {
+        state: { ...state },
+        outcome: 'unchanged',
+        authority: 'relay',
+        provenance: null,
+        deliverable: false,
+        fallbackDue: false,
+        trainable: false,
+        eventType: null,
+        refusal: null,
+      }
+    );
+  }
+  if (due) return { ...due, refusal: new ApiError('expired', 'question expired') };
+
+  if (ev.type === 'message') {
+    const m = applyMessage(state, ev);
+    return {
+      state: { ...state, ...m.state },
+      outcome: 'message',
+      authority: ev.side === 'human' ? 'person' : 'desktop',
+      provenance: null,
+      deliverable: false,
+      fallbackDue: false,
+      trainable: false,
+      eventType: 'decision.message.posted',
+      refusal: null,
+    };
+  }
+
+  const tr = applyAction(state, ev.action, ev.role, ev.expectedRevision, ev.decline);
+  let expiresAt = state.expiresAt;
+  if (ev.action === 'reopen') {
+    expiresAt = ev.expiresAt ?? null;
+    if (expiresAt !== null && (expiresAt <= ev.at || expiresAt > ev.at + LIMITS.maxQuestionExpiryMs)) {
+      throw new ApiError('validation_error', 'expires_at must be in the future (or null)');
+    }
+  }
+  const declined = isPersonDecline(ev.action, ev.role, ev.decline);
+  const provenance = provenanceForSigner(ev.action, ev.role);
+  return {
+    state: {
+      ...state,
+      status: tr.status,
+      revision: tr.revision,
+      proxyAbstained: tr.proxyAbstained,
+      expiresAt,
+    },
+    outcome: tr.noop ? 'unchanged' : declined ? 'declined' : OUTCOME[tr.eventType],
+    authority:
+      provenance === 'proxy' || ev.action === 'proxy-abstain'
+        ? 'proxy'
+        : provenance !== 'none' || declined
+          ? 'person'
+          : 'desktop',
+    provenance: provenance === 'none' ? null : provenance,
+    deliverable: tr.deliverable,
+    fallbackDue: false,
+    trainable: !tr.noop && (ev.action === 'answer' || ev.action === 'override'),
+    eventType: tr.noop ? null : tr.eventType,
+    refusal: null,
+  };
+}

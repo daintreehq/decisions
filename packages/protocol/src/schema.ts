@@ -79,6 +79,7 @@ export const ProtocolFeature = z.enum([
   'owner-desktop-declines-v1',
   'presence-v1',
   'agent-stopped-push-v1',
+  'advisory-deadlines-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -138,25 +139,70 @@ export const EnvelopePurpose = z.enum([
 ]);
 export type EnvelopePurpose = z.infer<typeof EnvelopePurpose>;
 
-export const EnvelopeAad = z.strictObject({
-  installation_id: Id,
-  question_id: Id,
-  record_type: z.string().min(1).max(32),
-  revision: z.number().int().min(0),
-  sender_device_id: Id,
-});
+/**
+ * How a question waits for its answer (docs/protocol.md section 21). `blocking`, the default, waits for a decision
+ * and its expiry authorises nothing. `advisory` asks for input on a step the asker may already take on its own: if no
+ * answer commits by the signed deadline, the asking host may tell its agent that the plan it stated is due. Only the
+ * advisory mode is ever written, as `EnvelopeAad.reply_mode`; its absence is `blocking`.
+ */
+export const ReplyMode = z.enum(['blocking', 'advisory']);
+export type ReplyMode = z.infer<typeof ReplyMode>;
 
-export const CryptoEnvelope = z.looseObject({
-  crypto_version: z.literal(CRYPTO_VERSION),
-  suite: z.literal(CRYPTO_SUITE),
-  key_epoch: z.number().int().min(1),
-  record_id: Id,
-  purpose: EnvelopePurpose,
-  nonce: NonceB64,
-  ciphertext: B64Url.min(22).max(LIMITS.envelopeCiphertextChars),
-  aad: EnvelopeAad,
-});
+/** The revision of the round an advisory create opens. A reopen opens a blocking round (section 21). */
+export const ADVISORY_ROUND_REVISION = 0;
+
+export const EnvelopeAad = z
+  .strictObject({
+    installation_id: Id,
+    question_id: Id,
+    record_type: z.string().min(1).max(32),
+    revision: z.number().int().min(0),
+    sender_device_id: Id,
+    /**
+     * A question create's content only: the question is advisory (section 21). Optional with no default, so every
+     * other envelope encrypts, digests and verifies exactly as before. It lives in the strict AAD on purpose: a reader
+     * that predates it refuses the whole question rather than showing an advisory question as one that waits.
+     */
+    reply_mode: z.literal('advisory').optional(),
+  })
+  .superRefine((a, ctx) => {
+    if (
+      a.reply_mode !== undefined &&
+      (a.record_type !== 'question' || a.revision !== ADVISORY_ROUND_REVISION)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['reply_mode'],
+        message: 'only a question create (revision 0) can be advisory',
+      });
+    }
+  });
+
+export const CryptoEnvelope = z
+  .looseObject({
+    crypto_version: z.literal(CRYPTO_VERSION),
+    suite: z.literal(CRYPTO_SUITE),
+    key_epoch: z.number().int().min(1),
+    record_id: Id,
+    purpose: EnvelopePurpose,
+    nonce: NonceB64,
+    ciphertext: B64Url.min(22).max(LIMITS.envelopeCiphertextChars),
+    aad: EnvelopeAad,
+  })
+  .superRefine((e, ctx) => {
+    if (e.aad.reply_mode !== undefined && e.purpose !== 'question-content') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['aad', 'reply_mode'],
+        message: 'only question content can be advisory',
+      });
+    }
+  });
 export type CryptoEnvelope = z.infer<typeof CryptoEnvelope>;
+
+/** A question's reply mode, from its create envelope's authenticated AAD. */
+export const replyModeOf = (envelope: Pick<CryptoEnvelope, 'aad'>): ReplyMode =>
+  envelope.aad.reply_mode === 'advisory' ? 'advisory' : 'blocking';
 
 /* ---------- signed records ---------- */
 
@@ -263,7 +309,36 @@ export const ActionRecord = z
   });
 export type ActionRecord = z.infer<typeof ActionRecord>;
 
-export const SignedQuestion = z.object({ record: QuestionRecord, envelope: CryptoEnvelope });
+/**
+ * The signed rules of an advisory question (section 21), which span its record and its envelope: a finite signed
+ * deadline, and no workflow gate. Every reader of a signed question applies them (`SignedQuestion`,
+ * `EventData.created`, `QuestionDetail`), so a relay cannot admit, and a client cannot accept, an advisory question
+ * that breaks them.
+ */
+export function refineAdvisoryQuestion(
+  q: { record: Pick<QuestionRecord, 'expires_at' | 'workflow_gate_id_hash'>; envelope: Pick<CryptoEnvelope, 'aad'> },
+  ctx: z.RefinementCtx,
+): void {
+  if (replyModeOf(q.envelope) !== 'advisory') return;
+  if (q.record.expires_at === null) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['record', 'expires_at'],
+      message: 'an advisory question needs a finite deadline',
+    });
+  }
+  if (q.record.workflow_gate_id_hash !== null) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['record', 'workflow_gate_id_hash'],
+      message: 'a gated question can never be advisory',
+    });
+  }
+}
+
+export const SignedQuestion = z
+  .object({ record: QuestionRecord, envelope: CryptoEnvelope })
+  .superRefine(refineAdvisoryQuestion);
 export type SignedQuestion = z.infer<typeof SignedQuestion>;
 
 export const SignedAction = z
@@ -285,6 +360,7 @@ export type SignedAction = z.infer<typeof SignedAction>;
 /* ---------- decrypted content (inside envelopes) ---------- */
 
 export const QuestionKind = z.enum(['choice', 'approval', 'text', 'mixed']);
+export type QuestionKind = z.infer<typeof QuestionKind>;
 
 export const OptionSchema = z.object({
   id: z.string().min(1).max(LIMITS.optionIdChars),
@@ -332,6 +408,13 @@ export const PreparationReport = z.object({
 });
 export type PreparationReport = z.infer<typeof PreparationReport>;
 
+/** An advisory question's plan: one non-blank description of at most `LIMITS.plannedFallbackChars` characters. */
+export const PlannedFallback = z
+  .string()
+  .min(1)
+  .max(LIMITS.plannedFallbackChars)
+  .refine((v) => v.trim() !== '', 'the plan is blank');
+
 export const DecisionContentV1 = z.object({
   content_version: z.literal(1).default(1),
   question: z.string().min(1).max(LIMITS.questionChars),
@@ -352,8 +435,42 @@ export const DecisionContentV1 = z.object({
    * it is informational, and the question must still reach the person.
    */
   preparation: PreparationReport.optional().catch(undefined),
+  /**
+   * An advisory question's plan (section 21): what the agent intends to do if no answer commits by the deadline,
+   * in the agent's words. A plan, never an action taken or an answer. Bound to the question and its first round by
+   * the signed `envelope_digest` and the AAD. A missing, blank or oversize one is dropped rather than failing the
+   * question, so a reader that cannot explain the plan still shows the deadline; the asking host never signs one.
+   */
+  planned_fallback: PlannedFallback.optional().catch(undefined),
 });
 export type DecisionContentV1 = z.infer<typeof DecisionContentV1>;
+
+/** What a reader can show of an advisory round: its signed deadline and, when the content holds a valid one, the plan. */
+export interface AdvisoryPlan {
+  /** The signed `expires_at` of the advisory round. */
+  deadline: string;
+  /**
+   * The agent's plan, or null when this reader cannot explain it (none, or one the content parse dropped). A reader
+   * then shows the deadline and says the agent may proceed after it, without naming what it will do.
+   */
+  fallback: string | null;
+}
+
+/**
+ * The advisory plan a reader shows for a verified question at `revision`, or null when there is none to show: a
+ * blocking question, or a round after the first (a reopen always waits). `content` is the decrypted, parsed content,
+ * or null when it could not be read. A plan is never an action taken, and showing it never answers anything.
+ */
+export function advisoryPlanOf(
+  question: { record: Pick<QuestionRecord, 'expires_at'>; envelope: Pick<CryptoEnvelope, 'aad'> },
+  revision: number,
+  content: Pick<DecisionContentV1, 'planned_fallback'> | null,
+): AdvisoryPlan | null {
+  if (replyModeOf(question.envelope) !== 'advisory' || revision !== ADVISORY_ROUND_REVISION)
+    return null;
+  if (question.record.expires_at === null) return null;
+  return { deadline: question.record.expires_at, fallback: content?.planned_fallback ?? null };
+}
 
 /**
  * An image a phone uploaded after the question existed, referenced from human answer or message content

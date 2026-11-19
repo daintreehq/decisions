@@ -1,4 +1,13 @@
-import type { HumanAnswerContentV1, PhoneImageReference } from './schema.js';
+import type { ErrorCode } from './errors.js';
+import type {
+  DecisionContentV1,
+  HumanAnswerContentV1,
+  PhoneImageReference,
+  Provenance,
+  QuestionStatus,
+  Requirement,
+} from './schema.js';
+import type { RoundAuthority, RoundEvent, RoundOutcome, RoundState } from './state.js';
 import type { PaneSnapshotContentV1, SnapshotRefresh, SnapshotSharing } from './snapshot.js';
 import type {
   AgentMessageContentV1,
@@ -21,6 +30,7 @@ export {
   legacyDesktopInvolvementSteering,
   legacyPhoneInvolvementRead,
 } from './legacy-involvement-0.7.0.js';
+export { Legacy080Question } from './legacy-question-0.8.0.js';
 export type {
   LegacyDesktopInvolvement,
   LegacyInvolvementContext,
@@ -287,3 +297,540 @@ export const SHARING_OFF_FIXTURE: UnsignedSnapshotRecord = {
   ...snapshotRecord('snap_off000001', 10),
   sharing: 'off',
 };
+
+/* ---------- advisory questions (docs/protocol.md section 21) ---------- */
+
+/** A `QuestionRecord` before encryption and signing: add `envelope_digest` and `signature`. */
+export interface UnsignedQuestionRecord {
+  v: 1;
+  type: 'question';
+  installation_id: string;
+  question_id: string;
+  originating_device_id: string;
+  target_host_id: string;
+  origin_ref: string;
+  requirement: Requirement;
+  workflow_gate_id_hash: string | null;
+  policy_version: number | null;
+  created_at: string;
+  expires_at: string | null;
+  key_epoch: number;
+  attachment_ids: string[];
+  signer_device_id: string;
+}
+
+/**
+ * The visible fields of a question's content envelope: encrypt `content` with them (`encryptEnvelope` with
+ * `replyMode: 'advisory'` when `aad.reply_mode` is set), then put the envelope's digest in the record and sign it.
+ */
+export interface QuestionEnvelopeBinding {
+  record_id: string;
+  purpose: 'question-content';
+  aad: {
+    installation_id: string;
+    question_id: string;
+    record_type: 'question';
+    revision: 0;
+    sender_device_id: string;
+    reply_mode?: 'advisory';
+  };
+}
+
+const ADVISORY_QUESTION_ID = 'q_advisory001';
+const APPROVAL_QUESTION_ID = 'q_approval001';
+/** The advisory question was asked at `FIXTURE_NOW` and waits fifteen minutes for advice. */
+const ADVISORY_DEADLINE = at(-15 * 60);
+
+const questionRecord = (
+  question_id: string,
+  extra: Pick<UnsignedQuestionRecord, 'requirement' | 'workflow_gate_id_hash' | 'policy_version' | 'expires_at'>,
+): UnsignedQuestionRecord => ({
+  v: 1,
+  type: 'question',
+  installation_id: FIXTURE_IDS.installation_id,
+  question_id,
+  originating_device_id: FIXTURE_IDS.desktop_device_id,
+  target_host_id: FIXTURE_IDS.target_host_id,
+  origin_ref: 'pane_fixture01',
+  ...extra,
+  created_at: FIXTURE_NOW,
+  key_epoch: 1,
+  attachment_ids: [],
+  signer_device_id: FIXTURE_IDS.desktop_device_id,
+});
+
+const questionBinding = (question_id: string, advisory: boolean): QuestionEnvelopeBinding => ({
+  record_id: question_id,
+  purpose: 'question-content',
+  aad: {
+    installation_id: FIXTURE_IDS.installation_id,
+    question_id,
+    record_type: 'question',
+    revision: 0,
+    sender_device_id: FIXTURE_IDS.desktop_device_id,
+    ...(advisory ? { reply_mode: 'advisory' as const } : {}),
+  },
+});
+
+/**
+ * An advisory question: the agent asks which fixture to use and, if no answer commits within fifteen minutes,
+ * plans to choose one itself. Ungated and `human-required` (no proxy answers it), with a finite signed deadline;
+ * the plan is encrypted content, bound to the question and its first round by the AAD and the signed digest.
+ */
+export const ADVISORY_QUESTION_FIXTURE = {
+  record: questionRecord(ADVISORY_QUESTION_ID, {
+    requirement: 'human-required',
+    workflow_gate_id_hash: null,
+    policy_version: null,
+    expires_at: ADVISORY_DEADLINE,
+  }),
+  envelope: questionBinding(ADVISORY_QUESTION_ID, true),
+  content: {
+    content_version: 1,
+    question: 'Which fixture should the migration tests use?',
+    kind: 'choice',
+    options: [
+      { id: 'sqlite', label: 'A SQLite file per test' },
+      { id: 'memory', label: 'One in-memory database' },
+    ],
+    attachments: [],
+    allow_text: true,
+    planned_fallback:
+      'Use the in-memory database, and say in the pull request that it can be switched to SQLite files.',
+  } satisfies DecisionContentV1,
+};
+
+/**
+ * A design sign-off that must wait for a decision: an approval under a workflow gate, with a deadline. It is never
+ * advisory (`advisoryRefusal` says `gated`), and its expiry authorises nothing.
+ */
+export const BLOCKING_APPROVAL_FIXTURE = {
+  record: questionRecord(APPROVAL_QUESTION_ID, {
+    requirement: 'human-required',
+    workflow_gate_id_hash: '5d1be7e9dda1ee8896be5b7e34a85ee16452a7b4f6fc2b9b4b3b0f6b6a3f1c22',
+    policy_version: 1,
+    expires_at: at(-24 * 60 * 60),
+  }),
+  envelope: questionBinding(APPROVAL_QUESTION_ID, false),
+  content: {
+    content_version: 1,
+    question: 'Approve the final design of the settings screen?',
+    kind: 'approval',
+    options: [
+      { id: 'approve', label: 'Approve' },
+      { id: 'reject', label: 'Reject' },
+    ],
+    attachments: [],
+    allow_text: false,
+  } satisfies DecisionContentV1,
+};
+
+/** One step of a round case, and what every implementation must observe. */
+export interface RoundCaseStep {
+  event: RoundEvent;
+  /** What commits, or null when the event is refused and nothing commits. */
+  outcome: RoundOutcome | null;
+  /**
+   * The error the submitter observes: a refusal that commits nothing, or the `expired` of a submission that met a due
+   * deadline (the deadline commits). Null when the event commits.
+   */
+  error: ErrorCode | null;
+  /** The round after the step; null once the question is deleted. */
+  after: Pick<RoundState, 'status' | 'revision'> | null;
+  authority?: RoundAuthority;
+  provenance?: Provenance | null;
+  fallbackDue?: boolean;
+  trainable?: boolean;
+}
+
+export interface RoundCase {
+  name: string;
+  start: RoundState;
+  steps: RoundCaseStep[];
+}
+
+/** The advisory round of `ADVISORY_QUESTION_FIXTURE`, in ms of relay time. */
+const T0 = Date.parse(FIXTURE_NOW);
+const D = Date.parse(ADVISORY_DEADLINE);
+const MIN = 60_000;
+const ADVISORY_ROUND: RoundState = {
+  status: 'open',
+  revision: 0,
+  requirement: 'human-required',
+  proxyAbstained: false,
+  expiresAt: D,
+  advisory: true,
+};
+const open = (revision = 0) => ({ status: 'open' as QuestionStatus, revision });
+const phoneAnswer = (at: number, expectedRevision = 0): RoundEvent => ({
+  type: 'action',
+  action: 'answer',
+  role: 'phone',
+  expectedRevision,
+  at,
+});
+const deadline = (at: number): RoundEvent => ({ type: 'deadline', at });
+const unanswered: RoundCaseStep = {
+  event: deadline(D),
+  outcome: 'advisory-unanswered',
+  error: null,
+  after: { status: 'expired', revision: 0 },
+  authority: 'relay',
+  provenance: null,
+  fallbackDue: true,
+  trainable: false,
+};
+const settled = (at: number, after: Pick<RoundState, 'status' | 'revision'>): RoundCaseStep => ({
+  event: deadline(at),
+  outcome: 'unchanged',
+  error: null,
+  after,
+  fallbackDue: false,
+});
+
+/**
+ * The executable transition table of section 21: each case starts from a round and applies its events in order with
+ * `applyRoundEvent`, and every implementation (the relay, the publishing desktop, the phone app, Daintree) must
+ * observe exactly the same. Times are relay commit times around the advisory deadline `D`, fifteen minutes after
+ * `FIXTURE_NOW`.
+ */
+export const ROUND_CASES: RoundCase[] = [
+  {
+    name: 'a timely answer wins and the deadline then changes nothing',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        // Committed a millisecond before D: timely, however late the asking desktop receives it.
+        event: phoneAnswer(D - 1),
+        outcome: 'answered',
+        error: null,
+        after: { status: 'human-answered', revision: 1 },
+        authority: 'person',
+        provenance: 'human',
+        fallbackDue: false,
+        trainable: true,
+      },
+      settled(D, { status: 'human-answered', revision: 1 }),
+    ],
+  },
+  {
+    name: "the person's answer on the computer is as timely as one from a phone",
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: { type: 'action', action: 'answer', role: 'owner-desktop', expectedRevision: 0, at: T0 + MIN },
+        outcome: 'answered',
+        error: null,
+        after: { status: 'human-answered', revision: 1 },
+        authority: 'person',
+        provenance: 'human-desktop',
+        trainable: true,
+      },
+    ],
+  },
+  {
+    name: 'an unanswered advisory deadline makes the plan due, and nothing else',
+    start: ADVISORY_ROUND,
+    steps: [settled(D - 1, open()), unanswered, settled(D + MIN, { status: 'expired', revision: 0 })],
+  },
+  {
+    name: 'a blocking deadline stays unsatisfied',
+    start: { ...ADVISORY_ROUND, advisory: false },
+    steps: [
+      {
+        event: deadline(D),
+        outcome: 'expired-unsatisfied',
+        error: null,
+        after: { status: 'expired', revision: 0 },
+        authority: 'relay',
+        provenance: null,
+        fallbackDue: false,
+        trainable: false,
+      },
+    ],
+  },
+  {
+    name: "a phone's verified decline closes the round and suppresses the plan",
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: { type: 'action', action: 'cancel', role: 'phone', expectedRevision: 0, at: D - MIN },
+        outcome: 'declined',
+        error: null,
+        after: { status: 'cancelled', revision: 0 },
+        authority: 'person',
+        provenance: null,
+        fallbackDue: false,
+        trainable: false,
+      },
+      {
+        // A retry from any device is a no-op: a decline is never relabelled a withdrawal.
+        event: { type: 'action', action: 'cancel', role: 'owner-desktop', expectedRevision: 0, at: D - 1 },
+        outcome: 'unchanged',
+        error: null,
+        after: { status: 'cancelled', revision: 0 },
+      },
+      settled(D, { status: 'cancelled', revision: 0 }),
+    ],
+  },
+  {
+    name: "the owner desktop's signed decline is the person's",
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'owner-desktop',
+          expectedRevision: 0,
+          decline: true,
+          at: D - MIN,
+        },
+        outcome: 'declined',
+        error: null,
+        after: { status: 'cancelled', revision: 0 },
+        authority: 'person',
+      },
+    ],
+  },
+  {
+    name: 'a desktop-host never declines for the person',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: {
+          type: 'action',
+          action: 'cancel',
+          role: 'desktop-host',
+          expectedRevision: 0,
+          decline: true,
+          at: D - MIN,
+        },
+        outcome: null,
+        error: 'forbidden',
+        after: open(),
+      },
+    ],
+  },
+  {
+    name: "the desktop's withdrawal closes the round and suppresses the plan",
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: { type: 'action', action: 'cancel', role: 'desktop-host', expectedRevision: 0, at: D - MIN },
+        outcome: 'withdrawn',
+        error: null,
+        after: { status: 'cancelled', revision: 0 },
+        authority: 'desktop',
+        provenance: null,
+        fallbackDue: false,
+      },
+      settled(D, { status: 'cancelled', revision: 0 }),
+    ],
+  },
+  {
+    name: 'a reopen after the advisory deadline opens a blocking round',
+    start: ADVISORY_ROUND,
+    steps: [
+      unanswered,
+      {
+        event: {
+          type: 'action',
+          action: 'reopen',
+          role: 'owner-desktop',
+          expectedRevision: 0,
+          expiresAt: D + 60 * MIN,
+          at: D + MIN,
+        },
+        outcome: 'reopened',
+        error: null,
+        after: open(1),
+        authority: 'desktop',
+      },
+      {
+        // An answer signed in the first round names its revision and conflicts with the new one.
+        event: phoneAnswer(D + 2 * MIN, 0),
+        outcome: null,
+        error: 'revision_conflict',
+        after: open(1),
+      },
+      {
+        event: deadline(D + 60 * MIN),
+        outcome: 'expired-unsatisfied',
+        error: null,
+        after: { status: 'expired', revision: 1 },
+        fallbackDue: false,
+      },
+    ],
+  },
+  {
+    name: 'a reopen without a deadline waits for a decision',
+    start: { ...ADVISORY_ROUND, status: 'cancelled' },
+    steps: [
+      {
+        event: { type: 'action', action: 'reopen', role: 'owner-desktop', expectedRevision: 0, at: D + MIN },
+        outcome: 'reopened',
+        error: null,
+        after: open(1),
+      },
+      settled(D + 365 * 24 * 60 * MIN, open(1)),
+    ],
+  },
+  {
+    name: 'deleting the question ends every round, and a late answer finds nothing',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: { type: 'delete', role: 'phone' },
+        outcome: null,
+        error: 'forbidden',
+        after: open(),
+      },
+      {
+        event: { type: 'delete', role: 'owner-desktop' },
+        outcome: 'deleted',
+        error: null,
+        after: null,
+        authority: 'desktop',
+        fallbackDue: false,
+      },
+      { event: phoneAnswer(D - 1), outcome: null, error: 'not_found', after: null },
+    ],
+  },
+  {
+    name: 'a competing proxy answer wins over the deadline, and is never ground truth',
+    start: { ...ADVISORY_ROUND, requirement: 'proxy-ok' },
+    steps: [
+      {
+        event: { type: 'action', action: 'proxy-answer', role: 'desktop-host', expectedRevision: 0, at: D - 1 },
+        outcome: 'proxy-answered',
+        error: null,
+        after: { status: 'proxy-answered', revision: 1 },
+        authority: 'proxy',
+        provenance: 'proxy',
+        fallbackDue: false,
+        trainable: false,
+      },
+      settled(D, { status: 'proxy-answered', revision: 1 }),
+      {
+        // The person's answer after it conflicts; they override the proxy instead, even after the deadline.
+        event: phoneAnswer(D + MIN, 1),
+        outcome: null,
+        error: 'revision_conflict',
+        after: { status: 'proxy-answered', revision: 1 },
+      },
+      {
+        event: { type: 'action', action: 'override', role: 'phone', expectedRevision: 1, at: D + MIN },
+        outcome: 'overridden',
+        error: null,
+        after: { status: 'human-answered', revision: 2 },
+        authority: 'person',
+        provenance: 'human',
+        trainable: true,
+      },
+    ],
+  },
+  {
+    name: "a proxy's abstention leaves the deadline armed",
+    start: { ...ADVISORY_ROUND, requirement: 'proxy-first' },
+    steps: [
+      {
+        event: { type: 'action', action: 'proxy-abstain', role: 'desktop-host', expectedRevision: 0, at: T0 + MIN },
+        outcome: 'proxy-abstained',
+        error: null,
+        after: open(),
+        authority: 'proxy',
+        provenance: null,
+      },
+      unanswered,
+    ],
+  },
+  {
+    name: 'a follow-up from either side never answers, and the deadline still makes the plan due',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: {
+          type: 'message',
+          side: 'human',
+          role: 'phone',
+          signerIsPublisher: false,
+          messageCount: 0,
+          at: D - 2 * MIN,
+        },
+        outcome: 'message',
+        error: null,
+        after: open(),
+        authority: 'person',
+        provenance: null,
+        trainable: false,
+      },
+      {
+        event: {
+          type: 'message',
+          side: 'agent',
+          role: 'desktop-host',
+          signerIsPublisher: true,
+          messageCount: 1,
+          at: D - MIN,
+        },
+        outcome: 'message',
+        error: null,
+        after: open(),
+        authority: 'desktop',
+      },
+      unanswered,
+    ],
+  },
+  {
+    name: 'a late phone answer meets the deadline: the round expires and the answer is refused',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        // At D exactly the round is due: the relay commits the expiry and refuses the answer in one transaction.
+        event: phoneAnswer(D),
+        outcome: 'advisory-unanswered',
+        error: 'expired',
+        after: { status: 'expired', revision: 0 },
+        authority: 'relay',
+        provenance: null,
+        fallbackDue: true,
+        trainable: false,
+      },
+      { event: phoneAnswer(D + MIN), outcome: null, error: 'expired', after: { status: 'expired', revision: 0 } },
+      {
+        // A dismissal sent once the round expired finds it closed.
+        event: { type: 'action', action: 'cancel', role: 'phone', expectedRevision: 0, at: D + MIN },
+        outcome: null,
+        error: 'invalid_state',
+        after: { status: 'expired', revision: 0 },
+      },
+      {
+        event: {
+          type: 'message',
+          side: 'human',
+          role: 'phone',
+          signerIsPublisher: false,
+          messageCount: 0,
+          at: D + MIN,
+        },
+        outcome: null,
+        error: 'expired',
+        after: { status: 'expired', revision: 0 },
+      },
+    ],
+  },
+  {
+    name: 'a second answer conflicts with the first',
+    start: ADVISORY_ROUND,
+    steps: [
+      { event: phoneAnswer(D - 2 * MIN), outcome: 'answered', error: null, after: { status: 'human-answered', revision: 1 } },
+      {
+        event: { type: 'action', action: 'answer', role: 'tablet', expectedRevision: 0, at: D - MIN },
+        outcome: null,
+        error: 'revision_conflict',
+        after: { status: 'human-answered', revision: 1 },
+      },
+    ],
+  },
+];
