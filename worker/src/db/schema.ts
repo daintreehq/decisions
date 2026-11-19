@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -303,13 +303,12 @@ export function migrate(sql: SqlStorage): void {
   if (current < 4) for (const stmt of V4) sql.exec(stmt);
   if (current < 5) for (const stmt of V5) sql.exec(stmt);
   if (current < 6) for (const stmt of V6) sql.exec(stmt);
-  // An overdue create is shown never committed (routes/questions.ts) only for history this relay kept whole: one
-  // upgraded from before that rule may have wiped its questions with no record of it, so it counts from now.
-  if (
-    sql.exec(`SELECT 1 FROM meta WHERE key = ?`, NEVER_COMMITTED_FROM_META).toArray().length === 0
-  )
+  // V7: an overdue create is shown never committed (routes/questions.ts) only for history this relay kept whole. One
+  // upgraded from before that rule may have wiped its questions with no record of it, so it counts from now; the
+  // version bump keeps an older Worker, which wipes without that record, from running on this storage again.
+  if (current < 7)
     sql.exec(
-      `INSERT INTO meta (key, value) VALUES (?, ?)`,
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
       NEVER_COMMITTED_FROM_META,
       String(current >= 1 ? Date.now() : 0),
     );

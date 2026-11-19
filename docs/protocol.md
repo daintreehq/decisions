@@ -169,7 +169,9 @@ relay keeps it (30 days), and the same signed record under any other key returns
 new question must still be due. Its overdue refusal carries `details.reason: "never-committed"`
 (`CREATE_NEVER_COMMITTED`) when the relay can also show that no question with that id was ever committed: no receipt,
 no question, no `decision.*` event for the id (a deletion leaves its `decision.deleted` tombstone), and no questions
-wipe (`POST /admin/delete-data`) since the record's `created_at`, less seven days for the desktop's clock. A desktop
+wipe (`POST /admin/delete-data`) since the record's `created_at`, less seven days for the desktop's clock. A relay
+upgraded from before this rule counts its history from the upgrade, since it may have wiped questions before with no
+record of it, so it gives the reason only for records made more than seven days after. A desktop
 that lost the reply to an earlier attempt settles the question as never published only on that reason; a refusal
 without it (from this relay after a wipe, or from a relay older than this rule) proves nothing about the earlier
 attempt.

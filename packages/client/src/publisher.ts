@@ -110,16 +110,12 @@ import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
  */
 export interface CreatePayload {
   /**
-   * Set and persisted under `ctx.lock` immediately before the create request is sent (`claimCreate`): the relay may
-   * have committed it from then on. Cleared again only when the request provably never left this computer
-   * (`RelayError.notSent`).
+   * Set and persisted under `ctx.lock` immediately before the create request is sent (`checkpointCreate`): the relay
+   * may have committed it from then on, whatever becomes of the request. A failed request proves nothing (fetch can
+   * retry a request it already sent), so it is cleared only when the relay shows it never took the question
+   * (`withdrawUnpublished`).
    */
   maybePublished?: boolean;
-  /**
-   * Which send made the claim, new for every send: a send whose request provably never left clears the claim only while
-   * it is still its own, never one another process has made since.
-   */
-  claim?: string;
   signed: SignedQuestion;
   attachments: { attachment_id: string; ciphertext_bytes: number; sha256_ciphertext: string }[];
   uploaded: string[];
@@ -1926,18 +1922,12 @@ export class Publisher {
       p.uploaded.push(a.attachment_id);
       await this.checkpointCreate(item, p, false);
     }
-    // From here on the relay may have committed the question even if we never see the reply. `firstClaim`: this
-    // send moved the stored create from provably unsent, so only it may move it back.
-    const firstClaim = await this.checkpointCreate(item, p, true);
+    // From here on the relay may have committed the question even if we never see the reply.
+    await this.checkpointCreate(item, p, true);
     this.inflight.add(item.question_id);
     let receipt;
     try {
       receipt = await ctx.client.createQuestion(item.id, p.signed);
-    } catch (e) {
-      // Every attempt failed while connecting: nothing left this computer, so it is still provably unsent.
-      if (firstClaim && e instanceof RelayError && e.notSent && (await this.unclaimCreate(item, p)))
-        throw new CreateWithdrawn();
-      throw e;
     } finally {
       this.inflight.delete(item.question_id);
     }
@@ -1953,59 +1943,23 @@ export class Publisher {
   /**
    * Store a create's progress, or with `claim` mark it possibly published, against the item as stored now, under
    * `ctx.lock` (as `enqueueCancel` reads it). An item gone meanwhile is never written back. A claim of a create never
-   * sent before is refused once its deadline has passed. True when this claim moved the stored create from provably
-   * unsent: a claim another sender holds already stays theirs to clear.
+   * sent before is refused once its deadline has passed. A claim already stored, by an earlier send or another
+   * sender, stands.
    */
-  private checkpointCreate(item: OutboxItem, p: CreatePayload, claim: boolean): Promise<boolean> {
+  private checkpointCreate(item: OutboxItem, p: CreatePayload, claim: boolean): Promise<void> {
     return this.ctx.lock.run(async () => {
       const live = (await this.ctx.store.outboxFor(item.question_id)).find((o) => o.id === item.id);
       if (!live) throw new CreateWithdrawn();
       const stored = live.payload as CreatePayload;
-      const first = claim && !stored.maybePublished;
-      if (first && this.overdue(p)) throw new CreateOverdue();
-      if (claim) {
-        // Every send claims anew, with a nonce of its own, so a send that never left can tell whether another has
-        // claimed since: only then is its own claim the one still standing.
-        p.maybePublished = true;
-        p.claim = newId(this.ctx.now());
-      } else if (stored.maybePublished) {
-        // Claimed already, by an earlier send or another sender: that claim stands.
-        p.maybePublished = true;
-        if (stored.claim) p.claim = stored.claim;
-        else delete p.claim;
-      }
+      if (claim && !stored.maybePublished && this.overdue(p)) throw new CreateOverdue();
+      if (claim || stored.maybePublished) p.maybePublished = true;
       await this.ctx.store.putOutbox({ ...live, payload: p });
-      return first;
     });
-  }
-
-  /**
-   * Mark a create unsent again after its request provably never left this computer, while the claim is still this
-   * send's: one another sender made since may have reached the relay. A withdrawal queued while it was claimed now
-   * wins, as `enqueueCancel` would have had it: the question closes as withdrawn, never published. True then.
-   */
-  private async unclaimCreate(item: OutboxItem, p: CreatePayload): Promise<boolean> {
-    const withdrawn = await this.ctx.lock.run(async () => {
-      const items = await this.ctx.store.outboxFor(item.question_id);
-      const live = items.find((o) => o.id === item.id);
-      if (!live || (live.payload as CreatePayload).claim !== p.claim) return false;
-      delete p.maybePublished;
-      delete p.claim;
-      const row = await this.ctx.store.getQuestion(item.question_id);
-      if (row?.local_status === 'queued' && items.some((o) => o.kind === 'cancel')) {
-        await this.withdrawUnpublished(item.question_id, items);
-        return true;
-      }
-      await this.ctx.store.putOutbox({ ...live, payload: p });
-      return false;
-    });
-    if (withdrawn) await this.dropSpool(p);
-    return withdrawn;
   }
 
   /**
    * Under `ctx.lock`: close a question withdrawn before it was ever published, as `enqueueCancel` does for a create it
-   * finds unsent. The row closes first; then its queued work goes, the person's own items aside (they close on their
+   * finds unsent, or one the relay has shown it never took. The row closes first; then its queued work goes, the person's own items aside (they close on their
    * next turn, `unpublishedQuestion`). The caller drops the spooled images.
    */
   private async withdrawUnpublished(questionId: string, items: OutboxItem[]): Promise<void> {
@@ -2014,7 +1968,7 @@ export class Publisher {
     for (const o of items) {
       const p = o.payload as CreatePayload;
       if (o.kind !== 'create' || !p.maybePublished) continue;
-      const { maybePublished: _claimed, claim: _nonce, ...unsent } = p;
+      const { maybePublished: _claimed, ...unsent } = p;
       await this.ctx.store.putOutbox({ ...o, payload: unsent });
     }
     await this.ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });

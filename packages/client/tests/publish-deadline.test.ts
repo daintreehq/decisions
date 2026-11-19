@@ -8,9 +8,7 @@ import {
   FileSpool,
   PolicyRegistry,
   RelayClient,
-  RelayError,
   currentEpochKey,
-  isUnsentError,
   openQuestionContent,
   type CreatePayload,
 } from '../src/index.js';
@@ -99,38 +97,15 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('publish-failed');
   });
 
-  it('settles a text-only ask whose every send failed while connecting, and tells the waiting agent no answer was recorded', async () => {
+  it('keeps a text-only ask sent while offline uncertain until the relay is reachable, then tells the agent no answer was recorded', async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
-    // No network at all: name resolution fails, so no request ever leaves this computer.
-    const offline = { on: true };
-    const relayFetch = env.relay.fetch;
-    env.relay.fetch = async (input, init) => {
-      if (offline.on) {
-        throw new TypeError('fetch failed', {
-          cause: Object.assign(new Error('getaddrinfo ENOTFOUND relay.test'), {
-            code: 'ENOTFOUND',
-          }),
-        });
-      }
-      return relayFetch(input, init);
-    };
-    const client = new RelayClient({
-      identity: env.identity,
-      fetch: (input, init) => env.relay.fetch(input, init),
-      sleep: async () => {},
-      maxRetries: 2,
-    });
-    const bridge = new DecisionsBridge({
-      identity: env.identity,
-      store: env.store,
-      sink: env.sink,
-      client,
-      pumpIntervalMs: 0,
-      now: () => now,
-    });
+    env.relay.createNow = () => now;
+    // No network at all. A failed request proves nothing about whether it was sent (fetch can retry one it already
+    // sent), so the create is possibly committed.
+    env.relay.down = 1_000;
     const deadline = now + 120_000;
-    const r = await bridge.registerQuestion({
+    const r = await env.bridge.registerQuestion({
       origin: origin(),
       input: {
         question: 'Ship it?',
@@ -138,16 +113,31 @@ describe('a question whose deadline passes before it reaches the relay', () => {
         expires_at: iso(deadline),
       },
     });
-    await bridge.pump();
-    expect(await bridge.getDecision(r.questionId)).toMatchObject({ publication: 'not-sent' });
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      publication: 'possibly-committed',
+    });
+    now = deadline + 1_000;
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'queued',
+      publication: 'possibly-committed',
+      closedReason: null,
+    });
+    expect(env.sink.typed).toHaveLength(0);
 
-    now = deadline;
-    await bridge.pump();
-    expect(await bridge.getDecision(r.questionId)).toMatchObject({
+    // Online again: the relay shows it never took the create, and the agent is told once.
+    env.relay.down = 0;
+    for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+      await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'publish-failed',
       publication: 'never-published',
       closedReason: 'never-published',
       fallbackDue: false,
+      expiresAt: iso(deadline),
+      deliveryStatus: 'terminal-delivered',
     });
     expect(env.sink.typed).toHaveLength(1);
     const notice = env.sink.typed[0]!.text;
@@ -157,16 +147,11 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       "it never reached the person's phone and no answer to it was recorded",
     );
     expect(notice).not.toMatch(/expired without an answer|did not answer|person never saw/);
-    expect(await bridge.getDecision(r.questionId)).toMatchObject({
-      closedReason: 'never-published',
-      deliveryStatus: 'terminal-delivered',
-    });
 
-    // Online again: nothing is sent for it, the notice is not typed twice, and no delivery is reported to a relay
-    // that never held the question.
-    offline.on = false;
-    await bridge.pump();
-    expect(creates(env.relay)).toHaveLength(0);
+    // Nothing more is sent for it, the notice is not typed twice, and no delivery is reported to a relay that never
+    // held the question.
+    await env.bridge.pump();
+    expect(creates(env.relay)).toHaveLength(1);
     expect(env.sink.typed).toHaveLength(1);
     expect(env.relay.calls.filter((c) => c.path.startsWith('/api/v1/deliveries'))).toHaveLength(0);
   });
@@ -331,32 +316,25 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect(env.sink.typed[0]!.text).toContain('choice: a');
   });
 
-  it('closes as withdrawn, with nothing sent and no notice, when a create withdrawn while it was claimed proves never sent', async () => {
+  it('closes as withdrawn, with no notice, when a create withdrawn while it may have been sent proves never taken', async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
-    const r = await env.bridge.publisher.register(origin(), {
-      question: 'q?',
-      options: [{ id: 'a', label: 'A' }],
-      expires_at: iso(now + 120_000),
+    env.relay.createNow = () => now;
+    const deadline = now + 120_000;
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q?', options: [{ id: 'a', label: 'A' }], expires_at: iso(deadline) },
     });
-    env.client.createQuestion = async () => {
-      // The agent withdraws it while the create is on its way; the create then could not even connect.
-      await env.bridge.cancelQuestion(r.questionId);
-      expect((await env.store.outboxFor(r.questionId)).map((o) => o.kind).sort()).toEqual([
-        'cancel',
-        'create',
-      ]);
-      throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
-    };
+    env.relay.down = 1; // the create may have reached the relay
     await env.bridge.pump();
-    // Before the deadline nothing is sent for it; past the deadline it is still withdrawn, never an unpublished notice.
-    now += 1_000;
+    await env.bridge.publisher.enqueueCancel(r.questionId);
+    expect((await env.store.outboxFor(r.questionId)).map((o) => o.kind).sort()).toEqual([
+      'cancel',
+      'create',
+    ]);
+    now = deadline + 1_000;
     for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
       await env.store.putOutbox({ ...o, next_attempt_at: 0 });
-    env.client.createQuestion = RelayClient.prototype.createQuestion.bind(env.client);
-    await env.bridge.pump();
-    expect(env.relay.calls.filter((c) => c.path.includes('/questions'))).toHaveLength(0);
-    now += 300_000;
     await env.bridge.pump();
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'cancelled',
@@ -365,7 +343,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       fallbackDue: false,
     });
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
-    expect(env.relay.calls.filter((c) => c.path.includes('/questions'))).toHaveLength(0);
+    expect(env.relay.calls.some((c) => c.path.endsWith('/cancel'))).toBe(false);
     expect(env.sink.typed).toHaveLength(0);
   });
 
@@ -540,87 +518,32 @@ describe('several senders and the person on one queued create', () => {
     expect(env.sink.typed).toHaveLength(0);
   });
 
-  it("keeps another sender's claim when this send provably never left the computer", async () => {
+  it('never sends a withdrawn create again after a crash in the middle of withdrawing it', async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
     env.relay.createNow = () => now;
     const deadline = now + 120_000;
-    const r = await env.bridge.publisher.register(origin(), {
-      question: 'q?',
-      options: [{ id: 'a', label: 'A' }],
-      expires_at: iso(deadline),
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q?', options: [{ id: 'a', label: 'A' }], expires_at: iso(deadline) },
     });
-    // A second process on the same store (a CLI `ask` beside `listen`), with its own locks and its own network.
-    const other = new DecisionsBridge({
-      identity: env.identity,
-      store: env.store,
-      sink: env.sink,
-      pumpIntervalMs: 0,
-      now: () => now,
-      client: new RelayClient({
-        identity: env.identity,
-        fetch: env.relay.fetch,
-        sleep: async () => {},
-        maxRetries: 0,
-      }),
-    });
-    env.client.createQuestion = async () => {
-      // While this send is out, the other process sends the claimed create too: the relay commits it and the reply is
-      // lost. Then this send turns out never to have connected.
-      env.relay.dropCreateReply = 1;
-      await other.publisher.flush();
-      expect(env.relay.questions.has(r.questionId)).toBe(true);
-      throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
-    };
+    env.relay.down = 1; // possibly committed
     await env.bridge.pump();
-    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
-      publication: 'possibly-committed',
-    });
-    // Offline through the deadline: the claim the other send made stands, so nothing is concluded.
-    env.client.createQuestion = RelayClient.prototype.createQuestion.bind(env.client);
-    env.relay.down = 1_000;
-    now = deadline;
-    await env.bridge.pump();
-    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
-      status: 'queued',
-      publication: 'possibly-committed',
-      closedReason: null,
-    });
-    expect(env.sink.typed).toHaveLength(0);
-    // Back online, the retry finds the question the other send published.
-    env.relay.down = 0;
+    await env.bridge.publisher.enqueueCancel(r.questionId); // queued behind the create, which may be on the relay
+    // Past the deadline the relay shows it never took the create, so the withdrawal wins; the process dies once the
+    // row is closed, before its items go.
+    now = deadline + 1_000;
     for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
       await env.store.putOutbox({ ...o, next_attempt_at: 0 });
-    await env.bridge.pump();
-    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
-      status: 'open',
-      publication: 'accepted',
-    });
-  });
-
-  it('never sends a withdrawn create again after a crash in the middle of withdrawing it', async () => {
-    let now = Date.parse('2026-11-19T10:00:00Z');
-    const env = await setupBridge({ now: () => now });
-    const r = await env.bridge.publisher.register(origin(), {
-      question: 'q?',
-      options: [{ id: 'a', label: 'A' }],
-      expires_at: iso(now + 120_000),
-    });
     const remove = env.store.deleteOutbox.bind(env.store);
-    env.client.createQuestion = async () => {
-      await env.bridge.cancelQuestion(r.questionId);
-      // The process dies once the withdrawal has closed the row, before its items go.
-      env.store.deleteOutbox = async () => {
-        throw new Error('the process died');
-      };
-      throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
+    env.store.deleteOutbox = async () => {
+      throw new Error('the process died');
     };
     await env.bridge.pump().catch(() => undefined);
-    expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('cancelled');
     env.store.deleteOutbox = remove;
+    expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('cancelled');
+    const sent = creates(env.relay).length;
 
-    // A new process, before the deadline: the leftover create and withdrawal go, and nothing reaches the relay.
-    now += 1_000;
     const restarted = new DecisionsBridge({
       identity: env.identity,
       store: env.store,
@@ -637,13 +560,15 @@ describe('several senders and the person on one queued create', () => {
     for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
       await env.store.putOutbox({ ...o, next_attempt_at: 0 });
     await restarted.pump();
-    expect(env.relay.calls.filter((c) => c.path.includes('/questions'))).toHaveLength(0);
+    expect(creates(env.relay)).toHaveLength(sent); // the leftover create is dropped, never sent again
+    expect(env.relay.calls.some((c) => c.path.endsWith('/cancel'))).toBe(false);
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
     expect(await restarted.getDecision(r.questionId)).toMatchObject({
       status: 'cancelled',
       publication: 'never-published',
       closedReason: 'withdrawn',
     });
+    expect(env.sink.typed).toHaveLength(0);
   });
 });
 
@@ -972,69 +897,5 @@ describe('an advisory question that never reached the relay', () => {
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('NOT authorised to continue');
     expect(notice).not.toContain('plan you stated');
-  });
-});
-
-describe('telling a request that never left this computer', () => {
-  const coded = (code: string) => Object.assign(new Error(code), { code });
-  const failed = (cause: unknown) => new TypeError('fetch failed', { cause });
-
-  it('counts only a direct connect failure, on every address tried', () => {
-    expect(isUnsentError(failed(coded('ENOTFOUND')))).toBe(true);
-    expect(isUnsentError(failed(coded('ECONNREFUSED')))).toBe(true);
-    expect(isUnsentError(failed(coded('UND_ERR_CONNECT_TIMEOUT')))).toBe(true);
-    expect(
-      isUnsentError(failed(new AggregateError([coded('ECONNREFUSED'), coded('ENETUNREACH')]))),
-    ).toBe(true);
-    // A reset or closed socket may come after the request was written; so may anything mixed or nested deeper.
-    expect(isUnsentError(failed(coded('ECONNRESET')))).toBe(false);
-    expect(isUnsentError(failed(coded('UND_ERR_SOCKET')))).toBe(false);
-    expect(
-      isUnsentError(failed(new AggregateError([coded('ECONNREFUSED'), coded('ECONNRESET')]))),
-    ).toBe(false);
-    expect(isUnsentError(failed(new AggregateError([])))).toBe(false);
-    expect(isUnsentError(failed(new Error('x', { cause: coded('ENOTFOUND') })))).toBe(false);
-    expect(isUnsentError(new TypeError('fetch failed'))).toBe(false);
-    expect(
-      isUnsentError(new AggregateError([coded('ECONNRESET')], 'x', { cause: coded('ENOTFOUND') })),
-    ).toBe(false);
-  });
-
-  it('sends a create with redirects refused, and reports it unsent only when every attempt failed to connect', async () => {
-    const identity = await makeIdentity();
-    const seen: (RequestRedirect | undefined)[] = [];
-    let outcome: 'refused' | 'reset-then-refused' | 'answered-then-refused' = 'refused';
-    let calls = 0;
-    const client = new RelayClient({
-      identity,
-      sleep: async () => {},
-      maxRetries: 1,
-      fetch: async (_input, init) => {
-        seen.push(init?.redirect);
-        calls++;
-        if (outcome === 'reset-then-refused' && calls === 1) throw failed(coded('ECONNRESET'));
-        if (outcome === 'answered-then-refused' && calls === 1)
-          return Response.json(
-            { code: 'temporarily_unavailable', message: 'busy' },
-            { status: 503 },
-          );
-        throw failed(coded('ECONNREFUSED'));
-      },
-    });
-    const question = { record: {}, envelope: {} } as never;
-    await expect(client.createQuestion('k', question)).rejects.toMatchObject({ notSent: true });
-    expect(seen).toEqual(['error', 'error']);
-    outcome = 'reset-then-refused';
-    calls = 0;
-    await expect(client.createQuestion('k', question)).rejects.toMatchObject({ notSent: false });
-    // An attempt the relay answered reached it, whatever the next one does.
-    outcome = 'answered-then-refused';
-    calls = 0;
-    await expect(client.createQuestion('k', question)).rejects.toMatchObject({ notSent: false });
-    // A request that may follow a redirect never claims it was not sent.
-    await expect(client.info()).rejects.toBeDefined();
-    await expect(client.request('POST', '/api/v1/anything', { body: {} })).rejects.toMatchObject({
-      notSent: false,
-    });
   });
 });

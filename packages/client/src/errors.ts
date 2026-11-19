@@ -5,17 +5,12 @@ export class RelayError extends Error {
   readonly status: number;
   readonly retryAfterMs: number | undefined;
   readonly details: Record<string, unknown> | undefined;
-  /**
-   * A network error from a request that provably never reached the relay: every attempt failed while connecting
-   * (`isUnsentError`), before a byte of the request was written. False whenever any attempt may have been sent.
-   */
-  readonly notSent: boolean;
 
   constructor(
     code: RelayError['code'],
     message: string,
     status: number,
-    extra: { retryAfterMs?: number; details?: Record<string, unknown>; notSent?: boolean } = {},
+    extra: { retryAfterMs?: number; details?: Record<string, unknown> } = {},
   ) {
     super(message);
     this.name = 'RelayError';
@@ -23,7 +18,6 @@ export class RelayError extends Error {
     this.status = status;
     this.retryAfterMs = extra.retryAfterMs;
     this.details = extra.details;
-    this.notSent = extra.notSent === true;
   }
 
   static fromBody(status: number, text: string): RelayError {
@@ -65,37 +59,4 @@ export function isDeviceRevoked(e: unknown): boolean {
     e.status === 401 &&
     e.message === 'unknown or revoked device'
   );
-}
-
-/**
- * Socket errors raised before a connection exists: name resolution, a refused or unreachable connection, or a connect
- * timeout. A request that failed with one of these was never written to the wire. Anything else (a reset, a closed
- * socket, an abort, a TLS failure) may come after the request left, so it proves nothing.
- */
-const UNSENT_CODES = new Set([
-  'ENOTFOUND',
-  'EAI_AGAIN',
-  'ECONNREFUSED',
-  'ENETUNREACH',
-  'ENETDOWN',
-  'EHOSTUNREACH',
-  'EHOSTDOWN',
-  'EADDRNOTAVAIL',
-  'UND_ERR_CONNECT_TIMEOUT',
-]);
-
-/**
- * True for a fetch failure that provably sent nothing: the error, or the cause fetch wraps it in, carries one of
- * `UNSENT_CODES`. A connection raced over several addresses (`AggregateError`) counts only when every address failed
- * that way. Nothing deeper in a cause chain is read, so an unrelated failure inside some other error never counts.
- */
-export function isUnsentError(e: unknown): boolean {
-  const unsent = (c: unknown): boolean => {
-    if (!c || typeof c !== 'object') return false;
-    if (c instanceof AggregateError) return c.errors.length > 0 && c.errors.every(unsent);
-    const code = (c as { code?: unknown }).code;
-    return typeof code === 'string' && UNSENT_CODES.has(code);
-  };
-  if (e instanceof AggregateError) return unsent(e);
-  return unsent(e) || (!!e && typeof e === 'object' && unsent((e as { cause?: unknown }).cause));
 }
