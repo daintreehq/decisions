@@ -1,5 +1,9 @@
 import type { DeviceCert, LedgerEvent, Requirement } from '@daintreehq/decisions-protocol';
 import {
+  ADVISORY_QUESTION_FIXTURE,
+  BLOCKING_APPROVAL_FIXTURE,
+} from '@daintreehq/decisions-protocol/fixtures';
+import {
   buildSignedAction,
   buildSignedMessage,
   buildSignedQuestion,
@@ -142,6 +146,9 @@ export async function questionEvent(
     purpose?: 'question-content' | 'answer-content';
     /** Mark the question advisory in its envelope's AAD (docs/protocol.md section 21). */
     replyMode?: 'advisory';
+    /** Ask it under a named workflow gate (its signed hash). */
+    gate?: string;
+    occurredAt?: string;
     tamper?: (e: { ciphertext: string }) => void;
   } = {},
 ): Promise<LedgerEvent> {
@@ -171,6 +178,7 @@ export async function questionEvent(
     expiresAt: o.expiresAt ?? null,
     attachmentIds: [],
     envelope,
+    ...(o.gate ? { workflowGateIdHash: o.gate, policyVersion: 1 } : {}),
   });
   if (o.tamper) o.tamper(q.envelope);
   return ev({
@@ -179,6 +187,7 @@ export async function questionEvent(
     question_id: questionId,
     question_revision: 0,
     origin_device_id: signer.id,
+    ...(o.occurredAt ? { occurred_at: o.occurredAt } : {}),
     data: {
       record: q.record,
       envelope: q.envelope,
@@ -379,4 +388,74 @@ export async function messageEvent(
       target_host_id: 'host_aaaaaaaa',
     },
   });
+}
+
+/* ---------- deadline scenarios (docs/protocol.md section 21) ---------- */
+
+export const MINUTE = 60_000;
+
+/** The relay expiring a question's open round at `at` (relay time), as `expireQuestionNow` emits it. */
+export function expiredEvent(questionId: string, at: number, revision = 0): LedgerEvent {
+  return plainEvent(
+    'decision.expired',
+    questionId,
+    { expired_at: new Date(at).toISOString(), target_host_id: 'host_aaaaaaaa' },
+    { occurred_at: new Date(at).toISOString(), question_revision: revision },
+  );
+}
+
+export type ScenarioKind =
+  'old-content' | 'no-expiry' | 'advisory' | 'dismissed' | 'required-expiry';
+
+export interface Scenario {
+  questionId: string;
+  /** When it was asked, and its signed deadline (null for none), in ms. */
+  asked: number;
+  deadline: number | null;
+  events: LedgerEvent[];
+}
+
+/**
+ * The phone's deadline fixtures, signed with the world's keys:
+ * - `old-content`: a blocking question as 0.8.0 signed it (no reply mode in its AAD), due 15 minutes after it was asked;
+ * - `no-expiry`: a blocking question with no deadline;
+ * - `advisory`: the 15-minute advisory question (`ADVISORY_QUESTION_FIXTURE`'s content and plan);
+ * - `dismissed`: that advisory question, declined from this phone;
+ * - `required-expiry`: a gated approval that needs a person (`BLOCKING_APPROVAL_FIXTURE`), which the relay expired.
+ */
+export async function deadlineScenario(
+  w: World,
+  kind: ScenarioKind,
+  asked = kind === 'required-expiry' ? Date.now() - 20 * MINUTE : Date.now(),
+): Promise<Scenario> {
+  const questionId = newId();
+  const deadline = kind === 'no-expiry' ? null : asked + 15 * MINUTE;
+  const expiresAt = deadline === null ? null : new Date(deadline).toISOString();
+  const occurredAt = new Date(asked).toISOString();
+  const advisory = kind === 'advisory' || kind === 'dismissed';
+  const created = await questionEvent(w, {
+    questionId,
+    expiresAt,
+    occurredAt,
+    ...(advisory
+      ? { replyMode: 'advisory' as const, content: { ...ADVISORY_QUESTION_FIXTURE.content } }
+      : kind === 'required-expiry'
+        ? {
+            gate: BLOCKING_APPROVAL_FIXTURE.record.workflow_gate_id_hash!,
+            content: { ...BLOCKING_APPROVAL_FIXTURE.content },
+          }
+        : {}),
+  });
+  const events = [created];
+  if (kind === 'dismissed')
+    events.push(
+      await actionEvent(w, {
+        questionId,
+        action: 'cancel',
+        signer: w.phone,
+        occurredAt: new Date(asked + 2 * MINUTE).toISOString(),
+      }),
+    );
+  if (kind === 'required-expiry') events.push(expiredEvent(questionId, deadline! + 1_000));
+  return { questionId, asked, deadline, events };
 }

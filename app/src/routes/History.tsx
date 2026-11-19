@@ -210,7 +210,13 @@ export function HistoryRow({
             {match.excerpt && <span className="hrow-hit-text"> {match.excerpt}</span>}
           </span>
         )}
-        <span className="sr-only">, {STATUS_LABEL[e.status]}</span>
+        {/* Past its deadline by this device's clock only: not an outcome, so never said as "Expired". */}
+        <span className="sr-only">
+          ,{' '}
+          {e.status === 'expired' && v.status === 'open'
+            ? 'Deadline passed'
+            : STATUS_LABEL[e.status]}
+        </span>
       </button>
     </li>
   );
