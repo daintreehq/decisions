@@ -670,6 +670,8 @@ describe('recovering an outcome by ID', () => {
     expect(await ask(a.ctx, {}, { question: 'One?', stopped: never() })).toBe(0);
     expect(e.created()).toHaveLength(1);
     expect(a.calls).not.toContain('POST /api/v1/questions');
+    // The receiver declared this device's features; an ask that only watches leaves its declaration as it is.
+    expect(a.calls).not.toContain('POST /api/v1/socket-ticket');
     release();
     await listening;
 
@@ -681,6 +683,53 @@ describe('recovering an outcome by ID', () => {
     expect(await ask(b.ctx, {}, { question: 'Two?', stopped: never() })).toBe(0);
     expect(e.created()).toHaveLength(2);
     expect(b.calls).toContain('POST /api/v1/questions');
+    // Taking over, it declares this device's features before it sends anything, as the receiver it replaces did.
+    expect(b.calls.filter((c) => c === 'POST /api/v1/socket-ticket')).toHaveLength(1);
+    expect(b.calls.indexOf('POST /api/v1/socket-ticket')).toBeLessThan(
+      b.calls.indexOf('POST /api/v1/questions'),
+    );
+  });
+
+  it('never lets a declaration the relay does not answer hold its question, or outlast a stop', async () => {
+    const e = await env();
+    /** One process whose socket tickets the relay never answers: each fails only once its request is aborted. */
+    const stalled = () => {
+      const p = e.proc();
+      const send = p.ctx.fetch;
+      p.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+        if (new URL(String(u)).pathname !== '/api/v1/socket-ticket') return send(u as string, init);
+        p.calls.push('POST /api/v1/socket-ticket');
+        return new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          }),
+        );
+      }) as typeof fetch;
+      return p;
+    };
+
+    // The declaration gives up within its bound, and the question goes out anyway.
+    const a = stalled();
+    expect(await ask(a.ctx, {}, { question: 'One?', stopped: never(), declareMs: 50 })).toBe(0);
+    expect(e.created()).toHaveLength(1);
+    expect(a.calls.indexOf('POST /api/v1/socket-ticket')).toBeLessThan(
+      a.calls.indexOf('POST /api/v1/questions'),
+    );
+    expect(a.err.join('\n')).toMatch(/could not declare this device's features/);
+
+    // Stopped while it declares: nothing more goes out, the declaration ends with the process, and so does its lock.
+    const b = stalled();
+    let signal!: (s: StopSignal) => void;
+    const stopped = new Promise<StopSignal>((r) => (signal = r));
+    const asking = ask(b.ctx, {}, { question: 'Two?', stopped, declareMs: 60_000 });
+    await vi.waitFor(() => expect(b.calls).toContain('POST /api/v1/socket-ticket'));
+    signal('SIGINT');
+    expect(await asking).toBe(130);
+    expect(b.calls).not.toContain('POST /api/v1/questions');
+    expect(e.created()).toHaveLength(1);
+    const next = ReceiverLock.forHome(e.home);
+    expect(next.tryAcquire()).toBe(true);
+    next.release();
   });
 
   it('asks once for two asks at once with the same correlation id', async () => {

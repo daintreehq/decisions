@@ -31,6 +31,7 @@ type Inside = {
   sync: unknown;
   epochKeys: unknown;
   refreshDevices(): Promise<void>;
+  ingestEvents(events: LedgerEvent[]): Promise<void>;
   resume(): void;
   outboxHooks(): OutboxHooks;
 };
@@ -237,6 +238,35 @@ describe('dismissing a question (docs/protocol.md section 6.1)', () => {
     inside(c).relay = {};
     inside(c).resume();
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the device list again when a question arrives from a desktop it lists without declines', async () => {
+    const { w, store } = await openQuestion();
+    const c = new AppController('https://relay.example');
+    const refresh = vi.fn(async () => undefined);
+    inside(c).refreshDevices = refresh;
+    inside(c).store = store;
+    inside(c).relay = {};
+    const withDevices = (devices: DeviceInfo[]) =>
+      inside(c).patch({ devices: { devices } as DevicesResponse });
+
+    // Before the list is read at all, the app's own first read is under way.
+    await inside(c).ingestEvents([await questionEvent(w)]);
+    expect(refresh).not.toHaveBeenCalled();
+    // Read when the desktop had not declared anything yet: its first plain `decisions ask` declares, then asks.
+    withDevices([device(w.desktop.id)]);
+    const asked = await questionEvent(w);
+    await inside(c).ingestEvents([asked]);
+    expect(store.get(asked.question_id!)!.status).toBe('open');
+    expect(refresh).toHaveBeenCalledTimes(1);
+    // Once per batch, however many such questions it brings.
+    await inside(c).ingestEvents([await questionEvent(w), await questionEvent(w)]);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    // A question read again, or one from a desktop listed as taking declines, needs no new read.
+    await inside(c).ingestEvents([asked]);
+    withDevices([device(w.desktop.id, { features: ['person-declines-v1'] })]);
+    await inside(c).ingestEvents([await questionEvent(w)]);
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 });
 

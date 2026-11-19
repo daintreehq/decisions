@@ -347,6 +347,36 @@ export class AppController {
     return !d || d.revoked_at !== null || !!d.features?.includes(DECLINE_FEATURE);
   }
 
+  /** What the sync engine read: into the thread, then to what else watches the ledger. */
+  private async ingestEvents(events: LedgerEvent[]): Promise<void> {
+    const store = this.store!;
+    // The questions this batch brings that the thread did not hold before it.
+    const arrived = events.flatMap((e) =>
+      e.event_type === 'decision.created' && e.question_id && !store.get(e.question_id)
+        ? [e.question_id]
+        : [],
+    );
+    await store.ingestAll(events);
+    this.recheckDeclines(arrived);
+    if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
+    if (this.involvementServed()) this.involvement?.noteEvents(events);
+  }
+
+  /**
+   * A question just arrived open from a desktop the device list says files no declines: read the list again, at most
+   * once per batch. That desktop may have declared them just before it asked (a first `decisions ask` on a computer that
+   * never ran a receiver), and Dismiss would otherwise stay hidden until the app comes back.
+   */
+  private recheckDeclines(questionIds: readonly string[]): void {
+    const store = this.store;
+    if (!this.relay || !store || !this.snap.devices) return;
+    const stale = questionIds.some((id) => {
+      const view = store.get(id);
+      return view?.status === 'open' && !this.declinesFor(view);
+    });
+    if (stale) void this.refreshDevices().catch(() => undefined);
+  }
+
   /**
    * Read every question's thread once, the first time this device declares thread messages: the event cursor may
    * already be past messages the relay never sent it. Each is verified as its event would be and cached like one.
@@ -489,11 +519,7 @@ export class AppController {
       relay: this.relay,
       db,
       origin: config.relayOrigin,
-      ingest: async (events) => {
-        await this.store!.ingestAll(events);
-        if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
-        if (this.involvementServed()) this.involvement?.noteEvents(events);
-      },
+      ingest: (events) => this.ingestEvents(events),
       features: () => this.declaredFeatures(),
       onServerTime: (iso) => this.snapshots?.setServerTime(iso),
       onConnection: (connection) => {
