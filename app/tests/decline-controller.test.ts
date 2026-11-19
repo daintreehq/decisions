@@ -32,6 +32,8 @@ type Inside = {
   epochKeys: unknown;
   refreshDevices(): Promise<void>;
   ingestEvents(events: LedgerEvent[]): Promise<void>;
+  trust: unknown;
+  db: unknown;
   resume(): void;
   outboxHooks(): OutboxHooks;
 };
@@ -250,9 +252,6 @@ describe('dismissing a question (docs/protocol.md section 6.1)', () => {
     const withDevices = (devices: DeviceInfo[]) =>
       inside(c).patch({ devices: { devices } as DevicesResponse });
 
-    // Before the list is read at all, the app's own first read is under way.
-    await inside(c).ingestEvents([await questionEvent(w)]);
-    expect(refresh).not.toHaveBeenCalled();
     // Read when the desktop had not declared anything yet: its first plain `decisions ask` declares, then asks.
     withDevices([device(w.desktop.id)]);
     const asked = await questionEvent(w);
@@ -262,11 +261,65 @@ describe('dismissing a question (docs/protocol.md section 6.1)', () => {
     // Once per batch, however many such questions it brings.
     await inside(c).ingestEvents([await questionEvent(w), await questionEvent(w)]);
     expect(refresh).toHaveBeenCalledTimes(2);
-    // A question read again, or one from a desktop listed as taking declines, needs no new read.
+    // A question read again, or one closed in the same batch that brought it, needs no new read.
     await inside(c).ingestEvents([asked]);
+    const gone = await questionEvent(w);
+    await inside(c).ingestEvents([
+      gone,
+      await actionEvent(w, { questionId: gone.question_id!, action: 'cancel' }),
+    ]);
+    expect(store.get(gone.question_id!)!.status).toBe('cancelled');
+    expect(refresh).toHaveBeenCalledTimes(2);
+    // Nor does one from a desktop listed as taking declines.
     withDevices([device(w.desktop.id, { features: ['person-declines-v1'] })]);
     await inside(c).ingestEvents([await questionEvent(w)]);
     expect(refresh).toHaveBeenCalledTimes(2);
+    // Before the list is read at all, a read may already be under way from before the desktop declared: one more.
+    inside(c).patch({ devices: null });
+    await inside(c).ingestEvents([await questionEvent(w)]);
+    expect(refresh).toHaveBeenCalledTimes(3);
+  });
+
+  it('never lets a read of the device list that started earlier replace a later one', async () => {
+    const { w, view } = await openQuestion();
+    const c = new AppController('https://relay.example');
+    const answers: ((res: unknown) => void)[] = [];
+    inside(c).relay = { json: () => new Promise((resolve) => answers.push(resolve)) };
+    inside(c).trust = w.trust;
+    inside(c).db = { putCert: async () => undefined };
+    inside(c).epochKeys = w.epochs;
+    const list = (features: string[]) => ({
+      key_epoch: 1,
+      owner_device_id: w.desktop.id,
+      devices: [
+        {
+          device_id: w.desktop.id,
+          role: 'owner-desktop',
+          label: 'Mac',
+          created_at: new Date().toISOString(),
+          revoked_at: null,
+          last_seen_at: null,
+          last_ack_seq: 0,
+          cert: w.desktop.cert,
+          push_enabled: false,
+          features,
+        },
+      ],
+    });
+    // The app came back before the desktop declared, then a question arrived after it did; the later read answers first.
+    const earlier = c.refreshDevices();
+    const later = c.refreshDevices();
+    answers[1]!(list(['person-declines-v1']));
+    await later;
+    expect(c.declinesFor(view)).toBe(true);
+    answers[0]!(list([]));
+    await earlier;
+    expect(c.declinesFor(view)).toBe(true);
+    // In order, the later read's list is the one shown.
+    const third = c.refreshDevices();
+    answers[2]!(list([]));
+    await third;
+    expect(c.declinesFor(view)).toBe(false);
   });
 });
 

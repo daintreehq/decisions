@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { knownFeatures } from '@daintreehq/decisions-protocol';
 import {
   BridgeError,
   RelayError,
@@ -605,6 +606,8 @@ async function publish(
           await Promise.race([sending, stopped, after(Math.max(0, until - performance.now()))]);
         return true;
       }
+      // Stopped while it read: nothing more starts.
+      if (w.halt.signal) return false;
       const left = until - performance.now();
       if (left <= 0) break;
       // One pump of its own at a time, looked at again every tick: a pump held up by another question's notice never
@@ -613,11 +616,9 @@ async function publish(
         const declare = !declared;
         declared = true;
         const send = (async () => {
-          if (declare) {
-            await declareFeatures(ctx, w, Math.min(declareMs, left / 2));
-            // Stopped, or out of time, while it declared: nothing more goes out.
-            if (w.halt.signal || performance.now() >= until) return;
-          }
+          if (declare) await declareFeatures(ctx, w, Math.min(declareMs, left / 2));
+          // Stopped, or out of time, meanwhile: nothing more goes out.
+          if (w.halt.signal || performance.now() >= until) return;
           await w.bridge.pump();
         })();
         w.also.push(send);
@@ -638,13 +639,23 @@ async function publish(
 }
 
 /**
- * Declares this device's features to the relay through a socket ticket it never uses, as an HTTP sync does: the relay
- * keeps only a ticket's declaration. Every `decisions` process of this state directory builds the same bridge, so this
- * declares exactly what its receivers do. Never throws; a failure is a warning.
+ * Sees that the relay lists this device's features: every `decisions` process of this state directory builds the same
+ * bridge, so these are what its receivers declare. The relay keeps only the latest socket ticket's declaration, so a
+ * missing one is declared, as an HTTP sync does, through a ticket it never uses. It only adds: what the relay already
+ * lists for this device stays declared (a host of the same device may declare more), and when that covers them nothing
+ * is sent, so a run of plain asks spends none of the device's few tickets a minute, which a receiver starting meanwhile
+ * needs. Done within `ms` altogether. Never throws; a failure is a warning.
  */
-async function declareFeatures(ctx: Ctx, w: Waiter, timeoutMs: number): Promise<void> {
+async function declareFeatures(ctx: Ctx, w: Waiter, ms: number): Promise<void> {
   try {
-    await w.rt.client.socketTicket(w.bridge.features, { retry: false, timeoutMs });
+    // One deadline for all of it, however often a request is signed and sent again (after a clock-skew refusal).
+    const signal = AbortSignal.timeout(Math.max(1, Math.floor(ms)));
+    const list = await w.rt.client.devices({ retry: false, signal });
+    const me = w.rt.identity.config.deviceId;
+    const self = (Array.isArray(list?.devices) ? list.devices : []).find((d) => d.device_id === me);
+    const listed = knownFeatures(self?.features);
+    if (w.bridge.features.every((f) => listed.has(f))) return;
+    await w.rt.client.socketTicket([...listed, ...w.bridge.features], { retry: false, signal });
   } catch (e) {
     ctx.err(
       `warning: could not declare this device's features to the relay (${(e as Error).message}); the phone may not offer to dismiss the question until a decisions listen or mcp runs`,

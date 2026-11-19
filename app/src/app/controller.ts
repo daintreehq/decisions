@@ -140,6 +140,9 @@ export class AppController {
   /** A declaration of the agent-stopped push is on its way; `pushDeclarationAgain` asks for one more pass after it. */
   private pushDeclaring = false;
   private pushDeclarationAgain = false;
+  /** Reads of the device list started, and the latest of them whose list is shown (`refreshDevices`). */
+  private devicesRead = 0;
+  private devicesShown = 0;
   private bound = false;
 
   constructor(private readonly origin: string = globalThis.location?.origin ?? '') {
@@ -363,13 +366,13 @@ export class AppController {
   }
 
   /**
-   * A question just arrived open from a desktop the device list says files no declines: read the list again, at most
-   * once per batch. That desktop may have declared them just before it asked (a first `decisions ask` on a computer that
-   * never ran a receiver), and Dismiss would otherwise stay hidden until the app comes back.
+   * A question just arrived open from a desktop the device list says files no declines, or before the list was read: read
+   * it again, at most once per batch. That desktop may have declared them just before it asked (a first `decisions ask`
+   * on a computer that never ran a receiver), and Dismiss would otherwise stay hidden until the app comes back.
    */
   private recheckDeclines(questionIds: readonly string[]): void {
     const store = this.store;
-    if (!this.relay || !store || !this.snap.devices) return;
+    if (!this.relay || !store) return;
     const stale = questionIds.some((id) => {
       const view = store.get(id);
       return view?.status === 'open' && !this.declinesFor(view);
@@ -717,6 +720,7 @@ export class AppController {
 
   async refreshDevices(): Promise<void> {
     if (!this.relay || !this.trust || !this.db) return;
+    const read = ++this.devicesRead;
     const res = DevicesResponse.parse(await this.relay.json('GET', '/devices'));
     for (const d of res.devices) {
       const ok = await this.trust.addCert(d.cert, d.revoked_at);
@@ -726,7 +730,12 @@ export class AppController {
         // A certificate the pinned owner key did not sign: ignored, never trusted.
       }
     }
-    this.patch({ devices: res });
+    // Reads overlap (the app coming back, a question that just arrived): one that started earlier and answers later may
+    // predate a desktop's declaration, so its list never replaces a later read's.
+    if (read > this.devicesShown) {
+      this.devicesShown = read;
+      this.patch({ devices: res });
+    }
     // The current epoch may be newer than what we hold (rotation while we were away).
     if (res.key_epoch > Math.max(0, ...this.epochKeys.keys())) await this.refreshGrants();
   }
