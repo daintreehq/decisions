@@ -581,7 +581,12 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
     for (;;) {
       if (w.halt.signal) return false;
       const row = await w.bridge.getDecision(questionId).catch(() => null);
-      if (row && row.status !== 'queued') return true;
+      if (row && row.status !== 'queued') {
+        // Its own pump may still be writing another question's notice: it finishes within the budget, unless stopped.
+        if (sending)
+          await Promise.race([sending, stopped, after(Math.max(0, until - performance.now()))]);
+        return true;
+      }
       const left = until - performance.now();
       if (left <= 0) break;
       // One pump of its own at a time, looked at again every tick: a pump held up by another question's notice never
