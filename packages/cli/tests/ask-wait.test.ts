@@ -792,6 +792,122 @@ describe('recovering an outcome by ID', () => {
   });
 });
 
+describe("a late retry's refusal from a relay that checks the deadline before the receipt (0.8.0)", () => {
+  /**
+   * An `ask --wait` that publishes, retries, and never reads the relay's events; `loseCreate` creates are lost on
+   * the way out, so they may have reached the relay as far as it knows.
+   */
+  const asker = (e: Awaited<ReturnType<typeof env>>, o: { loseCreate?: number } = {}) => {
+    const p = e.proc();
+    const inner = p.ctx.fetch;
+    let lose = o.loseCreate ?? 0;
+    p.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+      const path = new URL(String(u)).pathname;
+      if (path === '/api/v1/events') throw new TypeError('fetch failed');
+      if (lose > 0 && init?.method === 'POST' && path === '/api/v1/questions') {
+        lose--;
+        throw new TypeError('fetch failed');
+      }
+      return inner(u as string, init);
+    }) as typeof fetch;
+    let stop!: (s: StopSignal) => void;
+    const done = ask(
+      p.ctx,
+      {},
+      {
+        question: 'Deploy?',
+        option: ['yes=Yes', 'no=No'],
+        expiresIn: '2m',
+        wait: true,
+        stopped: new Promise<StopSignal>((r) => (stop = r)),
+        ...QUICK,
+      },
+    );
+    let settled = false;
+    void done.then(() => (settled = true));
+    return { p, done, stop: () => stop('SIGINT'), settled: () => settled };
+  };
+  const status = async (e: Awaited<ReturnType<typeof env>>, id: string) => {
+    const g = e.proc();
+    await getCmd(g.ctx, {}, id);
+    expect(g.calls).toEqual([]);
+    return JSON.parse(g.out[0]!) as Record<string, unknown>;
+  };
+  /** Past the deadline, the relay refuses the create's retry without saying whether it holds the question. */
+  const refuseLateRetry = async (e: Awaited<ReturnType<typeof env>>, id: string) => {
+    e.relay.rejectCreate = 400;
+    e.clock.skew = 3 * MIN;
+    await vi.waitFor(
+      async () => expect(await status(e, id)).toMatchObject({ status: 'publish-failed' }),
+      {
+        timeout: 10_000,
+      },
+    );
+  };
+
+  it('does not report the refusal before reading the relay, then reports the answer the relay holds', async () => {
+    const e = await env();
+    e.relay.dropCreateReply = 1; // committed; the reply is lost
+    const a = asker(e);
+    await vi.waitFor(() => expect(e.created()).toHaveLength(1));
+    const id = e.created()[0]!;
+    await e.relay.answerEvent({
+      questionId: id,
+      phone: e.phone,
+      options: ['yes'],
+      text: 'Ship it',
+    });
+    await refuseLateRetry(e, id);
+
+    // Nothing here has read the relay's history since: the refusal is no outcome yet, here or in `get`.
+    expect(await status(e, id)).toMatchObject({ outcome: null, delivery: 'none' });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(a.settled()).toBe(false);
+    a.stop();
+    expect(await a.done).toBe(130);
+    expect(result(a.p.records())).toMatchObject({ outcome: 'interrupted', question_id: id });
+
+    // A wait that reads the relay's events reports what the relay holds.
+    const w = e.proc();
+    expect(await waitCmd(w.ctx, {}, id, { stopped: never(), ...QUICK })).toBe(0);
+    expect(w.calls).toContain('GET /api/v1/events');
+    expect(result(w.records())).toMatchObject({
+      outcome: 'answered',
+      status: 'human-answered',
+      publication: 'accepted',
+      choice: 'yes',
+      text: 'Ship it',
+    });
+    expect(await status(e, id)).toMatchObject({ outcome: 'answered' });
+  });
+
+  it("reports the refusal once the relay's events show it never took the question", async () => {
+    const e = await env();
+    const a = asker(e, { loseCreate: 1 });
+    await vi.waitFor(() => expect(a.p.records().map((r) => r.record)).toEqual(['asked']));
+    const id = a.p.records()[0]!.question_id as string;
+    await vi.waitFor(async () =>
+      expect(await status(e, id)).toMatchObject({ publication: 'possibly-committed' }),
+    );
+    await refuseLateRetry(e, id);
+    expect(e.created()).toEqual([]);
+    expect(await status(e, id)).toMatchObject({ outcome: null });
+    a.stop();
+    expect(await a.done).toBe(130);
+
+    const w = e.proc();
+    expect(await waitCmd(w.ctx, {}, id, { stopped: never(), ...QUICK })).toBe(15);
+    expect(w.calls).toContain('GET /api/v1/events');
+    expect(result(w.records())).toMatchObject({
+      outcome: 'refused',
+      status: 'publish-failed',
+      publication: 'refused',
+      error_code: 'validation_error',
+    });
+    expect(await status(e, id)).toMatchObject({ outcome: 'refused' });
+  });
+});
+
 describe('the standalone flow through decisions mcp', () => {
   it('asks a 15-minute advisory question over MCP, writes the notice to the sink, and recovers it by ID', async () => {
     const e = await env({ advisory: true });
