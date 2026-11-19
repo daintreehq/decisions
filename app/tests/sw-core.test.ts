@@ -18,6 +18,30 @@ describe('push payload shaping', () => {
     expect(shapePush({ type: 'test' }).options.body).toBe('Notifications are working');
   });
 
+  it('shows an agent-stopped push as fixed text that opens the question list', () => {
+    expect(shapePush({ type: 'agent-stopped' })).toMatchObject({
+      title: 'Daintree Decisions',
+      // One tag, so a newer stop replaces the one still showing; it still alerts, as a new stop is news.
+      options: {
+        body: 'An agent stopped',
+        tag: 'agent-stopped',
+        renotify: true,
+        requireInteraction: false,
+        data: { url: '/' },
+      },
+    });
+    // A question id never fits the payload, and one that arrived anyway neither opens a question nor splits the tag.
+    expect(shapePush({ type: 'agent-stopped', question_id: QID }).options).toMatchObject({
+      tag: 'agent-stopped',
+      data: { url: '/' },
+    });
+    const leaky = JSON.stringify(
+      shapePush({ type: 'agent-stopped', agent: 'claude in api-server', pane: 'secret-repo' }),
+    );
+    expect(leaky).not.toContain('api-server');
+    expect(leaky).not.toContain('secret-repo');
+  });
+
   it('never lets payload text reach the notification', () => {
     const evil = shapePush({
       type: 'decision-new',

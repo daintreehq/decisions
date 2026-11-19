@@ -126,7 +126,10 @@ export function NotificationsSection() {
 
   const turnOn = () =>
     void run(async () => {
-      await enablePush(app.getRelay()!);
+      await enablePush(app.getRelay()!, app.pushFeatureGate());
+      // A `GET /info` that answered while this was on its way may have let a declaration land first, which this
+      // subscription, sent without it, then cleared.
+      app.declarePushFeatures();
       setSubscribed(true);
       return { text: 'Notifications are on. Send a test to check.', tone: 'success' };
     });
@@ -155,8 +158,8 @@ export function NotificationsSection() {
   return (
     <>
       <p className="s-lead">
-        Applies to this device straight away. A notification only says that a question needs you; it
-        never contains the question, project or any code.
+        Applies to this device straight away. A notification only says that a question needs you or
+        that an agent stopped; it never contains the question, project or any code.
       </p>
       <div ref={area}>
         <SettingsGroup
