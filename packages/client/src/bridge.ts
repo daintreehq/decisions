@@ -768,6 +768,8 @@ export class DecisionsBridge {
     // (`reopenDelivery`). Behind either, it runs in the background, so a write that never returns does not keep this run
     // from reading: delivery stays closed until it is done.
     const behind = this.delivery.draining || this.reopensPending > 0;
+    // Nothing more is typed before recovery has run, also on a first start behind a drain the host began.
+    if (behind) this.delivery.stopped = true;
     const reopening = this.reopenDelivery(run);
     if (behind) reopening.catch((e) => this.emitError(e as Error));
     else await reopening;
@@ -1636,6 +1638,9 @@ export class DecisionsBridge {
     // Beside the pump, never inside it: a slow relay must not keep a question asked meanwhile from the next flush. It
     // reads only on a host that could ask for advice, and never throws.
     const advisory = this.advisory.refreshIfDue();
+    // This run's recovery failed, so delivery is still closed: try it again rather than leave it closed until a restart.
+    if (this.delivery.stopped && this.reopensPending === 0)
+      void this.reopenDelivery(this.lifecycle).catch((e) => this.emitError(e as Error));
     if (this.pumping) return Promise.all([this.pumping, advisory]).then(() => undefined);
     const core = (async () => {
       try {

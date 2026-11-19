@@ -717,6 +717,91 @@ describe('restarting a stopped bridge', () => {
     await bridge.stop();
   });
 
+  it('a recovery that failed is tried again by the next pump, so delivery does not stay closed', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    const open = store.openIntents.bind(store);
+    let failed = false;
+    store.openIntents = async () => {
+      if (failed) return open();
+      failed = true;
+      throw new Error('store busy');
+    };
+    await expect(bridge.start({ socket: false })).rejects.toThrow('store busy');
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
+    await bridge.pump();
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
+    await bridge.idle();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('a first start behind a drain the host began types nothing more until recovery has run', async () => {
+    const { bridge, relay, phone, sink, store } = await setupBridge();
+    sink.addPane('pane-2');
+    sink.addPane('pane-3');
+    const ask = async (pane: string) =>
+      (
+        await bridge.registerQuestion({
+          origin: origin({ pane_id: pane }),
+          input: { question: 'Ship it?', options: [{ id: 'approve', label: 'Approve' }] },
+        })
+      ).questionId;
+    const first = await ask('pane-1');
+    const crashed = await ask('pane-2');
+    const third = await ask('pane-3');
+    await bridge.pump();
+    for (const pane of ['pane-1', 'pane-3']) sink.panes.get(pane)!.idle = false;
+    for (const q of [first, third])
+      await relay.answerEvent({ questionId: q, phone, options: ['approve'] });
+    await bridge.catchUp();
+    // A write a crash left open in pane-2: recovery looks for its marker there, and is held doing so.
+    const o = origin({ pane_id: 'pane-2' });
+    const now = Date.now();
+    await store.putIntent({
+      injection_id: 'crashed-write',
+      question_id: crashed,
+      answer_revision: 1,
+      message_id: null,
+      host_id: o.host_id,
+      pane_id: o.pane_id,
+      terminal_generation: o.terminal_generation,
+      ownership_principal: o.ownership_principal,
+      agent_incarnation: o.agent_incarnation,
+      state: 'intent',
+      created_at: now,
+      updated_at: now,
+    });
+    let found!: (found: boolean) => void;
+    sink.hasMarker = () => new Promise<boolean>((r) => (found = r));
+    // The host's own drain is held writing the first answer when the bridge starts.
+    const write = sink.inject.bind(sink);
+    let release!: (r: InjectResult) => void;
+    let calls = 0;
+    sink.inject = (t, text, id) => {
+      if (++calls === 1) return new Promise<InjectResult>((r) => (release = r));
+      return write(t, text, id);
+    };
+    sink.panes.get('pane-1')!.idle = true;
+    const draining = bridge.notifyPaneIdle();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    sink.panes.get('pane-3')!.idle = true;
+    await bridge.start({ socket: false });
+    release({ outcome: 'held', reason: 'busy' });
+    await draining;
+    await vi.waitFor(() => expect(found).toBeTypeOf('function'));
+    const typedFor = (q: string) => sink.typed.some((t) => t.text.includes(`question_id: ${q}`));
+    expect(typedFor(third)).toBe(false);
+    found(false);
+    await vi.waitFor(() => expect(typedFor(third)).toBe(true));
+    await bridge.idle();
+    expect(typedFor(first)).toBe(true);
+    await bridge.stop();
+  });
+
   it('a revoked bridge cannot be started again, before or after a stop', async () => {
     const { bridge, relay, phone, sink, qid, identity } = await asked();
     relay.push('device.revoked', null, null, { device_id: identity.config.deviceId, key_epoch: 2 });
