@@ -10,7 +10,7 @@ import { presenceHold } from '../room/presence.js';
 import type { Room } from '../room/types.js';
 import { expireQuestionNow, type QuestionRow } from '../routes/questions.js';
 import { nowMs } from '../util.js';
-import { sendNotification, type PushPayload } from './notify.js';
+import { pushTtlSeconds, sendNotification, type PushPayload } from './notify.js';
 
 interface JobRow {
   job_id: string;
@@ -91,8 +91,21 @@ const isOverdue = (q: QuestionRow) =>
 const isTransient = (status: number | null) => status === null || status === 429 || status >= 500;
 
 /**
- * Push jobs honour quiet hours by deferring (never delaying data sync). Subscriptions that already got this
- * notification are remembered in the job payload so a retry only targets the ones that transiently failed.
+ * Until when a push about `q` can still be acted on: an open question's deadline (docs/protocol.md section 11). No
+ * other state has one: a proxy answer cancels the expiry, and an answered question's thread outlives it.
+ */
+const deadlineOf = (q: Pick<QuestionRow, 'status' | 'expires_at'>): number | null =>
+  q.status === 'open' ? q.expires_at : null;
+
+/** Whether a push of `q` due at `at` would still have a second to live: work due later is dropped, not deferred. */
+const liveAt = (at: number, q: Pick<QuestionRow, 'status' | 'expires_at'>) =>
+  pushTtlSeconds(at, deadlineOf(q)) !== null;
+
+/**
+ * Push jobs honour quiet hours by deferring (never delaying data sync), unless quiet hours last until the question's
+ * deadline. Subscriptions that already got this notification are remembered in the job payload so a retry only
+ * targets the ones that transiently failed. Each send's TTL ends by the deadline, and none goes once it has passed or
+ * the job was cancelled meanwhile (an answer during an earlier send).
  */
 async function pushJob(
   room: Room,
@@ -103,16 +116,28 @@ async function pushJob(
 ): Promise<Outcome> {
   const t = nowMs();
   const when = nextAllowed(t, room.settings().quiet_hours);
-  if (when > t) return { deferUntil: when };
+  if (when > t) return liveAt(when, q) ? { deferUntil: when } : undefined;
+  const deadline = deadlineOf(q);
   const payload = JSON.parse(job.payload) as Record<string, unknown>;
   const done = new Set<string>(Array.isArray(payload.done) ? (payload.done as string[]) : []);
   const results = await sendNotification(
     room,
     { type, question_id: q.question_id },
-    { topic: await topicFor(q.question_id), urgency, skip: done },
+    {
+      topic: await topicFor(q.question_id),
+      urgency,
+      skip: done,
+      usefulUntil: deadline,
+      wanted: () =>
+        room.q1<{ status: string }>(
+          `SELECT status FROM scheduled_jobs WHERE job_id = ?`,
+          job.job_id,
+        )?.status === 'pending',
+    },
   );
   for (const r of results) if (r.ok) done.add(r.subscription_id);
-  if (results.some((r) => !r.ok && isTransient(r.status))) {
+  // A retry once the deadline has passed would only be dropped.
+  if (results.some((r) => !r.ok && isTransient(r.status)) && pushTtlSeconds(nowMs(), deadline) !== null) {
     room.run(
       `UPDATE scheduled_jobs SET payload = ? WHERE job_id = ?`,
       JSON.stringify({ ...payload, done: [...done] }),
@@ -186,10 +211,11 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
       if (type === 'decision-new' && q.status !== 'open') return;
       if (type === 'decision-proxy' && q.status !== 'proxy-answered') return;
       // While the person is at the computer, a new question waits there first, for a bounded time (section 11).
-      // A proxy answer's notice is not held: only a phone or tablet can confirm or override it.
+      // A proxy answer's notice is not held: only a phone or tablet can confirm or override it. A hold that lasts
+      // until the deadline leaves nothing to send.
       if (type === 'decision-new') {
         const hold = presenceHold(room, q, nowMs());
-        if (hold !== null) return { deferUntil: hold };
+        if (hold !== null) return liveAt(hold, q) ? { deferUntil: hold } : undefined;
       }
       return pushJob(room, job, q, type, 'high');
     }
@@ -215,9 +241,12 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
           );
           const fresh = getQuestion(room, job.question_id);
           if (still?.status !== 'pending' || !fresh || fresh.status !== 'open') return;
+          const runAt = nowMs() + s.interval_ms;
+          // No reminder is lined up for after the deadline.
+          if (!liveAt(runAt, fresh)) return;
           room.schedule({
             kind: 'remind',
-            runAt: nowMs() + s.interval_ms,
+            runAt,
             questionId: q.question_id,
             payload: { n: n + 1 },
           });

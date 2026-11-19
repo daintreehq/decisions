@@ -1,7 +1,7 @@
 import { PushPayload } from '@daintreehq/decisions-protocol';
 import type { Room } from '../room/types.js';
 import { nowMs } from '../util.js';
-import { sendWebPush, type VapidKeys } from '../push/webpush.js';
+import { DEFAULT_PUSH_TTL_SECONDS, sendWebPush, type VapidKeys } from '../push/webpush.js';
 
 export interface NotifyResult {
   subscription_id: string;
@@ -33,6 +33,20 @@ function eligible(type: PushPayload['type']): string {
 const SUB_FROM = `SELECT s.subscription_id, s.device_id, s.endpoint, s.p256dh, s.auth
      FROM push_subscriptions s JOIN devices d ON d.device_id = s.device_id`;
 
+/**
+ * The TTL a push sent at `now` carries: `max` seconds, cut to the whole seconds left before `until` for a push that
+ * is no use after it (docs/protocol.md section 11). Null when not a second is left: such a push is not sent.
+ */
+export function pushTtlSeconds(
+  now: number,
+  until: number | null | undefined,
+  max = DEFAULT_PUSH_TTL_SECONDS,
+): number | null {
+  if (until == null) return max;
+  const left = Math.floor((until - now) / 1000);
+  return left >= 1 ? Math.min(max, left) : null;
+}
+
 /** How many subscriptions a push of `type` would go to now. */
 export function eligibleSubscriptionCount(room: Room, type: PushPayload['type']): number {
   return room.q1<{ n: number }>(
@@ -44,6 +58,8 @@ export function eligibleSubscriptionCount(room: Room, type: PushPayload['type'])
  * Sends a generic push to every eligible subscription (`eligible`). The payload is an attention signal only (a
  * type, and a question id for a question's push): no project, no question text, no answer, no message. It is
  * checked against the protocol's strict `PushPayload` before anything is sent, so no other field can slip in.
+ * `usefulUntil` (relay epoch ms) ends the push's lifetime: each send's TTL runs out by then (`pushTtlSeconds`).
+ * `wanted` is asked before each send; once it says no, the rest of the list gets nothing.
  */
 export async function sendNotification(
   room: Room,
@@ -53,6 +69,8 @@ export async function sendNotification(
     topic?: string;
     urgency?: 'normal' | 'high';
     ttlSeconds?: number;
+    usefulUntil?: number | null;
+    wanted?: () => boolean;
     skip?: ReadonlySet<string>;
   } = {},
 ): Promise<NotifyResult[]> {
@@ -80,6 +98,10 @@ export async function sendNotification(
       listed.endpoint,
     );
     if (!sub || opts.skip?.has(sub.subscription_id)) continue;
+    // Every send awaits, so the time left is worked out again for each one. Once it has run out, or the push is no
+    // longer wanted, no endpoint further down the list gets it either, and none is counted as failed.
+    const ttlSeconds = pushTtlSeconds(nowMs(), opts.usefulUntil, opts.ttlSeconds);
+    if (ttlSeconds === null || opts.wanted?.() === false) break;
     let status: number | null = null;
     try {
       status = await sendWebPush(
@@ -87,11 +109,7 @@ export async function sendNotification(
         body,
         keys,
         room.env.PUSH_SUBJECT || room.getMeta('origin') || 'https://localhost',
-        {
-          urgency: opts.urgency ?? 'normal',
-          ...(opts.topic ? { topic: opts.topic } : {}),
-          ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
-        },
+        { urgency: opts.urgency ?? 'normal', ttlSeconds, ...(opts.topic ? { topic: opts.topic } : {}) },
       );
     } catch {
       status = null;
