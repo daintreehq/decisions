@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { knownFeatures, type ProtocolFeature } from '@daintreehq/decisions-protocol';
 import {
   BridgeError,
   RelayError,
@@ -180,6 +181,11 @@ const SETTLE_MS = 10_000;
 const PUBLISH_MS = 30_000;
 /** How often it looks again meanwhile. */
 const PUBLISH_TICK_MS = 250;
+/**
+ * The longest its declaration of this device's features may hold up its first send, at most half of what is left of
+ * `PUBLISH_MS`.
+ */
+const DECLARE_MS = 5_000;
 
 interface WaitArgs {
   ctx: Ctx;
@@ -452,6 +458,8 @@ export interface AskOptions {
   poll?: HttpPollOptions;
   tickMs?: number;
   settleMs?: number;
+  /** Tests: the longest the declaration of this device's features may hold up a plain ask's first send. */
+  declareMs?: number;
 }
 
 export interface WaitCommandOptions {
@@ -567,8 +575,18 @@ async function waitAndReport(
  * publishes it itself (a pump). While another process receives, it leaves the publishing to that one and watches, and
  * takes over if that process exits first. True once the question has left this computer's queue; false (with a word on
  * standard error) when it is still queued, for the next receiver to send.
+ *
+ * Before its first send it declares this device's features to the relay, as a receiver does on its socket ticket: the
+ * phone offers, and the relay accepts, the person's decline of a question only once its desktop has declared that it
+ * files one, and a device that never ran a receiver has declared nothing. A declaration that fails or is slow never
+ * keeps the question from going out.
  */
-async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean> {
+async function publish(
+  ctx: Ctx,
+  w: Waiter,
+  questionId: string,
+  declareMs = DECLARE_MS,
+): Promise<boolean> {
   const until = performance.now() + PUBLISH_MS;
   let interrupt: () => void = () => undefined;
   const stopped = new Promise<void>((resolve) => (interrupt = resolve));
@@ -577,6 +595,7 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
   const after = (ms: number) =>
     new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
   let sending: Promise<unknown> | null = null;
+  let declared = false;
   try {
     for (;;) {
       if (w.halt.signal) return false;
@@ -587,12 +606,21 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
           await Promise.race([sending, stopped, after(Math.max(0, until - performance.now()))]);
         return true;
       }
+      // Stopped while it read: nothing more starts.
+      if (w.halt.signal) return false;
       const left = until - performance.now();
       if (left <= 0) break;
       // One pump of its own at a time, looked at again every tick: a pump held up by another question's notice never
       // keeps this one from seeing its question go out, a signal or the deadline.
       if (!sending && w.lock.tryAcquire()) {
-        const send = w.bridge.pump();
+        const declare = !declared;
+        declared = true;
+        const send = (async () => {
+          if (declare) await declareFeatures(ctx, w, Math.min(declareMs, left / 2));
+          // Stopped, or out of time, meanwhile: nothing more goes out.
+          if (w.halt.signal || performance.now() >= until) return;
+          await w.bridge.pump();
+        })();
         w.also.push(send);
         sending = send
           .catch((e: Error) => ctx.err(`warning: ${e.message}`))
@@ -608,6 +636,44 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
     '[decisions] the question is not published yet: it stays queued on this computer, and the decisions process that receives for this state directory sends it (a running listen or mcp, or the next one to start).',
   );
   return false;
+}
+
+/**
+ * Sees that the relay lists this device's features: every `decisions` process of this state directory builds the same
+ * bridge, so these are what its receivers declare. The relay keeps only the latest socket ticket's declaration, so a
+ * missing one is declared, as an HTTP sync does, through a ticket it never uses. It only adds: what the relay already
+ * lists for this device stays declared (a host of the same device may declare more), and when that covers them nothing
+ * is sent, so a run of plain asks spends none of the device's few tickets a minute, which a receiver starting meanwhile
+ * needs. When the list cannot be read, the ticket declares what a receiver would. Done within `ms` altogether. Never
+ * throws; a failure is a warning.
+ */
+async function declareFeatures(ctx: Ctx, w: Waiter, ms: number): Promise<void> {
+  try {
+    // One deadline for all of it, however often a request is signed and sent again (after a clock-skew refusal).
+    const signal = AbortSignal.timeout(Math.max(1, Math.floor(ms)));
+    let listed = new Set<ProtocolFeature>();
+    try {
+      const list = (await w.rt.client.devices({ retry: false, signal })) as {
+        devices?: unknown;
+      } | null;
+      const me = w.rt.identity.config.deviceId;
+      const rows = list?.devices;
+      const self: unknown = Array.isArray(rows)
+        ? rows.find((d) => (d as { device_id?: unknown } | null)?.device_id === me)
+        : undefined;
+      const features = (self as { features?: unknown } | undefined)?.features;
+      if (Array.isArray(features))
+        listed = knownFeatures(features.filter((f): f is string => typeof f === 'string'));
+    } catch {
+      // Unread: the ticket below says why, if it fails too.
+    }
+    if (w.bridge.features.every((f) => listed.has(f))) return;
+    await w.rt.client.socketTicket([...listed, ...w.bridge.features], { retry: false, signal });
+  } catch (e) {
+    ctx.err(
+      `warning: could not declare this device's features to the relay (${(e as Error).message}); the phone may not offer to dismiss the question until a decisions listen or mcp runs`,
+    );
+  }
 }
 
 /** How long `ask` waits for another `ask` in the same state directory to finish registering. */
@@ -675,7 +741,7 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
         : text,
     );
     if (!o.wait) {
-      const published = await publish(ctx, w, r.questionId);
+      const published = await publish(ctx, w, r.questionId, o.declareMs);
       if (!ctx.json && published)
         ctx.out(
           'The outcome is delivered by a running `decisions listen` (or `decisions mcp`), or here with --wait.',

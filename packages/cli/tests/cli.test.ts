@@ -11,7 +11,7 @@ import {
   issueDeviceCert,
   newId,
 } from '@daintreehq/decisions-crypto';
-import { PROTOCOL_VERSION, type DeviceCert } from '@daintreehq/decisions-protocol';
+import { PROTOCOL_VERSION, ProtocolFeature, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
 import { DemoSink, cliOrigin, daemon, mcpAddLines, parseSink } from '../src/commands/daemon.js';
@@ -352,6 +352,96 @@ describe('ask / status / devices', () => {
     expect(out.join('\n')).toMatch(/Asked as q-1 .*requirement: human-required/);
     const create = calls.find((c) => c.path === '/api/v1/questions')!;
     expect(JSON.stringify(create.body)).not.toContain('Tabs or spaces?'); // encrypted
+  });
+  const ticketed = (tickets: { features?: string[] }[]) => (body: unknown) => {
+    tickets.push(body as { features?: string[] });
+    return {
+      ticket: 't',
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+      ws_path: '/api/v1/socket',
+    };
+  };
+  it("a plain ask declares this device's features before it publishes, as a receiver would, so the person can dismiss its question", async () => {
+    const tickets: { features?: string[] }[] = [];
+    const { ctx, calls } = await ready({
+      routes: {
+        'POST /api/v1/socket-ticket': ticketed(tickets),
+        'GET /api/v1/events': () => ({
+          protocol_version: PROTOCOL_VERSION,
+          from_exclusive: 0,
+          high_water_seq: 0,
+          events: [],
+          next_after: 0,
+          has_more: false,
+        }),
+        'POST /api/v1/deliveries/received': () => ({ ok: true }),
+      },
+    });
+    tickets.length = 0;
+    expect(await ask(ctx, {}, { question: 'Ship it?' })).toBe(0);
+    const paths = calls.map((c) => `${c.method} ${c.path}`);
+    const ticket = paths.indexOf('POST /api/v1/socket-ticket');
+    expect(ticket).toBeGreaterThanOrEqual(0);
+    expect(ticket).toBeLessThan(paths.indexOf('POST /api/v1/questions'));
+    // The relay and the phone gate the person's decline on it.
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]!.features).toEqual(
+      expect.arrayContaining(['person-declines-v1', 'owner-desktop-declines-v1']),
+    );
+    // Exactly what a receiver of this device declares.
+    await daemon(ctx, {}, { once: true });
+    expect(tickets).toHaveLength(2);
+    expect(tickets[0]!.features).toEqual(tickets[1]!.features);
+  });
+  it('a plain ask only adds to what the relay lists for this device, and sends nothing when that covers it', async () => {
+    const tickets: { features?: string[] }[] = [];
+    const me = { id: '', features: ['pane-snapshots-v1', 'phone-images-v1'] };
+    const { ctx, calls } = await ready({
+      routes: {
+        'POST /api/v1/socket-ticket': ticketed(tickets),
+        'GET /api/v1/devices': () => ({
+          key_epoch: 1,
+          owner_device_id: me.id,
+          // A phone, listed first, declares what a phone does; only this device's own row counts.
+          devices: [
+            { device_id: 'dev_phone0001', features: ProtocolFeature.options },
+            null,
+            { device_id: me.id, features: [...me.features, 7] },
+          ],
+        }),
+      },
+    });
+    me.id = (await loadIdentity(keyStoreFor(ctx))).config.deviceId;
+    tickets.length = 0;
+    // A host of the same device declared snapshots: they stay declared beside what this computer files.
+    expect(await ask(ctx, {}, { question: 'One?' })).toBe(0);
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]!.features).toEqual(
+      expect.arrayContaining(['pane-snapshots-v1', 'phone-images-v1', 'person-declines-v1']),
+    );
+    // The relay now lists them all: the next ask spends no ticket, and still publishes.
+    me.features = tickets[0]!.features!;
+    calls.length = 0;
+    expect(await ask(ctx, {}, { question: 'Two?' })).toBe(0);
+    expect(tickets).toHaveLength(1);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toContain('POST /api/v1/questions');
+  });
+  it('a plain ask that cannot read the device list still declares what a receiver would', async () => {
+    const tickets: { features?: string[] }[] = [];
+    const { ctx, calls } = await ready({
+      routes: {
+        'POST /api/v1/socket-ticket': ticketed(tickets),
+        'GET /api/v1/devices': () =>
+          new Response(JSON.stringify({ code: 'internal_error', message: 'down' }), {
+            status: 500,
+          }),
+      },
+    });
+    tickets.length = 0;
+    expect(await ask(ctx, {}, { question: 'Ship it?' })).toBe(0);
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]!.features).toEqual(expect.arrayContaining(['person-declines-v1']));
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toContain('POST /api/v1/questions');
   });
   it('ask rejects malformed --option values', async () => {
     const { ctx } = await ready();
