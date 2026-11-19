@@ -59,7 +59,7 @@ Everything runs in **your own Cloudflare account**. There is no Daintree-operate
 - Answers are typed into the exact pane they were asked from, or not at all. If that pane or session cannot be found, the answer waits and tells you.
 - Answers are typed as inert, delimited data. Control characters and escape sequences are stripped, and nothing in an answer can close the block or pose as a field.
 - An expired question never authorizes anything.
-- Push notifications say only "a question needs your input". Never the question.
+- Push notifications say only "a question needs your input", or "an agent stopped" when Daintree is set to send it. Never the question.
 
 <img src="docs/readme/pairing.png" alt="Two phones: the six-digit pairing code to check against the same code on the computer, and a paired computer's details under Settings, Devices, with its key fingerprint in four-character groups and Copy fingerprint." width="100%">
 
