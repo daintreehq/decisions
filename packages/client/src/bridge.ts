@@ -649,6 +649,7 @@ export class DecisionsBridge {
     const run = ++this.lifecycle;
     this.httpAbort = new AbortController();
     this.state = 'running';
+    this.advisory.start();
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
@@ -691,7 +692,7 @@ export class DecisionsBridge {
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
-    this.advisory.reset();
+    this.advisory.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -730,7 +731,7 @@ export class DecisionsBridge {
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
-    this.advisory.reset();
+    this.advisory.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));

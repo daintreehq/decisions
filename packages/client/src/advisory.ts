@@ -31,8 +31,10 @@ export class AdvisorySupport {
   /** The active phones and tablets that declared the feature, by device id. */
   private readers: { ids: string[]; at: number } | null = null;
   private reading: Promise<void> | null = null;
-  /** Bumped by `reset`, so a read that started before it never restores what it cleared. */
+  /** Bumped by `stop`, so a read that started before it never restores what it cleared. */
   private generation = 0;
+  /** False once the bridge stopped or was revoked, until it starts again: nothing is read meanwhile. */
+  private active = true;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -42,7 +44,7 @@ export class AdvisorySupport {
 
   /** Whether an agent on this host could ask for advice now, so the facts are worth reading. */
   wanted(): boolean {
-    return this.hostSupport && this.ctx.policy.advisoryQuestions;
+    return this.active && this.hostSupport && this.ctx.policy.advisoryQuestions;
   }
 
   /**
@@ -54,8 +56,7 @@ export class AdvisorySupport {
     const readers = relay ? this.fresh(this.readers) : null;
     if (!readers) return { relay, reader: null };
     for (const id of readers.ids)
-      if ((await this.ctx.store.getMeta(revokedKey(id))) === null)
-        return { relay, reader: true };
+      if ((await this.ctx.store.getMeta(revokedKey(id))) === null) return { relay, reader: true };
     return { relay, reader: false };
   }
 
@@ -70,8 +71,7 @@ export class AdvisorySupport {
     if (!this.wanted()) return Promise.resolve();
     if (this.reading) return this.reading;
     const now = this.ctx.now();
-    const due = (f: { at: number } | null) =>
-      !f || now - f.at >= REFRESH_AFTER_MS || now < f.at;
+    const due = (f: { at: number } | null) => !f || now - f.at >= REFRESH_AFTER_MS || now < f.at;
     if (!due(this.relay) && !(this.relay?.value && due(this.readers))) return Promise.resolve();
     const run = this.generation;
     this.reading = this.read(run)
@@ -82,8 +82,13 @@ export class AdvisorySupport {
     return this.reading;
   }
 
-  /** Forget everything (the bridge stopped or was revoked); a read in flight is discarded. */
-  reset(): void {
+  start(): void {
+    this.active = true;
+  }
+
+  /** Forget everything and read nothing more (the bridge stopped or was revoked); a read in flight is discarded. */
+  stop(): void {
+    this.active = false;
     this.generation++;
     this.relay = null;
     this.readers = null;

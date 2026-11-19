@@ -230,7 +230,7 @@ describe.skipIf(!chromiumPath)(
     let qid = '';
 
     it('ask_human returns at once; the phone answers; the answer is typed into the asking pane only', async () => {
-      const asked = await call(paneA, 'ask_human', {
+      const request = {
         question: 'Use optimistic updates for the todo list?',
         context: 'The list re-renders on every keystroke today.',
         options: [
@@ -238,7 +238,8 @@ describe.skipIf(!chromiumPath)(
           { id: 'no', label: 'No, wait for the server' },
         ],
         correlation_id: 'todo-optimistic',
-      });
+      };
+      const asked = await call(paneA, 'ask_human', request);
       expect(asked.isError).toBeFalsy();
       qid = String(asked.structuredContent!.question_id);
       expect(asked.structuredContent).toMatchObject({ enforced_requirement: 'human-required' });
@@ -246,16 +247,10 @@ describe.skipIf(!chromiumPath)(
         /^Asked as q-\d+\. Carry on with anything that does not depend on the answer/,
       );
 
-      // the same correlation id from the same pane is the same question, not a second one
-      const again = await call(paneA, 'ask_human', {
-        question: 'Use optimistic updates for the todo list?',
-        options: [
-          { id: 'yes', label: 'Yes, optimistic' },
-          { id: 'no', label: 'No, wait for the server' },
-        ],
-        correlation_id: 'todo-optimistic',
-      });
+      // the same request under the same correlation id from the same pane is the same question, not a second one
+      const again = await call(paneA, 'ask_human', request);
       expect(again.structuredContent!.question_id).toBe(qid);
+      expect(again.structuredContent).toMatchObject({ duplicate: true });
       await bridge.pump();
 
       const before = await call(paneA, 'get_decision', { question_id: qid });

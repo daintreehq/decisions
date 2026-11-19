@@ -190,9 +190,7 @@ export interface RegisterResult {
 
 /** What a correlated ask requested, by kind: the host default, a duration from asking, or a fixed time (UTC). */
 type DeadlineRequest =
-  | { kind: 'default' }
-  | { kind: 'relative'; ms: number }
-  | { kind: 'absolute'; at: string };
+  { kind: 'default' } | { kind: 'relative'; ms: number } | { kind: 'absolute'; at: string };
 
 /**
  * A correlated ask's registration (`reg:<question id>` in the store's meta): what it asked for beyond its signed content,
@@ -249,30 +247,32 @@ const sameDeadline = (a: DeadlineRequest, b: DeadlineRequest) =>
   (a.kind !== 'absolute' || a.at === (b as typeof a).at);
 
 /** Why an advisory ask was refused, as the agent is told: the error code and what to do. */
-const ADVISORY_REFUSALS: Record<AdvisoryRefusal | 'support-unknown', [BridgeError['code'], string]> =
-  {
-    'relay-unsupported': ['not_supported', 'the relay does not support advisory questions yet'],
-    'host-unsupported': ['not_supported', 'this host does not deliver advisory outcomes'],
-    'policy-disallowed': ['forbidden', "the host's policy does not allow advisory questions"],
-    'no-capable-reader': [
-      'not_supported',
-      'no phone or tablet the person uses can show an advisory question yet',
-    ],
-    gated: ['validation_error', 'a question under a workflow gate always waits for a decision'],
-    approval: ['validation_error', 'an approval always waits for a decision'],
-    'no-deadline': [
-      'validation_error',
-      "advice needs a deadline: give expires_in or expires_at, since this host's default never expires",
-    ],
-    'invalid-plan': [
-      'validation_error',
-      `planned_fallback must be 1 to ${LIMITS.plannedFallbackChars} characters and not blank`,
-    ],
-    'support-unknown': [
-      'invalid_state',
-      'whether the relay and the person’s devices support advisory questions is not known yet; try again in a minute',
-    ],
-  };
+const ADVISORY_REFUSALS: Record<
+  AdvisoryRefusal | 'support-unknown',
+  [BridgeError['code'], string]
+> = {
+  'relay-unsupported': ['not_supported', 'the relay does not support advisory questions yet'],
+  'host-unsupported': ['not_supported', 'this host does not deliver advisory outcomes'],
+  'policy-disallowed': ['forbidden', "the host's policy does not allow advisory questions"],
+  'no-capable-reader': [
+    'not_supported',
+    'no phone or tablet the person uses can show an advisory question yet',
+  ],
+  gated: ['validation_error', 'a question under a workflow gate always waits for a decision'],
+  approval: ['validation_error', 'an approval always waits for a decision'],
+  'no-deadline': [
+    'validation_error',
+    "advice needs a deadline: give expires_in or expires_at, since this host's default never expires",
+  ],
+  'invalid-plan': [
+    'validation_error',
+    `planned_fallback must be 1 to ${LIMITS.plannedFallbackChars} characters and not blank`,
+  ],
+  'support-unknown': [
+    'invalid_state',
+    'whether the relay and the person’s devices support advisory questions is not known yet; try again in a minute',
+  ],
+};
 
 function advisoryError(reason: AdvisoryRefusal | 'support-unknown'): BridgeError {
   const [code, why] = ADVISORY_REFUSALS[reason];
@@ -445,14 +445,19 @@ export class Publisher {
     const hostDefault = ctx.policy.defaultQuestionExpiryMs;
     const asked = requestedExpiresAt ?? undefined;
     let expiresAt: string | null;
-    let expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'> = { source: 'host', gateId: null };
+    let expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'> = {
+      source: 'host',
+      gateId: null,
+    };
     if (gate) {
       expiresAt = expiryOutcome(asked, gate, now, hostDefault).expiresAt;
       // A gate without an expiry of its own leaves the host's default in place and caps nothing.
       if (gate.expiryMs !== undefined) expirySource = { source: 'gate', gateId };
     } else {
       const host = expiryOutcome(asked, undefined, now, hostDefault).expiresAt;
-      const named = callerGate ? expiryOutcome(asked, callerGate, now, hostDefault).expiresAt : null;
+      const named = callerGate
+        ? expiryOutcome(asked, callerGate, now, hostDefault).expiresAt
+        : null;
       expiresAt = earliest(host, named);
       if (named !== null && (host === null || Date.parse(named) < Date.parse(host)))
         expirySource = { source: 'gate', gateId: callerGateId };
@@ -2125,7 +2130,11 @@ function requestOf(c: {
     question: c.question,
     context: c.context ?? null,
     kind: c.kind,
-    options: c.options.map((o) => ({ id: o.id, label: o.label, description: o.description ?? null })),
+    options: c.options.map((o) => ({
+      id: o.id,
+      label: o.label,
+      description: o.description ?? null,
+    })),
     allow_text: c.allow_text !== false,
     preparation: c.preparation ?? null,
     planned_fallback: c.planned_fallback ?? null,

@@ -336,7 +336,7 @@ export const TOOLS = [
           minLength: 1,
           maxLength: LIMITS.plannedFallbackChars,
           description:
-            "Ask for advice, not a decision: what you will do if no answer arrives by the deadline (expires_in, expires_at or the host default), such as \"I'll use the in-memory fixture.\" If none arrives, you are told, and may carry it out at your discretion. Never for an approval, a workflow gate or anything that needs permission. Refused where the host or the person's devices cannot show it; ask again without it for a decision.",
+            'Ask for advice, not a decision: what you will do if no answer arrives by the deadline (expires_in, expires_at or the host default), such as "I\'ll use the in-memory fixture." If none arrives, you are told, and may carry it out at your discretion. Never for an approval, a workflow gate or anything that needs permission. Refused where the host or the person\'s devices cannot show it; ask again without it for a decision.',
         },
         correlation_id: {
           type: 'string',
@@ -765,8 +765,8 @@ export function createDecisionsMcpHandler(
             : v.status === 'publish-failed'
               ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: the person never saw it, so nothing was decided. Ask again if you still need it.`
               : v.closedReason === 'declined'
-              ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-              : `q-${v.alias} is ${v.status}; no answer in force.`;
+                ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;
         return text(
           messages > 0

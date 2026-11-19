@@ -35,62 +35,64 @@ export function parseExpiresIn(v: string): number | null {
 }
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */
-export const AskHumanInput = z.object({
-  question: z.string().min(1).max(LIMITS.questionChars),
-  context: z
-    .string()
-    .refine((v) => utf8ByteLength(v) <= LIMITS.contextBytes, 'context exceeds 32 KiB')
-    .optional(),
-  kind: z.enum(['choice', 'approval', 'text', 'mixed']).optional(),
-  options: z
-    .array(
-      z.object({
-        id: z.string().min(1).max(LIMITS.optionIdChars),
-        label: z.string().min(1).max(LIMITS.optionLabelChars),
-        description: z.string().max(LIMITS.optionDescriptionChars).optional(),
-      }),
-    )
-    .max(LIMITS.maxOptions)
-    .optional(),
-  attachments: z
-    .array(
-      z.object({
-        local_resource_id: z.string().min(1).max(200),
-        role: z.enum(['before', 'after', 'reference', 'other']).optional(),
-        alt: z.string().max(500).optional(),
-      }),
-    )
-    .max(LIMITS.attachmentsPerQuestion)
-    .optional(),
-  requested_requirement: Requirement.optional(),
-  workflow_gate_id: z.string().min(1).max(200).optional(),
-  expires_at: z.iso.datetime({ offset: true }).optional(),
-  /**
-   * A reply window relative to when the host takes the question (`parseExpiresIn`), converted once on the host's
-   * clock. Never together with `expires_at`.
-   */
-  expires_in: z
-    .string()
-    .refine(
-      (v) => parseExpiresIn(v) !== null,
-      'expires_in must be a whole number and one unit (s, m, h or d), from 61s to 365d, such as 15m',
-    )
-    .optional(),
-  correlation_id: z.string().min(1).max(64).optional(),
-  /**
-   * The agent's own account of how it prepared the question under the person's involvement preference
-   * (protocol section 20.1). Shown to the person as the agent's account; it never changes the requirement.
-   */
-  preparation: PreparationReport.optional(),
-  /**
-   * What the agent will do if no answer arrives by the deadline. Sending it asks for advice rather than a decision
-   * (protocol section 21): the question is advisory, or refused, never quietly made blocking.
-   */
-  planned_fallback: PlannedFallback.optional(),
-}).refine((v) => v.expires_at === undefined || v.expires_in === undefined, {
-  message: 'supply only one of expires_at and expires_in',
-  path: ['expires_in'],
-});
+export const AskHumanInput = z
+  .object({
+    question: z.string().min(1).max(LIMITS.questionChars),
+    context: z
+      .string()
+      .refine((v) => utf8ByteLength(v) <= LIMITS.contextBytes, 'context exceeds 32 KiB')
+      .optional(),
+    kind: z.enum(['choice', 'approval', 'text', 'mixed']).optional(),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(LIMITS.optionIdChars),
+          label: z.string().min(1).max(LIMITS.optionLabelChars),
+          description: z.string().max(LIMITS.optionDescriptionChars).optional(),
+        }),
+      )
+      .max(LIMITS.maxOptions)
+      .optional(),
+    attachments: z
+      .array(
+        z.object({
+          local_resource_id: z.string().min(1).max(200),
+          role: z.enum(['before', 'after', 'reference', 'other']).optional(),
+          alt: z.string().max(500).optional(),
+        }),
+      )
+      .max(LIMITS.attachmentsPerQuestion)
+      .optional(),
+    requested_requirement: Requirement.optional(),
+    workflow_gate_id: z.string().min(1).max(200).optional(),
+    expires_at: z.iso.datetime({ offset: true }).optional(),
+    /**
+     * A reply window relative to when the host takes the question (`parseExpiresIn`), converted once on the host's
+     * clock. Never together with `expires_at`.
+     */
+    expires_in: z
+      .string()
+      .refine(
+        (v) => parseExpiresIn(v) !== null,
+        'expires_in must be a whole number and one unit (s, m, h or d), from 61s to 365d, such as 15m',
+      )
+      .optional(),
+    correlation_id: z.string().min(1).max(64).optional(),
+    /**
+     * The agent's own account of how it prepared the question under the person's involvement preference
+     * (protocol section 20.1). Shown to the person as the agent's account; it never changes the requirement.
+     */
+    preparation: PreparationReport.optional(),
+    /**
+     * What the agent will do if no answer arrives by the deadline. Sending it asks for advice rather than a decision
+     * (protocol section 21): the question is advisory, or refused, never quietly made blocking.
+     */
+    planned_fallback: PlannedFallback.optional(),
+  })
+  .refine((v) => v.expires_at === undefined || v.expires_in === undefined, {
+    message: 'supply only one of expires_at and expires_in',
+    path: ['expires_in'],
+  });
 export type AskHumanInput = z.infer<typeof AskHumanInput>;
 
 /**
