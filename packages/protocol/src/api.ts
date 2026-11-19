@@ -192,6 +192,11 @@ export const PushSubscriptionInfo = z.object({
   last_success_at: IsoTime.nullable(),
   last_error_code: z.string().nullable(),
   enabled: z.boolean(),
+  /**
+   * What this endpoint declared it can show (section 11), as the relay applies it: `agent-stopped-push-v1` or
+   * nothing. Absent from a relay that predates `agent-stopped-push-v1`.
+   */
+  features: FeatureList.optional(),
 });
 export const PushTestResponse = z.object({
   attempted: z.number().int(),
@@ -211,6 +216,17 @@ export const PresenceResponse = z.object({
   until: IsoTime.nullable(),
 });
 export type PresenceResponse = z.infer<typeof PresenceResponse>;
+
+/**
+ * `POST /push/agent-stopped`: what the relay did with the request. `sent`: a push service accepted it for at least
+ * one endpoint. `failed`: every endpoint's push service refused it or could not be reached. `quiet-hours`: dropped,
+ * never deferred. `rate-limited`: dropped, since the relay accepted one within the last `agentStoppedPushWindowMs`.
+ * `no-subscription`: no endpoint has declared it can show one. Every outcome is final: the desktop never retries.
+ */
+export const AgentStoppedPushResponse = z.object({
+  outcome: z.enum(['sent', 'failed', 'quiet-hours', 'rate-limited', 'no-subscription']),
+});
+export type AgentStoppedPushResponse = z.infer<typeof AgentStoppedPushResponse>;
 
 export const VoiceSessionResponse = z.object({
   ticket: B64Url,

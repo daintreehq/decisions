@@ -24,6 +24,11 @@ function dropPhoneImageColumns(sql: SqlStorage): void {
     sql.exec(`ALTER TABLE attachments DROP COLUMN ${c}`);
 }
 
+/** Takes push subscriptions back to before endpoints declared what they can show (schema 5). */
+function dropAgentStoppedColumn(sql: SqlStorage): void {
+  sql.exec(`ALTER TABLE push_subscriptions DROP COLUMN agent_stopped_capable`);
+}
+
 /** Takes the actions table back to its version 4 shape, whose provenance CHECK knows only human and proxy. */
 function restoreV4Actions(sql: SqlStorage): void {
   const cols =
@@ -65,6 +70,7 @@ describe('schema migrations', () => {
       sql.exec(`DROP TABLE messages`);
       sql.exec(`DROP TABLE message_deliveries`);
       sql.exec(`ALTER TABLE devices DROP COLUMN features`);
+      dropAgentStoppedColumn(sql);
       sql.exec(`UPDATE meta SET value = '1' WHERE key = 'schema_version'`);
       const devicesBefore = sql.exec(`SELECT * FROM devices ORDER BY device_id`).toArray();
       const before = dump();
@@ -135,6 +141,7 @@ describe('schema migrations', () => {
     const result = await inRoom((_room, state) => {
       const sql = state.storage.sql;
       dropPhoneImageColumns(sql);
+      dropAgentStoppedColumn(sql);
       sql.exec(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`);
       const rows = () => sql.exec(`SELECT * FROM attachments ORDER BY attachment_id`).toArray();
       const before = rows();
@@ -196,6 +203,7 @@ describe('schema migrations', () => {
       restoreV4Actions(sql);
       // Sparse rowids, so only copying them explicitly keeps them.
       sql.exec(`UPDATE actions SET rowid = rowid * 7 + 100`);
+      dropAgentStoppedColumn(sql);
       sql.exec(`UPDATE meta SET value = '4' WHERE key = 'schema_version'`);
       const rows = () => sql.exec(`SELECT rowid AS r, * FROM actions ORDER BY rowid`).toArray();
       const checkSql = () =>
@@ -255,6 +263,55 @@ describe('schema migrations', () => {
     expect((await act(w, w.owner, 'answer', open.questionId, 0)).res.status).toBe(201);
     const detail = await phone.call('GET', `/api/v1/questions/${open.questionId}`);
     expect(detail.json.actions[0].provenance).toBe('human-desktop');
+  });
+
+  it('upgrades a version 5 database, counting every existing push endpoint as unable to show agent-stopped', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const sub = {
+      protocol_version: PROTOCOL_VERSION,
+      p256dh: 'B' + 'A'.repeat(86),
+      auth: 'A'.repeat(22),
+    };
+    for (const n of [1, 2]) {
+      const r = await phone.call('POST', '/api/v1/push/subscriptions', {
+        ...sub,
+        endpoint: `https://fcm.googleapis.com/fcm/send/old${n}`,
+      });
+      expect(r.status).toBe(201);
+    }
+
+    const result = await inRoom((_room, state) => {
+      const sql = state.storage.sql;
+      dropAgentStoppedColumn(sql);
+      sql.exec(`UPDATE meta SET value = '5' WHERE key = 'schema_version'`);
+      const rows = () =>
+        sql.exec(`SELECT * FROM push_subscriptions ORDER BY subscription_id`).toArray();
+      const before = rows();
+      migrate(sql);
+      const after = rows();
+      migrate(sql);
+      return { before, after, again: rows() };
+    });
+    expect(result.before).toHaveLength(2);
+    expect(result.after.map(({ agent_stopped_capable, ...rest }) => rest)).toEqual(
+      result.before,
+    );
+    expect(result.after.map((r) => r.agent_stopped_capable)).toEqual([0, 0]);
+    expect(result.again).toEqual(result.after);
+
+    const listed = await phone.call('GET', '/api/v1/push/subscriptions');
+    expect(listed.json.subscriptions.map((s: { features: string[] }) => s.features)).toEqual([
+      [],
+      [],
+    ]);
+    // An endpoint says it can show one by subscribing again with the declaration.
+    const again = await phone.call('POST', '/api/v1/push/subscriptions', {
+      ...sub,
+      endpoint: 'https://fcm.googleapis.com/fcm/send/old1',
+      features: ['agent-stopped-push-v1'],
+    });
+    expect(again.json.features).toEqual(['agent-stopped-push-v1']);
   });
 
   it('refuses a database newer than the Worker', async () => {

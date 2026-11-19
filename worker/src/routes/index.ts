@@ -111,6 +111,7 @@ export const ROUTES: Route[] = [
   r('POST', '/push/subscriptions', 'signed', push.subscribe, HUMAN_ROLES),
   r('DELETE', `/push/subscriptions/${ID}`, 'signed', push.unsubscribe, HUMAN_ROLES),
   r('POST', '/push/test', 'signed', push.test, HUMAN_ROLES),
+  r('POST', '/push/agent-stopped', 'signed', push.agentStopped, OWNER),
   r('GET', '/settings', 'signed', push.getSettings, ANY),
   r('PUT', '/settings', 'signed', push.putSettings, ANY),
   r('GET', '/involvement', 'signed', involvement.getInvolvement, ANY),

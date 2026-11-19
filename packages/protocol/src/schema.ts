@@ -78,6 +78,7 @@ export const ProtocolFeature = z.enum([
   'owner-desktop-messages-v1',
   'owner-desktop-declines-v1',
   'presence-v1',
+  'agent-stopped-push-v1',
 ]);
 export type ProtocolFeature = z.infer<typeof ProtocolFeature>;
 export const FeatureToken = z.string().regex(/^[a-z0-9][a-z0-9.-]{0,39}$/, 'invalid feature token');
@@ -612,6 +613,12 @@ export const PushSubscribeBody = z.object({
   endpoint: z.url().max(2048),
   p256dh: PublicKeyB64,
   auth: B64Url.length(22),
+  /**
+   * What the service worker behind this endpoint can show (docs/protocol.md section 11): `agent-stopped-push-v1`
+   * says it can show an `agent-stopped` push. Every (re)subscription replaces the endpoint's declaration, so one
+   * without the list, from an older app, clears it. Unknown tokens are ignored.
+   */
+  features: FeatureList.optional(),
 });
 
 export const DeliveryReceivedBody = z.object({
@@ -678,6 +685,15 @@ export const PresenceBody = z.object({
   present: z.boolean(),
 });
 export type PresenceBody = z.infer<typeof PresenceBody>;
+
+/**
+ * `POST /push/agent-stopped` (owner desktop, `agent-stopped-push-v1`, section 11): asks for an `agent-stopped` push.
+ * It carries nothing about which agent stopped, where, or how many.
+ */
+export const AgentStoppedPushBody = z.object({
+  protocol_version: z.literal(PROTOCOL_VERSION),
+});
+export type AgentStoppedPushBody = z.infer<typeof AgentStoppedPushBody>;
 
 export const VoiceSessionBody = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),

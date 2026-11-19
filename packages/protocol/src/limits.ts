@@ -98,6 +98,12 @@ export const LIMITS = {
    */
   presenceHoldMs: 120_000,
 
+  /* ---- agent-stopped push (section 11) ---- */
+  /** The relay accepts at most one `agent-stopped` push per this window, whoever asks. */
+  agentStoppedPushWindowMs: 60_000,
+  /** A push service drops an `agent-stopped` push it could not deliver within this long (the push's TTL). */
+  agentStoppedPushTtlSeconds: 600,
+
   /* ---- feature negotiation (section 19) ---- */
   /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */
   featuresPerDeclaration: 16,

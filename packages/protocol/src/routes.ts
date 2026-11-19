@@ -3,6 +3,7 @@ import type { Role } from './schema.js';
 import {
   INVOLVEMENT_SETTER_ROLES,
   ActionBody,
+  AgentStoppedPushBody,
   AttachmentCompleteBody,
   AttachmentReserveBody,
   CorrectionResult,
@@ -30,6 +31,7 @@ import {
   VoiceSessionBody,
 } from './schema.js';
 import {
+  AgentStoppedPushResponse,
   AttachmentReservation,
   ClaimResponse,
   CommandReceipt,
@@ -492,6 +494,16 @@ export const ROUTE_MANIFEST: readonly RouteSpec[] = [
     roles: HUMANS,
     summary: 'Send a generic test notification to this device',
     response: PushTestResponse,
+  },
+  {
+    method: 'POST',
+    path: '/push/agent-stopped',
+    auth: 'signed',
+    roles: OWNER,
+    summary:
+      'Tell the phone that an agent stopped: at most one push per window, none in quiet hours, only to endpoints that can show it',
+    request: AgentStoppedPushBody,
+    response: AgentStoppedPushResponse,
   },
   {
     method: 'GET',

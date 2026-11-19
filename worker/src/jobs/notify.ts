@@ -20,8 +20,29 @@ interface SubRow {
 }
 
 /**
- * Sends a generic push to every enabled subscription of paired human devices. The payload is an
- * attention signal only (type and question id): no project, no question text, no answer, no message. It is
+ * The subscriptions a push of `type` may go to: enabled ones of paired phones and tablets. An `agent-stopped` push
+ * also needs an endpoint that declared it can show one (docs/protocol.md section 11): a service worker that does
+ * not know the type would show it as a new question.
+ */
+function eligible(type: PushPayload['type']): string {
+  return `s.enabled = 1 AND d.revoked_at IS NULL AND d.role IN ('phone','tablet')${
+    type === 'agent-stopped' ? ' AND s.agent_stopped_capable = 1' : ''
+  }`;
+}
+
+const SUB_FROM = `SELECT s.subscription_id, s.device_id, s.endpoint, s.p256dh, s.auth
+     FROM push_subscriptions s JOIN devices d ON d.device_id = s.device_id`;
+
+/** How many subscriptions a push of `type` would go to now. */
+export function eligibleSubscriptionCount(room: Room, type: PushPayload['type']): number {
+  return room.q1<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM push_subscriptions s JOIN devices d ON d.device_id = s.device_id WHERE ${eligible(type)}`,
+  )!.n;
+}
+
+/**
+ * Sends a generic push to every eligible subscription (`eligible`). The payload is an attention signal only (a
+ * type, and a question id for a question's push): no project, no question text, no answer, no message. It is
  * checked against the protocol's strict `PushPayload` before anything is sent, so no other field can slip in.
  */
 export async function sendNotification(
@@ -31,6 +52,7 @@ export async function sendNotification(
     deviceId?: string;
     topic?: string;
     urgency?: 'normal' | 'high';
+    ttlSeconds?: number;
     skip?: ReadonlySet<string>;
   } = {},
 ): Promise<NotifyResult[]> {
@@ -38,17 +60,24 @@ export async function sendNotification(
   const vapid = room.vapid();
   if (!vapid) return [];
   const keys: VapidKeys = { privateJwk: vapid.privateJwk, publicKey: vapid.publicKey };
+  const where = eligible(body.type);
   const subs = room.q<SubRow>(
-    `SELECT s.subscription_id, s.device_id, s.endpoint, s.p256dh, s.auth
-     FROM push_subscriptions s JOIN devices d ON d.device_id = s.device_id
-     WHERE s.enabled = 1 AND d.revoked_at IS NULL AND d.role IN ('phone','tablet')
+    `${SUB_FROM}
+     WHERE ${where}
        ${opts.deviceId ? 'AND s.device_id = ?' : ''}
      LIMIT 100`,
     ...(opts.deviceId ? [opts.deviceId] : []),
   );
   const results: NotifyResult[] = [];
-  for (const sub of subs) {
-    if (opts.skip?.has(sub.subscription_id)) continue;
+  for (const listed of subs) {
+    if (opts.skip?.has(listed.subscription_id)) continue;
+    // Each send awaits, and meanwhile an endpoint further down the list may have been subscribed again (new keys,
+    // or a declaration withdrawn by an older app), disabled or revoked: read it again just before sending.
+    const sub = room.q1<SubRow>(
+      `${SUB_FROM} WHERE s.subscription_id = ? AND ${where}`,
+      listed.subscription_id,
+    );
+    if (!sub) continue;
     let status: number | null = null;
     try {
       status = await sendWebPush(
@@ -56,7 +85,11 @@ export async function sendNotification(
         body,
         keys,
         room.env.PUSH_SUBJECT || room.getMeta('origin') || 'https://localhost',
-        { urgency: opts.urgency ?? 'normal', ...(opts.topic ? { topic: opts.topic } : {}) },
+        {
+          urgency: opts.urgency ?? 'normal',
+          ...(opts.topic ? { topic: opts.topic } : {}),
+          ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
+        },
       );
     } catch {
       status = null;

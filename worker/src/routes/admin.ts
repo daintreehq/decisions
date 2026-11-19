@@ -5,6 +5,7 @@ import type { Handler, Room } from '../room/types.js';
 import { iso, isoOrNull, json } from '../util.js';
 import { INVOLVEMENT_META } from './involvement.js';
 import { PRESENCE_META } from '../room/presence.js';
+import { AGENT_STOPPED_RATE_KEY } from './push.js';
 import type { DecisionRoom } from '../decision-room.js';
 
 export const diagnostics: Handler = async (room) => {
@@ -107,6 +108,7 @@ export const deleteData: Handler = async (room, c) => {
         PRESENCE_META,
       ])
         room.run(`DELETE FROM meta WHERE key = ?`, k);
+      room.run(`DELETE FROM rate_limits WHERE key = ?`, AGENT_STOPPED_RATE_KEY);
     }
   });
   if (b.scope === 'everything') await room.resetRuntime();

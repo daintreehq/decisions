@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
 import {
+  AgentStoppedPushResponse,
   LIMITS,
   PresenceResponse,
   PushPayload,
@@ -11,6 +12,7 @@ import {
 import { newId } from '@daintreehq/decisions-crypto';
 import { PRESENCE_META, presenceHold } from '../src/room/presence.js';
 import { PROXY_GRACE_MS } from '../src/routes/questions.js';
+import { AGENT_STOPPED_RATE_KEY } from '../src/routes/push.js';
 import type { Room } from '../src/room/types.js';
 import {
   act,
@@ -518,19 +520,26 @@ async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, bytes: 
   );
 }
 
-/** A push subscriber that keeps its private key, so a test can read exactly what the relay sent. */
-async function subscriber(phone: Actor) {
+/**
+ * A push subscriber that keeps its private key, so a test can read exactly what the relay sent. `features` is the
+ * subscription's declaration of what its service worker can show; `resubscribe` sends the same endpoint again.
+ */
+async function subscriber(phone: Actor, features?: string[]) {
   const kp = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
     'deriveBits',
   ])) as CryptoKeyPair;
   const pub = new Uint8Array((await crypto.subtle.exportKey('raw', kp.publicKey)) as ArrayBuffer);
   const auth = crypto.getRandomValues(new Uint8Array(16));
-  const r = await phone.call('POST', '/api/v1/push/subscriptions', {
-    protocol_version: 1,
-    endpoint: `https://fcm.googleapis.com/fcm/send/${newId()}`,
-    p256dh: bytesToBase64Url(pub),
-    auth: bytesToBase64Url(auth),
-  });
+  const endpoint = `https://fcm.googleapis.com/fcm/send/${newId()}`;
+  const resubscribe = (declared?: string[]) =>
+    phone.call('POST', '/api/v1/push/subscriptions', {
+      protocol_version: 1,
+      endpoint,
+      p256dh: bytesToBase64Url(pub),
+      auth: bytesToBase64Url(auth),
+      ...(declared ? { features: declared } : {}),
+    });
+  const r = await resubscribe(features);
   expect(r.status).toBe(201);
   /** RFC 8291 / RFC 8188 (aes128gcm, one record), the way a browser's push service client opens it. */
   const open = async (body: Uint8Array): Promise<unknown> => {
@@ -563,7 +572,7 @@ async function subscriber(phone: Actor) {
     expect(plain[end]).toBe(2); // last-record delimiter
     return JSON.parse(new TextDecoder().decode(plain.slice(0, end)));
   };
-  return { open };
+  return { open, endpoint, resubscribe, id: r.json.subscription_id as string, created: r.json };
 }
 
 describe('reply pushes', () => {
@@ -1107,5 +1116,209 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
     expect(await lease()).toBeTruthy();
     expect((await wipe('everything')).status).toBe(200);
     expect(await lease()).toBeUndefined();
+  });
+});
+
+describe('agent-stopped pushes (docs/protocol.md section 11)', () => {
+  let w: World;
+  let phone: Actor;
+  const calls: { url: string; init: RequestInit }[] = [];
+  let status = 201;
+  // Holds every push send while true. A flag rather than a promise: the send runs in the Durable Object's context.
+  let held = false;
+  const CAN = ['agent-stopped-push-v1'];
+
+  beforeEach(async () => {
+    calls.length = 0;
+    status = 201;
+    held = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      while (held) await new Promise((r) => setTimeout(r, 5));
+      return new Response(null, { status });
+    }) as never);
+    w = await claimRelay();
+    phone = await pairDevice(w);
+  });
+  afterEach(() => {
+    held = false;
+    vi.restoreAllMocks();
+  });
+
+  const stopped = (a: Actor = w.owner, body: unknown = { protocol_version: 1 }) =>
+    a.call('POST', '/api/v1/push/agent-stopped', body);
+  const outcome = async (a?: Actor) => {
+    const r = await stopped(a);
+    expect(r.status).toBe(200);
+    return AgentStoppedPushResponse.parse(r.json).outcome;
+  };
+  /** Ends the current window, as if `agentStoppedPushWindowMs` had passed. */
+  const windowPasses = () =>
+    inRoom((room) =>
+      room.run(
+        `UPDATE rate_limits SET window_start = window_start - ? WHERE key = ?`,
+        LIMITS.agentStoppedPushWindowMs,
+        AGENT_STOPPED_RATE_KEY,
+      ),
+    );
+  const window = () =>
+    inRoom((room) =>
+      room.q1<{ window_start: number }>(
+        `SELECT window_start FROM rate_limits WHERE key = ?`,
+        AGENT_STOPPED_RATE_KEY,
+      ),
+    );
+  /** Quiet hours that hold for hours either side of now, whatever the time of day. */
+  const quiet = (enabled: boolean) => {
+    const h = new Date().getUTCHours();
+    const at = (n: number) => `${String((n + 24) % 24).padStart(2, '0')}:00`;
+    return phone.call('PUT', '/api/v1/settings', {
+      protocol_version: 1,
+      quiet_hours: { enabled, start: at(h - 2), end: at(h + 3), time_zone: 'UTC' },
+    });
+  };
+  const header = (c: { init: RequestInit }, name: string) =>
+    (c.init.headers as Record<string, string>)[name];
+
+  it('takes the request from the owner desktop only', async () => {
+    await subscriber(phone, CAN);
+    const { host } = await enrollHost(w);
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    for (const a of [phone, tablet, host]) expect((await stopped(a)).status).toBe(403);
+    for (const body of [{}, { protocol_version: 2 }, { protocol_version: '1' }]) {
+      expect((await stopped(w.owner, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    // Nothing refused above sent a push or took the window.
+    expect(calls).toEqual([]);
+    expect(await window()).toBeUndefined();
+    expect(await outcome()).toBe('sent');
+  });
+
+  it('pushes only a type, briefly and replaceably, to the endpoints that said they can show it', async () => {
+    const can = await subscriber(phone, CAN);
+    expect(can.created.features).toEqual(CAN);
+    const cannot = await subscriber(phone);
+    expect(cannot.created.features).toEqual([]);
+    // Unknown tokens are ignored; a socket-ticket declaration speaks for the device, never for an endpoint.
+    const other = await subscriber(phone, ['some-future-v9']);
+    await declare(phone, CAN);
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    const tabletCan = await subscriber(tablet, CAN);
+
+    const jobs = await pending();
+    expect(await outcome()).toBe('sent');
+    expect(calls.map((c) => c.url).sort()).toEqual([can.endpoint, tabletCan.endpoint].sort());
+    for (const c of calls) {
+      expect(header(c, 'TTL')).toBe(String(LIMITS.agentStoppedPushTtlSeconds));
+      expect(header(c, 'Urgency')).toBe('high');
+      expect(header(c, 'Topic')).toBe('agent-stopped');
+    }
+    const sent = calls.find((c) => c.url === can.endpoint)!;
+    expect(await can.open(new Uint8Array(sent.init.body as ArrayBuffer))).toEqual({
+      type: 'agent-stopped',
+    });
+    // No job comes of it.
+    expect(await pending()).toEqual(jobs);
+
+    const listed = await phone.call('GET', '/api/v1/push/subscriptions');
+    const byId = Object.fromEntries(
+      (listed.json.subscriptions as { subscription_id: string; features: string[] }[]).map((s) => [
+        s.subscription_id,
+        s.features,
+      ]),
+    );
+    expect(byId).toEqual({ [can.id]: CAN, [cannot.id]: [], [other.id]: [] });
+  });
+
+  it('forgets an endpoint’s declaration when an older app subscribes it again', async () => {
+    const s = await subscriber(phone, CAN);
+    const again = await s.resubscribe();
+    expect(again.status).toBe(201);
+    expect(again.json.subscription_id).toBe(s.id);
+    expect(again.json.features).toEqual([]);
+    expect(await outcome()).toBe('no-subscription');
+    expect(calls).toEqual([]);
+    // Nowhere to send takes no window: once the endpoint says so again, the next request goes out.
+    expect(await window()).toBeUndefined();
+    expect((await s.resubscribe(CAN)).json.features).toEqual(CAN);
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('skips an endpoint whose declaration is withdrawn while the push is going out', async () => {
+    const first = await subscriber(phone, CAN);
+    const second = await subscriber(phone, CAN);
+    held = true;
+    const asked = stopped();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const waiting = calls[0]!.url === first.endpoint ? second : first;
+    expect((await waiting.resubscribe()).status).toBe(201);
+    held = false;
+    const r = await asked;
+    expect(r.json).toEqual({ outcome: 'sent' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).not.toBe(waiting.endpoint);
+  });
+
+  it('drops a request in quiet hours rather than deferring it, presence or not', async () => {
+    await subscriber(phone, CAN);
+    expect((await quiet(true)).status).toBe(200);
+    const jobs = await pending();
+    expect(await outcome()).toBe('quiet-hours');
+    expect(calls).toEqual([]);
+    expect(await pending()).toEqual(jobs);
+    expect(await window()).toBeUndefined();
+    // Nothing waits for quiet hours to end, and a dropped request took no window.
+    expect((await quiet(false)).status).toBe(200);
+    await runDurableObjectAlarm(stub());
+    expect(calls).toEqual([]);
+    // The presence hold is for questions: the desktop asks only while the person is away.
+    const lease = await w.owner.call('PUT', '/api/v1/presence', {
+      protocol_version: 1,
+      present: true,
+    });
+    expect(lease.status).toBe(200);
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('accepts one per window, whoever asks and whether or not it was delivered', async () => {
+    await subscriber(phone, CAN);
+    status = 500;
+    expect(await outcome()).toBe('failed');
+    status = 201;
+    expect(await outcome()).toBe('rate-limited');
+    expect(calls).toHaveLength(1);
+    // Requests at the same moment: one goes out, the rest are dropped, not queued.
+    await windowPasses();
+    const burst = await Promise.all([stopped(), stopped(), stopped()]);
+    expect(burst.map((r) => r.json.outcome).sort()).toEqual([
+      'rate-limited',
+      'rate-limited',
+      'sent',
+    ]);
+    expect(calls).toHaveLength(2);
+    // A refusal is final, not a "try again later".
+    const refused = await stopped();
+    expect(refused.status).toBe(200);
+    expect(refused.headers.get('Retry-After')).toBeNull();
+    await windowPasses();
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('forgets the window with everything else', async () => {
+    await subscriber(phone, CAN);
+    expect(await outcome()).toBe('sent');
+    const wipe = (scope: string) =>
+      w.owner.call('POST', '/api/v1/admin/delete-data', {
+        protocol_version: 1,
+        confirm: 'DELETE',
+        scope,
+      });
+    expect((await wipe('questions')).status).toBe(200);
+    expect(await window()).toBeTruthy();
+    expect((await wipe('everything')).status).toBe(200);
+    expect(await window()).toBeUndefined();
   });
 });
