@@ -1,6 +1,5 @@
 import {
   LIMITS,
-  isAdvisoryRound,
   type DecisionContentV1,
   type LedgerEvent,
   type ProtocolFeature,
@@ -284,8 +283,8 @@ export interface DecisionView {
   expiresAt: string | null;
   /**
    * The current round's mode (protocol section 21): `advisory` while the question is in the round its agent asked for
-   * advice in, so if no answer commits by that round's deadline the plan it stated is its own to carry out. `blocking`
-   * otherwise, a reopened question (`revision` above 0) included: it waits for a decision.
+   * advice in (answered or not), so if no answer commits by that round's deadline the plan it stated is its own to
+   * carry out. `blocking` otherwise, a reopened question included: it waits for a decision.
    */
   replyMode: ReplyMode;
   /**
@@ -1183,12 +1182,16 @@ export class DecisionsBridge {
     const declined = entries.some(
       (e) => e.kind === 'declined' && e.revision === row.question_revision,
     );
-    const replyMode: ReplyMode = isAdvisoryRound({
-      advisory: replyModeOfRow(row) === 'advisory',
-      revision: row.question_revision,
-    })
-      ? 'advisory'
-      : 'blocking';
+    // Every answer, correction or confirmation moves the revision on and is kept with its revision; a reopen moves it
+    // without one. So a revision the answers do not account for means the question was reopened into a round that
+    // waits for a decision. History an older bridge did not keep reads as reopened: the safe side.
+    const answeredRevisions = new Set(
+      entries.filter((e) => e.kind === 'answer').map((e) => e.revision),
+    ).size;
+    const replyMode: ReplyMode =
+      replyModeOfRow(row) === 'advisory' && row.question_revision <= answeredRevisions
+        ? 'advisory'
+        : 'blocking';
     let plannedFallback: string | null = null;
     if (replyMode === 'advisory') {
       // Opened with the keys already held: reading a decision never asks the relay for one.

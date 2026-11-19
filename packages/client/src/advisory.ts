@@ -40,7 +40,7 @@ export class AdvisorySupport {
   private readers: ({ ids: string[] } & ReadAt) | null = null;
   private reading: Promise<void> | null = null;
   /** When the last read started, so a relay that keeps failing is not read on every ask. */
-  private attempted: number | null = null;
+  private attempted: ReadAt | null = null;
   /** Bumped by `stop`, so a read that started before it never restores what it cleared. */
   private generation = 0;
   /** False once the bridge stopped or was revoked, until it starts again: nothing is read meanwhile. */
@@ -89,11 +89,13 @@ export class AdvisorySupport {
   refreshIfDue(): Promise<void> {
     if (!this.wanted()) return Promise.resolve();
     if (this.reading) return this.reading;
-    const now = this.ctx.now();
-    const due = (f: { at: number } | null) => !f || now - f.at >= REFRESH_AFTER_MS || now < f.at;
+    const now = this.stamp();
+    // By either clock, so a wall clock that stands still or is set back never stops the reads.
+    const age = (f: ReadAt) =>
+      now.at < f.at ? Infinity : Math.max(now.at - f.at, now.mono - f.mono);
+    const due = (f: ReadAt | null) => !f || age(f) >= REFRESH_AFTER_MS;
     if (!due(this.relay) && !(this.relay?.value && due(this.readers))) return Promise.resolve();
-    if (this.attempted !== null && now >= this.attempted && now - this.attempted < RETRY_AFTER_MS)
-      return Promise.resolve();
+    if (this.attempted && age(this.attempted) < RETRY_AFTER_MS) return Promise.resolve();
     this.attempted = now;
     const run = this.generation;
     this.reading = this.read(run)

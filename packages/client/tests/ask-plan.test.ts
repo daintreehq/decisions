@@ -145,6 +145,8 @@ describe('expires_in: a relative reply window', () => {
     const named = await e.ask({ expires_in: '15m', workflow_gate_id: 'review' });
     expect(named.expiresAt).toBe(at(5 * MIN));
     expect(named.adjustments[0]).toMatchObject({ source: 'gate', gateId: 'review' });
+    await e.bridge.pump();
+    expect(e.relay.questions.get(named.questionId)!.signed.record.expires_at).toBe(at(5 * MIN));
     // A request inside the cap is left alone.
     expect((await e.ask({ expires_in: '2m' }, { workflow_gate_id: 'review' })).adjustments).toEqual(
       [],
@@ -204,7 +206,10 @@ describe('expires_in: a relative reply window', () => {
     await expect(e.ask({ expires_at: at(MIN) })).rejects.toMatchObject({
       message: 'expires_at must be at least one minute in the future',
     });
-    expect(await e.ask({})).toMatchObject({ expiresAt: at(7 * DAY), requestedExpiresAt: null });
+    const none = await e.ask({});
+    expect(none).toMatchObject({ expiresAt: at(7 * DAY), requestedExpiresAt: null });
+    await e.bridge.pump();
+    expect(e.relay.questions.get(none.questionId)!.signed.record.expires_at).toBe(at(7 * DAY));
   });
 });
 
@@ -248,6 +253,7 @@ describe('planned_fallback: asking for advice', () => {
   it('a blocking question signs exactly as before: no mode, no plan', async () => {
     const e = await advisoryEnv();
     const r = await e.ask({ expires_in: '15m' });
+    expect(r).toMatchObject({ replyMode: 'blocking', plannedFallback: null });
     await e.bridge.pump();
     const signed = e.relay.questions.get(r.questionId)!.signed;
     expect('reply_mode' in signed.envelope.aad).toBe(false);
@@ -723,6 +729,27 @@ describe('correlation_id: retries and collisions', () => {
       message: expect.stringMatching(/^gated: /),
     });
     expect((await e.ask(input)).questionId).toBe(first.questionId);
+    // The same holds for a question that waits for a decision.
+    const blocking = { question: 'Ship?', correlation_id: 'c2' };
+    const asked = await e.ask(blocking);
+    const gated = await e.ask(blocking, { workflow_gate_id: 'unregistered' });
+    expect(gated.questionId).not.toBe(asked.questionId);
+  });
+
+  it('a gate whose policy changed since is another question, even with the same choices', async () => {
+    const policy = new PolicyRegistry();
+    const choices = [
+      { id: 'approve', label: 'Approve' },
+      { id: 'reject', label: 'Reject' },
+    ];
+    policy.register(gate('review', { choices, policyVersion: 1 }));
+    const e = await env({ policy });
+    const input = { question: 'Ship it?', correlation_id: 'c1' };
+    const first = await e.ask(input, { workflow_gate_id: 'review' });
+    expect((await e.ask(input, { workflow_gate_id: 'review' })).questionId).toBe(first.questionId);
+    policy.register(gate('review', { choices, policyVersion: 2 }));
+    const again = await e.ask(input, { workflow_gate_id: 'review' });
+    expect(again.questionId).not.toBe(first.questionId);
   });
 
   it('names the gate that changed the level or the kind, not merely one that was there', async () => {
@@ -753,6 +780,25 @@ describe('correlation_id: retries and collisions', () => {
         gateId: 'strict',
       },
       { field: 'kind', requested: 'mixed', effective: 'choice', source: 'gate', gateId: 'strict' },
+    ]);
+    // Raised by both, it names the gate whose level applies.
+    policy.register(gate('firmer', { minRequirement: 'proxy-first' }));
+    const twice = await e.ask(
+      {
+        requested_requirement: 'proxy-ok',
+        workflow_gate_id: 'strict',
+        options: [{ id: 'a', label: 'A' }],
+      },
+      { workflow_gate_id: 'firmer' },
+    );
+    expect(twice.adjustments.filter((a) => a.field === 'requirement')).toEqual([
+      {
+        field: 'requirement',
+        requested: 'proxy-ok',
+        effective: 'human-required',
+        source: 'gate',
+        gateId: 'strict',
+      },
     ]);
     // A text question under the lenient gate's choices is given them, and may still be answered in words.
     const text = await e.ask({ kind: 'text' }, { workflow_gate_id: 'lenient' });
@@ -864,6 +910,7 @@ describe('over MCP', () => {
       expires_at: at(15 * MIN),
       reply_mode: 'advisory',
     });
+    expect(again.structuredContent.planned_fallback).toBe(PLAN);
     expect(again.content[0].text).toMatch(/^Already asked as q-1: /);
     expect(again.content[0].text).toContain(
       `It was asked for advice, with a deadline of ${at(15 * MIN)} (UTC) and the plan in planned_fallback.`,
@@ -1030,6 +1077,7 @@ describe('over MCP', () => {
     const withdrawn = await ask({});
     const expired = await ask({});
     const advised = await ask({ planned_fallback: PLAN });
+    const answeredAdvice = await ask({ planned_fallback: PLAN });
     await e.bridge.pump();
     e.relay.rejectCreate = 400;
     const failed = await ask({});
@@ -1049,6 +1097,7 @@ describe('over MCP', () => {
       action: 'proxy-answer',
       options: ['disk'],
     });
+    await e.relay.answerEvent({ questionId: answeredAdvice, phone: e.phone, options: ['disk'] });
     await e.relay.plainActionEvent({ questionId: declined, signer: e.phone, action: 'cancel' });
     await e.relay.plainActionEvent({ questionId: withdrawn, signer: desktop, action: 'cancel' });
     // The relay expires a question at its signed deadline, and the bridge believes it only once that has passed.
@@ -1119,6 +1168,15 @@ describe('over MCP', () => {
       error_code: null,
     });
     expect(a.content[0].text).toContain('nothing was decided or approved');
+    // Answered in time, it is still the question asked for advice, now with an answer in force.
+    expect((await get(answeredAdvice)).structuredContent).toMatchObject({
+      status: 'human-answered',
+      provenance: 'human',
+      choice: 'disk',
+      revision: 1,
+      reply_mode: 'advisory',
+      planned_fallback: PLAN,
+    });
     // Reopened, it is a new round that waits for a decision: the plan no longer applies.
     await e.relay.plainActionEvent({
       questionId: advised,

@@ -202,6 +202,8 @@ interface RegistrationRecord {
   deadline: DeadlineRequest;
   /** The origin's gate id as the host bound it, registered or not. */
   originGateId: string | null;
+  /** The governing gate's policy version when it was asked: a changed policy is another question. */
+  policyVersion: number | null;
   namedGateId: string | null;
   requestedRequirement: Requirement | null;
   requestedExpiresAt: string | null;
@@ -401,6 +403,7 @@ export class Publisher {
         reg &&
         (await this.sameRequest(origin, input, prior, reg, {
           governingId,
+          policyVersion: governing?.policyVersion ?? null,
           requirement,
           shape,
           deadline,
@@ -637,6 +640,7 @@ export class Publisher {
         v: 1,
         deadline,
         originGateId: origin.workflow_gate_id ?? null,
+        policyVersion: governing?.policyVersion ?? null,
         namedGateId: input.workflow_gate_id ?? null,
         requestedRequirement: input.requested_requirement ?? null,
         requestedExpiresAt,
@@ -730,6 +734,7 @@ export class Publisher {
     reg: RegistrationRecord,
     asked: {
       governingId: string | null;
+      policyVersion: number | null;
       requirement: QuestionRow['requirement'];
       shape: GatedShape;
       deadline: DeadlineRequest;
@@ -741,6 +746,7 @@ export class Publisher {
     if (
       // Raw ids, registered or not: a gate bound since, even one the policy does not know, makes it another question.
       reg.originGateId !== (origin.workflow_gate_id ?? null) ||
+      reg.policyVersion !== asked.policyVersion ||
       reg.namedGateId !== (input.workflow_gate_id ?? null) ||
       reg.requestedRequirement !== (input.requested_requirement ?? null) ||
       reg.replyMode !== asked.replyMode ||
@@ -2188,12 +2194,13 @@ function policyAdjustments(a: {
   if (asked && asked !== a.requirement) {
     const [origin, originId] = a.gates[0]!;
     const [, namedId] = a.gates[1]!;
-    // The origin's gate (or the host, with none) raised it if the level was already stricter before the named gate.
+    // Named for the level that applies: the named gate when it raised the level further, else the origin's gate (or
+    // the host, with none).
     out.push({
       field: 'requirement',
       requested: asked,
       effective: a.requirement,
-      ...(a.baseRequirement !== asked ? (origin ? gate(originId) : host) : gate(namedId)),
+      ...(a.requirement !== a.baseRequirement ? gate(namedId) : origin ? gate(originId) : host),
     });
   }
   const kind = a.input.kind;

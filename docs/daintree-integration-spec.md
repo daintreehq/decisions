@@ -146,7 +146,7 @@ Asking for advice (`tools/call`, its result, a `get_decision` after the deadline
 }
 ```
 
-Its text: `q-7's deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.` The result also carries `answers: []` and `thread: []`, left out here.
+Its text: `q-7's deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.` This `get_decision` result, like the one below, also carries `alias`, `delivery_status`, `answers` and `thread`, left out here.
 
 An approval under a gate the host registered with a 5-minute expiry, and a `get_decision` once the person approved it on their phone:
 

@@ -227,8 +227,9 @@ export function askedText(r: AskedReceipt): string {
   const q = `q-${r.alias}`;
   const recover = `call get_decision with question_id ${r.questionId}`;
   const full = r.expiresAt !== undefined ? (r as RegisterResult) : null;
-  const policy = full?.adjustments.length
-    ? ` Policy: ${full.adjustments.map(adjustmentText).join('; ')}.`
+  const adjustments = r.adjustments ?? [];
+  const policy = adjustments.length
+    ? ` Policy: ${adjustments.map(adjustmentText).join('; ')}.`
     : '';
   if (r.duplicate)
     return `Already asked as ${q}: this correlation_id and request match it, so this is that question, not a new one.${full ? ` ${askedAsText(full)}` : ''}${policy} It may have been answered, closed or reopened since: ${recover} to see where it stands before you act on it.`;
@@ -789,7 +790,7 @@ export function createDecisionsMcpHandler(
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
               : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.status === 'publish-failed'
-              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: the relay refused it, and nothing was decided. Ask again if you still need it.`
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
               : v.closedReason === 'declined'
                 ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
                 : `q-${v.alias} is ${v.status}; no answer in force.`;
