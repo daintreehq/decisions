@@ -2,12 +2,37 @@ import { z } from 'zod';
 import {
   DEFAULTS,
   LIMITS,
+  PlannedFallback,
   PreparationReport,
   Requirement,
   utf8ByteLength,
   type DecisionContentV1,
 } from '@daintreehq/decisions-protocol';
-import { gateAllowsText, questionExpiryPolicy, type WorkflowGate } from './policy.js';
+import {
+  QUESTION_EXPIRY_LIMIT_MS,
+  gateAllowsText,
+  questionExpiryPolicy,
+  type WorkflowGate,
+} from './policy.js';
+
+/** Milliseconds in one unit of an `expires_in` duration. */
+const DURATION_UNITS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+const DURATION = /^([1-9][0-9]{0,8})([smhd])$/;
+
+/** The shortest `expires_in`: more than one minute, as for `expires_at`. */
+export const MIN_EXPIRES_IN_MS = 61_000;
+
+/**
+ * An `expires_in` duration in milliseconds: a whole number and one unit, `s`, `m`, `h` or `d` (a day is 24 hours),
+ * such as `90s`, `15m`, `2h` or `7d`. Null for anything else, or for a duration outside 61 seconds to
+ * `QUESTION_EXPIRY_LIMIT_MS` (366 days, less two minutes).
+ */
+export function parseExpiresIn(v: string): number | null {
+  const m = DURATION.exec(v);
+  if (!m) return null;
+  const ms = Number(m[1]) * DURATION_UNITS[m[2] as keyof typeof DURATION_UNITS];
+  return ms >= MIN_EXPIRES_IN_MS && ms <= QUESTION_EXPIRY_LIMIT_MS ? ms : null;
+}
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */
 export const AskHumanInput = z.object({
@@ -40,12 +65,31 @@ export const AskHumanInput = z.object({
   requested_requirement: Requirement.optional(),
   workflow_gate_id: z.string().min(1).max(200).optional(),
   expires_at: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * A reply window relative to when the host takes the question (`parseExpiresIn`), converted once on the host's
+   * clock. Never together with `expires_at`.
+   */
+  expires_in: z
+    .string()
+    .refine(
+      (v) => parseExpiresIn(v) !== null,
+      'expires_in must be a whole number and one unit (s, m, h or d), from 61s to 365d, such as 15m',
+    )
+    .optional(),
   correlation_id: z.string().min(1).max(64).optional(),
   /**
    * The agent's own account of how it prepared the question under the person's involvement preference
    * (protocol section 20.1). Shown to the person as the agent's account; it never changes the requirement.
    */
   preparation: PreparationReport.optional(),
+  /**
+   * What the agent will do if no answer arrives by the deadline. Sending it asks for advice rather than a decision
+   * (protocol section 21): the question is advisory, or refused, never quietly made blocking.
+   */
+  planned_fallback: PlannedFallback.optional(),
+}).refine((v) => v.expires_at === undefined || v.expires_in === undefined, {
+  message: 'supply only one of expires_at and expires_in',
+  path: ['expires_in'],
 });
 export type AskHumanInput = z.infer<typeof AskHumanInput>;
 
@@ -210,8 +254,22 @@ export function resolveExpiry(
   now: number,
   hostDefaultMs: number | null = DEFAULTS.questionExpiryMs,
 ): string | null {
+  return expiryOutcome(requested, gate, now, hostDefaultMs).expiresAt;
+}
+
+/** `resolveExpiry`, and whether the policy's cap made a requested expiry earlier. */
+export function expiryOutcome(
+  requested: string | undefined,
+  gate: WorkflowGate | undefined,
+  now: number,
+  hostDefaultMs: number | null = DEFAULTS.questionExpiryMs,
+): { expiresAt: string | null; capped: boolean } {
   const { defaultMs, maxMs } = questionExpiryPolicy(hostDefaultMs, gate);
-  if (!requested) return defaultMs === null ? null : new Date(now + defaultMs).toISOString();
+  if (!requested)
+    return {
+      expiresAt: defaultMs === null ? null : new Date(now + defaultMs).toISOString(),
+      capped: false,
+    };
   const asked = Date.parse(requested);
   if (!Number.isFinite(asked) || asked <= now + 60_000) {
     throw new BridgeError(
@@ -220,7 +278,7 @@ export function resolveExpiry(
     );
   }
   const eff = maxMs === null ? asked : Math.min(asked, now + maxMs);
-  return new Date(eff).toISOString();
+  return { expiresAt: new Date(eff).toISOString(), capped: eff < asked };
 }
 
 export function defaultKind(input: AskHumanInput): DecisionContentV1['kind'] {

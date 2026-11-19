@@ -4,12 +4,16 @@ import {
   HumanMessageContentV1,
   LIMITS,
   MESSAGE_RECORD_TYPE,
+  advisoryRefusal,
   canonicalize,
   knownFeatures,
   stricter,
+  type AdvisoryRefusal,
   type CommandReceipt,
   type DecisionContentV1,
   type ProtocolFeature,
+  type ReplyMode,
+  type Requirement,
   type SignedAction,
   type SignedMessage,
   type SignedQuestion,
@@ -29,11 +33,14 @@ import {
 import {
   AskHumanInput,
   BridgeError,
-  resolveExpiry,
+  expiryOutcome,
+  parseExpiresIn,
+  type GatedShape,
   type PostMessageInput,
   shapeForGates,
   validateOptions,
 } from './content.js';
+import type { AdvisorySupport } from './advisory.js';
 import {
   MemorySpool,
   gateHash,
@@ -42,7 +49,7 @@ import {
   paneRef,
   type BridgeContext,
 } from './context.js';
-import { QUESTION_EXPIRY_LIMIT_MS, answerRuleViolation } from './policy.js';
+import { QUESTION_EXPIRY_LIMIT_MS, answerRuleViolation, type WorkflowGate } from './policy.js';
 import { sameDigests } from './answers.js';
 import { openProxyDraft, openQuestionContent, sealProxyDraft } from './at-rest.js';
 import { currentEpochKey } from './identity.js';
@@ -147,13 +154,132 @@ const takesOwnerMessages = (set: ReadonlySet<ProtocolFeature>) =>
 const OUTBOX_BATCH = 20;
 const OUTBOX_SCAN = 1_000;
 
+/**
+ * Where trusted policy gave a question something other than what its agent asked for. `requested` is null when the
+ * agent asked for nothing (the deadline then comes from policy); `effective` is null for a deadline that never comes.
+ */
+export interface PolicyAdjustment {
+  field: 'expires_at' | 'requirement' | 'kind';
+  requested: string | null;
+  effective: string | null;
+  /** The host's own policy, or a workflow gate (named by `gateId`). */
+  source: 'host' | 'gate';
+  gateId: string | null;
+}
+
 export interface RegisterResult {
   questionId: string;
   alias: number;
   requirement: QuestionRow['requirement'];
   status: 'queued';
-  /** True when `correlation_id` matched an earlier call and the existing question was returned. */
+  /**
+   * True when `correlation_id` and the whole request matched an earlier call from this pane, and that question was
+   * returned with its original deadline (it may have an answer, or have closed, since).
+   */
   duplicate: boolean;
+  /** The deadline the question was signed with, in UTC; null when it never expires. */
+  expiresAt: string | null;
+  /** The deadline the agent asked for, in UTC (`expires_in` converted once on the host clock); null if none. */
+  requestedExpiresAt: string | null;
+  /** `advisory` when the agent asked for advice (`planned_fallback`) and the host signed it so. */
+  replyMode: ReplyMode;
+  plannedFallback: string | null;
+  /** Each change policy made to the request, in the order deadline, requirement, kind. */
+  adjustments: PolicyAdjustment[];
+}
+
+/** What a correlated ask requested, by kind: the host default, a duration from asking, or a fixed time (UTC). */
+type DeadlineRequest =
+  | { kind: 'default' }
+  | { kind: 'relative'; ms: number }
+  | { kind: 'absolute'; at: string };
+
+/**
+ * A correlated ask's registration (`reg:<question id>` in the store's meta): what it asked for beyond its signed content,
+ * and the receipt it got, so an exact retry returns that receipt after a restart. No question text: the content
+ * itself is compared, opened in memory (`sameRequest`).
+ */
+interface RegistrationRecord {
+  v: 1;
+  deadline: DeadlineRequest;
+  namedGateId: string | null;
+  requestedRequirement: Requirement | null;
+  requestedExpiresAt: string | null;
+  expiresAt: string | null;
+  replyMode: ReplyMode;
+  adjustments: PolicyAdjustment[];
+}
+
+const registrationKey = (questionId: string) => `reg:${questionId}`;
+
+function parseRegistration(v: string | null): RegistrationRecord | null {
+  if (v === null) return null;
+  try {
+    const r = JSON.parse(v) as Partial<RegistrationRecord> | null;
+    return r && r.v === 1 && r.deadline && Array.isArray(r.adjustments)
+      ? (r as RegistrationRecord)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The question a correlation id points at: `q`, the latest one committed, and `p`, one being committed now. A `p`
+ * with a committed row wins (the process stopped before moving `q` on); one without is ignored. Before #154 the
+ * value was the question id alone.
+ */
+function parseCorrelation(v: string | null): { q: string | null; p: string | null } {
+  if (v === null) return { q: null, p: null };
+  if (!v.startsWith('{')) return { q: v, p: null };
+  try {
+    const o = JSON.parse(v) as { q?: unknown; p?: unknown };
+    return {
+      q: typeof o.q === 'string' ? o.q : null,
+      p: typeof o.p === 'string' ? o.p : null,
+    };
+  } catch {
+    return { q: null, p: null };
+  }
+}
+
+const sameDeadline = (a: DeadlineRequest, b: DeadlineRequest) =>
+  a.kind === b.kind &&
+  (a.kind !== 'relative' || a.ms === (b as typeof a).ms) &&
+  (a.kind !== 'absolute' || a.at === (b as typeof a).at);
+
+/** Why an advisory ask was refused, as the agent is told: the error code and what to do. */
+const ADVISORY_REFUSALS: Record<AdvisoryRefusal | 'support-unknown', [BridgeError['code'], string]> =
+  {
+    'relay-unsupported': ['not_supported', 'the relay does not support advisory questions yet'],
+    'host-unsupported': ['not_supported', 'this host does not deliver advisory outcomes'],
+    'policy-disallowed': ['forbidden', "the host's policy does not allow advisory questions"],
+    'no-capable-reader': [
+      'not_supported',
+      'no phone or tablet the person uses can show an advisory question yet',
+    ],
+    gated: ['validation_error', 'a question under a workflow gate always waits for a decision'],
+    approval: ['validation_error', 'an approval always waits for a decision'],
+    'no-deadline': [
+      'validation_error',
+      "advice needs a deadline: give expires_in or expires_at, since this host's default never expires",
+    ],
+    'invalid-plan': [
+      'validation_error',
+      `planned_fallback must be 1 to ${LIMITS.plannedFallbackChars} characters and not blank`,
+    ],
+    'support-unknown': [
+      'invalid_state',
+      'whether the relay and the person’s devices support advisory questions is not known yet; try again in a minute',
+    ],
+  };
+
+function advisoryError(reason: AdvisoryRefusal | 'support-unknown'): BridgeError {
+  const [code, why] = ADVISORY_REFUSALS[reason];
+  return new BridgeError(
+    code,
+    `${reason}: ${why}. Nothing was asked. To have the person decide instead, ask again without planned_fallback.`,
+  );
 }
 
 export interface PublisherHooks {
@@ -177,9 +303,14 @@ export class Publisher {
   /** One flush at a time, so an outbox item is never sent by two flushes at once. */
   private readonly flushing = new Mutex();
 
+  /** Registrations under one correlation key, one at a time, so an identical retry sees the first one's question. */
+  private readonly registering = new Map<string, Promise<unknown>>();
+
   constructor(
     private readonly ctx: BridgeContext,
     private readonly hooks: PublisherHooks = {},
+    /** Whether advice may be asked now (protocol section 21); without it every advisory ask is refused. */
+    private readonly advisory?: AdvisorySupport,
   ) {}
 
   /** Commit locally and return. NOTHING here touches the network. */
@@ -199,6 +330,27 @@ export class Publisher {
       if (typeof v !== 'string' || v.length === 0)
         throw new BridgeError('validation_error', `origin.${k} is required (set by the host)`);
     }
+    // Idempotency by correlation id, scoped to the pane so one agent cannot collide with another.
+    const corrKey = input.correlation_id
+      ? `corr:${await originScope(origin)}:${input.correlation_id}`
+      : null;
+    if (!corrKey) return this.registerParsed(origin, input, null);
+    const prev = this.registering.get(corrKey) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(() => this.registerParsed(origin, input, corrKey));
+    const tail = run.catch(() => undefined);
+    this.registering.set(corrKey, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.registering.get(corrKey) === tail) this.registering.delete(corrKey);
+    }
+  }
+
+  private async registerParsed(
+    origin: QuestionOrigin,
+    input: AskHumanInput,
+    corrKey: string | null,
+  ): Promise<RegisterResult> {
     const { ctx } = this;
     // The origin's gate is trusted (registered by the host) and is the floor. A gate the agent names can only
     // make the question STRICTER; it can never replace the origin's gate or relax its level.
@@ -223,33 +375,48 @@ export class Publisher {
     const governingId = gate ? gateId : callerGate ? callerGateId : null;
     const governing = gate ?? callerGate;
     const shape = shapeForGates(input, [gate, callerGate], input.attachments?.length ?? 0);
+    const replyMode: ReplyMode = input.planned_fallback !== undefined ? 'advisory' : 'blocking';
+    const deadline: DeadlineRequest =
+      input.expires_in !== undefined
+        ? { kind: 'relative', ms: parseExpiresIn(input.expires_in)! }
+        : input.expires_at !== undefined
+          ? { kind: 'absolute', at: new Date(Date.parse(input.expires_at)).toISOString() }
+          : { kind: 'default' };
 
-    // Idempotency by correlation id, scoped to the pane so one agent cannot collide with another.
-    let questionId = newId(ctx.now());
-    const corrKey = input.correlation_id
-      ? `corr:${await originScope(origin)}:${input.correlation_id}`
-      : null;
+    // An exact retry returns the question it asked, with the deadline it got then, whatever the clock or the host's
+    // default says now. Anything else under the same id is a different question, and an answer to the old one must
+    // never be returned for it, so it is asked afresh and the id moves to it once it is committed.
+    let prior: QuestionRow | null = null;
     if (corrKey) {
-      const existing = await ctx.store.getMeta(corrKey);
-      const row = existing ? await ctx.store.getQuestion(existing) : null;
-      if (row && !(await this.sameBinding(origin, input, row, governingId, requirement))) {
-        // Different images, a different gate or a different level under the same correlation id are a
-        // different question: an answer to the old one must never be returned for the new one. Re-point the
-        // id at a fresh question.
-        await ctx.store.setMeta(corrKey, questionId);
-      } else if (existing) {
-        if (row) {
-          return {
-            questionId: row.question_id,
-            alias: row.alias,
-            requirement: row.requirement,
-            status: 'queued',
-            duplicate: true,
-          };
-        }
-        questionId = existing; // crashed between the meta write and the commit: reuse the id
-      } else {
-        await ctx.store.setMeta(corrKey, questionId);
+      const pointer = parseCorrelation(await ctx.store.getMeta(corrKey));
+      if (pointer.p) prior = await ctx.store.getQuestion(pointer.p);
+      if (!prior && pointer.q) prior = await ctx.store.getQuestion(pointer.q);
+      const reg = prior
+        ? parseRegistration(await ctx.store.getMeta(registrationKey(prior.question_id)))
+        : null;
+      if (
+        prior &&
+        reg &&
+        (await this.sameRequest(origin, input, prior, reg, {
+          governingId,
+          requirement,
+          shape,
+          deadline,
+          replyMode,
+        }))
+      ) {
+        return {
+          questionId: prior.question_id,
+          alias: prior.alias,
+          requirement: prior.requirement,
+          status: 'queued',
+          duplicate: true,
+          expiresAt: reg.expiresAt,
+          requestedExpiresAt: reg.requestedExpiresAt,
+          replyMode: reg.replyMode,
+          plannedFallback: input.planned_fallback ?? null,
+          adjustments: reg.adjustments,
+        };
       }
     }
 
@@ -263,17 +430,33 @@ export class Publisher {
       );
     }
 
+    const questionId = newId(ctx.now());
     const epoch = currentEpochKey(ctx.identity);
+    // One reading of the clock: a relative deadline, the policy's caps and the signed times all count from it.
     const now = ctx.now();
+    const requestedExpiresAt =
+      deadline.kind === 'relative'
+        ? new Date(now + deadline.ms).toISOString()
+        : deadline.kind === 'absolute'
+          ? deadline.at
+          : null;
     // An origin gate is the host's policy. A gate the agent picked can only shorten the no-gate expiry. The
     // host's default expiry is read now, so a change to it applies from the next question on.
     const hostDefault = ctx.policy.defaultQuestionExpiryMs;
-    const expiresAt = gate
-      ? resolveExpiry(input.expires_at, gate, now, hostDefault)
-      : earliest(
-          resolveExpiry(input.expires_at, undefined, now, hostDefault),
-          callerGate ? resolveExpiry(input.expires_at, callerGate, now, hostDefault) : null,
-        );
+    const asked = requestedExpiresAt ?? undefined;
+    let expiresAt: string | null;
+    let expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'> = { source: 'host', gateId: null };
+    if (gate) {
+      expiresAt = expiryOutcome(asked, gate, now, hostDefault).expiresAt;
+      // A gate without an expiry of its own leaves the host's default in place and caps nothing.
+      if (gate.expiryMs !== undefined) expirySource = { source: 'gate', gateId };
+    } else {
+      const host = expiryOutcome(asked, undefined, now, hostDefault).expiresAt;
+      const named = callerGate ? expiryOutcome(asked, callerGate, now, hostDefault).expiresAt : null;
+      expiresAt = earliest(host, named);
+      if (named !== null && (host === null || Date.parse(named) < Date.parse(host)))
+        expirySource = { source: 'gate', gateId: callerGateId };
+    }
     // The relay refuses a finite expiry too far ahead, and a refused question is dropped: say so now instead.
     if (expiresAt !== null && Date.parse(expiresAt) > now + QUESTION_EXPIRY_LIMIT_MS) {
       throw new BridgeError(
@@ -281,6 +464,28 @@ export class Publisher {
         'expires_at is too far ahead: the relay accepts at most 366 days, less two minutes for clock skew',
       );
     }
+    if (replyMode === 'advisory') {
+      await this.admitAdvisory({
+        originGateId: origin.workflow_gate_id,
+        namedGateId: input.workflow_gate_id,
+        kind: shape.kind,
+        expiresAt,
+        plannedFallback: input.planned_fallback,
+      });
+    }
+    const adjustments = policyAdjustments({
+      input,
+      requestedExpiresAt,
+      expiresAt,
+      expirySource,
+      requirement,
+      baseRequirement: base.requirement,
+      shape,
+      gates: [
+        [gate, gateId],
+        [callerGate, callerGateId],
+      ],
+    });
 
     // Attachments: encrypt now (so an offline desktop can publish later) and spool the ciphertext.
     const descriptors: DecisionContentV1['attachments'] = [];
@@ -346,6 +551,7 @@ export class Publisher {
       machine_label: (origin.machine_label?.trim() || origin.host_id).slice(0, 200),
       origin_summary: `${origin.agent_kind} · ${origin.worktree_id}`.slice(0, 500),
       ...(input.preparation ? { preparation: input.preparation } : {}),
+      ...(replyMode === 'advisory' ? { planned_fallback: input.planned_fallback } : {}),
     };
     const envelope = await encryptEnvelope({
       epochKey: epoch,
@@ -357,6 +563,7 @@ export class Publisher {
       senderDeviceId: ctx.identity.config.deviceId,
       purpose: 'question-content',
       plaintext: content,
+      ...(replyMode === 'advisory' ? { replyMode: 'advisory' as const } : {}),
     });
     const signed = await buildSignedQuestion({
       installationId: ctx.identity.config.installationId,
@@ -408,7 +615,27 @@ export class Publisher {
       created_at: now,
       last_error: null,
     };
+    if (corrKey) {
+      const reg: RegistrationRecord = {
+        v: 1,
+        deadline,
+        namedGateId: input.workflow_gate_id ?? null,
+        requestedRequirement: input.requested_requirement ?? null,
+        requestedExpiresAt,
+        expiresAt,
+        replyMode,
+        adjustments,
+      };
+      await ctx.store.setMeta(registrationKey(questionId), JSON.stringify(reg));
+      // Staged beside the question it replaces, which stays in force unless this commit lands; a process that stops
+      // after the commit finds the staged one committed and takes it.
+      await ctx.store.setMeta(
+        corrKey,
+        JSON.stringify({ q: prior?.question_id ?? null, p: questionId }),
+      );
+    }
     await ctx.store.commitNewQuestion(row, item);
+    if (corrKey) await ctx.store.setMeta(corrKey, JSON.stringify({ q: questionId }));
     await ctx.audit.log({
       event: 'question.queued',
       question_id: questionId,
@@ -416,7 +643,49 @@ export class Publisher {
       result: 'local-commit',
       content: input.question,
     });
-    return { questionId, alias, requirement, status: 'queued', duplicate: false };
+    return {
+      questionId,
+      alias,
+      requirement,
+      status: 'queued',
+      duplicate: false,
+      expiresAt,
+      requestedExpiresAt,
+      replyMode,
+      plannedFallback: input.planned_fallback ?? null,
+      adjustments,
+    };
+  }
+
+  /**
+   * Refuses an advisory ask the host may not sign (protocol section 21, `advisoryRefusal`). The host's own rules are
+   * checked first; then what the relay and the person's devices support, as last read in the background. Unknown
+   * support refuses too, and starts a read, so a retry a moment later can be decided.
+   */
+  private async admitAdvisory(
+    q: Pick<
+      Parameters<typeof advisoryRefusal>[0],
+      'originGateId' | 'namedGateId' | 'kind' | 'expiresAt' | 'plannedFallback'
+    >,
+  ): Promise<void> {
+    const facts = {
+      ...q,
+      hostSupport: this.advisory?.hostSupport === true,
+      policyAllows: this.ctx.policy.advisoryQuestions,
+    };
+    const local = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
+    if (local) throw advisoryError(local);
+    const known = await this.advisory!.known();
+    if (known.relay === null || (known.relay && known.reader === null)) {
+      void this.advisory!.refreshIfDue();
+      throw advisoryError('support-unknown');
+    }
+    const remote = advisoryRefusal({
+      ...facts,
+      relaySupport: known.relay,
+      readerSupport: known.reader === true,
+    });
+    if (remote) throw advisoryError(remote);
   }
 
   private async resolveAttachment(origin: QuestionOrigin, id: string): Promise<Uint8Array> {
@@ -428,24 +697,73 @@ export class Publisher {
   }
 
   /**
-   * Whether a repeat call is bound like the question it would return: the same governing gate, the same
-   * enforced level and the same images (by plaintext digest).
+   * Whether a repeat call asks exactly what `row` asked: the same governing gate, enforced level, named gate and
+   * requested level, the same deadline request and reply mode, and the same content the person would see (question,
+   * context, kind, options, text rule, preparation, plan, and the images in order with their roles and captions,
+   * by plaintext digest). The stored content is opened in memory with the keys this identity holds; content it
+   * cannot open is never taken as the same.
    */
-  private async sameBinding(
+  private async sameRequest(
     origin: QuestionOrigin,
     input: AskHumanInput,
     row: QuestionRow,
-    gateId: string | null,
-    requirement: QuestionRow['requirement'],
+    reg: RegistrationRecord,
+    asked: {
+      governingId: string | null;
+      requirement: QuestionRow['requirement'];
+      shape: GatedShape;
+      deadline: DeadlineRequest;
+      replyMode: ReplyMode;
+    },
   ): Promise<boolean> {
-    if (row.origin.workflow_gate_id !== gateId || row.requirement !== requirement) return false;
-    const asked = input.attachments ?? [];
-    if (asked.length !== row.attachment_digests.length) return false;
-    if (asked.length === 0) return true;
+    if (row.origin.workflow_gate_id !== asked.governingId || row.requirement !== asked.requirement)
+      return false;
+    if (
+      reg.namedGateId !== (input.workflow_gate_id ?? null) ||
+      reg.requestedRequirement !== (input.requested_requirement ?? null) ||
+      reg.replyMode !== asked.replyMode ||
+      !sameDeadline(reg.deadline, asked.deadline)
+    )
+      return false;
+    const images = input.attachments ?? [];
+    if (images.length !== row.attachment_digests.length) return false;
     const digests: string[] = [];
-    for (const a of asked)
+    for (const a of images)
       digests.push(await sha256Hex(await this.resolveAttachment(origin, a.local_resource_id)));
-    return sameDigests(digests, row.attachment_digests);
+    if (!sameDigests(digests, row.attachment_digests)) return false;
+    let stored: DecisionContentV1 | null;
+    try {
+      // The identity alone: deciding whether a retry is the same must never fetch keys from the relay.
+      stored = await openQuestionContent({ identity: this.ctx.identity }, row);
+    } catch {
+      return false;
+    }
+    if (!stored) return false;
+    try {
+      return (
+        canonicalize(requestOf(stored)) ===
+        canonicalize(
+          requestOf({
+            question: input.question,
+            ...(input.context ? { context: input.context } : {}),
+            kind: asked.shape.kind,
+            options: asked.shape.options,
+            allow_text: asked.shape.allowText,
+            ...(input.preparation ? { preparation: input.preparation } : {}),
+            ...(input.planned_fallback !== undefined
+              ? { planned_fallback: input.planned_fallback }
+              : {}),
+            attachments: images.map((a, i) => ({
+              sha256: digests[i]!,
+              role: a.role ?? 'other',
+              ...(a.alt ? { alt: a.alt } : {}),
+            })),
+          }),
+        )
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1792,6 +2110,81 @@ export class Publisher {
 }
 
 /** The earlier of two expiry times; null means never. */
+/** The parts of a question's content its agent chose, for comparing a retry with the question it may repeat. */
+function requestOf(c: {
+  question: string;
+  context?: string | undefined;
+  kind: string;
+  options: readonly { id: string; label: string; description?: string | undefined }[];
+  allow_text?: boolean | undefined;
+  preparation?: unknown;
+  planned_fallback?: string | undefined;
+  attachments: readonly { sha256: string; role: string; alt?: string | undefined }[];
+}): unknown {
+  return {
+    question: c.question,
+    context: c.context ?? null,
+    kind: c.kind,
+    options: c.options.map((o) => ({ id: o.id, label: o.label, description: o.description ?? null })),
+    allow_text: c.allow_text !== false,
+    preparation: c.preparation ?? null,
+    planned_fallback: c.planned_fallback ?? null,
+    attachments: c.attachments.map((a) => ({ sha256: a.sha256, role: a.role, alt: a.alt ?? null })),
+  };
+}
+
+/**
+ * What trusted policy changed in a request: a deadline it capped or chose, a level it raised, a kind its gates set.
+ * Each change names the policy that made it: an origin gate, a gate the agent named, or the host's own.
+ */
+function policyAdjustments(a: {
+  input: AskHumanInput;
+  requestedExpiresAt: string | null;
+  expiresAt: string | null;
+  expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'>;
+  requirement: Requirement;
+  /** The level the origin's gate, or the host, gave before any gate the agent named. */
+  baseRequirement: Requirement;
+  shape: GatedShape;
+  gates: [WorkflowGate | undefined, string | null][];
+}): PolicyAdjustment[] {
+  const out: PolicyAdjustment[] = [];
+  const host = { source: 'host', gateId: null } as const;
+  const gate = (id: string | null) => ({ source: 'gate', gateId: id }) as const;
+  if (a.expiresAt !== a.requestedExpiresAt)
+    out.push({
+      field: 'expires_at',
+      requested: a.requestedExpiresAt,
+      effective: a.expiresAt,
+      ...a.expirySource,
+    });
+  const asked = a.input.requested_requirement;
+  if (asked && asked !== a.requirement) {
+    const [origin, originId] = a.gates[0]!;
+    const [, namedId] = a.gates[1]!;
+    out.push({
+      field: 'requirement',
+      requested: asked,
+      effective: a.requirement,
+      ...(origin ? gate(originId) : a.baseRequirement !== asked ? host : gate(namedId)),
+    });
+  }
+  const kind = a.input.kind;
+  if (kind && kind !== a.shape.kind) {
+    const by =
+      a.gates.find(([g]) => g?.bindArtifacts) ??
+      a.gates.find(([g]) => g?.choices) ??
+      a.gates.find(([g]) => g && (g.allowText ?? !g.choices) === false);
+    out.push({
+      field: 'kind',
+      requested: kind,
+      effective: a.shape.kind,
+      ...(by ? gate(by[1]) : host),
+    });
+  }
+  return out;
+}
+
 function earliest(a: string | null, b: string | null): string | null {
   if (a === null) return b;
   if (b === null) return a;

@@ -3,6 +3,7 @@ import {
   type DecisionContentV1,
   type LedgerEvent,
   type ProtocolFeature,
+  type ReplyMode,
 } from '@daintreehq/decisions-protocol';
 import { AuditLog } from './audit.js';
 import { BridgeError, PostMessageInput } from './content.js';
@@ -82,6 +83,7 @@ import {
   type SnapshotPublishResult,
 } from './snapshots.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
+import { AdvisorySupport } from './advisory.js';
 import type { LocalStore } from './store.js';
 import type { QuestionOrigin, QuestionRow } from './types.js';
 
@@ -199,6 +201,17 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
   'owner-desktop-declines-v1',
 ];
 
+/** A question's reply mode, from the AAD of the envelope it was published with (readable without opening it). */
+function replyModeOfRow(row: Pick<QuestionRow, 'content_sealed'>): ReplyMode {
+  if (!row.content_sealed) return 'blocking';
+  try {
+    const env = JSON.parse(row.content_sealed) as { aad?: { reply_mode?: unknown } };
+    return env.aad?.reply_mode === 'advisory' ? 'advisory' : 'blocking';
+  } catch {
+    return 'blocking';
+  }
+}
+
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
  * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
@@ -268,6 +281,15 @@ export interface DecisionView {
   deliveryStatus: QuestionRow['delivery_status'];
   revision: number;
   expiresAt: string | null;
+  /**
+   * `advisory` when the agent asked for advice (protocol section 21): if no answer commits by the first round's
+   * deadline, the plan it stated is its own to carry out. A reopened question (`revision` above 0) always waits.
+   */
+  replyMode: ReplyMode;
+  /** The plan the agent stated when it asked for advice; null for a blocking question, or content this desktop cannot open. */
+  plannedFallback: string | null;
+  /** Why the relay refused the question, when it is `publish-failed`; null otherwise. */
+  errorCode: string | null;
   /** The trusted workflow gate that governs the question, if any. */
   workflowGateId: string | null;
   /**
@@ -384,6 +406,8 @@ type Listener = {
 export class DecisionsBridge {
   readonly ctx: BridgeContext;
   readonly publisher: Publisher;
+  /** What the relay and the person's devices support for advisory questions, read in the background. */
+  private readonly advisory: AdvisorySupport;
   readonly verifier: EventVerifier;
   readonly inbox: Inbox;
   readonly delivery: DeliveryEngine;
@@ -481,11 +505,16 @@ export class DecisionsBridge {
       ...(o.learner ? { learner: o.learner } : {}),
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
-    this.publisher = new Publisher(this.ctx, {
-      onOwnerAnswer: (r) => this.notify('answer', r),
-      onOwnerDecline: (r) => this.notify('decline', r),
-      onOwnerFollowUp: (r) => this.notify('followUp', r),
-    });
+    this.advisory = new AdvisorySupport(this.ctx, o.advisoryDeadlines === true);
+    this.publisher = new Publisher(
+      this.ctx,
+      {
+        onOwnerAnswer: (r) => this.notify('answer', r),
+        onOwnerDecline: (r) => this.notify('decline', r),
+        onOwnerFollowUp: (r) => this.notify('followUp', r),
+      },
+      this.advisory,
+    );
     this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
@@ -662,6 +691,7 @@ export class DecisionsBridge {
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
+    this.advisory.reset();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
@@ -700,6 +730,7 @@ export class DecisionsBridge {
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
+    this.advisory.reset();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -1146,6 +1177,15 @@ export class DecisionsBridge {
     const declined = entries.some(
       (e) => e.kind === 'declined' && e.revision === row.question_revision,
     );
+    const replyMode = replyModeOfRow(row);
+    let plannedFallback: string | null = null;
+    if (replyMode === 'advisory') {
+      // Opened with the keys already held: reading a decision never asks the relay for one.
+      const content = await openQuestionContent({ identity: this.ctx.identity }, row).catch(
+        () => null,
+      );
+      plannedFallback = content?.planned_fallback ?? null;
+    }
     return {
       questionId: row.question_id,
       alias: row.alias,
@@ -1154,6 +1194,9 @@ export class DecisionsBridge {
       deliveryStatus: row.delivery_status,
       revision: row.question_revision,
       expiresAt: row.expires_at,
+      replyMode,
+      plannedFallback,
+      errorCode: row.local_status === 'publish-failed' ? row.error_code : null,
       workflowGateId: row.origin.workflow_gate_id,
       provenance: inForce
         ? confirmed
@@ -1299,6 +1342,8 @@ export class DecisionsBridge {
         // A polling bridge reads the preference after each successful sync instead, so a relay refusing this device
         // hears from it on the sync's slow schedule, not every pump.
         if (!this.pollMode) this.involvement.retryIfDue();
+        // Last, so a slow relay holds up nothing else; it reads only on a host that could ask for advice.
+        await this.advisory.refreshIfDue();
       } finally {
         this.pumping = null;
       }

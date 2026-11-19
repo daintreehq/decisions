@@ -176,8 +176,11 @@ export async function rotateEpoch(client: RelayClient, store: KeyStore): Promise
 }
 
 /** Verify every returned device certificate against the pinned owner key (our own key on the owner desktop). */
-export async function verifiedDevices(client: RelayClient): Promise<DeviceInfo[]> {
-  const list = await client.devices();
+export async function verifiedDevices(
+  client: RelayClient,
+  opts: Parameters<RelayClient['devices']>[0] = {},
+): Promise<DeviceInfo[]> {
+  const list = await client.devices(opts);
   const id = client.identity;
   const out: DeviceInfo[] = [];
   for (const d of list.devices) {

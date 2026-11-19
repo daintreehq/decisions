@@ -1,9 +1,11 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { LIMITS, isAdvisoryRound } from '@daintreehq/decisions-protocol';
 import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
 import type { InvolvementView } from './involvement.js';
+import type { PolicyAdjustment, RegisterResult } from './publisher.js';
 import type { QuestionOrigin } from './types.js';
 
 const SERVER_VERSION = '0.8.0';
@@ -56,6 +58,9 @@ function decisionResult(v: DecisionView) {
     delivery_status: v.deliveryStatus,
     revision: v.revision,
     expires_at: v.expiresAt,
+    reply_mode: v.replyMode,
+    planned_fallback: v.plannedFallback,
+    error_code: v.errorCode,
     answers: v.answers.map((a) => ({
       revision: a.revision,
       source: a.source,
@@ -168,9 +173,67 @@ export const SERVER_INSTRUCTIONS =
   'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. When the person would have to see something to decide (a UI, a design, a layout, a chart, an error on screen), attach screenshots to ask_human as its attachments field describes, instead of describing it in words, with roles before and after for a change. If the images change after an approval, ask again: an approval covers only the images it was given. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
   "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
-/** The `ask_human` result text. */
+/** How the `ask_human` result text begins: where the answer arrives, and what to do meanwhile. */
 export const askedInstruction = (alias: number) =>
   `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`;
+
+const policyName = (a: Pick<PolicyAdjustment, 'source' | 'gateId'>) =>
+  a.source === 'gate' ? `the workflow gate ${a.gateId}` : 'the host';
+
+/** One change policy made, in words. */
+function adjustmentText(a: PolicyAdjustment): string {
+  const by = policyName(a);
+  if (a.field === 'expires_at')
+    return a.requested === null
+      ? `the deadline is ${by}'s default`
+      : `${by} moved the deadline you asked for (${a.requested}) to ${a.effective ?? 'never'}`;
+  if (a.field === 'requirement')
+    return `${by} raised the requirement from ${a.requested} to ${a.effective}`;
+  return `${by} made it ${a.effective} instead of ${a.requested}`;
+}
+
+/**
+ * The `ask_human` result text: where the answer arrives, the deadline and mode that apply, what policy changed, and
+ * how to find the question again.
+ */
+export function askedText(r: RegisterResult): string {
+  const q = `q-${r.alias}`;
+  const lead = r.duplicate
+    ? `Already asked as ${q}: this correlation_id and request match it, so this is that question with its original deadline. It may have been answered or closed since; check with get_decision.`
+    : askedInstruction(r.alias);
+  const plan =
+    r.replyMode === 'advisory'
+      ? `Asked for advice, due ${r.expiresAt} (UTC). An answer that arrives by then is typed here as usual. If none does, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`
+      : r.expiresAt
+        ? `It waits for a decision until ${r.expiresAt} (UTC); unanswered by then, it expires, and expiry authorises nothing.`
+        : 'It has no deadline: it waits for a decision until it is answered, declined or cancelled.';
+  const policy = r.adjustments.length
+    ? ` Policy: ${r.adjustments.map(adjustmentText).join('; ')}.`
+    : '';
+  return `${lead} ${plan}${policy} To check on it later, or if you lose track of it, call get_decision with question_id ${r.questionId}.`;
+}
+
+/** The `ask_human` structured result: the question and the plan that applies to it, in the MCP surface's snake_case. */
+function askedResult(r: RegisterResult, instruction: string) {
+  return {
+    question_id: r.questionId,
+    status: r.status,
+    duplicate: r.duplicate,
+    enforced_requirement: r.requirement,
+    reply_mode: r.replyMode,
+    expires_at: r.expiresAt,
+    requested_expires_at: r.requestedExpiresAt,
+    planned_fallback: r.plannedFallback,
+    policy_adjustments: r.adjustments.map((a) => ({
+      field: a.field,
+      requested: a.requested,
+      effective: a.effective,
+      source: a.source,
+      gate_id: a.gateId,
+    })),
+    instruction,
+  };
+}
 
 /** The `send_followup` result text. */
 export const followupInstruction = (alias: number, expectsReply: boolean) =>
@@ -259,12 +322,27 @@ export const TOOLS = [
         },
         expires_at: {
           type: 'string',
-          description: 'ISO time; bounded by host and workflow policy. Omit for the host default.',
+          description:
+            'A fixed deadline, as an ISO 8601 time. Policy may shorten it; the result gives the deadline that applies, in UTC. Not with expires_in. Omit both for the host default.',
+        },
+        expires_in: {
+          type: 'string',
+          pattern: '^[1-9][0-9]{0,8}[smhd]$',
+          description:
+            'A reply window from now: a whole number and one unit, s, m, h or d (24 hours), from 61s to 365d, such as 15m or 2h. Worked out once on the host clock; the result gives the UTC deadline that applies. Not with expires_at.',
+        },
+        planned_fallback: {
+          type: 'string',
+          minLength: 1,
+          maxLength: LIMITS.plannedFallbackChars,
+          description:
+            "Ask for advice, not a decision: what you will do if no answer arrives by the deadline (expires_in, expires_at or the host default), such as \"I'll use the in-memory fixture.\" If none arrives, you are told, and may carry it out at your discretion. Never for an approval, a workflow gate or anything that needs permission. Refused where the host or the person's devices cannot show it; ask again without it for a decision.",
         },
         correlation_id: {
           type: 'string',
           maxLength: 64,
-          description: 'Repeat calls with the same id return the same question.',
+          description:
+            'Makes retries safe: a repeat call from this terminal with the same id and the same request returns the original question and deadline. A changed question, options, deadline or plan under the same id asks a new question.',
         },
         preparation: {
           type: 'object',
@@ -364,6 +442,17 @@ export const TOOLS = [
           type: ['string', 'null'],
           description:
             "The current round's deadline: the one the question was published with, or the one signed when it was last reopened. Null: no deadline.",
+        },
+        reply_mode: {
+          type: 'string',
+          enum: ['blocking', 'advisory'],
+          description:
+            'advisory: you asked for advice; if no answer arrived by the first deadline (revision 0, status expired), the plan you stated is yours to carry out. blocking: expiry authorises nothing.',
+        },
+        planned_fallback: { type: ['string', 'null'] },
+        error_code: {
+          type: ['string', 'null'],
+          description: 'Why the relay refused the question, when status is publish-failed.',
         },
         thread: {
           type: 'array',
@@ -660,13 +749,8 @@ export function createDecisionsMcpHandler(
     try {
       if (name === 'ask_human') {
         const r = await bridge.registerQuestion({ origin, input: args });
-        const instruction = askedInstruction(r.alias);
-        return text(instruction, {
-          question_id: r.questionId,
-          status: r.status,
-          enforced_requirement: r.requirement,
-          instruction,
-        });
+        const instruction = askedText(r);
+        return text(instruction, askedResult(r, instruction));
       }
       if (name === 'get_decision') {
         if (typeof args.question_id !== 'string')
@@ -675,8 +759,12 @@ export function createDecisionsMcpHandler(
         const summary = v.provenance
           ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
-            ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : v.closedReason === 'declined'
+            ? isAdvisoryRound({ advisory: v.replyMode === 'advisory', revision: v.revision })
+              ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
+              : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+            : v.status === 'publish-failed'
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: the person never saw it, so nothing was decided. Ask again if you still need it.`
+              : v.closedReason === 'declined'
               ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
               : `q-${v.alias} is ${v.status}; no answer in force.`;
         const messages = v.thread.filter((t) => t.kind === 'message').length;

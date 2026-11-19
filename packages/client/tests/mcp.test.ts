@@ -376,14 +376,25 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
       options: [{ id: 'red', label: 'Red' }],
     });
     expect(res.isError).toBeUndefined();
-    expect(res.content[0].text).toBe(askedInstruction(1));
+    const id = res.structuredContent.question_id as string;
+    const expires = res.structuredContent.expires_at as string;
+    expect(res.content[0].text).toBe(
+      `${askedInstruction(1)} It waits for a decision until ${expires} (UTC); unanswered by then, it expires, and expiry authorises nothing. Policy: the deadline is the host's default. To check on it later, or if you lose track of it, call get_decision with question_id ${id}.`,
+    );
     expect(res.content[0].text).toMatch(
       /^Asked as q-1\. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn\. The answer arrives as a new message in this terminal, with your question quoted\. /,
     );
-    expect(res.structuredContent.instruction).toBe(askedInstruction(1));
+    expect(res.structuredContent.instruction).toBe(res.content[0].text);
     expect(res.structuredContent).toMatchObject({
       status: 'queued',
+      duplicate: false,
       enforced_requirement: 'human-required',
+      reply_mode: 'blocking',
+      requested_expires_at: null,
+      planned_fallback: null,
+      policy_adjustments: [
+        { field: 'expires_at', requested: null, effective: expires, source: 'host', gate_id: null },
+      ],
     });
     expect(await store.listQuestions()).toHaveLength(1);
   });

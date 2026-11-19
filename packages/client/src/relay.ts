@@ -587,8 +587,9 @@ export class RelayClient {
   }
 
   /* ---- devices ---- */
-  devices(): Promise<DevicesResponse> {
-    return this.request('GET', `${API_PREFIX}/devices`);
+  /** The device directory. `opts` makes a background read give up early instead of retrying. */
+  devices(opts: Pick<RequestOptions, 'retry' | 'timeoutMs'> = {}): Promise<DevicesResponse> {
+    return this.request('GET', `${API_PREFIX}/devices`, opts);
   }
   revokeDevice(deviceId: string, newKeyEpoch: number, grants: EpochGrant[]) {
     return this.ownerOnly('revoking a device', () =>
