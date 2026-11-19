@@ -1301,6 +1301,11 @@ export class DecisionsBridge {
     const entries = await openAnswers(this.ctx, row);
     const unpublished = entries.find((e) => e.kind === 'unpublished');
     const timeout = this.advisoryTimeout(row, entries);
+    // The host as it stands while the answers just read are current, as the published notice's view reads it.
+    const host = {
+      outcomes: this.advisory.hostSupport,
+      allowed: this.ctx.policy.advisoryQuestions,
+    };
     // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
     // ahead here either.
     const noticeWaits =
@@ -1390,10 +1395,7 @@ export class DecisionsBridge {
         !row.history_only &&
         ((row.local_status === 'publish-failed' &&
           !!unpublished &&
-          unpublishedPlanDue(unpublished, planMaybeTyped, {
-            outcomes: this.advisory.hostSupport,
-            allowed: this.ctx.policy.advisoryQuestions,
-          })) ||
+          unpublishedPlanDue(unpublished, planMaybeTyped, host)) ||
           (timeout?.inForce === true && timeout.view.disposition === 'fallback-due' && !waiting)),
       advisoryTimeout: timeout?.view ?? null,
       choice: inForce?.choices[0]?.id ?? null,
