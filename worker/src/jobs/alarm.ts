@@ -22,7 +22,8 @@ interface JobRow {
   attempt_count: number;
 }
 
-type Outcome = { deferUntil: number } | void;
+/** `dropped`: the job ends without its work, which could only have come too late (a reminder lines up no next one). */
+type Outcome = { deferUntil: number } | { dropped: true } | void;
 
 const MAX_ATTEMPTS = 8;
 
@@ -102,10 +103,11 @@ const liveAt = (at: number, q: Pick<QuestionRow, 'status' | 'expires_at'>) =>
   pushTtlSeconds(at, deadlineOf(q)) !== null;
 
 /**
- * Push jobs honour quiet hours by deferring (never delaying data sync), unless quiet hours last until the question's
- * deadline. Subscriptions that already got this notification are remembered in the job payload so a retry only
- * targets the ones that transiently failed. Each send's TTL ends by the deadline, and none goes once it has passed or
- * the job was cancelled meanwhile (an answer during an earlier send).
+ * Push jobs honour quiet hours by deferring (never delaying data sync). A push other than a reply is dropped instead
+ * when quiet hours last until the question's deadline. Subscriptions that already got this notification are
+ * remembered in the job payload so a retry only targets the ones that transiently failed. Each send's TTL ends by the
+ * deadline, and none goes, nor is retried, once it has passed or the job was cancelled meanwhile (an answer during an
+ * earlier send).
  */
 async function pushJob(
   room: Room,
@@ -116,8 +118,14 @@ async function pushJob(
 ): Promise<Outcome> {
   const t = nowMs();
   const when = nextAllowed(t, room.settings().quiet_hours);
-  if (when > t) return liveAt(when, q) ? { deferUntil: when } : undefined;
+  // A reply push waits even past the deadline: a proxy answer meanwhile ends the deadline without answering the agent's
+  // message, and the question's expiry cancels the job otherwise.
+  if (when > t)
+    return type === 'decision-reply' || liveAt(when, q) ? { deferUntil: when } : { dropped: true };
   const deadline = deadlineOf(q);
+  const wanted = () =>
+    room.q1<{ status: string }>(`SELECT status FROM scheduled_jobs WHERE job_id = ?`, job.job_id)
+      ?.status === 'pending';
   const payload = JSON.parse(job.payload) as Record<string, unknown>;
   const done = new Set<string>(Array.isArray(payload.done) ? (payload.done as string[]) : []);
   const results = await sendNotification(
@@ -128,18 +136,15 @@ async function pushJob(
       urgency,
       skip: done,
       usefulUntil: deadline,
-      wanted: () =>
-        room.q1<{ status: string }>(
-          `SELECT status FROM scheduled_jobs WHERE job_id = ?`,
-          job.job_id,
-        )?.status === 'pending',
+      wanted,
     },
   );
   for (const r of results) if (r.ok) done.add(r.subscription_id);
-  // A retry once the deadline has passed would only be dropped.
+  // A retry once the deadline has passed, or of a job cancelled meanwhile, would only be dropped.
   if (
     results.some((r) => !r.ok && isTransient(r.status)) &&
-    pushTtlSeconds(nowMs(), deadline) !== null
+    pushTtlSeconds(nowMs(), deadline) !== null &&
+    wanted()
   ) {
     room.run(
       `UPDATE scheduled_jobs SET payload = ? WHERE job_id = ?`,
@@ -218,7 +223,7 @@ async function runJob(room: Room, job: JobRow): Promise<Outcome> {
       // until the deadline leaves nothing to send.
       if (type === 'decision-new') {
         const hold = presenceHold(room, q, nowMs());
-        if (hold !== null) return liveAt(hold, q) ? { deferUntil: hold } : undefined;
+        if (hold !== null) return liveAt(hold, q) ? { deferUntil: hold } : { dropped: true };
       }
       return pushJob(room, job, q, type, 'high');
     }
