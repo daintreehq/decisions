@@ -35,9 +35,11 @@ export const paneOrigin = (pane: string): QuestionOrigin =>
     workflow_gate_id: null,
   }) as QuestionOrigin;
 
-/** One terminal per pane, recording what Daintree would type into each. */
+/** One terminal per pane, recording what Daintree would type into each, and when (real time). */
 export class PaneSink implements TerminalSink {
-  typed: { pane: string; text: string; injectionId: string }[] = [];
+  typed: { pane: string; text: string; injectionId: string; at: number }[] = [];
+  /** Panes whose agent is busy: nothing is typed into them until they are taken out again. */
+  readonly busy = new Set<string>();
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     return {
       state: 'alive',
@@ -52,11 +54,11 @@ export class PaneSink implements TerminalSink {
       },
     };
   }
-  async isIdle() {
-    return true;
+  async isIdle(t: TerminalTarget) {
+    return !this.busy.has(t.paneId);
   }
   async inject(t: TerminalTarget, text: string, injectionId: string) {
-    this.typed.push({ pane: t.paneId, text, injectionId });
+    this.typed.push({ pane: t.paneId, text, injectionId, at: Date.now() });
     return { outcome: 'delivered' as const, proof: 'e2e' };
   }
   async hasMarker(t: TerminalTarget, id: string) {

@@ -38,11 +38,11 @@ export class DecisionRoom extends RelayRoom {
       const at = await getAlarm(options);
       return at == null ? at : at + offsetMs;
     };
-    // A room started again (evicted, or a relay restarted on the same storage) keeps the time it had reached. An
-    // alarm still set for an earlier offset (a move cut short) fires now, so the room schedules it again on this one.
+    // A room started again (evicted, or a relay restarted on the same storage) keeps the time it had reached. Its
+    // alarm may still be set for an earlier offset (a move cut short), so it fires now and is scheduled again.
     void ctx.blockConcurrencyWhile(async () => {
       const saved = await storage.get<number>(OFFSET_KEY);
-      if (typeof saved !== 'number' || saved === offsetMs) return;
+      if (typeof saved !== 'number') return;
       offsetMs = saved;
       if ((await getAlarm()) !== null) await setAlarm(nativeNow());
     });
@@ -78,10 +78,10 @@ export class DecisionRoom extends RelayRoom {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (new URL(request.url).pathname === CLOCK_PATH) {
-      return env.DECISION_ROOM.get(env.DECISION_ROOM.idFromName('primary')).fetch(request);
-    }
-    const res = await worker.fetch(request, env);
+    const res =
+      new URL(request.url).pathname === CLOCK_PATH
+        ? await env.DECISION_ROOM.get(env.DECISION_ROOM.idFromName('primary')).fetch(request)
+        : await worker.fetch(request, env);
     // A socket upgrade is passed on as it is; it carries no Date a client reads.
     if (res.status === 101 || res.webSocket) return res;
     const dated = new Response(res.body, res);

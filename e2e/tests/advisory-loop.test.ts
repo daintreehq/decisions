@@ -491,10 +491,28 @@ describe.skipIf(!chromiumPath)(
         .waitFor();
       expect(await page.getByRole('note', { name: 'Your agent’s plan' }).count()).toBe(0);
 
-      await pastDeadline(expiresAt);
-      await view();
-      await page.getByText('Expired without an answer').first().waitFor({ timeout: 30_000 });
-      await page.getByText('Nothing was approved, and the step stays blocked.').first().waitFor();
+      // Pane C's agent is busy as the deadline passes, so the expiry waits to be typed: what the agent reads meanwhile
+      // must not let it go ahead either.
+      sink.busy.add('pane-c');
+      try {
+        await pastDeadline(expiresAt);
+        await page.getByText('Expired without an answer').first().waitFor({ timeout: 30_000 });
+        await page.getByText('Nothing was approved, and the step stays blocked.').first().waitFor();
+        await settle();
+        const waiting = await until(
+          async () => {
+            const r = await view();
+            return r.status === 'expired' ? r : null;
+          },
+          30_000,
+          'the expiry taken in while the pane is busy',
+          POLL_MS,
+        );
+        expect(waiting.delivery_status).not.toBe('terminal-delivered');
+        expect(sink.typed.slice(before)).toHaveLength(0);
+      } finally {
+        sink.busy.delete('pane-c');
+      }
 
       await settle();
       const typed = await typedSince(before);
@@ -556,8 +574,9 @@ describe.skipIf(!chromiumPath)(
           expiresAt: String(asked.structuredContent!.expires_at),
         };
       };
-      const first = await ask('Keep the old importer behind a flag?', WINDOW);
-      const second = await ask('Log the importer’s timings?', '905s');
+      // The shortest windows an agent may ask for, five seconds apart: the move is two steps, so the margin is the gap.
+      const first = await ask('Keep the old importer behind a flag?', '61s');
+      const second = await ask('Log the importer’s timings?', '66s');
       await published(first.id);
       await published(second.id);
       await page.goto('about:blank');
@@ -565,11 +584,13 @@ describe.skipIf(!chromiumPath)(
         sink.typed.slice(before).filter((t) => t.text.includes(`question_id: ${id}`));
 
       await clock.advance(Math.ceil(Date.parse(first.expiresAt) - clock.now()) + 1_000);
-      const secondDue = Date.parse(second.expiresAt);
-      expect(secondDue - clock.now()).toBeGreaterThan(2_000);
+      // The second deadline in real time, which the sink records injections in, now that the clock stands still.
+      const secondDue = Date.parse(second.expiresAt) - clock.offset;
+      expect(secondDue - Date.now()).toBeGreaterThan(2_000);
       await until(async () => typedFor(first.id).length > 0, 30_000, 'the first expiry pushed');
-      expect(clock.now()).toBeLessThan(secondDue);
       await until(async () => typedFor(second.id).length > 0, 30_000, 'the second expiry pushed');
+      expect(typedFor(first.id)[0]!.at).toBeLessThan(secondDue);
+      expect(typedFor(second.id)[0]!.at).toBeGreaterThanOrEqual(secondDue);
 
       expect(sink.typed.slice(before).map((t) => t.pane)).toEqual(['pane-b', 'pane-b']);
       for (const q of [first, second]) {
