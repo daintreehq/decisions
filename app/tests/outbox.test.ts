@@ -29,6 +29,33 @@ const poster = (impl: (path: string, body: string) => Promise<unknown>): Poster 
 });
 
 describe('outbox', () => {
+  it('never writes back an entry let go while it was being sent', async () => {
+    const db = await Db.open(dbName());
+    const key = await generateCacheKey();
+    let release: (() => void) | null = null;
+    const ob = new Outbox(
+      db,
+      key,
+      () =>
+        poster(
+          () =>
+            new Promise((r) => {
+              release = () => r({});
+            }),
+        ),
+      // Not read back yet: a committed entry would otherwise stay until it is.
+      { inThread: () => false },
+    );
+    await ob.enqueue(entry({ id: 'gone_1' }));
+    const sending = ob.flush();
+    await vi.waitFor(() => expect(release).not.toBeNull());
+    await ob.discard('gone_1');
+    release!();
+    await sending;
+    expect(ob.list()).toEqual([]);
+    expect(await db.outbox()).toEqual([]);
+  });
+
   it('stores nothing in plaintext and survives a restart', async () => {
     const name = dbName();
     const key = await generateCacheKey();

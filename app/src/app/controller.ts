@@ -27,6 +27,7 @@ import {
   Drafts,
   Outbox,
   type OutboxEntry,
+  type OutboxHooks,
   type OutboxImage,
   type Rebuilt,
 } from '../data/outbox.js';
@@ -43,10 +44,10 @@ import { SyncEngine, type Connection } from '../data/sync.js';
 import {
   buildAnswerRequest,
   buildDeclineRequest,
-  DeclineUnsupportedError,
   highestEpoch,
   type HumanActionKind,
 } from '../domain/answer.js';
+import { DeclineBlockedError, DeclineInFlightError, declineSettlement } from '../domain/decline.js';
 import { buildMessageRequest } from '../domain/message.js';
 import {
   buildInvolvementRecord,
@@ -458,31 +459,20 @@ export class AppController {
     });
     this.involvement.subscribe(() => this.emitInvolvement());
 
-    this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
-      onChange: () => this.patch({}),
-      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
-      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
-      settle: () => this.sync?.catchUp(),
-      onCommitted: () =>
-        void this.sync
-          ?.catchUp()
-          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
-      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
-      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
-      inThread: (e) => {
-        const v = this.store?.get(e.questionId);
-        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
-        const id = e.recordId ?? e.messageId;
-        if (!id) return true;
-        return e.kind === 'message'
-          ? v.messages.some((m) => m.messageId === id)
-          : v.actions.some((a) => a.actionId === id);
-      },
-    });
+    this.outbox = new Outbox(db, cacheKey, () => this.relay!, this.outboxHooks(config.deviceId));
     // Whatever the thread reads (a socket event, a catch-up, a backfill) may be what a committed entry waited for.
     this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
     await this.outbox.load();
+    // A dismissal of a question since deleted has nothing left to settle against or show it in. Only a deletion this
+    // device has read counts: a question merely missing may be a thread still being rebuilt.
+    const deleted = new Set(
+      cached.filter((e) => e.event_type === 'decision.deleted').map((e) => e.question_id),
+    );
+    for (const e of this.outbox.list())
+      if (e.kind === 'decline' && deleted.has(e.questionId)) await this.outbox.discard(e.id);
+    // A dismissal whose settlement was read before the app closed, but not yet written, settles from the thread now.
+    this.outbox.reconcile();
 
     const sync = (this.sync = new SyncEngine({
       relay: this.relay,
@@ -526,6 +516,47 @@ export class AppController {
       void this.backfillThreads();
     });
     void this.refreshDevices().catch(() => undefined);
+  }
+
+  /** What the outbox asks of the app: reading a commit back, photo rebuilds, and when an entry has settled. */
+  private outboxHooks(deviceId?: string): OutboxHooks {
+    return {
+      onChange: () => this.patch({}),
+      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
+      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
+      settle: () => this.sync?.catchUp(),
+      onCommitted: () =>
+        void this.sync
+          ?.catchUp()
+          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
+      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
+      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
+      inThread: (e) => {
+        const v = this.store?.get(e.questionId);
+        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
+        const id = e.recordId ?? e.messageId;
+        if (!id) return true;
+        return e.kind === 'message'
+          ? v.messages.some((m) => m.messageId === id)
+          : v.actions.some((a) => a.actionId === id);
+      },
+      // A decline is settled only by the very cancel this device signed, verified in the thread (a relay answers a
+      // cancel another cancel beat with a receipt like a committed one), or by what settled its round instead.
+      declineSettlement: (e) => {
+        // Known from boot, before the snapshot carries the config.
+        const self = deviceId ?? this.snap.config?.deviceId;
+        return self ? declineSettlement(e, this.store?.get(e.questionId), self) : null;
+      },
+      onRefused: (e) => {
+        if (e.kind !== 'decline') return;
+        // The relay knows more than this thread (an answer that won, a reopen): read it now, so nothing here is offered
+        // against the round that is gone.
+        void this.sync?.catchUp().catch(() => undefined);
+        // The asking desktop stopped taking declines since the device list was read: read it again, so Dismiss agrees.
+        if (e.refusalReason === CREATOR_MISSING_FEATURE)
+          void this.refreshDevices().catch(() => undefined);
+      },
+    };
   }
 
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
@@ -580,7 +611,8 @@ export class AppController {
     return {
       questions: this.store?.list().length ?? 0,
       // An entry already on the relay, only waiting to be read back here, is not unsent.
-      unsent: this.outbox?.list().filter((e) => e.state !== 'committed').length ?? 0,
+      // Nor is a note about how a dismissal settled.
+      unsent: this.outbox?.list().filter((e) => e.state !== 'committed' && !e.outcome).length ?? 0,
       drafts,
     };
   }
@@ -819,52 +851,124 @@ export class AppController {
     /** Photos going with the answer (answer and override only). */
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
-    const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
-    const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
-    const req = await buildAnswerRequest({
-      installationId: this.snap.config.installationId,
-      deviceId: this.snap.config.deviceId,
-      signingKey: this.keys.signingPrivate,
-      epochKey: highestEpoch(this.epochKeys),
-      view: args.view,
-      kind: args.kind,
-      expectedRevision: args.expectedRevision,
-      selected: args.selected,
-      text: args.text,
-      reason: args.reason,
-      reviewedDigests: args.reviewedDigests,
-      explicitApproval: args.view.content?.kind === 'approval' ? true : undefined,
-      ...(sealed ? { images: sealed.refs } : {}),
-    });
-    await this.outbox.enqueue(
-      {
-        id: newId(),
-        questionId: args.view.id,
-        kind: req.kind,
-        recordId: req.actionId,
-        path: req.path,
-        bodyText: req.bodyText,
-        idempotencyKey: req.idempotencyKey,
-        expectedRevision: req.expectedRevision,
+    await this.admit(args.view.id, async () => {
+      if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+      // Nothing else goes on a question while this device's dismissal of it is on its way.
+      if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
+      const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
+      const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
+      const req = await buildAnswerRequest({
+        installationId: this.snap.config.installationId,
+        deviceId: this.snap.config.deviceId,
+        signingKey: this.keys.signingPrivate,
+        epochKey: highestEpoch(this.epochKeys),
+        view: args.view,
+        kind: args.kind,
+        expectedRevision: args.expectedRevision,
         selected: args.selected,
         text: args.text,
-        reason: args.reason ?? '',
-        ...(sealed ? { images: sealed.images, reviewedDigests: args.reviewedDigests } : {}),
-      },
-      sealed?.ciphertexts,
-    );
+        reason: args.reason,
+        reviewedDigests: args.reviewedDigests,
+        explicitApproval: args.view.content?.kind === 'approval' ? true : undefined,
+        ...(sealed ? { images: sealed.refs } : {}),
+      });
+      await this.outbox.enqueue(
+        {
+          id: newId(),
+          questionId: args.view.id,
+          kind: req.kind,
+          recordId: req.actionId,
+          path: req.path,
+          bodyText: req.bodyText,
+          idempotencyKey: req.idempotencyKey,
+          expectedRevision: req.expectedRevision,
+          selected: args.selected,
+          text: args.text,
+          reason: args.reason ?? '',
+          ...(sealed ? { images: sealed.images, reviewedDigests: args.reviewedDigests } : {}),
+        },
+        sealed?.ciphertexts,
+      );
+    });
+    // Stored, so admitted: the draft goes only now, outside the admission, which holds nothing it need not.
     await this.drafts?.delete(args.view.id);
-    void this.outbox.flush();
+    void this.outbox?.flush();
+  }
+
+  /** By question, the admission to the outbox under way: each waits for the one before it. */
+  private admitting = new Map<string, Promise<unknown>>();
+
+  /**
+   * Admits one answer, follow-up or dismissal to the outbox at a time per question, from its checks to its stored
+   * entry: a dismissal confirmed while an answer's photos are still being sealed (or the other way round) sees the
+   * other one stored and is refused, rather than both going out.
+   */
+  private admit<T>(questionId: string, run: () => Promise<T>): Promise<T> {
+    const next = (this.admitting.get(questionId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(run);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.admitting.set(questionId, settled);
+    void settled.then(() => {
+      if (this.admitting.get(questionId) === settled) this.admitting.delete(questionId);
+    });
+    return next;
   }
 
   /**
-   * The person declines to answer an open question: a signed `cancel` from this device, sent now rather than queued,
-   * so the confirmation that asked for it can say whether it took. The relay stops its pushes and every paired device
-   * files it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
+   * The person declines to answer an open question: a `cancel` signed once by this device against the revision they
+   * saw, sealed into the outbox before anything is sent, and sent from there exactly as signed (after a reload too)
+   * until the relay commits or refuses it. It is never signed again, so a question that moved on refuses it rather
+   * than taking it for a round the person never saw. Resolves once it is stored, with the entry; a decline already on
+   * its way for the question is returned instead of a second. The relay stops its pushes and every paired device files
+   * it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
    */
-  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.relay) throw new Error('not paired');
+  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    // A second tap waits for the first, then finds it stored.
+    const entry = await this.admit(view.id, async () => {
+      const existing = this.outbox?.declineInFlight(view.id);
+      return existing ?? this.storeDecline(view, expectedRevision);
+    });
+    const outbox = this.outbox;
+    if (outbox) {
+      // An earlier decline of this question that settled is only a note about how: this one replaces it.
+      for (const e of outbox.forQuestion(view.id))
+        if (e.kind === 'decline' && e.id !== entry.id && e.outcome) await outbox.discard(e.id);
+      void outbox.flush();
+    }
+    return entry;
+  }
+
+  /**
+   * Sends a refused entry again, as it was, through the same admission as everything else on its question: never
+   * while this device's dismissal of it is on its way, or being stored.
+   */
+  retry(id: string): Promise<void> {
+    const e = this.outbox?.list().find((x) => x.id === id);
+    if (!e) return Promise.resolve();
+    return this.admit(e.questionId, async () => {
+      if (this.outbox?.declineInFlight(e.questionId)) return;
+      await this.outbox?.retry(id);
+    });
+  }
+
+  private async storeDecline(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    const outbox = this.outbox;
+    if (!this.keys || !this.snap.config || !outbox) throw new Error('not paired');
+    // An answer or follow-up from this device still on its way goes first: a decline behind it would only be refused.
+    if (
+      outbox
+        .forQuestion(view.id)
+        .some(
+          (e) =>
+            e.kind !== 'decline' &&
+            (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
+        )
+    )
+      throw new DeclineBlockedError();
     const req = await buildDeclineRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -872,17 +976,19 @@ export class AppController {
       view,
       expectedRevision,
     });
-    try {
-      await this.relay.jsonRaw('POST', req.path, req.bodyText);
-    } catch (e) {
-      if (e instanceof RelayError && e.details?.reason === CREATOR_MISSING_FEATURE) {
-        // The asking desktop stopped taking declines since the device list was read: read it again, so the menu agrees.
-        void this.refreshDevices().catch(() => undefined);
-        throw new DeclineUnsupportedError();
-      }
-      throw e;
-    }
-    await this.sync?.catchUp().catch(() => undefined);
+    return outbox.enqueue({
+      id: newId(),
+      questionId: view.id,
+      kind: 'decline',
+      recordId: req.actionId,
+      path: req.path,
+      bodyText: req.bodyText,
+      idempotencyKey: req.idempotencyKey,
+      expectedRevision,
+      selected: [],
+      text: '',
+      reason: '',
+    });
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */
@@ -891,36 +997,39 @@ export class AppController {
     text: string;
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
-    const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
-    const req = await buildMessageRequest({
-      installationId: this.snap.config.installationId,
-      deviceId: this.snap.config.deviceId,
-      signingKey: this.keys.signingPrivate,
-      epochKey: highestEpoch(this.epochKeys),
-      view: args.view,
-      text: args.text,
-      ...(sealed ? { images: sealed.refs } : {}),
-    });
-    await this.outbox.enqueue(
-      {
-        id: newId(),
-        questionId: args.view.id,
-        kind: 'message',
-        messageId: req.messageId,
-        recordId: req.messageId,
-        path: req.path,
-        bodyText: req.bodyText,
-        idempotencyKey: req.idempotencyKey,
-        expectedRevision: args.view.revision,
-        selected: [],
+    return this.admit(args.view.id, async () => {
+      if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+      if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
+      const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
+      const req = await buildMessageRequest({
+        installationId: this.snap.config.installationId,
+        deviceId: this.snap.config.deviceId,
+        signingKey: this.keys.signingPrivate,
+        epochKey: highestEpoch(this.epochKeys),
+        view: args.view,
         text: args.text,
-        reason: '',
-        ...(sealed ? { images: sealed.images } : {}),
-      },
-      sealed?.ciphertexts,
-    );
-    void this.outbox.flush();
+        ...(sealed ? { images: sealed.refs } : {}),
+      });
+      await this.outbox.enqueue(
+        {
+          id: newId(),
+          questionId: args.view.id,
+          kind: 'message',
+          messageId: req.messageId,
+          recordId: req.messageId,
+          path: req.path,
+          bodyText: req.bodyText,
+          idempotencyKey: req.idempotencyKey,
+          expectedRevision: args.view.revision,
+          selected: [],
+          text: args.text,
+          reason: '',
+          ...(sealed ? { images: sealed.images } : {}),
+        },
+        sealed?.ciphertexts,
+      );
+      void this.outbox.flush();
+    });
   }
 
   /**
@@ -993,7 +1102,7 @@ export class AppController {
         ciphertexts: sealed.ciphertexts,
       };
     }
-    if (e.kind === 'confirm-proxy') return null;
+    if (e.kind === 'confirm-proxy' || e.kind === 'decline') return null;
     const req = await buildAnswerRequest({
       ...base,
       kind: e.kind,

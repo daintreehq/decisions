@@ -31,8 +31,16 @@ export function refusedFollowUps(): Set<string> {
 export function useActionCount(now: number, except?: (v: QuestionView) => boolean): number {
   const all = useQuestions();
   const refused = refusedFollowUps();
-  // A question the person declined holds nothing for them, whatever its refused follow-ups.
-  return all.filter((v) => !except?.(v) && countsForAction(v, now, refused)).length;
+  // A question the person declined holds nothing for them, whatever its refused follow-ups; nor does one they have
+  // dismissed on this device, while that dismissal is on its way.
+  const dismissing = new Set(
+    (app.outbox?.list() ?? [])
+      .filter((e) => e.kind === 'decline' && !e.outcome)
+      .map((e) => e.questionId),
+  );
+  return all.filter(
+    (v) => !except?.(v) && !dismissing.has(v.id) && countsForAction(v, now, refused),
+  ).length;
 }
 
 const noSubscribe = () => () => undefined;
