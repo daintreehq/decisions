@@ -9,7 +9,13 @@ import {
   type QuestionStatus,
   type SnapshotRefresh,
 } from '@daintreehq/decisions-protocol';
-import { parseAnswers, serializeAnswers, type AnswerContent, type AnswerEntry } from './answers.js';
+import {
+  isClosure,
+  parseAnswers,
+  serializeAnswers,
+  type AnswerContent,
+  type AnswerEntry,
+} from './answers.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import { hostRef, type BridgeContext } from './context.js';
 import {
@@ -33,6 +39,12 @@ export interface InboxCallbacks {
   onQuestionClosed?(questionId: string): void;
   /** The relay says the involvement preference changed (a hint, not the record). Must return without waiting. */
   onInvolvementHint?(): void;
+  /**
+   * The terminal write of a closure notice for this question that is under way, if any: settled once the sink has
+   * answered. A reopen is applied only after it, so the old round's notice is either written before the question
+   * opens again or never. Must return without waiting.
+   */
+  closureWrite?(questionId: string): Promise<void> | null;
 }
 
 export interface InboxOptions {
@@ -54,6 +66,19 @@ function withdrawMessages(json: string): string {
     ),
   );
 }
+
+/**
+ * Closure notices (an expiry or a decline) of rounds before `revision` that were not typed yet: withdrawn, kept for
+ * the record. A reopen starts round `revision`, so they no longer describe the question.
+ */
+export function withdrawClosures(entries: AnswerEntry[], revision: number): AnswerEntry[] {
+  return entries.map((e) =>
+    isClosure(e) && e.revision < revision && !e.delivered ? { ...e, deliver: false } : e,
+  );
+}
+
+/** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
+export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
 
 /**
  * A transiently failing event is given up on (consumed with an error) only after this many attempts AND this long
@@ -87,6 +112,8 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
 export class Inbox {
   private readonly serial = new Mutex();
   private readonly transientAttempts = new Map<number, { n: number; since: number }>();
+  /** Rows written before reopens kept their deadline are reconciled once per run, before any event applies. */
+  private reconciled = false;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -120,6 +147,19 @@ export class Inbox {
   processPending(): Promise<boolean> {
     return this.serial.run(async () => {
       let drain = false;
+      if (!this.reconciled) {
+        try {
+          await this.reconcileRounds();
+          this.reconciled = true;
+        } catch (e) {
+          // A directory that cannot be read now is tried again on the next pass; anything else on the next start.
+          if (!(e instanceof TransientError)) this.reconciled = true;
+          await this.ctx.audit.log({
+            event: 'rounds.unreconciled',
+            result: (e as Error).message.slice(0, 80),
+          });
+        }
+      }
       for (;;) {
         const cursor = await this.ctx.store.getCursor();
         const batch = (await this.ctx.store.unprocessedEvents(50)).filter((e) => e.seq <= cursor);
@@ -127,7 +167,7 @@ export class Inbox {
         for (const stored of batch) {
           const ev = JSON.parse(stored.json) as LedgerEvent;
           try {
-            if (await this.apply(ev)) drain = true;
+            if (await this.apply(ev, stored.received_at)) drain = true;
           } catch (e) {
             if (e instanceof TransientError) {
               const prev = this.transientAttempts.get(ev.seq);
@@ -195,7 +235,8 @@ export class Inbox {
     await this.ctx.refreshIdentity?.(epoch ?? undefined);
   }
 
-  private async apply(ev: LedgerEvent): Promise<boolean> {
+  /** `receivedAt`: when this desktop first stored the event (durable, so a restart cannot move it). */
+  private async apply(ev: LedgerEvent, receivedAt: number): Promise<boolean> {
     const { ctx } = this;
     switch (ev.event_type) {
       case 'device.revoked': {
@@ -240,6 +281,7 @@ export class Inbox {
     if (EVENT_ACTION[ev.event_type]) {
       const v = await this.verifier.verifyAction(ev); // may throw TransientError; no lock held across the network
       if (!v.ok) return this.reject(peek, v.reason);
+      if (v.action === 'reopen') return this.afterClosureWrites(peek.question_id, ev, v);
       return ctx.lock.run(() => this.applyVerified(ev, v));
     }
     if (ev.event_type === 'decision.message.posted') {
@@ -281,7 +323,7 @@ export class Inbox {
           return false;
         }
         case 'decision.expired':
-          return this.applyExpired(ev, row);
+          return this.applyExpired(ev, row, receivedAt);
         case 'decision.snapshot.refresh_requested': {
           // A relay hint, not a signed request: at most it asks this desktop to look at its own pane again.
           const d = EventData.snapshotRefreshRequested.safeParse(ev.data);
@@ -298,9 +340,118 @@ export class Inbox {
     });
   }
 
-  private async applyExpired(ev: LedgerEvent, row: QuestionRow): Promise<boolean> {
-    // Relay-asserted and unsigned: it can only ever result in a "not authorised" notice, never an approval.
+  /**
+   * Apply a verified reopen once no closure notice of the question is being written to its terminal. The check and
+   * the apply share the lock delivery admits a write under, so a notice is either admitted first (and the reopen
+   * waits for the sink's answer, outside the lock) or finds itself withdrawn.
+   */
+  private async afterClosureWrites(
+    questionId: string,
+    ev: LedgerEvent,
+    v: Extract<VerifiedAnswer, { ok: true }>,
+  ): Promise<boolean> {
+    for (;;) {
+      const r = await this.ctx.lock.run(async () => {
+        const writing = this.cb.closureWrite?.(questionId);
+        return writing ? { writing } : { applied: await this.applyVerified(ev, v) };
+      });
+      if ('applied' in r) return r.applied;
+      await r.writing.catch(() => undefined);
+    }
+  }
+
+  /**
+   * A bridge before this one stored a reopen's status and revision but kept the previous round's deadline. For each
+   * open question in a reopened round, take the deadline from the one verified reopen that started that round in
+   * the stored history. Nothing is guessed: no such reopen, or more than one, leaves the row as it is.
+   */
+  private async reconcileRounds(): Promise<void> {
+    const { ctx } = this;
+    if (!ctx.store.processedEventsOfType) return;
+    const rows = (await ctx.store.listQuestions()).filter(
+      (q) => !q.history_only && q.local_status === 'open' && q.question_revision > 0,
+    );
+    if (rows.length === 0) return;
+    const reopens = (await ctx.store.processedEventsOfType('decision.reopened')).map(
+      (e) => JSON.parse(e.json) as LedgerEvent,
+    );
+    for (const row of rows) {
+      const into = reopens.filter(
+        (ev) => ev.question_id === row.question_id && ev.question_revision === row.question_revision,
+      );
+      const claimed = into.map((ev) => EventData.action.safeParse(ev.data).data?.record.expires_at);
+      // The usual case once reopens keep their deadline: nothing differs, so nothing is verified.
+      if (claimed.every((d) => d === row.expires_at)) continue;
+      const verified: (string | null)[] = [];
+      for (const ev of into) {
+        const v = await this.verifier.verifyAction(ev); // may throw TransientError: retried on the next pass
+        const declared = EventData.action.safeParse(ev.data).data;
+        if (
+          v.ok &&
+          v.action === 'reopen' &&
+          v.record.expected_revision === row.question_revision - 1 &&
+          declared?.revision === row.question_revision &&
+          declared.status === 'open'
+        ) {
+          verified.push(v.record.expires_at);
+        }
+      }
+      if (verified.length !== 1) {
+        if (verified.length > 1)
+          await ctx.audit.log({ event: 'round.ambiguous', question_id: row.question_id });
+        continue;
+      }
+      const deadline = verified[0]!;
+      if (deadline === row.expires_at) continue;
+      await ctx.lock.run(async () => {
+        const fresh = await ctx.store.getQuestion(row.question_id);
+        if (
+          !fresh ||
+          fresh.local_status !== 'open' ||
+          fresh.question_revision !== row.question_revision
+        ) {
+          return;
+        }
+        await ctx.store.updateQuestion(row.question_id, { expires_at: deadline });
+        await ctx.audit.log({ event: 'round.reconciled', question_id: row.question_id });
+      });
+    }
+  }
+
+  /**
+   * The relay's word that the round's deadline passed. Unsigned, so it is believed only against what this desktop
+   * verified: the current round, the deadline signed for it (the question's, or its latest reopen's), this
+   * question's host, and the ledger order. Even then it can only ever close the question with a "not authorised"
+   * notice, never approve anything. Its notice records when the signed deadline elapsed, not when the event came.
+   */
+  private async applyExpired(
+    ev: LedgerEvent,
+    row: QuestionRow,
+    receivedAt: number,
+  ): Promise<boolean> {
+    // An answer, cancellation or earlier expiry already in force stays in force; a duplicate changes nothing.
     if (row.local_status !== 'open' && row.local_status !== 'queued') return false;
+    const d = EventData.expired.safeParse(ev.data);
+    if (!d.success) return this.reject(row, 'malformed-event');
+    if (ev.question_revision !== row.question_revision)
+      return this.reject(row, 'expiry-for-another-round');
+    if (row.remote_event_seq !== null && ev.seq <= row.remote_event_seq)
+      return this.reject(row, 'stale-expiry');
+    if (d.data.target_host_id !== (await hostRef(row.origin.host_id)))
+      return this.reject(row, 'expiry-for-another-host');
+    if (row.expires_at === null) return this.reject(row, 'expiry-without-deadline');
+    const deadline = Date.parse(row.expires_at);
+    // The relay's two clocks, and when this desktop first held the claim (with room for its clock to lag).
+    if (
+      Date.parse(ev.occurred_at) < deadline ||
+      Date.parse(d.data.expired_at) < deadline ||
+      receivedAt + EXPIRY_CLOCK_SKEW_MS < deadline
+    ) {
+      return this.reject(row, 'expiry-before-deadline');
+    }
+    // Held just before the deadline by this desktop's clock: a clock a little behind the relay's, or a relay that
+    // dates its claim ahead. Either way it waits, in ledger order, until the deadline has passed here too.
+    if (this.ctx.now() < deadline) throw new TransientError('expiry not yet due');
     const entries = parseAnswers(row.answers_json);
     entries.push({
       entry_id: `expired-${ev.event_id}`,
@@ -309,7 +460,7 @@ export class Inbox {
       revision: row.question_revision,
       source: 'system',
       correction: false,
-      created_at: new Date(this.ctx.now()).toISOString(),
+      created_at: new Date(deadline).toISOString(),
       event_seq: ev.seq,
       deliver: true,
       delivered: false,
@@ -418,7 +569,13 @@ export class Inbox {
         return declined;
       }
       case 'reopen':
-        await ctx.store.updateQuestion(row.question_id, patch);
+        // A new round: its signed deadline (null: never) replaces the last one, and a closure notice of an earlier
+        // round that was not typed yet never will be: the question is open again.
+        await ctx.store.updateQuestion(row.question_id, {
+          ...patch,
+          expires_at: v.record.expires_at,
+          answers_json: serializeAnswers(withdrawClosures(entries, t.revision)),
+        });
         return false;
       case 'proxy-abstain':
         await ctx.store.updateQuestion(row.question_id, { remote_event_seq: ev.seq });

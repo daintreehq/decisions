@@ -1049,6 +1049,29 @@ export class FakeRelay {
     });
   }
 
+  /**
+   * The relay expiring a question's round as `expireQuestionNow` does: at `at` (by default the deadline the question
+   * was published with), naming the question's signed host, at the round's revision (by default 0).
+   */
+  expiryEvent(opts: {
+    questionId: string;
+    revision?: number | null;
+    at?: string;
+    occurredAt?: string;
+    targetHostId?: string;
+  }): LedgerEvent {
+    const q = this.questions.get(opts.questionId)!;
+    const at = opts.at ?? q.signed.record.expires_at ?? new Date().toISOString();
+    const ev = this.push(
+      'decision.expired',
+      opts.questionId,
+      opts.revision === undefined ? 0 : opts.revision,
+      { expired_at: at, target_host_id: opts.targetHostId ?? q.signed.record.target_host_id },
+    );
+    ev.occurred_at = opts.occurredAt ?? at;
+    return ev;
+  }
+
   /** A signed envelope-less action (cancel / reopen / proxy-abstain) as the relay would emit it. */
   async plainActionEvent(opts: {
     questionId: string;
@@ -1061,6 +1084,8 @@ export class FakeRelay {
     provenance?: 'human' | 'proxy' | null;
     /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
     decline?: true;
+    /** A reopen's signed new deadline (null: never expires). */
+    expiresAt?: string | null;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -1072,6 +1097,7 @@ export class FakeRelay {
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
       ...(opts.decline ? { decline: true as const } : {}),
+      ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

@@ -481,19 +481,25 @@ export class QuestionStore {
         break;
       }
       case 'decision.expired': {
-        // Unsigned and relay-asserted: only believed once the SIGNED deadline has really passed by the relay's own clock.
+        // Unsigned and relay-asserted: only believed for the round in force, for the question's signed host, and once
+        // the deadline signed for that round (the question's, or its latest reopen's) has passed by the relay's clocks.
         const v = qid ? this.views.get(qid) : undefined;
-        if (!v) break;
-        if (
-          v.status === 'open' &&
-          v.expiresAt &&
-          Date.parse(ev.occurred_at) >= Date.parse(v.expiresAt)
-        ) {
+        if (!v || v.status !== 'open') break;
+        const p = EventData.expired.safeParse(d);
+        const due = v.expiresAt ? Date.parse(v.expiresAt) : null;
+        if (!p.success) v.integrityIssues.push('malformed expiry (ignored)');
+        else if (ev.question_revision !== v.revision)
+          v.integrityIssues.push('expiry reported for another round (ignored)');
+        else if (p.data.target_host_id !== v.targetHostId)
+          v.integrityIssues.push('expiry reported for another host (ignored)');
+        else if (due === null)
+          v.integrityIssues.push('expiry reported for a question with no deadline (ignored)');
+        else if (Date.parse(ev.occurred_at) < due || Date.parse(p.data.expired_at) < due)
+          v.integrityIssues.push('expiry reported before the signed deadline (ignored)');
+        else {
           v.status = 'expired';
           v.lastSeq = ev.seq;
           v.lastEventAt = ev.occurred_at;
-        } else if (v.status === 'open') {
-          v.integrityIssues.push('expiry reported before the signed deadline (ignored)');
         }
         break;
       }

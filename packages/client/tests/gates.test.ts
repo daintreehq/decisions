@@ -41,10 +41,12 @@ async function designReview(
   policy.register(DESIGN_REVIEW);
   const spool = new KeepSpool();
   let current = images;
+  let late = 0;
   const env = await setupBridge({
     policy,
     spool,
     resolver: { resolve: async (_o, id) => (current[id] ? { bytes: current[id] } : null) },
+    now: () => Date.now() + late,
   });
   const ask = async (correlation_id?: string) => {
     const r = await env.bridge.registerQuestion({
@@ -65,7 +67,11 @@ async function designReview(
   const setImages = (next: Record<string, Uint8Array>) => {
     current = next;
   };
-  return { ...env, spool, ask, setImages };
+  /** Move the bridge's clock past a deadline. */
+  const passDeadline = (iso: string) => {
+    late = Date.parse(iso) - Date.now();
+  };
+  return { ...env, spool, ask, setImages, passDeadline };
 }
 
 type Env = Awaited<ReturnType<typeof designReview>>;
@@ -453,7 +459,8 @@ describe('what never counts as approval', () => {
   it('an expired question never reports approval', async () => {
     const env = await designReview();
     const r = await env.ask();
-    env.relay.push('decision.expired', r.questionId, 0, { reason: 'expired' });
+    env.passDeadline((await env.store.getQuestion(r.questionId))!.expires_at!);
+    env.relay.expiryEvent({ questionId: r.questionId });
     await env.bridge.catchUp();
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'expired',

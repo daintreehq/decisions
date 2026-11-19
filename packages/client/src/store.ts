@@ -42,6 +42,11 @@ export interface LocalStore {
   insertEvent(ev: InboundEvent): Promise<boolean>;
   markEventProcessed(seq: number, at: number): Promise<void>;
   unprocessedEvents(limit: number): Promise<InboundEvent[]>;
+  /**
+   * Every stored event of one type that was already processed, in ledger order: the history the bridge reconciles
+   * rows written by an earlier version from. Optional: without it, nothing is reconciled.
+   */
+  processedEventsOfType?(eventType: string): Promise<InboundEvent[]>;
   /** Highest seq such that every event from 1..seq has been stored, starting from the persisted cursor. */
   advanceCursor(): Promise<number>;
   getCursor(): Promise<number>;

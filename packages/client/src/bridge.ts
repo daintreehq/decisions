@@ -500,6 +500,7 @@ export class DecisionsBridge {
         onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
         onInvolvementHint: () => this.involvement.hint(),
+        closureWrite: (id) => this.delivery.closureWrite(id),
       },
       { messages: !!o.followUps },
     );

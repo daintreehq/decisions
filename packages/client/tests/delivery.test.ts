@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULTS } from '@daintreehq/decisions-protocol';
 import {
   PolicyRegistry,
   fakeResumeAdapter,
@@ -282,11 +283,10 @@ describe('ordering, expiry, proxy labelling', () => {
   });
 
   it('expiry notice is explicit that the workflow is not authorised, and unsigned events never approve', async () => {
-    const { bridge, relay, sink, qid, store } = await asked();
-    relay.push('decision.expired', qid, 0, {
-      expired_at: new Date().toISOString(),
-      target_host_id: 'x'.repeat(12),
-    });
+    let late = 0;
+    const { bridge, relay, sink, qid, store } = await asked({ now: () => Date.now() + late });
+    late = DEFAULTS.questionExpiryMs;
+    relay.expiryEvent({ questionId: qid });
     await bridge.catchUp();
     expect(sink.typed).toHaveLength(1);
     expect(sink.typed[0]!.text).toContain('NOT authorised to continue');

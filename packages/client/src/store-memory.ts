@@ -100,6 +100,12 @@ export class MemoryLocalStore implements LocalStore {
       .slice(0, limit)
       .map(clone);
   }
+  async processedEventsOfType(eventType: string) {
+    return [...this.events.values()]
+      .filter((e) => e.processed_at !== null && e.event_type === eventType)
+      .sort((a, b) => a.seq - b.seq)
+      .map(clone);
+  }
   async getCursor() {
     return Number(this.meta.get('cursor') ?? '0');
   }

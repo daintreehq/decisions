@@ -6,6 +6,8 @@ import {
 } from './notice.js';
 import {
   answeredOn,
+  closureInForce,
+  isClosure,
   parseAnswers,
   serializeAnswers,
   type AnswerContent,
@@ -175,10 +177,25 @@ interface Thread {
   messages: StoredMessage[];
 }
 
+/**
+ * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced:
+ * nothing at that revision is still to be typed, and an untyped closure notice there no longer describes the
+ * question.
+ */
+function supersededClosure(q: QuestionRow, revision: number): boolean {
+  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision && !e.delivered);
+  return (
+    at.some((e) => isClosure(e) && !closureInForce(e, q)) &&
+    !at.some((e) => e.deliver && (!isClosure(e) || closureInForce(e, q)))
+  );
+}
+
 export class DeliveryEngine {
   private running: Promise<DrainResult> | null = null;
   private again = false;
   stopped = false;
+  /** Closure notices being written to a terminal, by question (see `closureWrite`). */
+  private readonly closureWrites = new Map<string, Promise<void>>();
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -213,7 +230,7 @@ export class DeliveryEngine {
 
   private pending(q: QuestionRow): AnswerEntry[] {
     return parseAnswers(q.answers_json)
-      .filter((e) => e.deliver && !e.delivered)
+      .filter((e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, q)))
       .sort((a, b) => a.revision - b.revision);
   }
 
@@ -384,6 +401,9 @@ export class DeliveryEngine {
   ): Promise<{ target: TerminalTarget } | { attention: string }> {
     // Resume restores the agent in its ORIGINAL worktree; anything else would cross a destination boundary.
     if (target.worktreeId !== q.origin.worktree_id) return { attention: 'resume_wrong_worktree' };
+    // And on its original host: the relay keeps naming the host the question was published for, and the inbox
+    // checks the relay's host-bound claims (an expiry, a snapshot refresh) against this origin.
+    if (target.hostId !== q.origin.host_id) return { attention: 'resume_wrong_host' };
     const origin: QuestionOrigin = {
       ...q.origin,
       host_id: target.hostId,
@@ -722,7 +742,11 @@ export class DeliveryEngine {
     }
     // 0b. Every answer and message must still be one to type: fetching images takes time, and a cancellation,
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
-    //     the inbox applies cancellations and deletions under, so none lands between them.
+    //     the inbox applies cancellations and deletions under, so none lands between them. A closure notice
+    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink.
+    let written!: () => void;
+    const writing = new Promise<void>((r) => (written = r));
+    const closing = new Set<string>();
     const admitted = await ctx.lock.run(async () => {
       const rows = new Map<string, QuestionRow>();
       for (const q of questions) {
@@ -789,17 +813,45 @@ export class DeliveryEngine {
             last_injection_id: i.intentId,
             last_attempt_at: new Date(now).toISOString(),
           });
+          if (isClosure(i.entry)) closing.add(i.q.question_id);
         }
       }
+      for (const id of closing) this.closureWrites.set(id, writing);
       return true;
     });
     if (!admitted) {
+      written();
       // Stale: another pass rebuilds the lane from the store, without what was settled, so the pane's other
       // answers are not left waiting for an unrelated wake-up.
       this.again = true;
       res.deferred++;
       return res;
     }
+    try {
+      return await this.typeChunk(target, chunk, questions, text, res);
+    } finally {
+      for (const id of closing) if (this.closureWrites.get(id) === writing) this.closureWrites.delete(id);
+      written();
+    }
+  }
+
+  /**
+   * The terminal write of a closure notice for this question that is under way, if any: it settles once the sink
+   * has answered and the outcome is recorded.
+   */
+  closureWrite(questionId: string): Promise<void> | null {
+    return this.closureWrites.get(questionId) ?? null;
+  }
+
+  /** Steps 2 and 3 of `injectChunk`: type the admitted chunk and record what the sink said. */
+  private async typeChunk(
+    target: TerminalTarget,
+    chunk: Item[],
+    questions: QuestionRow[],
+    text: string,
+    res: DrainResult,
+  ): Promise<DrainResult> {
+    const { ctx, o } = this;
     // 2. Type, and take the sink's word only in the shapes the contract allows.
     let result: InjectResult & { code?: string };
     let thrown: unknown = undefined;
@@ -1282,6 +1334,18 @@ export class DeliveryEngine {
         });
         await this.ack(intent.injection_id);
         reconciled++;
+      } else if (supersededClosure(q, intent.answer_revision)) {
+        // A closure notice of a round a reopen has since replaced: content-free, and no longer to be typed, so
+        // whether it reached the screen holds nothing back. The new round's answers must not wait on it.
+        await ctx.store.updateIntent(intent.injection_id, {
+          state: 'abandoned',
+          updated_at: ctx.now(),
+        });
+        await ctx.audit.log({
+          event: 'delivery.superseded',
+          question_id: q.question_id,
+          result: 'crash_unreconciled',
+        });
       } else {
         await this.attention(q, 'crash_unreconciled', 'delivery-uncertain', intent.injection_id);
         uncertain++;
