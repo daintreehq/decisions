@@ -320,6 +320,8 @@ const ops = {
     const invite = await client.createPairingInvite(new client.RelayClient({ identity }), 'phone');
     return {
       pairingId: invite.pairingId,
+      // The link the phone app opens to pair (its fragment carries the secret).
+      url: invite.url,
       secret: invite.payload.s,
       origin: identity.config.relayOrigin,
       installationId: identity.config.installationId,
@@ -327,7 +329,8 @@ const ops = {
     };
   },
 
-  async ownerApprove({ home, pairingId }) {
+  /** Approves a pending pairing; `shortCode`, when given, is the code the phone shows, compared as a person would. */
+  async ownerApprove({ home, pairingId, shortCode }) {
     const identity = await loadIdentity(home);
     const rc = new client.RelayClient({ identity });
     const cand = await until(
@@ -335,10 +338,26 @@ const ops = {
       20_000,
       'the pending pairing',
     );
-    if (cand.short_code !== (await client.localShortCode(cand)))
-      throw new Error('the pairing short code does not match');
+    const local = await client.localShortCode(cand);
+    if (cand.short_code !== local) throw new Error('the pairing short code does not match');
+    const digits = (c) => String(c).replace(/\s/g, '');
+    if (shortCode !== undefined && digits(shortCode) !== digits(local))
+      throw new Error(`the phone shows ${shortCode}, but this desktop computes ${local}`);
     await client.approveCandidate(rc, cand);
     return { approved: true };
+  },
+
+  /** The relay's device directory as the owner reads it: each device's role, what it declared, and its push state. */
+  async ownerDevices({ home }) {
+    const identity = await loadIdentity(home);
+    const list = await new client.RelayClient({ identity }).devices();
+    return list.devices.map((d) => ({
+      device_id: d.device_id,
+      role: d.role,
+      revoked_at: d.revoked_at,
+      push_enabled: d.push_enabled ?? null,
+      features: d.features ?? [],
+    }));
   },
 
   /** A signed `reopen` by the owner desktop (docs/protocol.md section 21): revision r to r+1 with a new deadline. */

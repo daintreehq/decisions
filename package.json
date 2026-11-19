@@ -13,7 +13,7 @@
     "build": "pnpm --filter @daintreehq/decisions-app build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test && pnpm test:tools",
-    "test:tools": "node --test tools/release/release.test.mjs",
+    "test:tools": "node --test tools/release/release.test.mjs tools/compat-check/phone-app.test.mjs",
     "format": "prettier --write .",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
