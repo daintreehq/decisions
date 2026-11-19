@@ -9,6 +9,8 @@ import {
   PolicyRegistry,
   RelayClient,
   currentEpochKey,
+  decisionResult,
+  decisionText,
   openQuestionContent,
   parseAnswers,
   type CreatePayload,
@@ -923,10 +925,11 @@ describe('an advisory question that never reached the relay', () => {
     });
     policy.advisoryQuestions = false;
     // What get_decision says follows the policy before anything is typed.
-    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
-      closedReason: 'never-published',
-      fallbackDue: false,
-    });
+    const view = await env.bridge.getDecision(r.questionId);
+    expect(view).toMatchObject({ closedReason: 'never-published', fallbackDue: false });
+    expect(decisionResult(view)).toMatchObject({ fallback_due: false });
+    expect(decisionText(view)).toContain('You are not authorised to continue the gated step');
+    expect(decisionText(view)).not.toContain('you may carry out the plan');
     env.sink.panes.get('pane-1')!.idle = true;
     await env.bridge.notifyPaneIdle();
     expect(env.sink.typed).toHaveLength(1);
@@ -996,8 +999,15 @@ describe('an advisory question that never reached the relay', () => {
       deliveryStatus: 'delivery-uncertain',
       fallbackDue: true,
     });
+    // A retry clears the question's flag, not the uncertain intent: nothing is typed again, and what may be on the
+    // screen still stands.
+    await env.bridge.retryDelivery(r.questionId);
     await env.bridge.notifyPaneIdle();
     expect(env.sink.typed).toHaveLength(1);
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+      fallbackDue: true,
+    });
     expect((await unpublishedEntry(env, r.questionId)).fallback_due).toBe(true);
   });
 });

@@ -1348,6 +1348,13 @@ export class DecisionsBridge {
       );
       plannedFallback = content?.planned_fallback ?? null;
     }
+    // A never-published notice that may have been typed keeps what it said: the question is flagged so, or an intent
+    // for it is still uncertain (a retry clears the flag, never the intent, and delivery stays blocked on it).
+    const planMaybeTyped =
+      unpublished?.fallback_due === true &&
+      !unpublished.delivered &&
+      (row.delivery_status === 'delivery-uncertain' ||
+        (await this.ctx.store.hasUncertainIntent(row.question_id)));
     return {
       questionId: row.question_id,
       alias: row.alias,
@@ -1383,7 +1390,7 @@ export class DecisionsBridge {
         !row.history_only &&
         ((row.local_status === 'publish-failed' &&
           !!unpublished &&
-          unpublishedPlanDue(unpublished, row, {
+          unpublishedPlanDue(unpublished, planMaybeTyped, {
             outcomes: this.advisory.hostSupport,
             allowed: this.ctx.policy.advisoryQuestions,
           })) ||

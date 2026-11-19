@@ -96,17 +96,15 @@ export function currentDisposition(
  * Whether a never-published advisory question's stated plan may still go ahead (`AnswerEntry.fallback_due`), as the
  * host stands now. Its notice, not yet typed, follows the host as a published advisory expiry does
  * (`currentDisposition`): only a host that still delivers advisory outcomes and whose policy still allows advice lets
- * it go ahead. A notice typed, or that may have been (`delivery-uncertain`), keeps what it said. Never upgraded.
+ * it go ahead. A notice typed, or that may have been (`maybeTyped`), keeps what it said. Never upgraded.
  */
 export function unpublishedPlanDue(
   e: Pick<AnswerEntry, 'fallback_due' | 'delivered'>,
-  q: Pick<QuestionRow, 'delivery_status'>,
+  maybeTyped: boolean,
   host: { outcomes: boolean; allowed: boolean },
 ): boolean {
   if (e.fallback_due !== true) return false;
-  return (
-    e.delivered || q.delivery_status === 'delivery-uncertain' || (host.outcomes && host.allowed)
-  );
+  return e.delivered || maybeTyped || (host.outcomes && host.allowed);
 }
 
 /** An entry whose stated plan is due: an advisory expiry's `fallback-due`, or a never-published `fallback_due`. */
