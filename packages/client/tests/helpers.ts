@@ -1,4 +1,5 @@
 import {
+  AgentStoppedPushBody,
   ApiError,
   CREATOR_MISSING_FEATURE,
   EventData,
@@ -218,6 +219,15 @@ export class FakeRelay {
   holdPresence: Promise<void> | null = null;
   /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
   dropPresenceReply = 0;
+  /**
+   * Whether `POST /push/agent-stopped` exists; false makes it unknown (404), like a relay from before
+   * `agent-stopped-push-v1`. Advertising the feature is `features`' job, so a test can make the two disagree.
+   */
+  agentStoppedRoute = true;
+  /** Replies for upcoming agent-stopped POSTs, in order; when empty the relay answers `sent`. */
+  agentStoppedReplies: { status: number; body: Record<string, unknown> | string }[] = [];
+  /** While set, agent-stopped POSTs wait for it before the relay looks at them (a slow relay). */
+  holdAgentStopped: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -650,6 +660,21 @@ export class FakeRelay {
         present,
         until: present ? new Date(this.presenceUntil!).toISOString() : null,
       });
+    }
+    if (method === 'POST' && p === '/api/v1/push/agent-stopped' && this.agentStoppedRoute) {
+      if (this.holdAgentStopped) await this.holdAgentStopped;
+      // The body is strict, as the relay's is: anything but the version is refused.
+      if (!AgentStoppedPushBody.safeParse(body).success)
+        return json(400, { code: 'validation_error', message: 'invalid body' });
+      const reply = this.agentStoppedReplies.shift();
+      if (reply)
+        return typeof reply.body === 'string'
+          ? new Response(reply.body, {
+              status: reply.status,
+              headers: { 'content-type': 'application/json' },
+            })
+          : json(reply.status, reply.body);
+      return json(200, { outcome: 'sent' });
     }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
       const served = this.involvement;
