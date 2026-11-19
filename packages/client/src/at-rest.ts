@@ -23,7 +23,7 @@ import {
 } from './answers.js';
 import { currentEpochKey, type Identity } from './identity.js';
 import type { MessageContent, StoredMessage } from './messages.js';
-import { TransientError, type Mutex } from './mutex.js';
+import { KeyUnavailableError, type Mutex } from './mutex.js';
 import type { LocalStore } from './store.js';
 import type { OutboxItem, QuestionRow } from './types.js';
 
@@ -127,7 +127,7 @@ async function open<T>(
     // Rotated by another process: reload the key material once before giving up.
     await ctx.refreshIdentity?.();
     if (!ctx.identity.epochs.has(env.key_epoch))
-      throw new TransientError(`missing epoch key ${env.key_epoch}`);
+      throw new KeyUnavailableError(`missing epoch key ${env.key_epoch}`);
   }
   try {
     return await decryptEnvelope<T>(env, ctx.identity.epochs, binding);

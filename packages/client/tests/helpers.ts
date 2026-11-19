@@ -150,6 +150,8 @@ export class FakeRelay {
   grants = new Map<string, EpochGrant[]>();
   /** Number of upcoming key-grant fetches that fail with a network error. */
   failGrants = 0;
+  /** While set, key-grant fetches get this status and body in place of the grants (a refusal or a broken reply). */
+  grantsReply: { status: number; body: Record<string, unknown> } | null = null;
   /** Phone image ciphertext served by `GET /attachments/{id}/content`, and the ids each download asked for. */
   blobs = new Map<string, Uint8Array>();
   downloads: string[] = [];
@@ -626,6 +628,7 @@ export class FakeRelay {
         this.failGrants--;
         throw new TypeError('fetch failed');
       }
+      if (this.grantsReply) return json(this.grantsReply.status, this.grantsReply.body);
       return json(200, { current_epoch: this.epoch, grants: this.grants.get(m[1]!) ?? [] });
     }
     if (method === 'GET' && p === '/api/v1/events') {

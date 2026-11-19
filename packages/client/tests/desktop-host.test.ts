@@ -294,6 +294,9 @@ describe('a desktop-host bridge after a key rotation', () => {
     // Many quick retries (one per socket event, say) within a short outage: everything stays queued.
     for (let i = 0; i < 12; i++) await bridge.inbox.processPending();
     expect((await store.unprocessedEvents(10)).length).toBe(2);
+    const deferred = async () =>
+      (await store.listAudit(500)).filter((a) => a.event === 'event.deferred').length;
+    expect(await deferred()).toBe(1);
     relay.failGrants = 0;
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
@@ -313,6 +316,7 @@ describe('a desktop-host bridge after a key rotation', () => {
     expect((await store.unprocessedEvents(10)).length).toBe(2);
     expect(sink.typed).toHaveLength(1);
     expect((await store.getQuestion(later))!.local_status).toBe('open');
+    expect(await deferred()).toBe(2); // one per hold, however many retries
     relay.failGrants = 0;
     await bridge.pump();
     expect(await store.unprocessedEvents(10)).toEqual([]);
@@ -321,6 +325,54 @@ describe('a desktop-host bridge after a key rotation', () => {
     expect(sink.typed[1]!.text).toContain('choice: reject');
     expect((await store.getQuestion(later))!.local_status).toBe('human-answered');
     expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(false);
+  });
+
+  it('a grant read the relay refuses or garbles holds the rotation and the answer behind it until it can be read', async () => {
+    let clock = Date.now();
+    const { relay, owner, phone, host, bridge, sink, store } = await hostWorld({
+      now: () => clock,
+    });
+    const qid = await ask(bridge);
+    const r = await rotate(owner, relay, host);
+    keyRotated(relay, r.epoch);
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'], epoch: r.key });
+    // A reply that is no grant list, a refusal while the relay is being upgraded, and one for a signature it could
+    // not check: none of them says anything about the events, which wait well past ten minutes each.
+    for (const reply of [
+      { status: 200, body: {} },
+      { status: 426, body: { code: 'upgrade_required', message: 'upgrade' } },
+      { status: 401, body: { code: 'not_authenticated', message: 'bad signature' } },
+    ]) {
+      relay.grantsReply = reply;
+      await bridge.catchUp();
+      for (let i = 0; i < 4; i++) {
+        clock += 5 * 60_000;
+        await bridge.pump();
+      }
+      expect((await store.unprocessedEvents(10)).length).toBe(2);
+    }
+    expect(sink.typed).toHaveLength(0);
+    expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(false);
+    relay.grantsReply = null;
+    await bridge.pump();
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
+  });
+
+  it('a grant read refused because this Host is revoked ends the wait', async () => {
+    const { relay, owner, phone, host, bridge, store } = await hostWorld();
+    const qid = await ask(bridge);
+    const r = await rotate(owner, relay, host);
+    keyRotated(relay, r.epoch);
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'], epoch: r.key });
+    relay.grantsReply = {
+      status: 401,
+      body: { code: 'not_authenticated', message: 'unknown or revoked device' },
+    };
+    await bridge.catchUp();
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(true);
   });
 
   it('rejects an answer under an epoch from before it was enrolled, and the events behind it go on', async () => {

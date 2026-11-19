@@ -30,7 +30,7 @@ import {
   type VerifiedMessage,
 } from './inbound.js';
 import { parseMessages, serializeMessages, type StoredMessage } from './messages.js';
-import { Mutex, TransientError } from './mutex.js';
+import { KeyUnavailableError, Mutex, TransientError } from './mutex.js';
 import { answerRuleViolation } from './policy.js';
 import type { QuestionRow } from './types.js';
 
@@ -99,6 +99,14 @@ const ROUNDS_RECONCILED = 'rounds-reconciled';
 /** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
 
+/**
+ * A key still missing after a reload that succeeded (`KeyUnavailableError`) is waited for only this many attempts AND
+ * this long since it was first missed, then the event is consumed with an error. Attempts come with every pump and
+ * socket event, so a count alone would end the wait for a rotation another process is still saving.
+ */
+const MAX_KEY_ATTEMPTS = 5;
+const MIN_KEY_WINDOW_MS = 10 * 60_000;
+
 /** What the relay would hold for this question, derived only from events WE verified. */
 function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
   switch (s) {
@@ -119,13 +127,15 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
  * Persists ledger events BEFORE anything is acknowledged, then verifies and applies them strictly in seq
  * order and only up to the confirmed (contiguous) frontier. Unverifiable events are rejected and audited;
  * they never reach a terminal. Transient failures leave the event unprocessed so it is retried in order, for as
- * long as they last: such a failure says nothing about the event, so however long the relay or the device directory
- * stays unreachable, a committed answer waits for it rather than being dropped.
+ * long as they last: such a failure says nothing about the event, so however long the relay, the device directory
+ * or the key store stays unreadable, a committed answer waits for it rather than being dropped. Only a key still
+ * missing once its source was read is waited for a bounded time (`MAX_KEY_ATTEMPTS`, `MIN_KEY_WINDOW_MS`).
  */
 export class Inbox {
   private readonly serial = new Mutex();
-  /** The event this run last audited as deferred: a long outage is logged once per held event, not on every retry. */
-  private deferredSeq: number | null = null;
+  private readonly keyAttempts = new Map<number, { n: number; since: number }>();
+  /** What this run last audited as deferred (event and kind of failure): logged once per hold, not on every retry. */
+  private deferred: string | null = null;
   /**
    * Rows written before reopens kept their deadline are repaired in the background (`reconcileRounds`), never in the
    * way of an event. Until a pass has settled them all, an expiry is judged by `roundDeadline` instead.
@@ -182,16 +192,15 @@ export class Inbox {
           try {
             if (await this.apply(ev, stored.received_at)) drain = true;
           } catch (e) {
-            if (e instanceof TransientError) {
-              // Leave it unprocessed and stop: later events must not overtake it. It is never given up on, so an
-              // outage of any length cannot consume an answer the relay committed; what is permanently wrong with an
-              // event is a rejection, never a `TransientError`.
-              if (this.deferredSeq !== ev.seq) {
-                this.deferredSeq = ev.seq;
+            if (e instanceof TransientError && this.keepWaiting(ev.seq, e)) {
+              // Leave it unprocessed and stop: later events must not overtake it.
+              const hold = `${ev.seq}:${e.name}`;
+              if (this.deferred !== hold) {
                 await this.ctx.audit.log({
                   event: 'event.deferred',
                   result: e.message.slice(0, 80),
                 });
+                this.deferred = hold;
               }
               return drain;
             }
@@ -200,10 +209,25 @@ export class Inbox {
               result: (e as Error).message.slice(0, 80),
             });
           }
+          this.keyAttempts.delete(ev.seq);
           await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
         }
       }
     });
+  }
+
+  /**
+   * Whether an event held by a transient failure is still waited for. An outage (the relay, the device directory, the
+   * key store) is waited out however long it lasts: it says nothing about the event, so an answer the relay committed
+   * is never consumed for it. A key still missing after a reload that succeeded is waited for a bounded time, enough
+   * for a rotation another process is saving; one erased from the key store never comes back.
+   */
+  private keepWaiting(seq: number, e: TransientError): boolean {
+    if (!(e instanceof KeyUnavailableError)) return true;
+    const prev = this.keyAttempts.get(seq);
+    const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
+    this.keyAttempts.set(seq, a);
+    return a.n < MAX_KEY_ATTEMPTS || this.ctx.now() - a.since < MIN_KEY_WINDOW_MS;
   }
 
   /**

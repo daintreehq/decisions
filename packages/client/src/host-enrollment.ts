@@ -625,16 +625,18 @@ export async function acceptHostEnrollment(o: AcceptHostEnrollmentOptions): Prom
 }
 
 /**
- * Host side, after a `device.key_rotated` event: fetch this Host's sealed grants, verify each against the
- * pinned owner, store the opened epoch keys, and swap the refreshed identity into the client.
+ * Host side, after a `device.key_rotated` event: fetch this Host's sealed grants (or take the ones the caller already
+ * read with `client.keyGrants()`), verify each against the pinned owner, store the opened epoch keys, and swap the
+ * refreshed identity into the client.
  */
 export async function refreshHostGrants(
   client: RelayClient,
   keyStore: KeyStore,
+  fetched?: EpochGrant[],
 ): Promise<Identity> {
   const id = client.identity;
   if (id.role !== 'desktop-host') throw new Error('only an enrolled Host refreshes its grants');
-  const { grants } = await client.keyGrants();
+  const grants = fetched ?? (await client.keyGrants()).grants;
   // Merge into what is stored NOW, not into the snapshot taken before the fetch: overlapping refreshes must
   // never drop an epoch another one saved, nor move the current epoch backwards.
   return lockFor(keyStore).run(async () => {
