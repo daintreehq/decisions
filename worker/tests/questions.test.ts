@@ -171,7 +171,10 @@ describe('question creation', () => {
     });
     try {
       const key = newId();
-      const late = await ask(w, { idempotencyKey: key, expiresAt: new Date(deadline).toISOString() });
+      const late = await ask(w, {
+        idempotencyKey: key,
+        expiresAt: new Date(deadline).toISOString(),
+      });
       expect(late.res.status).toBe(400);
       expect(late.res.json.code).toBe('validation_error');
       const left = await inRoom((room) => ({
