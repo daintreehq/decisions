@@ -7,7 +7,7 @@ import {
   type InjectResult,
   type TerminalTarget,
 } from '../src/index.js';
-import { origin, setupBridge, makePhone, tick } from './helpers.js';
+import { origin, setupBridge, makePhone } from './helpers.js';
 
 async function asked(
   extra: Parameters<typeof setupBridge>[0] = {},
@@ -537,16 +537,87 @@ describe('restarting a stopped bridge', () => {
     await bridge.stop();
     await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
     await bridge.catchUp();
+    expect(await store.getQuestion(qid)).toMatchObject({
+      local_status: 'human-answered',
+      delivery_status: 'desktop-received',
+    });
     expect(sink.typed).toHaveLength(0);
     await bridge.start({ socket: false });
-    await bridge.catchUp();
     await bridge.idle();
     expect(sink.typed).toHaveLength(1);
     expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
     await bridge.stop();
   });
 
-  it('waits for a write still in flight from before the stop, then types the answer once', async () => {
+  it('delivers even when its first pump only joins one that drained while delivery was closed', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    // Hold the first run's pump after its delivery pass, so it is still running across the stop and the restart.
+    const inbox = (bridge as unknown as { inbox: { hasGap(): Promise<boolean> } }).inbox;
+    const hasGap = inbox.hasGap.bind(inbox);
+    let held = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    inbox.hasGap = async () => {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return hasGap();
+    };
+    await bridge.start({ socket: false });
+    await vi.waitFor(() => expect(held).toBe(true));
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('desktop-received');
+    await bridge.start({ socket: false });
+    release();
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
+    await bridge.idle();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('applies a deletion read while it was stopped before it types anything', async () => {
+    const { bridge, relay, phone, sink, qid } = await asked();
+    sink.panes.get('pane-1')!.idle = false;
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    // The deletion is read and stored, but not applied.
+    const inbox = (bridge as unknown as { inbox: { processPending(): Promise<boolean> } }).inbox;
+    const processPending = inbox.processPending.bind(inbox);
+    inbox.processPending = async () => false;
+    relay.push('decision.deleted', qid, null, {});
+    await bridge.catchUp();
+    inbox.processPending = processPending;
+    sink.panes.get('pane-1')!.idle = true;
+    // Hold the restart's first pump before it applies anything, so only the reopen's own delivery runs.
+    const publisher = (bridge as unknown as { publisher: { flush(o: unknown): Promise<unknown> } })
+      .publisher;
+    const flush = publisher.flush.bind(publisher);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    publisher.flush = async (o) => {
+      await gate;
+      return flush(o);
+    };
+    await bridge.start({ socket: false });
+    const runs = bridge as unknown as {
+      applier: { idle(): Promise<void> };
+      deliverer: { idle(): Promise<void> };
+    };
+    await runs.applier.idle();
+    await runs.deliverer.idle();
+    expect(sink.typed).toHaveLength(0);
+    release();
+    await bridge.idle();
+    expect(sink.typed).toHaveLength(0);
+    await bridge.stop();
+  });
+
+  it('starts at once beside a write still in flight from before the stop, and types the answer once it settles', async () => {
     const { bridge, relay, phone, sink, qid, store } = await asked();
     await bridge.start({ socket: false });
     const write = sink.inject.bind(sink);
@@ -560,16 +631,16 @@ describe('restarting a stopped bridge', () => {
     const reading = bridge.catchUp();
     await vi.waitFor(() => expect(calls).toBe(1));
     await bridge.stop();
-    let started = false;
-    const starting = bridge.start({ socket: false }).then(() => (started = true));
-    await tick(20);
-    // Recovery would take the open write for a crash and flag the answer uncertain.
-    expect(started).toBe(false);
+    // The write never settling must not hold the restart.
+    await bridge.start({ socket: false });
+    // Recovery waits for the write: it would take its open intent for a crash and flag the answer uncertain.
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('desktop-received');
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
+    expect(calls).toBe(1);
     release({ outcome: 'held', reason: 'busy' });
     await reading;
-    await starting;
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
     await bridge.idle();
-    expect(sink.typed).toHaveLength(1);
     expect(await store.getQuestion(qid)).toMatchObject({
       delivery_status: 'terminal-delivered',
       error_code: null,
@@ -577,7 +648,7 @@ describe('restarting a stopped bridge', () => {
     await bridge.stop();
   });
 
-  it('stays closed when stopped again while it recovers', async () => {
+  it('stays closed while it recovers, and after a stop meanwhile', async () => {
     const { bridge, relay, phone, sink, qid, store } = await asked();
     await bridge.start({ socket: false });
     await bridge.stop();
@@ -595,6 +666,7 @@ describe('restarting a stopped bridge', () => {
     };
     const starting = bridge.start({ socket: false });
     await vi.waitFor(() => expect(recovering).toBe(true));
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
     await bridge.stop();
     release();
     await starting;
@@ -602,6 +674,47 @@ describe('restarting a stopped bridge', () => {
     await bridge.idle();
     expect(bridge.state).toBe('stopped');
     expect(sink.typed).toHaveLength(0);
+  });
+
+  it('a second start waits for the recovery of the first, so an interrupted write is reconciled once', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    sink.panes.get('pane-1')!.idle = false;
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    // A write a crash left open: recovery looks for its marker in the pane.
+    const o = origin();
+    const now = Date.now();
+    await store.putIntent({
+      injection_id: 'crashed-write',
+      question_id: qid,
+      answer_revision: 1,
+      message_id: null,
+      host_id: o.host_id,
+      pane_id: o.pane_id,
+      terminal_generation: o.terminal_generation,
+      ownership_principal: o.ownership_principal,
+      agent_incarnation: o.agent_incarnation,
+      state: 'intent',
+      created_at: now,
+      updated_at: now,
+    });
+    let lookups = 0;
+    let answer!: (found: boolean) => void;
+    sink.hasMarker = async () => {
+      if (++lookups === 1) return new Promise<boolean>((r) => (answer = r));
+      return true;
+    };
+    const first = bridge.start({ socket: false });
+    await vi.waitFor(() => expect(lookups).toBe(1));
+    await bridge.stop();
+    await bridge.start({ socket: false });
+    answer(false);
+    await first;
+    await bridge.idle();
+    expect(lookups).toBe(1);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('delivery-uncertain');
+    expect(sink.typed).toHaveLength(0);
+    await bridge.stop();
   });
 
   it('a revoked bridge cannot be started again, before or after a stop', async () => {

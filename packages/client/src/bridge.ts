@@ -549,6 +549,12 @@ export class DecisionsBridge {
     () => this.deliverNow(),
     (e) => this.emitError(e),
   );
+  /** Recovery and the reopening of delivery, chained across starts (`reopenDelivery`); never rejects. */
+  private reopening: Promise<void> = Promise.resolve();
+  /** Starts whose recovery has not finished. */
+  private reopensPending = 0;
+  /** Delivery was just reopened: the applier's next run delivers even when it applies nothing new. */
+  private redeliver = false;
   /** The last sync was refused this device's signature: background requests wait for the sync's slow retry. */
   private authRefused = false;
   /** Deliveries already announced on `delivered`, so two drains settling the same one announce it once. */
@@ -758,18 +764,17 @@ export class DecisionsBridge {
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
-    // A drain from before a stop may still be writing: recovery would take its open intent for a crash, and delivery
-    // reopened now would let it type on. So recovery, and with it delivery, waits for that drain to settle.
-    await this.delivery.idle();
-    if (run !== this.lifecycle) return;
-    await this.delivery.recover();
+    // Recovery waits for a drain still writing from before a stop, and for an earlier start's recovery
+    // (`reopenDelivery`). Behind either, it runs in the background, so a write that never returns does not keep this run
+    // from reading: delivery stays closed until it is done.
+    const behind = this.delivery.draining || this.reopensPending > 0;
+    const reopening = this.reopenDelivery(run);
+    if (behind) reopening.catch((e) => this.emitError(e as Error));
+    else await reopening;
     // Images a crash left with no queued create to use them.
     await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
     // Stopped or revoked while recovering: nothing may start sending in the background now.
     if (run !== this.lifecycle) return;
-    // The last stop closed delivery; this run reopens it, only now that recovery has run.
-    const reopened = this.delivery.stopped;
-    this.delivery.stopped = false;
     this.snapshots.start();
     this.involvement.start();
     this.presence.start();
@@ -788,8 +793,35 @@ export class DecisionsBridge {
       (this.timer as { unref?: () => void }).unref?.();
     }
     void this.pump().catch((e) => this.emitError(e as Error));
-    // A pump that drained while delivery was still closed typed nothing, and the one above may only have joined it.
-    if (reopened) void this.deliverer.kick();
+  }
+
+  /**
+   * Reconcile interrupted injections for run `run`, then reopen delivery if the last stop closed it. Waits first for
+   * the previous start's recovery, so two never reconcile the same intent, and for a drain still writing from before
+   * the stop: recovery would take its open intent for a crash, and delivery reopened under it would let it type on. A
+   * stop or revocation meanwhile leaves delivery closed.
+   */
+  private reopenDelivery(run: number): Promise<void> {
+    const prior = this.reopening;
+    this.reopensPending++;
+    const next = (async () => {
+      try {
+        await prior;
+        await this.delivery.idle();
+        if (run !== this.lifecycle) return;
+        await this.delivery.recover();
+        if (run !== this.lifecycle || !this.delivery.stopped) return;
+        this.delivery.stopped = false;
+        // A pump that drained while delivery was closed typed nothing, and this run's first pump may only join it. The
+        // applier delivers once more, after applying what is stored, so a withdrawal waiting there is applied first.
+        this.redeliver = true;
+        void this.applier.kick();
+      } finally {
+        this.reopensPending--;
+      }
+    })();
+    this.reopening = next.catch(() => undefined);
+    return next;
   }
 
   /**
@@ -839,6 +871,7 @@ export class DecisionsBridge {
       quiet(this.pumping),
       quiet(this.syncing),
       quiet(this.paging?.pass),
+      this.reopening,
       this.applier.idle(),
       this.deliverer.idle(),
     ]);
@@ -1758,7 +1791,9 @@ export class DecisionsBridge {
   private async applyStored(): Promise<void> {
     if (!this.running()) return;
     const drain = await this.inbox.processPending();
-    if (drain || this.delivery.replayHeld) void this.deliverer.kick();
+    const reopened = this.redeliver;
+    this.redeliver = false;
+    if (drain || reopened || this.delivery.replayHeld) void this.deliverer.kick();
   }
 
   private readPages(req: CallOptions): Promise<number> {
