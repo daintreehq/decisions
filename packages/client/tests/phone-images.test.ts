@@ -21,7 +21,7 @@ import {
   type PhoneImageFile,
   type PhoneImageStore,
 } from '../src/index.js';
-import { FakeSocket, makeIdentity, origin, setupBridge, tick } from './helpers.js';
+import { FakeSocket, makeIdentity, origin, setupBridge } from './helpers.js';
 
 /** A real 1x1 PNG. */
 const PNG = new Uint8Array(
@@ -666,9 +666,11 @@ describe('declaring phone-images-v1', () => {
     await env.bridge.catchUp();
     expect(events.mock.calls[0]![2]).toContain('phone-images-v1');
     await env.bridge.start();
-    await tick(10);
-    const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket');
-    expect((ticket!.body as { features?: string[] }).features).toContain('phone-images-v1');
+    await vi.waitFor(() =>
+      expect(env.relay.calls.some((c) => c.path === '/api/v1/socket-ticket')).toBe(true),
+    );
+    const ticket = env.relay.calls.find((c) => c.path === '/api/v1/socket-ticket')!;
+    expect((ticket.body as { features?: string[] }).features).toContain('phone-images-v1');
     await env.bridge.stop();
   });
 
