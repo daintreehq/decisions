@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DEFAULTS } from '@daintreehq/decisions-protocol';
 import {
   PolicyRegistry,
   fakeResumeAdapter,
   parseAnswers,
+  type InjectResult,
   type TerminalTarget,
 } from '../src/index.js';
 import { origin, setupBridge, makePhone } from './helpers.js';
@@ -513,5 +514,308 @@ describe('verification: forged or unauthorised events never reach a terminal', (
     await expect(
       bridge.registerQuestion({ origin: origin(), input: { question: 'q' } }),
     ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+});
+
+describe('restarting a stopped bridge', () => {
+  it('types an answer that arrives after the restart', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await bridge.start({ socket: false });
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(1);
+    expect(sink.typed[0]!.text).toContain(`question_id: ${qid}`);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('types an answer stored while it was stopped once it starts again', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(await store.getQuestion(qid)).toMatchObject({
+      local_status: 'human-answered',
+      delivery_status: 'desktop-received',
+    });
+    expect(sink.typed).toHaveLength(0);
+    await bridge.start({ socket: false });
+    await bridge.idle();
+    expect(sink.typed).toHaveLength(1);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('delivers even when its first pump only joins one that drained while delivery was closed', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    // Hold the first run's pump after its delivery pass, so it is still running across the stop and the restart.
+    const inbox = (bridge as unknown as { inbox: { hasGap(): Promise<boolean> } }).inbox;
+    const hasGap = inbox.hasGap.bind(inbox);
+    let held = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    inbox.hasGap = async () => {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return hasGap();
+    };
+    await bridge.start({ socket: false });
+    await vi.waitFor(() => expect(held).toBe(true));
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('desktop-received');
+    await bridge.start({ socket: false });
+    release();
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
+    await bridge.idle();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('applies a deletion read while it was stopped before it types anything', async () => {
+    const { bridge, relay, phone, sink, qid } = await asked();
+    sink.panes.get('pane-1')!.idle = false;
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    // The deletion is read and stored, but not applied.
+    const inbox = (bridge as unknown as { inbox: { processPending(): Promise<boolean> } }).inbox;
+    const processPending = inbox.processPending.bind(inbox);
+    inbox.processPending = async () => false;
+    relay.push('decision.deleted', qid, null, {});
+    await bridge.catchUp();
+    inbox.processPending = processPending;
+    sink.panes.get('pane-1')!.idle = true;
+    // Hold the restart's first pump before it applies anything, so only the reopen's own delivery runs.
+    const publisher = (bridge as unknown as { publisher: { flush(o: unknown): Promise<unknown> } })
+      .publisher;
+    const flush = publisher.flush.bind(publisher);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    publisher.flush = async (o) => {
+      await gate;
+      return flush(o);
+    };
+    await bridge.start({ socket: false });
+    const runs = bridge as unknown as {
+      applier: { idle(): Promise<void> };
+      deliverer: { idle(): Promise<void> };
+    };
+    await runs.applier.idle();
+    await runs.deliverer.idle();
+    expect(sink.typed).toHaveLength(0);
+    release();
+    await bridge.idle();
+    expect(sink.typed).toHaveLength(0);
+    await bridge.stop();
+  });
+
+  it('starts at once beside a write still in flight from before the stop, and types the answer once it settles', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    const write = sink.inject.bind(sink);
+    let calls = 0;
+    let release!: (r: InjectResult) => void;
+    sink.inject = (t, text, id) => {
+      if (++calls === 1) return new Promise<InjectResult>((r) => (release = r));
+      return write(t, text, id);
+    };
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    const reading = bridge.catchUp();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await bridge.stop();
+    // The write never settling must not hold the restart.
+    await bridge.start({ socket: false });
+    // Recovery waits for the write: it would take its open intent for a crash and flag the answer uncertain.
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('desktop-received');
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
+    expect(calls).toBe(1);
+    release({ outcome: 'held', reason: 'busy' });
+    await reading;
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
+    await bridge.idle();
+    expect(await store.getQuestion(qid)).toMatchObject({
+      delivery_status: 'terminal-delivered',
+      error_code: null,
+    });
+    await bridge.stop();
+  });
+
+  it('stays closed while it recovers, and after a stop meanwhile', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect((await store.getQuestion(qid))!.local_status).toBe('human-answered');
+    const open = store.openIntents.bind(store);
+    let recovering = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    store.openIntents = async () => {
+      recovering = true;
+      await gate;
+      return open();
+    };
+    const starting = bridge.start({ socket: false });
+    await vi.waitFor(() => expect(recovering).toBe(true));
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
+    await bridge.stop();
+    release();
+    await starting;
+    await bridge.notifyPaneIdle();
+    await bridge.idle();
+    expect(bridge.state).toBe('stopped');
+    expect(sink.typed).toHaveLength(0);
+  });
+
+  it('a second start waits for the recovery of the first, so an interrupted write is reconciled once', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    sink.panes.get('pane-1')!.idle = false;
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    // A write a crash left open: recovery looks for its marker in the pane.
+    const o = origin();
+    const now = Date.now();
+    await store.putIntent({
+      injection_id: 'crashed-write',
+      question_id: qid,
+      answer_revision: 1,
+      message_id: null,
+      host_id: o.host_id,
+      pane_id: o.pane_id,
+      terminal_generation: o.terminal_generation,
+      ownership_principal: o.ownership_principal,
+      agent_incarnation: o.agent_incarnation,
+      state: 'intent',
+      created_at: now,
+      updated_at: now,
+    });
+    let lookups = 0;
+    let answer!: (found: boolean) => void;
+    sink.hasMarker = async () => {
+      if (++lookups === 1) return new Promise<boolean>((r) => (answer = r));
+      return true;
+    };
+    const first = bridge.start({ socket: false });
+    await vi.waitFor(() => expect(lookups).toBe(1));
+    await bridge.stop();
+    await bridge.start({ socket: false });
+    answer(false);
+    await first;
+    await bridge.idle();
+    expect(lookups).toBe(1);
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('delivery-uncertain');
+    expect(sink.typed).toHaveLength(0);
+    await bridge.stop();
+  });
+
+  it('a recovery that failed is tried again by the next pump, so delivery does not stay closed', async () => {
+    const { bridge, relay, phone, sink, qid, store } = await asked();
+    await bridge.start({ socket: false });
+    await bridge.stop();
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    const open = store.openIntents.bind(store);
+    let failed = false;
+    store.openIntents = async () => {
+      if (failed) return open();
+      failed = true;
+      throw new Error('store busy');
+    };
+    await expect(bridge.start({ socket: false })).rejects.toThrow('store busy');
+    expect((await bridge.notifyPaneIdle()).delivered).toBe(0);
+    await bridge.pump();
+    await vi.waitFor(() => expect(sink.typed).toHaveLength(1));
+    await bridge.idle();
+    expect((await store.getQuestion(qid))!.delivery_status).toBe('terminal-delivered');
+    await bridge.stop();
+  });
+
+  it('a first start behind a drain the host began types nothing more until recovery has run', async () => {
+    const { bridge, relay, phone, sink, store } = await setupBridge();
+    sink.addPane('pane-2');
+    sink.addPane('pane-3');
+    const ask = async (pane: string) =>
+      (
+        await bridge.registerQuestion({
+          origin: origin({ pane_id: pane }),
+          input: { question: 'Ship it?', options: [{ id: 'approve', label: 'Approve' }] },
+        })
+      ).questionId;
+    const first = await ask('pane-1');
+    const crashed = await ask('pane-2');
+    const third = await ask('pane-3');
+    await bridge.pump();
+    for (const pane of ['pane-1', 'pane-3']) sink.panes.get(pane)!.idle = false;
+    for (const q of [first, third])
+      await relay.answerEvent({ questionId: q, phone, options: ['approve'] });
+    await bridge.catchUp();
+    // A write a crash left open in pane-2: recovery looks for its marker there, and is held doing so.
+    const o = origin({ pane_id: 'pane-2' });
+    const now = Date.now();
+    await store.putIntent({
+      injection_id: 'crashed-write',
+      question_id: crashed,
+      answer_revision: 1,
+      message_id: null,
+      host_id: o.host_id,
+      pane_id: o.pane_id,
+      terminal_generation: o.terminal_generation,
+      ownership_principal: o.ownership_principal,
+      agent_incarnation: o.agent_incarnation,
+      state: 'intent',
+      created_at: now,
+      updated_at: now,
+    });
+    let found!: (found: boolean) => void;
+    sink.hasMarker = () => new Promise<boolean>((r) => (found = r));
+    // The host's own drain is held writing the first answer when the bridge starts.
+    const write = sink.inject.bind(sink);
+    let release!: (r: InjectResult) => void;
+    let calls = 0;
+    sink.inject = (t, text, id) => {
+      if (++calls === 1) return new Promise<InjectResult>((r) => (release = r));
+      return write(t, text, id);
+    };
+    sink.panes.get('pane-1')!.idle = true;
+    const draining = bridge.notifyPaneIdle();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    sink.panes.get('pane-3')!.idle = true;
+    await bridge.start({ socket: false });
+    release({ outcome: 'held', reason: 'busy' });
+    await draining;
+    await vi.waitFor(() => expect(found).toBeTypeOf('function'));
+    const typedFor = (q: string) => sink.typed.some((t) => t.text.includes(`question_id: ${q}`));
+    expect(typedFor(third)).toBe(false);
+    found(false);
+    await vi.waitFor(() => expect(typedFor(third)).toBe(true));
+    await bridge.idle();
+    expect(typedFor(first)).toBe(true);
+    await bridge.stop();
+  });
+
+  it('a revoked bridge cannot be started again, before or after a stop', async () => {
+    const { bridge, relay, phone, sink, qid, identity } = await asked();
+    relay.push('device.revoked', null, null, { device_id: identity.config.deviceId, key_epoch: 2 });
+    await bridge.start({ socket: false });
+    await bridge.catchUp();
+    expect(bridge.state).toBe('revoked');
+    await expect(bridge.start({ socket: false })).rejects.toMatchObject({ code: 'forbidden' });
+    expect(bridge.state).toBe('revoked');
+    await bridge.stop();
+    await expect(bridge.start({ socket: false })).rejects.toMatchObject({ code: 'forbidden' });
+    expect(bridge.state).toBe('stopped');
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp().catch(() => {});
+    await bridge.notifyPaneIdle();
+    expect(sink.typed).toHaveLength(0);
   });
 });

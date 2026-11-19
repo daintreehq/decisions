@@ -219,6 +219,11 @@ export class DeliveryEngine {
     private readonly o: DeliveryOptions,
   ) {}
 
+  /** True while a drain is running, also one a stop has cut short that is still finishing its write. */
+  get draining(): boolean {
+    return this.running !== null;
+  }
+
   /** True while an advisory notice is waiting for the ledger: the host drains again once the ledger settles. */
   get replayHeld(): boolean {
     return this.held.size > 0;

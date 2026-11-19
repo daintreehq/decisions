@@ -292,6 +292,25 @@ describe('a socketless bridge that polls over HTTP', () => {
     expect(await Promise.race([stopped, late])).toBe('stopped');
   });
 
+  it('restarted while the sink is still typing from before the stop, it reads again at once', async () => {
+    const env = await listening();
+    const qid = await ask(env);
+    let typing = 0;
+    env.sink.inject = () => {
+      typing++;
+      return new Promise(() => undefined); // a command that never exits
+    };
+    await env.relay.answerEvent({ questionId: qid, phone: env.phone, options: ['yes'] });
+    await wait(() => expect(typing).toBe(1));
+    await env.bridge.stop();
+    const reads = env.ctl.eventReads.length;
+    const started = env.bridge.start({ socket: false, poll: POLL }).then(() => 'started');
+    const late = new Promise((r) => setTimeout(() => r('hung'), 1_000));
+    expect(await Promise.race([started, late])).toBe('started');
+    await wait(() => expect(env.ctl.eventReads.length).toBeGreaterThan(reads + 2));
+    expect(typing).toBe(1);
+  });
+
   it('applies a withdrawal while the sink is stuck typing another answer', async () => {
     const env = await listening();
     const first = await ask(env);

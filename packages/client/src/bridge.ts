@@ -549,6 +549,12 @@ export class DecisionsBridge {
     () => this.deliverNow(),
     (e) => this.emitError(e),
   );
+  /** Recovery and the reopening of delivery, chained across starts (`reopenDelivery`); never rejects. */
+  private reopening: Promise<void> = Promise.resolve();
+  /** Starts whose recovery has not finished. */
+  private reopensPending = 0;
+  /** Delivery was just reopened: the applier's next run delivers even when it applies nothing new. */
+  private redeliver = false;
   /** The last sync was refused this device's signature: background requests wait for the sync's slow retry. */
   private authRefused = false;
   /** Deliveries already announced on `delivered`, so two drains settling the same one announce it once. */
@@ -733,6 +739,9 @@ export class DecisionsBridge {
    * Reconcile interrupted injections, connect the socket, start the retry timer. Without a socket
    * (`socket: false`) the host reads events itself (`catchUp`, `sync`), or passes `poll` to have the bridge
    * sync over HTTP continuously, starting now, until it stops or is revoked.
+   *
+   * A stopped bridge can be started again, and delivers again once a write still in flight from before the stop has
+   * settled. A revoked one cannot: `start` throws `forbidden`.
    */
   async start(opts: { socket?: boolean; poll?: HttpPollOptions | true } = {}): Promise<void> {
     if (opts.poll && opts.socket !== false)
@@ -740,6 +749,9 @@ export class DecisionsBridge {
         'validation_error',
         'HTTP polling replaces the socket: pass socket: false',
       );
+    // Revocation is final for this bridge, also once a stop has replaced its state: nothing reads or types again.
+    if (this.revokedSeen)
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
     if (this.state === 'running') return;
     const run = ++this.lifecycle;
     this.httpAbort = new AbortController();
@@ -752,7 +764,15 @@ export class DecisionsBridge {
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
-    await this.delivery.recover();
+    // Recovery waits for a drain still writing from before a stop, and for an earlier start's recovery
+    // (`reopenDelivery`). Behind either, it runs in the background, so a write that never returns does not keep this run
+    // from reading: delivery stays closed until it is done.
+    const behind = this.delivery.draining || this.reopensPending > 0;
+    // Nothing more is typed before recovery has run, also on a first start behind a drain the host began.
+    if (behind) this.delivery.stopped = true;
+    const reopening = this.reopenDelivery(run);
+    if (behind) reopening.catch((e) => this.emitError(e as Error));
+    else await reopening;
     // Images a crash left with no queued create to use them.
     await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
     // Stopped or revoked while recovering: nothing may start sending in the background now.
@@ -775,6 +795,35 @@ export class DecisionsBridge {
       (this.timer as { unref?: () => void }).unref?.();
     }
     void this.pump().catch((e) => this.emitError(e as Error));
+  }
+
+  /**
+   * Reconcile interrupted injections for run `run`, then reopen delivery if the last stop closed it. Waits first for
+   * the previous start's recovery, so two never reconcile the same intent, and for a drain still writing from before
+   * the stop: recovery would take its open intent for a crash, and delivery reopened under it would let it type on. A
+   * stop or revocation meanwhile leaves delivery closed.
+   */
+  private reopenDelivery(run: number): Promise<void> {
+    const prior = this.reopening;
+    this.reopensPending++;
+    const next = (async () => {
+      try {
+        await prior;
+        await this.delivery.idle();
+        if (run !== this.lifecycle) return;
+        await this.delivery.recover();
+        if (run !== this.lifecycle || !this.delivery.stopped) return;
+        this.delivery.stopped = false;
+        // A pump that drained while delivery was closed typed nothing, and this run's first pump may only join it. The
+        // applier delivers once more, after applying what is stored, so a withdrawal waiting there is applied first.
+        this.redeliver = true;
+        void this.applier.kick();
+      } finally {
+        this.reopensPending--;
+      }
+    })();
+    this.reopening = next.catch(() => undefined);
+    return next;
   }
 
   /**
@@ -824,6 +873,7 @@ export class DecisionsBridge {
       quiet(this.pumping),
       quiet(this.syncing),
       quiet(this.paging?.pass),
+      this.reopening,
       this.applier.idle(),
       this.deliverer.idle(),
     ]);
@@ -1588,6 +1638,9 @@ export class DecisionsBridge {
     // Beside the pump, never inside it: a slow relay must not keep a question asked meanwhile from the next flush. It
     // reads only on a host that could ask for advice, and never throws.
     const advisory = this.advisory.refreshIfDue();
+    // This run's recovery failed, so delivery is still closed: try it again rather than leave it closed until a restart.
+    if (this.delivery.stopped && this.reopensPending === 0)
+      void this.reopenDelivery(this.lifecycle).catch((e) => this.emitError(e as Error));
     if (this.pumping) return Promise.all([this.pumping, advisory]).then(() => undefined);
     const core = (async () => {
       try {
@@ -1743,7 +1796,9 @@ export class DecisionsBridge {
   private async applyStored(): Promise<void> {
     if (!this.running()) return;
     const drain = await this.inbox.processPending();
-    if (drain || this.delivery.replayHeld) void this.deliverer.kick();
+    const reopened = this.redeliver;
+    this.redeliver = false;
+    if (drain || reopened || this.delivery.replayHeld) void this.deliverer.kick();
   }
 
   private readPages(req: CallOptions): Promise<number> {
