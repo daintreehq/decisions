@@ -306,6 +306,9 @@ describe('the signed advisory contract', () => {
     expect(() => advisoryPlanOf(q, 0, { ...content, planned_fallback: undefined })).toThrow(
       ApiError,
     );
+    // A later round shows nothing advisory, but refused content stays refused.
+    for (const revision of [1, 2])
+      expect(() => advisoryPlanOf(q, revision, { ...content, kind: 'approval' })).toThrow(ApiError);
     expect(
       advisoryPlanOf({ ...q, record: { ...q.record, expires_at: null } }, 0, content),
     ).toBeNull();

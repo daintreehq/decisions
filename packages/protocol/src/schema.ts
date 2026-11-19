@@ -490,11 +490,11 @@ export function advisoryPlanOf(
   revision: number,
   content: Pick<DecisionContentV1, 'kind' | 'planned_fallback'> | null,
 ): AdvisoryPlan | null {
-  if (replyModeOf(question.envelope) !== 'advisory' || revision !== ADVISORY_ROUND_REVISION)
-    return null;
-  if (question.record.expires_at === null) return null;
+  if (replyModeOf(question.envelope) !== 'advisory') return null;
+  // Refused content stays refused in every round, so it is never read as an ordinary question either.
   const issue = content && advisoryContentIssue(question, content);
   if (issue) throw new ApiError('validation_error', `advisory question content refused: ${issue}`);
+  if (revision !== ADVISORY_ROUND_REVISION || question.record.expires_at === null) return null;
   return { deadline: question.record.expires_at, fallback: content?.planned_fallback ?? null };
 }
 

@@ -1009,7 +1009,7 @@ commits, the relay also refuses a `confirm-proxy` that does not name the latest 
 a person's action the publishing desktop has not declared it accepts (`409 invalid_state` with
 `creator-missing-feature`, section 19), a human message on a question whose desktop takes no messages
 (`409 invalid_state`, section 16), phone images that do not bind (section 17), and a reopen past the open-question
-quota (`429 rate_limited`). A deadline that committed first stays committed.
+quota (`429 rate_limited`, checked before the reopen's deadline). A deadline that committed first stays committed.
 
 | Input                                       | Authority                                                        | From                         | Revision           | Result                                                                                                             |
 | ------------------------------------------- | ---------------------------------------------------------------- | ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
@@ -1018,7 +1018,7 @@ quota (`429 rate_limited`). A deadline that committed first stays committed.
 | Verified decline (section 6.1)              | the person: phone, tablet, or owner desktop with `decline: true` | `open`                       | CAS `r`, stays `r` | `cancelled`, declined; the plan is never due                                                                       |
 | Withdrawal (a desktop's `cancel`)           | a desktop                                                        | `open` or `proxy-answered`   | CAS `r`, stays `r` | `cancelled`, withdrawn; the plan is never due                                                                      |
 | Reopen                                      | the owner desktop                                                | `cancelled` or `expired`     | CAS `r` → `r+1`    | `open`, a blocking round with the reopen's deadline                                                                |
-| Deletion (`DELETE /questions/{id}`)         | the owner desktop, authenticated and unsigned                    | any                          | none               | gone, with a `decision.deleted` tombstone; every later command is `404 not_found`                                  |
+| Deletion (`DELETE /questions/{id}`)         | the owner desktop, authenticated and unsigned                    | any                          | none               | gone, with a `decision.deleted` tombstone; every later fresh command is `404 not_found`                            |
 | Competing proxy answer                      | a desktop's model (`proxy-ok`, `proxy-first`)                    | `open`, committed before `D` | CAS `r` → `r+1`    | `proxy-answered`; the deadline no longer applies, and the person confirms or overrides it as usual, after `D` too  |
 | Proxy abstains                              | a desktop's model                                                | `open`                       | CAS `r`, stays `r` | still `open`; the deadline stays armed                                                                             |
 | Follow-up message, either side (section 16) | the person, or the publishing desktop                            | `open` or answered           | none               | nothing changes: never an answer, and the round's deadline stands as it was                                        |
@@ -1088,7 +1088,8 @@ so a reader that cannot explain it refuses the question rather than showing it a
 - **Phone or tablet 0.8.0 or older**: `EventData.created` fails on the AAD, so the app shows the question as one it
   cannot read, never as an ordinary one, and the person cannot answer it on that device. Every other question reads
   as before. A marker such a phone could ignore would show "Human decision required" next to the deadline, as if the
-  agent would wait, while the agent may go ahead at the deadline.
+  agent would wait, while the agent may go ahead at the deadline. (Its History may still label the unreadable entry
+  with that placeholder; the current app does not.)
 - **0.3.0 clients**: their page and frame schemas leave event data unchecked, so catch-up goes on. A client that
   verifies the event rejects that one.
 - **Strict schema readers**: `schemas.json` closes `EnvelopeAad` and `DecisionContentV1`
