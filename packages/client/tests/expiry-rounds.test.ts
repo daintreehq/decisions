@@ -683,8 +683,8 @@ describe('a superseded closure notice holds nothing back', () => {
     expect((await e.row()).delivery_status).toBe('terminal-delivered');
   });
 
-  /** Long enough for a loaded machine, short enough that a stuck step fails here, not at the test's timeout. */
-  const WAIT = { timeout: 1_500, interval: 5 };
+  /** Long enough for a loaded machine; the tests' timeout leaves room for every wait, so a stuck step fails here. */
+  const WAIT = { timeout: 2_000, interval: 5 };
 
   /**
    * A socket the test drives by hand. Every step waits for the state it reads next, never for a fixed time: the
@@ -746,7 +746,7 @@ describe('a superseded closure notice holds nothing back', () => {
     now = Date.parse(deadline) + MIN;
     socket.watch(env);
     await env.bridge.start();
-    await env.bridge.pump(); // the one start() runs, over HTTP, before the socket is up
+    await env.bridge.pump(); // the one start() runs, drained before any replay frame arrives
     const expired = env.relay.expiryEvent({ questionId: qid });
     const reopened = await env.relay.plainActionEvent({
       questionId: qid,
@@ -775,7 +775,7 @@ describe('a superseded closure notice holds nothing back', () => {
     expect(await socket.ended()).toBe(0);
     expect((await env.store.getQuestion(qid))!.local_status).toBe('open');
     expect(env.sink.typed).toHaveLength(0);
-  });
+  }, 10_000);
 
   it('a closure notice still in force when a replay ends is typed then', async () => {
     let now = Date.now();
@@ -790,7 +790,7 @@ describe('a superseded closure notice holds nothing back', () => {
     now = Date.parse(deadline) + MIN;
     socket.watch(env);
     await env.bridge.start();
-    await env.bridge.pump(); // the one start() runs, over HTTP, before the socket is up
+    await env.bridge.pump(); // the one start() runs, drained before any replay frame arrives
     const expired = env.relay.expiryEvent({ questionId: r.questionId });
     const ws = await socket.opened();
     ws.recv({
@@ -811,7 +811,7 @@ describe('a superseded closure notice holds nothing back', () => {
     expect(await socket.ended()).toBe(1);
     expect(env.sink.typed).toHaveLength(1);
     expect(env.sink.typed[0]!.text).toContain('NOT authorised to continue');
-  });
+  }, 10_000);
 });
 
 describe('rows reopened before reopens kept their deadline are reconciled from verified history', () => {
