@@ -9,7 +9,8 @@ import type { Env } from '../src/env.js';
  * `POST /__e2e/clock` with `{ "offset_ms": n }` sets how far the relay's clock runs ahead of the real one (absolute,
  * so a repeated request never moves it twice) and then runs the room's alarm, as the runtime would once the new time
  * reached it. The relay reads its clock through `nowMs()` (`Date.now()`), so deadlines, expiries, request skew and the
- * ledger's timestamps all move with it. Native alarms are set in real time, so the room translates them.
+ * ledger's timestamps all move with it. Native alarms are set in real time, so the room translates them, and HTTP
+ * responses carry the moved time in `Date`, the header a client learns its skew from after a refusal.
  */
 
 // Every export of an entry module is an entrypoint to workerd: only the handler and the room class are exported.
@@ -23,6 +24,9 @@ let offsetMs = 0;
 Date.now = () => nativeNow() + offsetMs;
 
 export class DecisionRoom extends RelayRoom {
+  /** The alarm runs from the runtime and from a move: one pass at a time, so no due job runs twice at once. */
+  private alarms: Promise<void> = Promise.resolve();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // The room schedules its alarm on its own clock; the runtime fires it on the real one.
@@ -34,11 +38,20 @@ export class DecisionRoom extends RelayRoom {
       const at = await getAlarm(options);
       return at == null ? at : at + offsetMs;
     };
-    // A room started again (evicted, or a relay restarted on the same storage) keeps the time it had reached.
+    // A room started again (evicted, or a relay restarted on the same storage) keeps the time it had reached. An
+    // alarm still set for an earlier offset (a move cut short) fires now, so the room schedules it again on this one.
     void ctx.blockConcurrencyWhile(async () => {
       const saved = await storage.get<number>(OFFSET_KEY);
-      if (typeof saved === 'number') offsetMs = saved;
+      if (typeof saved !== 'number' || saved === offsetMs) return;
+      offsetMs = saved;
+      if ((await getAlarm()) !== null) await setAlarm(nativeNow());
     });
+  }
+
+  override alarm(): Promise<void> {
+    const pass = this.alarms.then(() => super.alarm());
+    this.alarms = pass.catch(() => undefined);
+    return pass;
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -55,9 +68,11 @@ export class DecisionRoom extends RelayRoom {
     for (let pass = 0; pass < MAX_ALARM_PASSES; pass++) {
       await this.alarm();
       const at = await this.ctx.storage.getAlarm();
-      if (at === null || at > Date.now()) break;
+      if (at === null || at > Date.now()) {
+        return Response.json({ offset_ms: offsetMs, now: new Date(Date.now()).toISOString() });
+      }
     }
-    return Response.json({ offset_ms: offsetMs, now: new Date(Date.now()).toISOString() });
+    return new Response(`jobs still due after ${MAX_ALARM_PASSES} alarm passes`, { status: 500 });
   }
 }
 
@@ -66,6 +81,11 @@ export default {
     if (new URL(request.url).pathname === CLOCK_PATH) {
       return env.DECISION_ROOM.get(env.DECISION_ROOM.idFromName('primary')).fetch(request);
     }
-    return worker.fetch(request, env);
+    const res = await worker.fetch(request, env);
+    // A socket upgrade is passed on as it is; it carries no Date a client reads.
+    if (res.status === 101 || res.webSocket) return res;
+    const dated = new Response(res.body, res);
+    dated.headers.set('Date', new Date(Date.now()).toUTCString());
+    return dated;
   },
 } satisfies ExportedHandler<Env>;

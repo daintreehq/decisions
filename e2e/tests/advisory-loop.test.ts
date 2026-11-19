@@ -21,6 +21,7 @@ import {
   ADVISORY_TIMEOUT_NOTICE_FIXTURE,
   BLOCKING_APPROVAL_FIXTURE,
 } from '@daintreehq/decisions-protocol/fixtures';
+import { replyModeOf } from '@daintreehq/decisions-protocol';
 import { TestClock } from './clock.js';
 import {
   CLAIM_SECRET,
@@ -49,10 +50,16 @@ const PORT = 8891;
 const MOUNT = '/mcp/decisions';
 const TOKEN_A = 'pane-a-advisory-bearer-0123456789abcdef';
 const TOKEN_B = 'pane-b-advisory-bearer-0123456789abcdef';
-/** A design sign-off the host registered: its questions wait for a decision and are never advisory. */
+const TOKEN_C = 'pane-c-advisory-bearer-0123456789abcdef';
+/**
+ * A design sign-off the host registered and bound to pane C's agent, as Daintree binds a workflow's gate to the pane
+ * running it: its questions wait for a decision and are never advisory.
+ */
 const GATE = 'design-review/final';
 const MINUTE = 60_000;
 const WINDOW = '15m';
+/** Between `get_decision` polls: MCP allows a pane 60 requests a minute. */
+const POLL_MS = 1_000;
 
 const ADVICE = ADVISORY_QUESTION_FIXTURE.content;
 const APPROVAL = BLOCKING_APPROVAL_FIXTURE.content;
@@ -71,6 +78,7 @@ describe.skipIf(!chromiumPath)(
     let mcp: RunningMcp;
     let paneA: Client;
     let paneB: Client;
+    let paneC: Client;
     const sink = new PaneSink();
     const problems: string[] = [];
     let keyDir = '';
@@ -132,6 +140,7 @@ describe.skipIf(!chromiumPath)(
       const auth = new TokenMapAuthenticator();
       auth.register(TOKEN_A, paneOrigin('pane-a'));
       auth.register(TOKEN_B, paneOrigin('pane-b'));
+      auth.register(TOKEN_C, { ...paneOrigin('pane-c'), workflow_gate_id: GATE });
       mcp = await startDecisionsMcpServer({
         bridge,
         authenticator: auth,
@@ -140,6 +149,7 @@ describe.skipIf(!chromiumPath)(
       });
       paneA = await connect(mcp.url, TOKEN_A);
       paneB = await connect(mcp.url, TOKEN_B);
+      paneC = await connect(mcp.url, TOKEN_C);
     }, 120_000);
 
     afterAll(async () => {
@@ -147,6 +157,7 @@ describe.skipIf(!chromiumPath)(
       for (const step of [
         () => paneA?.close(),
         () => paneB?.close(),
+        () => paneC?.close(),
         () => mcp?.close(),
         () => bridge?.stop?.(),
         () => browser?.close(),
@@ -168,6 +179,29 @@ describe.skipIf(!chromiumPath)(
 
     const decision = async (c: Client, id: string) =>
       (await call(c, 'get_decision', { question_id: id })).structuredContent!;
+
+    /** Polls `get_decision` until `done` holds, at a pace MCP's rate limit allows. */
+    const decisionWhen = (
+      c: Client,
+      id: string,
+      done: (r: Record<string, unknown>) => boolean,
+      what: string,
+    ) =>
+      until(
+        async () => {
+          const r = await decision(c, id);
+          return done(r) ? r : null;
+        },
+        30_000,
+        what,
+        POLL_MS,
+      );
+
+    /** The chunks typed into any pane since `before`, once there are at least `n`. */
+    const typedSince = async (before: number, n = 1) => {
+      await until(async () => sink.typed.length >= before + n, 30_000, `${n} typed chunk(s)`);
+      return sink.typed.slice(before);
+    };
 
     /** Pushes the question to the relay and waits until the relay holds it open, so its deadline is the relay's. */
     const published = async (id: string) => {
@@ -224,22 +258,18 @@ describe.skipIf(!chromiumPath)(
         .check();
       await page.getByRole('button', { name: /^Send (decision|answer)$/ }).click();
 
-      await until(async () => sink.typed.length > before, 30_000, 'the answer to be typed');
-      const typed = sink.typed.slice(before);
+      const typed = await typedSince(before);
       expect(typed.map((t) => t.pane)).toEqual(['pane-a']);
       expect(typed[0]!.text).toContain(`question_id: ${id}`);
       expect(typed[0]!.text).toContain('source: human');
       expect(typed[0]!.text).toContain('choice: sqlite');
+      expect(typed[0]!.text).toContain('choice_label: A SQLite file per test');
       expect(typed[0]!.text).not.toContain('advisory-unanswered');
 
-      const answered = await until(
-        async () => {
-          const r = await decision(paneA, id);
-          return r.status === 'human-answered' && r.delivery_status === 'terminal-delivered'
-            ? r
-            : null;
-        },
-        30_000,
+      const answered = await decisionWhen(
+        paneA,
+        id,
+        (r) => r.status === 'human-answered' && r.delivery_status === 'terminal-delivered',
         'the answer recorded as delivered',
       );
       expect(answered).toMatchObject({
@@ -270,8 +300,11 @@ describe.skipIf(!chromiumPath)(
 
     it('an ignored advisory question: the phone shows its deadline and plan, then that it closed; the agent hears its plan is due', async () => {
       const before = sink.typed.length;
-      const { id, expiresAt } = await askAdvice(ADVICE.question);
-      await openFromInbox(page, relay.origin, ADVICE.question);
+      // Not the fixture's own question, so the notice below is checked against every value this run substituted.
+      const question = 'Which fixture should the parser tests use?';
+      const { id, expiresAt } = await askAdvice(question);
+      expect(replyModeOf((await relayClient.getQuestion(id)).question.envelope)).toBe('advisory');
+      await openFromInbox(page, relay.origin, question);
 
       // Before the deadline: when it is, how long is left, and what the agent will do without an answer.
       const due = page.locator('.msg-meta .due');
@@ -289,15 +322,15 @@ describe.skipIf(!chromiumPath)(
       const leftBefore = await minutesLeft();
       expect(leftBefore).toBeGreaterThanOrEqual(13);
       await clock.advance(5 * MINUTE);
+      // Five fewer, or six when a real second carried it over the minute.
       const leftAfter = await until(
         async () => {
           const n = await minutesLeft();
-          return n < leftBefore ? n : null;
+          return n <= leftBefore - 5 ? n : null;
         },
         20_000,
-        'the time left to count down',
+        'the time left to count down by five minutes',
       );
-      expect(leftBefore - leftAfter).toBeGreaterThanOrEqual(5);
       expect(leftBefore - leftAfter).toBeLessThanOrEqual(6);
 
       // Nobody answers. Once the deadline passes, the phone shows the relay closed the question, plan and all.
@@ -315,29 +348,37 @@ describe.skipIf(!chromiumPath)(
 
       // The asking pane gets the notice once, byte for byte the frozen one, and get_decision says the plan is due.
       await settle();
-      const view = await until(
-        async () => {
-          const r = await decision(paneA, id);
-          const timeout = r.advisory_timeout as { notice?: string } | null;
-          return r.delivery_status === 'terminal-delivered' && timeout?.notice === 'delivered'
-            ? r
-            : null;
-        },
-        30_000,
+      const typed = await typedSince(before);
+      const view = await decisionWhen(
+        paneA,
+        id,
+        (r) =>
+          r.delivery_status === 'terminal-delivered' &&
+          (r.advisory_timeout as { notice?: string } | null)?.notice === 'delivered',
         'the notice recorded as delivered',
       );
-      const typed = sink.typed.slice(before);
+      expect(sink.typed.slice(before)).toHaveLength(1);
       expect(typed.map((t) => t.pane)).toEqual(['pane-a']);
       const notice = ADVISORY_TIMEOUT_NOTICE_FIXTURE;
       const injectionId = typed[0]!.injectionId;
-      const expected = notice.due
-        .replace(
-          `question_id: ${notice.questionId} (q-${notice.alias})`,
-          () => `question_id: ${id} (q-${String(view.alias)})`,
-        )
-        .replace(`injection_id: ${notice.injectionId}`, () => `injection_id: ${injectionId}`)
-        .replace(`question: ${notice.question}`, () => `question: ${ADVICE.question}`)
-        .replace(`deadline: ${notice.deadline}`, () => `deadline: ${expiresAt}`);
+      // Each of the fixture's values stands in exactly one place, so none can be left behind unreplaced.
+      const swap = (text: string, from: string, to: string) => {
+        expect(text.split(from)).toHaveLength(2);
+        return text.replace(from, () => to);
+      };
+      let expected: string = notice.due;
+      expected = swap(
+        expected,
+        `question_id: ${notice.questionId} (q-${notice.alias})`,
+        `question_id: ${id} (q-${String(view.alias)})`,
+      );
+      expected = swap(
+        expected,
+        `injection_id: ${notice.injectionId}`,
+        `injection_id: ${injectionId}`,
+      );
+      expected = swap(expected, `question: ${notice.question}`, `question: ${question}`);
+      expected = swap(expected, `deadline: ${notice.deadline}`, `deadline: ${expiresAt}`);
       expect(typed[0]!.text).toBe(expected);
 
       const fixture = ADVISORY_TIMEOUT_DECISION_FIXTURE;
@@ -372,12 +413,11 @@ describe.skipIf(!chromiumPath)(
         30_000,
         'declined on the relay',
       );
-      const declined = await until(
-        async () => {
-          const r = await decision(paneA, id);
-          return r.status === 'cancelled' && r.delivery_status === 'terminal-delivered' ? r : null;
-        },
-        30_000,
+      await typedSince(before);
+      const declined = await decisionWhen(
+        paneA,
+        id,
+        (r) => r.status === 'cancelled' && r.delivery_status === 'terminal-delivered',
         'the decline delivered',
       );
       const expectDeclined = (r: Record<string, unknown>) =>
@@ -413,11 +453,11 @@ describe.skipIf(!chromiumPath)(
     it('a required approval that expires stays unsatisfied and is never fallback_due', async () => {
       const before = sink.typed.length;
       await bridge.pump();
-      const asked = await call(paneB, 'ask_human', {
+      // Pane C's agent runs the design-review step: the host's gate applies whether or not the agent names it.
+      const asked = await call(paneC, 'ask_human', {
         question: APPROVAL.question,
         kind: APPROVAL.kind,
         options: APPROVAL.options,
-        workflow_gate_id: GATE,
         expires_in: WINDOW,
       });
       expect(asked.isError, JSON.stringify(asked.structuredContent)).toBeFalsy();
@@ -428,42 +468,59 @@ describe.skipIf(!chromiumPath)(
       });
       const id = String(asked.structuredContent!.question_id);
       const expiresAt = String(asked.structuredContent!.expires_at);
+      // Every view the agent could read on the way, each of which must say no plan is due.
+      const views: Record<string, unknown>[] = [];
+      const view = async () => {
+        const r = await decision(paneC, id);
+        views.push(r);
+        return r;
+      };
       await published(id);
+      // What the relay holds is what the host signed: a decision only a person makes, under the gate's policy.
+      const signed = (await relayClient.getQuestion(id)).question;
+      expect(signed.record).toMatchObject({ requirement: 'human-required', policy_version: 1 });
+      expect(signed.record.workflow_gate_id_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(replyModeOf(signed.envelope)).toBe('blocking');
+      expect(await view()).toMatchObject({ status: 'open', workflow_gate_id: GATE });
 
       await openFromInbox(page, relay.origin, APPROVAL.question);
+      await page.getByText('Human decision required').first().waitFor({ timeout: 20_000 });
       await page
         .getByText('If no one decides by then, nothing is approved and the step stays blocked.')
         .first()
-        .waitFor({ timeout: 20_000 });
+        .waitFor();
       expect(await page.getByRole('note', { name: 'Your agent’s plan' }).count()).toBe(0);
 
       await pastDeadline(expiresAt);
+      await view();
       await page.getByText('Expired without an answer').first().waitFor({ timeout: 30_000 });
       await page.getByText('Nothing was approved, and the step stays blocked.').first().waitFor();
 
       await settle();
+      const typed = await typedSince(before);
       const expired = await until(
         async () => {
-          const r = await decision(paneB, id);
+          const r = await view();
           return r.status === 'expired' && r.delivery_status === 'terminal-delivered' ? r : null;
         },
         30_000,
         'the expiry delivered',
+        POLL_MS,
       );
+      expect(views.map((v) => v.fallback_due)).toEqual(views.map(() => false));
       expect(expired).toMatchObject({
         closed_reason: 'expired',
         requirement: 'human-required',
         workflow_gate_id: GATE,
         reply_mode: 'blocking',
         planned_fallback: null,
-        fallback_due: false,
         advisory_timeout: null,
         provenance: null,
         choice: null,
         answers: [],
       });
-      const typed = sink.typed.slice(before);
-      expect(typed.map((t) => t.pane)).toEqual(['pane-b']);
+      expect(sink.typed.slice(before)).toHaveLength(1);
+      expect(typed.map((t) => t.pane)).toEqual(['pane-c']);
       expect(typed[0]!.text).toContain(`question_id: ${id}`);
       expect(typed[0]!.text).toContain('source: system');
       expect(typed[0]!.text).toContain('status: expired');
@@ -478,9 +535,10 @@ describe.skipIf(!chromiumPath)(
 
     it('the relay closes questions at their deadlines by its own alarm, with nobody reading them', async () => {
       // Every relay read and write first expires what is overdue, so the outcomes above would hold even if the moved
-      // relay never fired an alarm. Here nothing reads: the phone waits on Home, the bridge only listens on its
-      // socket, and nobody settles. The first deadline passes with the move (the alarm the move runs); the second
-      // passes seconds later in real time (the runtime's own alarm, set on the moved clock).
+      // relay never fired an alarm. Here nothing reads: the phone leaves the relay, the bridge only listens on its
+      // socket, and nobody settles. The first deadline passes with the move (the alarm the move runs), and its notice
+      // arrives while the second is still ahead; the second passes seconds later in real time (the runtime's own
+      // alarm, set on the moved clock).
       const before = sink.typed.length;
       await bridge.pump();
       const ask = async (question: string, window: string) => {
@@ -499,24 +557,25 @@ describe.skipIf(!chromiumPath)(
         };
       };
       const first = await ask('Keep the old importer behind a flag?', WINDOW);
-      const second = await ask('Log the importer’s timings?', '903s');
+      const second = await ask('Log the importer’s timings?', '905s');
       await published(first.id);
       await published(second.id);
-      await page.goto(`${relay.origin}/`);
+      await page.goto('about:blank');
+      const typedFor = (id: string) =>
+        sink.typed.slice(before).filter((t) => t.text.includes(`question_id: ${id}`));
 
       await clock.advance(Math.ceil(Date.parse(first.expiresAt) - clock.now()) + 1_000);
-      expect(Date.parse(second.expiresAt)).toBeGreaterThan(clock.now());
-      await until(
-        async () => sink.typed.length >= before + 2,
-        30_000,
-        'both expiries pushed to the bridge',
-      );
-      const typed = sink.typed.slice(before);
-      expect(typed.map((t) => t.pane)).toEqual(['pane-b', 'pane-b']);
-      for (const [i, q] of [first, second].entries()) {
-        expect(typed[i]!.text).toContain(`question_id: ${q.id}`);
-        expect(typed[i]!.text).toContain('status: expired');
-        expect(typed[i]!.text).toContain('authorised: no');
+      const secondDue = Date.parse(second.expiresAt);
+      expect(secondDue - clock.now()).toBeGreaterThan(2_000);
+      await until(async () => typedFor(first.id).length > 0, 30_000, 'the first expiry pushed');
+      expect(clock.now()).toBeLessThan(secondDue);
+      await until(async () => typedFor(second.id).length > 0, 30_000, 'the second expiry pushed');
+
+      expect(sink.typed.slice(before).map((t) => t.pane)).toEqual(['pane-b', 'pane-b']);
+      for (const q of [first, second]) {
+        const [typed] = typedFor(q.id);
+        expect(typed!.text).toContain('status: expired');
+        expect(typed!.text).toContain('authorised: no');
         expect((await relayClient.getQuestion(q.id)).status).toBe('expired');
       }
       expect(problems).toEqual([]);

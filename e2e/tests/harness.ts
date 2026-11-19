@@ -126,12 +126,14 @@ export async function until<T>(
   fn: () => Promise<T | null | undefined | false>,
   ms = 30_000,
   what = 'condition',
+  /** Between attempts; slower for a check that spends a rate-limited request (MCP allows 60 a minute per pane). */
+  everyMs = 150,
 ): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
     if (v) return v;
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await tick(150);
+    await tick(everyMs);
   }
 }
