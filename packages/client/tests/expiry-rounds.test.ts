@@ -1077,6 +1077,50 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect(await events(e)).toContain('round.ambiguous');
   });
 
+  /** A custom store that cannot read its processed history: `processedEventsOfType` left out. Returns a restore. */
+  const withoutHistory = (e: Env) => {
+    const s = e.store as unknown as { processedEventsOfType?: unknown };
+    s.processedEventsOfType = undefined;
+    return () => void delete s.processedEventsOfType;
+  };
+  const errorsOf = (b: DecisionsBridge) => {
+    const errors: Error[] = [];
+    b.on('error', (err) => errors.push(err));
+    return errors;
+  };
+
+  it('a store that cannot read its history says the repair could not run, and repairs once it can', async () => {
+    let finite = '';
+    const e = await legacy((x) => (finite = x.later(x.deadline, DAY)));
+    // Asked with no deadline, reopened with one: the earlier bridge kept none.
+    await e.store.updateQuestion(e.qid, { expires_at: null });
+    const restore = withoutHistory(e);
+    const errors = errorsOf(e.again);
+    await e.again.catchUp();
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0]!.message).toContain('processedEventsOfType');
+    expect(await events(e)).toContain('rounds.unreconciled');
+    expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
+    expect((await e.row()).expires_at).toBeNull();
+    // Said once a run, however many passes follow.
+    e.at(new Date(e.now).toISOString(), 2 * MIN);
+    await e.again.catchUp();
+    await tick(20);
+    expect(errors).toHaveLength(1);
+    // Once the store can read it, the next start repairs the row, and the relay's expiry closes the question.
+    restore();
+    const third = await restart({ ...e, bridge: e.again });
+    const later = errorsOf(third);
+    await third.catchUp();
+    await settled(e);
+    expect((await e.row()).expires_at).toBe(finite);
+    e.relay.expiryEvent({ questionId: e.qid, revision: 1, at: finite });
+    e.at(finite, MIN);
+    await third.catchUp();
+    expect((await e.row()).local_status).toBe('expired');
+    expect(later).toEqual([]);
+  });
+
   it('a row whose deadline already matches costs no verification', async () => {
     const e = await asked();
     await e.reopen(1, null);
