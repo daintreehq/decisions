@@ -506,9 +506,16 @@ describe('recovering an outcome by ID', () => {
       status: 'human-answered',
       text: 'Yes, merge it',
     });
-    // Another pane's question is unknown here, as it is to get_decision.
+    // Another pane's question is unknown here, as it is to get_decision, and waiting for it takes over nothing.
     const other = await getCmd(e.proc().ctx, {}, id, { pane: 'mcp' }).catch((x: unknown) => x);
     expect((other as CliError).message).toBe('not_found: unknown question');
+    const reads = e.relay.calls.length;
+    const unknown = await waitCmd(e.proc().ctx, {}, 'nope', { stopped: never(), ...QUICK }).catch(
+      (x: unknown) => x,
+    );
+    expect((unknown as CliError).message).toBe('not_found: unknown question');
+    expect((unknown as CliError).exitCode).toBe(1);
+    expect(e.relay.calls.length).toBe(reads);
   });
 
   it('only reads while a listener receives, and takes over once that listener stops', async () => {

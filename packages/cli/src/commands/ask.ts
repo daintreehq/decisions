@@ -544,6 +544,8 @@ export async function waitCmd(
     const pane = paneIdentityOf(cliOrigin(o.pane ?? 'cli'));
     let res: WaitResult;
     try {
+      // An unknown question fails here, before this process takes over receiving for anything else.
+      await w.bridge.getDecision(questionId, pane);
       res = await waitForOutcome({
         ctx,
         bridge: w.bridge,
