@@ -385,13 +385,17 @@ export class Inbox {
     ev: LedgerEvent,
     v: Extract<VerifiedAnswer, { ok: true }>,
   ): Promise<boolean> {
+    type Turn = { kind: 'applied'; applied: boolean } | { kind: 'writing'; writing: Promise<void> };
     for (;;) {
-      const r = await this.ctx.lock.run(async () => {
+      // The write is handed back, never awaited here: waiting inside the lock would hold up its own settlement.
+      const turn = await this.ctx.lock.run(async (): Promise<Turn> => {
         const writing = this.cb.closureWrite?.(questionId);
-        return writing ? { writing } : { applied: await this.applyVerified(ev, v) };
+        return writing
+          ? { kind: 'writing', writing }
+          : { kind: 'applied', applied: await this.applyVerified(ev, v) };
       });
-      if ('applied' in r) return r.applied;
-      await r.writing.catch(() => undefined);
+      if (turn.kind === 'applied') return turn.applied;
+      await turn.writing.catch(() => undefined);
     }
   }
 
