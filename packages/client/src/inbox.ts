@@ -264,9 +264,13 @@ export class Inbox {
   /** The check of a store that cannot read its history: started once it is due, or the one under way, shared. */
   private historyChecked(): Promise<void> {
     if (!this.historyCheck && !this.reconcileDone && this.ctx.now() >= this.reconcileAfter) {
-      this.historyCheck = this.withoutHistory().finally(() => {
-        this.historyCheck = null;
-      });
+      // Held before the store is first called, so a caller the store reaches meanwhile joins this check.
+      const check: Promise<void> = Promise.resolve()
+        .then(() => this.withoutHistory())
+        .finally(() => {
+          if (this.historyCheck === check) this.historyCheck = null;
+        });
+      this.historyCheck = check;
     }
     return this.historyCheck ?? Promise.resolve();
   }

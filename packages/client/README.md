@@ -29,8 +29,9 @@ every processed inbound event of that type, applied or rejected, in `seq` order 
 bridge kept the earlier round's deadline when a question was reopened, and 0.9.0 repairs those rows from the stored
 reopens it can verify. Without the method nothing is repaired, and such a question can miss its expiry (asked with no
 deadline and reopened with one, it never expires) or be closed at the earlier round's deadline. Such a bridge looks
-once, on its first `start()`, `catchUp()` or `sync()`, and while any reopened question is open reports a
-`not_supported` error on `bridge.on("error")`, before `start()` returns; register the listener before any of them.
+once, as it starts or first applies events, and while any reopened question is open reports a `not_supported` error on
+`bridge.on("error")`, before `start()` returns; register the listener before the first `start()`, `catchUp()` or
+`sync()`.
 Once the method is implemented, a new bridge over the same store repairs the rows in the background from the stored
 events, as long as they are kept. An expiry refused before then stays refused, and a question closed before then stays
 closed. Both bundled stores implement it.
