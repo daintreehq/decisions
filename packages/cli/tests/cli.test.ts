@@ -353,6 +353,32 @@ describe('ask / status / devices', () => {
     const create = calls.find((c) => c.path === '/api/v1/questions')!;
     expect(JSON.stringify(create.body)).not.toContain('Tabs or spaces?'); // encrypted
   });
+  it("a plain ask declares this device's features before it publishes, so the person can dismiss its question", async () => {
+    const tickets: { features?: string[] }[] = [];
+    const { ctx, calls } = await ready({
+      routes: {
+        'POST /api/v1/socket-ticket': (body) => {
+          tickets.push(body as { features?: string[] });
+          return {
+            ticket: 't',
+            expires_at: new Date(Date.now() + 30_000).toISOString(),
+            ws_path: '/api/v1/socket',
+          };
+        },
+      },
+    });
+    tickets.length = 0;
+    expect(await ask(ctx, {}, { question: 'Ship it?' })).toBe(0);
+    const paths = calls.map((c) => `${c.method} ${c.path}`);
+    const ticket = paths.indexOf('POST /api/v1/socket-ticket');
+    expect(ticket).toBeGreaterThanOrEqual(0);
+    expect(ticket).toBeLessThan(paths.indexOf('POST /api/v1/questions'));
+    // What a receiver of this device declares: the relay and the phone gate the person's decline on it.
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]!.features).toEqual(
+      expect.arrayContaining(['person-declines-v1', 'owner-desktop-declines-v1']),
+    );
+  });
   it('ask rejects malformed --option values', async () => {
     const { ctx } = await ready();
     await expect(ask(ctx, {}, { question: 'q', option: ['nolabel'] })).rejects.toThrow(/id=Label/);
