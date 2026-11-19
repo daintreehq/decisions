@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
@@ -188,36 +188,73 @@ class SocketTap {
   }
 }
 
+/** `p`, or a failure naming `what` once `ms` pass first. */
+const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+};
+
+/** The longest one teardown step may take before the steps after it run anyway. */
+const TEARDOWN_STEP_MS = 20_000;
+
+/**
+ * What one test started, stopped last first when the test ends, however it ends. Every step runs even if one before
+ * it fails or hangs, so the receivers, Chromium contexts and wrangler always stop. Something a timed-out test starts
+ * after its scope closed is stopped as soon as it is added, never left to the next test.
+ */
+class Scope {
+  private steps: (() => unknown)[] = [];
+  private closed = false;
+
+  add(step: () => unknown): void {
+    if (this.closed) void Scope.run(step);
+    else this.steps.push(step);
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    for (const step of this.steps.splice(0).reverse()) await Scope.run(step);
+  }
+
+  private static run(step: () => unknown): Promise<unknown> {
+    return within(Promise.resolve().then(step), TEARDOWN_STEP_MS, 'a teardown step').catch(
+      () => undefined,
+    );
+  }
+}
+
 const chromiumPath = findChromium();
 
 describe.skipIf(!chromiumPath)(
   'advisory faults: offline publish, a lost receipt, an offline phone, a restart and a replay, recovered by ID',
   () => {
     let browser: Browser;
-    /** What each test started, stopped last first after it, however it ended. */
-    let cleanup: (() => unknown)[] = [];
+    let scope = new Scope();
 
     beforeAll(async () => {
       browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
     }, 60_000);
 
+    beforeEach(() => {
+      scope = new Scope();
+    });
+
     afterEach(async () => {
+      await scope.close();
+      // Only once the receivers have stopped, so none finds its terminal idle again while it shuts down.
       vi.restoreAllMocks();
-      const steps = cleanup.reverse();
-      cleanup = [];
-      // every step runs even if an earlier one rejects, so the receivers, Chromium contexts and wrangler always stop
-      for (const step of steps) {
-        await Promise.resolve()
-          .then(step)
-          .catch(() => undefined);
-      }
-    }, 60_000);
+    }, 120_000);
 
     afterAll(async () => {
       await browser?.close().catch(() => undefined);
     });
 
     interface System {
+      /** The test's own scope, held from its start, so what it starts late is never stopped with the next test. */
+      scope: Scope;
       relay: RunningRelay;
       clock: TestClock;
       context: BrowserContext;
@@ -233,21 +270,22 @@ describe.skipIf(!chromiumPath)(
 
     /** A fresh relay claimed by this computer, with a phone paired to it that can show an agent's plan. */
     const startSystem = async (label: string): Promise<System> => {
+      const owner = scope;
       const relay = await startRelay(PORT, undefined, { script: CLOCKED_WORKER });
-      cleanup.push(() => relay.stop());
+      owner.add(() => relay.stop());
       const clock = new TestClock(relay.origin);
       const context = await browser.newContext({
         viewport: { width: 390, height: 844 },
         serviceWorkers: 'allow',
       });
-      cleanup.push(() => context.close());
+      owner.add(() => context.close());
       await clock.attach(context);
       const page = await context.newPage();
       const problems: string[] = [];
       page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 
       const home = mkdtempSync(join(tmpdir(), 'decisions-faults-e2e-'));
-      cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+      owner.add(() => rmSync(home, { recursive: true, force: true }));
       // Claimed into the state directory as `decisions setup` stores it, so the receiver loads these keys from disk.
       const { identity } = await claimRelay({
         origin: relay.origin,
@@ -256,7 +294,7 @@ describe.skipIf(!chromiumPath)(
         store: new FileKeyStore(home),
       });
       const observer = new RelayClient({ identity, now: clock.now });
-      cleanup.push(() => observer.close());
+      owner.add(() => observer.close());
       await pairPhone(page, observer);
       // The receiver signs advice only once a device of the person's has said it can show the plan.
       await until(
@@ -269,6 +307,7 @@ describe.skipIf(!chromiumPath)(
         'the phone to declare advisory deadlines',
       );
       return {
+        scope: owner,
         relay,
         clock,
         context,
@@ -304,6 +343,7 @@ describe.skipIf(!chromiumPath)(
       bridge: DecisionsBridge;
       /** The agent's MCP session, with the token `decisions mcp` keeps in the state directory. */
       agent: Client;
+      token: string;
       stop(): Promise<void>;
     }
 
@@ -344,23 +384,32 @@ describe.skipIf(!chromiumPath)(
         release();
         await serving.catch(() => undefined);
       };
-      cleanup.push(stop);
-      const h = await Promise.race([
-        readied,
-        serving.then(() => {
-          throw new Error(`the receiver stopped before it was ready:\n${err.join('\n')}`);
-        }),
-      ]);
-      const agent = await connect(h.url, h.token);
-      cleanup.push(() => agent.close());
-      await until(
-        async () => h.bridge.socket.currentState === 'live',
-        30_000,
-        'the receiver’s socket live',
+      s.scope.add(stop);
+      // Ends a wait below as soon as the receiver ends on its own, with what it reported.
+      const exited = serving.then(
+        () => {
+          throw new Error(`the receiver stopped:\n${err.join('\n')}`);
+        },
+        (e: unknown) => {
+          throw new Error(`the receiver failed: ${(e as Error).message}\n${err.join('\n')}`);
+        },
       );
+      exited.catch(() => undefined);
+      const h = await within(Promise.race([readied, exited]), 60_000, 'the receiver to be ready');
+      const agent = await within(connect(h.url, h.token), 15_000, 'the agent to connect');
+      s.scope.add(() => agent.close());
+      await Promise.race([
+        until(
+          async () => h.bridge.socket.currentState === 'live',
+          30_000,
+          'the receiver’s socket live',
+        ),
+        exited,
+      ]);
       return {
         bridge: h.bridge,
         agent,
+        token: h.token,
         stop: async () => {
           await agent.close().catch(() => undefined);
           await stop();
@@ -584,7 +633,7 @@ describe.skipIf(!chromiumPath)(
       expect(recovered.calls).toEqual([]);
       expect(typed(s)).toBe(notice);
       expect(s.problems).toEqual([]);
-    });
+    }, 180_000);
 
     it('a published question keeps its outcome through a lost receipt, an offline phone, a restart and a replay', async () => {
       const s = await startSystem('Advisory faults E2E Mac');
@@ -703,6 +752,12 @@ describe.skipIf(!chromiumPath)(
         30_000,
         'the expiry sent to the receiver',
       );
+      // The relay's history holds the question once, created at the receipt's event, then expired: the retry added
+      // nothing to it.
+      expect(tap.events(id, 'decision.created').map((f) => f.seq)).toEqual([
+        (JSON.parse(retried.reply) as { event_seq: number }).event_seq,
+      ]);
+      expect(tap.events(id, 'decision.expired')).toHaveLength(1);
       const received = await decisionWhen(
         first.agent,
         id,
@@ -726,7 +781,10 @@ describe.skipIf(!chromiumPath)(
       await first.stop();
       busy.mockRestore();
       expect(typed(s)).toBe('');
+      const before = tap.connections;
       const second = await startReceiver(s, { webSocket: tap.factory });
+      // The agent's configured token still works: the state directory keeps it.
+      expect(second.token).toBe(first.token);
       await settle(second.bridge);
       const view = await decisionWhen(
         second.agent,
@@ -765,28 +823,48 @@ describe.skipIf(!chromiumPath)(
       notice = swap(notice, `question: ${frozen.question}`, `question: ${question}`);
       notice = swap(notice, `deadline: ${frozen.deadline}`, `deadline: ${expiresAt}`);
       expect(typed(s)).toBe(notice + '\n');
+      // It typed what the first receiver had taken in and stored: the relay sent it nothing more about the question.
+      expect(tap.frames.filter((f) => f.conn > before && f.question_id === id)).toEqual([]);
 
       // 8. The relay sends the expiry again over the socket: taken in as already known, and not typed again.
       const [expiry] = tap.events(id, 'decision.expired');
       const conn = tap.connections;
       const from = tap.frames.length;
+      const errors: Error[] = [];
+      const offError = second.bridge.on('error', (e) => errors.push(e));
+      // The socket stays live through the replay, so its next `live` is the replay's own `caught_up`, handled after
+      // every event before it (the socket handles frames one at a time, in order).
+      let offLive = () => {};
       const live = new Promise<void>((resolve) => {
-        const off = second.bridge.on('socket', (state) => {
-          if (state !== 'live') return;
-          off();
-          resolve();
+        offLive = second.bridge.on('socket', (state) => {
+          if (state === 'live') resolve();
         });
       });
-      second.bridge.socket.syncFrom(expiry!.seq! - 1);
-      await live;
+      try {
+        second.bridge.socket.syncFrom(expiry!.seq! - 1);
+        await within(live, 30_000, 'the replay to be caught up');
+      } finally {
+        offLive();
+      }
+      expect(tap.connections).toBe(conn);
       const replay = tap.frames.slice(from).filter((f) => f.conn === conn);
       expect(replay.filter((f) => f.t === 'event' && f.event_id === expiry!.event_id)).toEqual([
         { ...expiry, conn },
       ]);
       expect(replay.at(-1)).toMatchObject({ t: 'caught_up', has_more: false });
       await settle(second.bridge);
+      offError();
+      expect(errors).toEqual([]);
       expect(typed(s)).toBe(notice + '\n');
       expect(await decision(second.agent, id)).toEqual(view);
+
+      // A receiver started again once the notice is written does not write it again.
+      await second.stop();
+      const third = await startReceiver(s, { webSocket: tap.factory });
+      expect(third.token).toBe(first.token);
+      await settle(third.bridge);
+      expect(typed(s)).toBe(notice + '\n');
+      expect(await decision(third.agent, id)).toEqual(view);
 
       // 9. The agent recovers the outcome by ID: its plan is due, and nothing was answered.
       const recovered = await recoverById(s, id);
@@ -805,6 +883,6 @@ describe.skipIf(!chromiumPath)(
       expect(recovered.calls).toEqual([]);
       expect(typed(s)).toBe(notice + '\n');
       expect(s.problems).toEqual([]);
-    });
+    }, 180_000);
   },
 );
