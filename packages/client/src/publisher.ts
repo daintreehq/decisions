@@ -2137,7 +2137,13 @@ export class Publisher {
         content_sealed: JSON.stringify(envelope),
       });
       const content = DecisionContentV1.safeParse(raw);
-      return content.success && advisoryContentIssue({ envelope }, content.data) === null;
+      // The policy is read again once the content is open: a host that turned advice off meanwhile authorises nothing.
+      return (
+        content.success &&
+        advisoryContentIssue({ envelope }, content.data) === null &&
+        this.advisory?.hostSupport === true &&
+        this.ctx.policy.advisoryQuestions
+      );
     } catch {
       return false;
     }

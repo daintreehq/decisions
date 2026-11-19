@@ -280,7 +280,7 @@ export type ThreadEntryView =
 
 /**
  * Whether a question reached the relay, from the evidence this desktop keeps durably:
- * - `not-sent`: queued, and provably never sent (no create request has left this computer);
+ * - `not-sent`: queued, and provably never sent (no create request has been attempted);
  * - `possibly-committed`: queued, and a create request may have reached the relay, but no reply or history has
  *   confirmed it: its outcome is unknown until the relay can be reached;
  * - `accepted`: the relay acknowledged it (a receipt or its history). Nothing more: not that the person saw it;

@@ -778,7 +778,7 @@ describe('a restart during an attachment upload', () => {
 
 describe('an advisory question that never reached the relay', () => {
   /**
-   * Queue a question, then sign its create as advisory, as `ask_human` will once it signs advisory asks (#154). With
+   * Queue a question, then sign its create as advisory, as `ask_human` does for an advisory ask. With
    * `rowOnly`, only the local copy of the content says advisory; the create stays signed as a blocking question.
    */
   const advisoryAsk = async (over: {
