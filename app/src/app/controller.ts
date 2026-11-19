@@ -27,6 +27,7 @@ import {
   Drafts,
   Outbox,
   type OutboxEntry,
+  type OutboxHooks,
   type OutboxImage,
   type Rebuilt,
 } from '../data/outbox.js';
@@ -43,7 +44,6 @@ import { SyncEngine, type Connection } from '../data/sync.js';
 import {
   buildAnswerRequest,
   buildDeclineRequest,
-  DeclineUnsupportedError,
   highestEpoch,
   type HumanActionKind,
 } from '../domain/answer.js';
@@ -458,27 +458,7 @@ export class AppController {
     });
     this.involvement.subscribe(() => this.emitInvolvement());
 
-    this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
-      onChange: () => this.patch({}),
-      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
-      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
-      settle: () => this.sync?.catchUp(),
-      onCommitted: () =>
-        void this.sync
-          ?.catchUp()
-          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
-      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
-      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
-      inThread: (e) => {
-        const v = this.store?.get(e.questionId);
-        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
-        const id = e.recordId ?? e.messageId;
-        if (!id) return true;
-        return e.kind === 'message'
-          ? v.messages.some((m) => m.messageId === id)
-          : v.actions.some((a) => a.actionId === id);
-      },
-    });
+    this.outbox = new Outbox(db, cacheKey, () => this.relay!, this.outboxHooks());
     // Whatever the thread reads (a socket event, a catch-up, a backfill) may be what a committed entry waited for.
     this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
@@ -526,6 +506,38 @@ export class AppController {
       void this.backfillThreads();
     });
     void this.refreshDevices().catch(() => undefined);
+  }
+
+  /** What the outbox asks of the app: reading a commit back, photo rebuilds, and when an entry has settled. */
+  private outboxHooks(): OutboxHooks {
+    return {
+      onChange: () => this.patch({}),
+      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
+      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
+      settle: () => this.sync?.catchUp(),
+      onCommitted: () =>
+        void this.sync
+          ?.catchUp()
+          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
+      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
+      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
+      inThread: (e) => {
+        const v = this.store?.get(e.questionId);
+        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
+        const id = e.recordId ?? e.messageId;
+        if (!id) return true;
+        if (e.kind === 'message') return v.messages.some((m) => m.messageId === id);
+        if (v.actions.some((a) => a.actionId === id)) return true;
+        // A decline the relay took as a no-op (another cancel closed the question first) is never in the log: it has
+        // settled once the thread shows the question moved on from the open round it was signed against.
+        return e.kind === 'decline' && (v.status !== 'open' || v.revision !== e.expectedRevision);
+      },
+      onRefused: (e) => {
+        // The asking desktop stopped taking declines since the device list was read: read it again, so Dismiss agrees.
+        if (e.kind === 'decline' && e.refusalReason === CREATOR_MISSING_FEATURE)
+          void this.refreshDevices().catch(() => undefined);
+      },
+    };
   }
 
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
@@ -858,13 +870,32 @@ export class AppController {
     void this.outbox.flush();
   }
 
+  /** Declines being signed and stored, by question: a second tap meanwhile joins the first. */
+  private declining = new Map<string, Promise<OutboxEntry>>();
+
   /**
-   * The person declines to answer an open question: a signed `cancel` from this device, sent now rather than queued,
-   * so the confirmation that asked for it can say whether it took. The relay stops its pushes and every paired device
-   * files it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
+   * The person declines to answer an open question: a `cancel` signed once by this device against the revision they
+   * saw, sealed into the outbox before anything is sent, and sent from there exactly as signed (after a reload too)
+   * until the relay commits or refuses it. It is never signed again, so a question that moved on refuses it rather
+   * than taking it for a round the person never saw. Resolves once it is stored, with the entry; a decline already on
+   * its way for the question is returned instead of a second. The relay stops its pushes and every paired device files
+   * it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
    */
-  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.relay) throw new Error('not paired');
+  declineQuestion(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    const existing = this.outbox?.declineInFlight(view.id);
+    if (existing) return Promise.resolve(existing);
+    const joining = this.declining.get(view.id);
+    if (joining) return joining;
+    const storing = this.storeDecline(view, expectedRevision).finally(() =>
+      this.declining.delete(view.id),
+    );
+    this.declining.set(view.id, storing);
+    return storing;
+  }
+
+  private async storeDecline(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    const outbox = this.outbox;
+    if (!this.keys || !this.snap.config || !outbox) throw new Error('not paired');
     const req = await buildDeclineRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -872,17 +903,31 @@ export class AppController {
       view,
       expectedRevision,
     });
-    try {
-      await this.relay.jsonRaw('POST', req.path, req.bodyText);
-    } catch (e) {
-      if (e instanceof RelayError && e.details?.reason === CREATOR_MISSING_FEATURE) {
-        // The asking desktop stopped taking declines since the device list was read: read it again, so the menu agrees.
-        void this.refreshDevices().catch(() => undefined);
-        throw new DeclineUnsupportedError();
-      }
-      throw e;
-    }
-    await this.sync?.catchUp().catch(() => undefined);
+    const entry = await outbox.enqueue({
+      id: newId(),
+      questionId: view.id,
+      kind: 'decline',
+      recordId: req.actionId,
+      path: req.path,
+      bodyText: req.bodyText,
+      idempotencyKey: req.idempotencyKey,
+      expectedRevision,
+      selected: [],
+      text: '',
+      reason: '',
+    });
+    // An earlier decline of this question the relay refused is only a note about how it settled: this one replaces it.
+    for (const e of outbox.forQuestion(view.id))
+      if (
+        e.kind === 'decline' &&
+        e.id !== entry.id &&
+        e.state !== 'queued' &&
+        e.state !== 'sending' &&
+        e.state !== 'committed'
+      )
+        await outbox.discard(e.id);
+    void outbox.flush();
+    return entry;
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */
@@ -993,7 +1038,7 @@ export class AppController {
         ciphertexts: sealed.ciphertexts,
       };
     }
-    if (e.kind === 'confirm-proxy') return null;
+    if (e.kind === 'confirm-proxy' || e.kind === 'decline') return null;
     const req = await buildAnswerRequest({
       ...base,
       kind: e.kind,

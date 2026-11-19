@@ -12,8 +12,11 @@ import type { PhotoMime } from './photos.js';
 export type OutboxState =
   'queued' | 'sending' | 'committed' | 'conflicted' | 'rejected' | 'expired';
 
-/** What an entry sends: one of the person's actions on the question, or a follow-up message in its thread. */
-export type OutboxKind = HumanActionKind | 'message';
+/**
+ * What an entry sends: one of the person's actions on the question, a follow-up message in its thread, or the person's
+ * decline (a `cancel` signed by this phone or tablet, docs/protocol.md section 6.1).
+ */
+export type OutboxKind = HumanActionKind | 'message' | 'decline';
 
 /**
  * One photo going with an answer or follow-up (docs/protocol.md section 17). It is encrypted on this device when the
@@ -70,8 +73,12 @@ export interface OutboxEntry {
   attempts: number;
   /** Revision the relay reported when it refused (conflict). */
   latestRevision?: number;
+  /** The question's status the relay reported when it refused (a revision conflict names it). */
+  latestStatus?: string;
   /** The relay's error code when it refused for good. */
   errorCode?: string;
+  /** Why, when the relay named a reason with its refusal (`creator-missing-feature`). */
+  refusalReason?: string;
 }
 
 export interface Poster {
@@ -102,6 +109,8 @@ export interface OutboxHooks {
    */
   settle?: (e: OutboxEntry) => Promise<unknown> | undefined;
   onChange?: () => void;
+  /** The relay refused an entry for good; it is stored with the refusal before this is called. */
+  onRefused?: (e: OutboxEntry) => void;
   /**
    * The relay lost an entry's photo reservation (its upload window or orphan deadline passed) or refused the record's
    * photos: sign the same answer or follow-up again with the photos encrypted under fresh ids. Null when it can't be.
@@ -215,6 +224,17 @@ export class Outbox {
   forQuestion(questionId: string): OutboxEntry[] {
     return this.list().filter((e) => e.questionId === questionId);
   }
+  /**
+   * The person's decline of the question from this device while it is still on its way: queued here, being sent, or
+   * on the relay and not yet read back into the thread. At most one is ever in flight per question.
+   */
+  declineInFlight(questionId: string): OutboxEntry | undefined {
+    return this.forQuestion(questionId).find(
+      (e) =>
+        e.kind === 'decline' &&
+        (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
+    );
+  }
   pendingState(questionId: string): 'queued' | 'sending' | undefined {
     const e = this.forQuestion(questionId).find(
       (x) => x.state === 'queued' || x.state === 'sending',
@@ -290,6 +310,8 @@ export class Outbox {
     if (e.errorCode === 'image_lost') e.rebuilt = 0;
     delete e.errorCode;
     delete e.refusedAt;
+    delete e.latestStatus;
+    delete e.refusalReason;
     await this.persist(e);
     this.changed();
     void this.flush();
@@ -559,8 +581,13 @@ export class Outbox {
           e.errorCode = err.code;
           const latest = err.details?.latest_revision;
           if (typeof latest === 'number') e.latestRevision = latest;
+          const status = err.details?.status;
+          if (typeof status === 'string') e.latestStatus = status;
+          const reason = err.details?.reason;
+          if (typeof reason === 'string') e.refusalReason = reason;
           await this.persist(e);
           this.changed();
+          this.hooks.onRefused?.(e);
           continue;
         }
         // Network trouble or relay hiccup: keep it queued and stop, order matters. Photos part-way up say so, and
