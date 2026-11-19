@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { DEFAULTS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { DEFAULTS, PROTOCOL_VERSION, type LedgerEvent } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
   EXPIRY_CLOCK_SKEW_MS,
@@ -683,10 +683,58 @@ describe('a superseded closure notice holds nothing back', () => {
     expect((await e.row()).delivery_status).toBe('terminal-delivered');
   });
 
+  /** Long enough for a loaded machine; the tests' timeout leaves room for every wait, so a stuck step fails here. */
+  const WAIT = { timeout: 2_000, interval: 5 };
+
+  /**
+   * A socket the test drives by hand. Every step waits for the state it reads next, never for a fixed time: the
+   * socket opens only once its signed ticket request is answered, and applies frames one at a time in the background.
+   */
+  function handDriven() {
+    let ws: FakeSocket | undefined;
+    const handled: number[] = [];
+    let typedAtLive: number | undefined;
+    return {
+      /** The bridge's socket factory, so the socket the test reads is the one its own bridge opened. */
+      webSocket: (url: string) => (ws = new FakeSocket(url)),
+      /** Called before `start()`. The bridge is stopped when the test ends, whatever its outcome. */
+      watch({ bridge, sink }: Awaited<ReturnType<typeof setupBridge>>) {
+        onTestFinished(() => bridge.stop());
+        // Read as the state changes: a notice typed only after `live` is not one the replay's end typed.
+        bridge.on('socket', (s) => {
+          if (s === 'live') typedAtLive ??= sink.typed.length;
+        });
+        // The socket reaches this handler through an arrow that looks it up for each frame, so this sees them all.
+        const b = bridge as unknown as { onSocketEvent(ev: LedgerEvent): Promise<void> };
+        const onEvent = b.onSocketEvent.bind(b);
+        b.onSocketEvent = async (ev) => {
+          await onEvent(ev);
+          handled.push(ev.seq);
+        };
+      },
+      /** The socket `start()` opened, once its ticket request has been answered. */
+      async opened(): Promise<FakeSocket> {
+        await vi.waitFor(() => expect(ws, 'the socket start() opens').toBeDefined(), WAIT);
+        return ws!;
+      },
+      /** Event frame `seq`, and every frame before it, is stored and applied, and delivered if it would be. */
+      handled: (seq: number) =>
+        vi.waitFor(() => expect(handled, 'the replayed events handled').toContain(seq), WAIT),
+      /** The replay's last segment is caught up, its pump and deliveries finished: how many were typed by then. */
+      async ended(): Promise<number> {
+        await vi.waitFor(
+          () => expect(typedAtLive, 'the socket live after the replay').toBeDefined(),
+          WAIT,
+        );
+        return typedAtLive!;
+      },
+    };
+  }
+
   it('a socket replay types no closure notice a later event in the same replay replaced', async () => {
-    FakeSocket.instances = [];
     let now = Date.now();
-    const env = await setupBridge({ now: () => now, webSocket: (u) => new FakeSocket(u) });
+    const socket = handDriven();
+    const env = await setupBridge({ now: () => now, webSocket: socket.webSocket });
     const r = await env.bridge.registerQuestion({
       origin: origin(),
       input: { question: 'Ship it?' },
@@ -696,8 +744,9 @@ describe('a superseded closure notice holds nothing back', () => {
     const deadline = (await env.store.getQuestion(qid))!.expires_at!;
     const desktop = { deviceId: env.identity.config.deviceId, keys: env.identity.keys };
     now = Date.parse(deadline) + MIN;
+    socket.watch(env);
     await env.bridge.start();
-    await env.bridge.pump(); // the one start() runs, over HTTP, before the socket is up
+    await env.bridge.pump(); // the one start() runs, drained before any replay frame arrives
     const expired = env.relay.expiryEvent({ questionId: qid });
     const reopened = await env.relay.plainActionEvent({
       questionId: qid,
@@ -705,8 +754,7 @@ describe('a superseded closure notice holds nothing back', () => {
       action: 'reopen',
       expiresAt: null,
     });
-    await tick(10);
-    const ws = FakeSocket.instances.at(-1)!;
+    const ws = await socket.opened();
     ws.recv({
       t: 'hello',
       protocol_version: PROTOCOL_VERSION,
@@ -718,22 +766,21 @@ describe('a superseded closure notice holds nothing back', () => {
     });
     for (const ev of env.relay.events.filter((x) => x.seq <= expired.seq))
       ws.recv({ t: 'event', event: ev });
-    await tick(20);
+    await socket.handled(expired.seq);
     // Applied, but held while the replay goes on.
     expect((await env.store.getQuestion(qid))!.local_status).toBe('expired');
     expect(env.sink.typed).toHaveLength(0);
     ws.recv({ t: 'event', event: reopened });
     ws.recv({ t: 'caught_up', high_water: reopened.seq, has_more: false });
-    await tick(30);
+    expect(await socket.ended()).toBe(0);
     expect((await env.store.getQuestion(qid))!.local_status).toBe('open');
     expect(env.sink.typed).toHaveLength(0);
-    await env.bridge.stop();
-  });
+  }, 10_000);
 
   it('a closure notice still in force when a replay ends is typed then', async () => {
-    FakeSocket.instances = [];
     let now = Date.now();
-    const env = await setupBridge({ now: () => now, webSocket: (u) => new FakeSocket(u) });
+    const socket = handDriven();
+    const env = await setupBridge({ now: () => now, webSocket: socket.webSocket });
     const r = await env.bridge.registerQuestion({
       origin: origin(),
       input: { question: 'Ship it?' },
@@ -741,11 +788,11 @@ describe('a superseded closure notice holds nothing back', () => {
     await env.bridge.pump();
     const deadline = (await env.store.getQuestion(r.questionId))!.expires_at!;
     now = Date.parse(deadline) + MIN;
+    socket.watch(env);
     await env.bridge.start();
-    await env.bridge.pump(); // the one start() runs, over HTTP, before the socket is up
+    await env.bridge.pump(); // the one start() runs, drained before any replay frame arrives
     const expired = env.relay.expiryEvent({ questionId: r.questionId });
-    await tick(10);
-    const ws = FakeSocket.instances.at(-1)!;
+    const ws = await socket.opened();
     ws.recv({
       t: 'hello',
       protocol_version: PROTOCOL_VERSION,
@@ -756,15 +803,15 @@ describe('a superseded closure notice holds nothing back', () => {
       server_time: new Date().toISOString(),
     });
     for (const ev of env.relay.events) ws.recv({ t: 'event', event: ev });
-    await tick(20);
+    await socket.handled(expired.seq);
     expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('expired');
     expect(env.sink.typed).toHaveLength(0);
     ws.recv({ t: 'caught_up', high_water: expired.seq, has_more: false });
-    await tick(30);
+    // Typed by the replay's end, and once.
+    expect(await socket.ended()).toBe(1);
     expect(env.sink.typed).toHaveLength(1);
     expect(env.sink.typed[0]!.text).toContain('NOT authorised to continue');
-    await env.bridge.stop();
-  });
+  }, 10_000);
 });
 
 describe('rows reopened before reopens kept their deadline are reconciled from verified history', () => {
