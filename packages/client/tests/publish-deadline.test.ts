@@ -10,6 +10,7 @@ import {
   RelayClient,
   currentEpochKey,
   openQuestionContent,
+  parseAnswers,
   type CreatePayload,
 } from '../src/index.js';
 import { SqliteLocalStore } from '../src/store-sqlite.js';
@@ -780,6 +781,7 @@ describe('an advisory question that never reached the relay', () => {
   /**
    * Queue a question, then sign its create as advisory, as `ask_human` does for an advisory ask. With
    * `rowOnly`, only the local copy of the content says advisory; the create stays signed as a blocking question.
+   * With `busy`, its pane is busy when the deadline settles it, so nothing is typed yet.
    */
   const advisoryAsk = async (over: {
     advisoryDeadlines: boolean;
@@ -787,12 +789,14 @@ describe('an advisory question that never reached the relay', () => {
     plan?: unknown;
     kind?: string;
     rowOnly?: boolean;
+    busy?: boolean;
   }) => {
     let now = Date.parse('2026-11-19T10:00:00Z');
+    const policy = new PolicyRegistry({ advisoryQuestions: over.policy });
     const env = await setupBridge({
       now: () => now,
       advisoryDeadlines: over.advisoryDeadlines,
-      policy: new PolicyRegistry({ advisoryQuestions: over.policy }),
+      policy,
     });
     env.relay.down = 1_000;
     const deadline = now + 120_000;
@@ -843,10 +847,16 @@ describe('an advisory question that never reached the relay', () => {
         payload: { ...(item.payload as CreatePayload), signed },
       });
     }
+    if (over.busy) env.sink.panes.get('pane-1')!.idle = false;
     now = deadline;
     await env.bridge.pump();
-    return { env, r };
+    return { env, r, policy };
   };
+  const unpublishedEntry = async (env: Awaited<ReturnType<typeof setupBridge>>, id: string) =>
+    parseAnswers((await env.store.getQuestion(id))!.answers_json).find(
+      (e) => e.kind === 'unpublished',
+    )!;
+  const PLAN_DUE = 'You may carry out the plan you stated';
 
   it('tells its agent the stated plan may go ahead when the host delivers advisory outcomes and its policy allows them', async () => {
     const { env, r } = await advisoryAsk({
@@ -897,5 +907,97 @@ describe('an advisory question that never reached the relay', () => {
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('NOT authorised to continue');
     expect(notice).not.toContain('plan you stated');
+  });
+
+  it('withholds the plan once the policy no longer allows advice before its notice is typed', async () => {
+    const { env, r, policy } = await advisoryAsk({
+      advisoryDeadlines: true,
+      policy: true,
+      plan: 'Use the in-memory fixture.',
+      busy: true,
+    });
+    expect(env.sink.typed).toHaveLength(0);
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+      fallbackDue: true,
+    });
+    policy.advisoryQuestions = false;
+    // What get_decision says follows the policy before anything is typed.
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+      fallbackDue: false,
+    });
+    env.sink.panes.get('pane-1')!.idle = true;
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed).toHaveLength(1);
+    const notice = env.sink.typed[0]!.text;
+    expect(notice).toContain('status: never-published');
+    expect(notice).toContain('NOT authorised to continue');
+    expect(notice).not.toContain(PLAN_DUE);
+    const entry = await unpublishedEntry(env, r.questionId);
+    expect(entry.delivered).toBe(true);
+    expect(entry.fallback_due).toBeUndefined();
+    // Allowing advice again never brings a withheld plan back.
+    policy.advisoryQuestions = true;
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({ fallbackDue: false });
+  });
+
+  it('withholds the plan the policy turned off while its notice was being admitted', async () => {
+    const { env, r, policy } = await advisoryAsk({
+      advisoryDeadlines: true,
+      policy: true,
+      plan: 'Use the in-memory fixture.',
+      busy: true,
+    });
+    const putIntent = env.store.putIntent.bind(env.store);
+    // The host turns advice off while delivery writes its intent, after it read the policy.
+    env.store.putIntent = async (i) => {
+      policy.advisoryQuestions = false;
+      return putIntent(i);
+    };
+    env.sink.panes.get('pane-1')!.idle = true;
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed).toHaveLength(1);
+    expect(env.sink.typed[0]!.text).toContain('NOT authorised to continue');
+    expect(env.sink.typed[0]!.text).not.toContain(PLAN_DUE);
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({ fallbackDue: false });
+  });
+
+  it('keeps what a typed notice said when the policy changes afterwards', async () => {
+    const { env, r, policy } = await advisoryAsk({
+      advisoryDeadlines: true,
+      policy: true,
+      plan: 'Use the in-memory fixture.',
+    });
+    expect(env.sink.typed[0]!.text).toContain(PLAN_DUE);
+    policy.advisoryQuestions = false;
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+      fallbackDue: true,
+    });
+    expect((await unpublishedEntry(env, r.questionId)).fallback_due).toBe(true);
+  });
+
+  it('keeps what a notice that may have been typed said when the policy changes afterwards', async () => {
+    const { env, r, policy } = await advisoryAsk({
+      advisoryDeadlines: true,
+      policy: true,
+      plan: 'Use the in-memory fixture.',
+      busy: true,
+    });
+    env.sink.injectBehaviour = 'ambiguous';
+    env.sink.panes.get('pane-1')!.idle = true;
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed).toHaveLength(1);
+    expect(env.sink.typed[0]!.text).toContain(PLAN_DUE);
+    policy.advisoryQuestions = false;
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+      deliveryStatus: 'delivery-uncertain',
+      fallbackDue: true,
+    });
+    await env.bridge.notifyPaneIdle();
+    expect(env.sink.typed).toHaveLength(1);
+    expect((await unpublishedEntry(env, r.questionId)).fallback_due).toBe(true);
   });
 });

@@ -51,6 +51,7 @@ import {
   currentDisposition,
   isAdvisoryNotice,
   sameDigests,
+  unpublishedPlanDue,
   type AdvisoryDisposition,
   type OpenAnswerEntry,
 } from './answers.js';
@@ -1380,7 +1381,12 @@ export class DecisionsBridge {
               : null,
       fallbackDue:
         !row.history_only &&
-        ((row.local_status === 'publish-failed' && unpublished?.fallback_due === true) ||
+        ((row.local_status === 'publish-failed' &&
+          !!unpublished &&
+          unpublishedPlanDue(unpublished, row, {
+            outcomes: this.advisory.hostSupport,
+            allowed: this.ctx.policy.advisoryQuestions,
+          })) ||
           (timeout?.inForce === true && timeout.view.disposition === 'fallback-due' && !waiting)),
       advisoryTimeout: timeout?.view ?? null,
       choice: inForce?.choices[0]?.id ?? null,
