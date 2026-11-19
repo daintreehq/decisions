@@ -22,9 +22,67 @@ A polling listener reads again 15 seconds after each successful sync. When a rea
 
 Each sync is reported on standard error: the first success, every failure with the error code and the next retry, and the recovery. `decisions status` shows the last HTTP sync: when it last read the whole ledger, at which event, and, while it is failing, the error code and how many attempts in a row have failed since the listener started. It is a record kept in the state directory, not a liveness check: a listener that has stopped leaves its last result behind. None of this includes question or answer text.
 
-Run one receiving process per state directory (`--home`): every `decisions` command that runs the bridge (`listen`, `mcp`, `ask`) delivers what it finds to its own sink.
+Run one receiving process per state directory (`--home`): the receiver reads the relay and delivers what it finds to its own sink. `listen` and `mcp` refuse to start while another process receives for the same directory (status 1). `ask --wait` and `wait` receive when nothing else does; while something else does, they only read the shared state, and take over if it exits. The right to receive is a lock on `receiver.lock` in the state directory, released when its process ends, however it ends.
 
 **From an MCP client.** Run `decisions mcp --no-socket --sink file:./decisions.log` (or `exec:<command>`, or the default stdout) and add it to the agent with the line it prints. `ask_human` returns the question ID at once. When the person answers or dismisses the question, or it expires, the next sync fetches the outcome and writes the notice to the sink. An agent that cannot be woken by the sink calls `get_decision` with that ID. It reads this listener's local copy, which catches up with the relay at the next sync that reads and applies the outcome: normally within one poll interval, later while the relay is unreachable. Only `status: human-answered` with `provenance: human` is the person's decision. A dismissal (`closed_reason: declined`) or an expiry never authorises the gated step. Restart with the same `--home` and token to carry on where it stopped.
+
+## Asking from a script or an agent without Daintree
+
+`decisions ask` asks the person from the command line, and `decisions mcp` serves `ask_human` to an agent. Both commit the question on this computer first and report it at once; publishing and the outcome follow. This walkthrough follows one question with a 15-minute reply window from the asking terminal to its outcome, and back after a restart.
+
+### Ask
+
+```sh
+decisions --json ask "Which fixture should I use?" \
+  --option mem="In memory" --option disk="On disk" \
+  --expires-in 15m \
+  --planned-fallback "I will use the in-memory fixture." \
+  --correlation-id fixture-choice \
+  --wait --wait-timeout 20m
+```
+
+- `--expires-in` (a whole number and one unit, `s`, `m`, `h` or `d`, from `61s` to `365d`) or `--expires-at` (an ISO 8601 time) sets the deadline, never both. Policy may shorten it. Neither means the default of 7 days.
+- `--planned-fallback` asks for advice instead of a decision: what you will do if no answer arrives by the deadline. It is refused (status 1, `not_supported: <reason>`) for an approval, for a question without a finite deadline, by a relay that does not support advice, or when no paired phone or tablet can show it; ask again without it for a decision. A relay that cannot be read when you ask leaves that unknown (`invalid_state: support-unknown`): ask again once it can be reached. Without it, the question waits for a decision, and its expiry authorises nothing.
+- `--correlation-id` makes a retry safe: the same id and the same request return the original question and its original deadline (`duplicate: true`). A changed question, option, deadline or plan under the same id asks a new question.
+
+These are the fields and rules of `ask_human` (see [daintree-integration-spec.md](daintree-integration-spec.md) section 3.3.1). The first line of output is the receipt, written before anything is sent: the question ID, the deadline that applies (UTC), the mode (`reply_mode`: `blocking` or `advisory`), the plan, and any change policy made. Keep the `question_id`: it is how you find the question again.
+
+### Wait
+
+With `--wait`, the command stays until the question has an outcome, or until you stop it. It reads the outcome from this computer's copy of the question, so it finds one that settled before it began, or in another `decisions` process on the same state directory, and it never concludes anything from its own clock: a question whose publication is unconfirmed, or whose deadline passed while the relay was unreachable, is waited for until the relay says what happened.
+
+| Exit | Outcome            | What it means                                                                                                                                                              |
+| ---- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | `answered`         | An answer is in force. Only `status: human-answered` with `provenance: human` is the person's decision; `proxy` is the opinion model's.                                    |
+| 10   | `declined`         | The person chose not to answer. Nothing was approved.                                                                                                                      |
+| 11   | `withdrawn`        | A desktop called the question off.                                                                                                                                         |
+| 12   | `expired`          | The deadline passed unanswered, and nothing may go ahead: a question that waits for a decision, or advice this host did not let go ahead (`advisory_timeout.disposition`). |
+| 13   | `advisory-expired` | The advisory deadline passed unanswered: the plan you stated is yours to carry out, at your discretion (`fallback_due: true`). Nothing was decided or approved.            |
+| 14   | `never-published`  | The deadline passed before the question reached the relay, so the person never saw it. `fallback_due` says whether an advisory plan may go ahead.                          |
+| 15   | `refused`          | The relay refused the question (`error_code`).                                                                                                                             |
+| 16   | `wait-timeout`     | `--wait-timeout` (1s to 365d) passed first. The question is still live.                                                                                                    |
+| 130  | `interrupted`      | SIGINT (143: SIGTERM) came first. The question is still live.                                                                                                              |
+
+Status 1 is an error (a relay that refuses this client, a revoked device, an unknown question ID) and 2 a usage error (a malformed flag, both deadlines); neither is a question outcome, and neither prints a result. Stopping a wait never cancels the question: resume it with `decisions wait <question_id>`.
+
+With `--json`, standard output carries one JSON object per line, each with a `record` field: `asked` (the receipt), then `notice` lines when this process's own stdout sink writes one (the text the sink would type), and finally `result`. A script reads the last line, or the line whose `record` is `result`; diagnostics (relay connection, sync failures, warnings) go to standard error only. The `result` record has `outcome`, `exit_code`, `delivery`, `signal` (for `interrupted`), and every field of `get_decision`: `status`, `provenance`, `choice`, `text`, `closed_reason`, `fallback_due`, `advisory_timeout`, `publication`, `expires_at`, `reply_mode`, `planned_fallback`, `thread` and the rest. `delivery` says where the outcome's notice stands in the receiving process's sink, kept apart from the outcome: `delivered` (the sink confirmed the write), `pending`, `uncertain` (a write may or may not have happened, and it is never written again on its own), `needs-attention` (nothing was written, and a person has to decide), or `none` (none is due). An answer whose notice is `uncertain` is still the answer in the record. Without `--json`, the receipt and the result are plain sentences, and the outcome is in the exit status.
+
+### Recover by ID
+
+- `decisions wait <question_id>` waits again, with the same outcomes and records as `ask --wait` (without the receipt). Use it after a restart, a lost terminal, or a `--wait-timeout`.
+- `decisions get <question_id>` prints where the question stands now, without waiting, reaching the relay or typing anything: the `get_decision` fields, plus `outcome` (null while there is none) and `delivery`. It exits 0 whenever the question is found.
+
+Both take `--pane mcp` for a question an agent asked through `decisions mcp`; the default is a question asked with `decisions ask`. A question asked from another pane is reported as unknown. Both read the state directory's local copy, which a running receiver keeps current.
+
+### Who gets the notice
+
+Stdout belongs to the process running the sink. A notice is written by the one process that receives for the state directory, to its own sink:
+
+- `decisions ask --wait` with nothing else running receives itself: the default stdout sink prints the notice in the asking terminal (as a `notice` record with `--json`), and the result follows.
+- With `decisions listen` or `decisions mcp` running, that process receives, and the notice goes to its sink: its own terminal (stdout), a file (`--sink file:./notices.log`), or a command (`--sink 'exec:<command>'`, which reads the notice on standard input; with `--json`, the command's own output goes to standard error). The waiting terminal gets the outcome in its `result`, read from the shared state, and no notice.
+- An agent connected to `decisions mcp` is not woken by any of these: the stdout sink prints into the terminal running `decisions mcp`, not into the agent. It calls `get_decision` with the ID from `ask_human` when it is ready for the outcome, or runs `decisions wait <question_id> --pane mcp` from its own shell. Daintree's integration types the notice into the agent's own terminal, which wakes it; a standalone setup gets that only from an `exec:` command that wakes its agent itself.
+
+The same 15-minute question through `decisions mcp`: run `decisions mcp --sink file:./notices.log` and add it to the agent with the line it prints. The agent calls `ask_human` with `expires_in: "15m"` and `planned_fallback`, gets its `question_id` at once, and carries on. If the person answers in time, the answer is written to `notices.log`; if not, an `advisory-unanswered` notice is written there once this computer has read the relay's expiry. Either way, `get_decision` (or `decisions --json get <question_id> --pane mcp`) reports it: `fallback_due: true` lets the stated plan go ahead, and `status: human-answered` with `provenance: human` is the person's decision.
 
 ## Limits and costs (verify against Cloudflare's pages before relying on them)
 
