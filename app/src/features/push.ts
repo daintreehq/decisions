@@ -168,7 +168,9 @@ export async function declareAgentStoppedPush(
   const features = declared(reg, worker, gate);
   if (!features.features || now?.endpoint !== sub.endpoint || !current() || !notificationsGranted())
     return false;
-  await relay.json('POST', '/push/subscriptions', { body: { ...subscriptionBody(sub), ...features } });
+  await relay.json('POST', '/push/subscriptions', {
+    body: { ...subscriptionBody(sub), ...features },
+  });
   return true;
 }
 

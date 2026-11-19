@@ -174,7 +174,10 @@ describe('declaring the agent-stopped push when notifications are turned on', ()
   it('declares nothing for a worker that answers wrongly, late, not at all, or is replaced', async () => {
     const cases: (() => void)[] = [
       () => (reg.active = null),
-      () => (reg.active = fakeWorker((port) => port.postMessage({ features: 'agent-stopped-push-v1' }))),
+      () =>
+        (reg.active = fakeWorker((port) =>
+          port.postMessage({ features: 'agent-stopped-push-v1' }),
+        )),
       () => (reg.active = fakeWorker((port) => port.postMessage({ features: ['presence-v1'] }))),
       () => (reg.active = fakeWorker((port) => setTimeout(() => canShow(port), 60))),
       () => {
@@ -258,7 +261,10 @@ describe('declaring the agent-stopped push for an app updated in place', () => {
 
   it('sends nothing without permission, a subscription or a relay row', async () => {
     const tries: [() => void, unknown[]][] = [
-      [() => vi.stubGlobal('Notification', { permission: 'denied', requestPermission }), [row(ROW, true, null)]],
+      [
+        () => vi.stubGlobal('Notification', { permission: 'denied', requestPermission }),
+        [row(ROW, true, null)],
+      ],
       [() => (current = null), [row(ROW, true, null)]],
       [() => undefined, []],
     ];

@@ -1,11 +1,5 @@
 /// <reference lib="webworker" />
-import {
-  FEATURES_REQUEST,
-  isCacheable,
-  safeTargetUrl,
-  shapePush,
-  SW_FEATURES,
-} from './sw-core.js';
+import { FEATURES_REQUEST, isCacheable, safeTargetUrl, shapePush, SW_FEATURES } from './sw-core.js';
 
 declare const self: ServiceWorkerGlobalScope;
 declare const __PRECACHE__: string[];
