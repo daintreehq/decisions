@@ -173,3 +173,35 @@ describe("a decline made on the computer, as the person's", () => {
     expect(timeline.querySelector('.tl-item[data-kind="withdrawn"]')).not.toBeNull();
   });
 });
+
+describe('a dismissal from this phone still on its way', () => {
+  it('reads on Home as saved on this device, keeping the question as it stands', () => {
+    // Still open everywhere: the relay has not taken it.
+    const open: QuestionView = { ...view(cancel()), status: 'open', actions: [] };
+    for (const [state, chip] of [
+      ['queued', 'Dismissal saved on this device'],
+      ['sending', 'Dismissing…'],
+    ] as const) {
+      const host = render(
+        createElement(
+          'ul',
+          null,
+          createElement(QuestionRow, {
+            v: open,
+            now: NOW,
+            selected: false,
+            extras: { pending: { kind: 'decline', state, selected: [], text: '' } },
+            onOpen: () => {},
+          }),
+        ),
+      );
+      const row = host.querySelector<HTMLElement>('.qrow')!;
+      expect(row.dataset.status).toBe('sending');
+      expect(row.querySelector('.badge')!.textContent).toBe(chip);
+      // Never shown as declined, nor as an answer of the person's, before it is.
+      expect(row.textContent).not.toMatch(/declined|You:/i);
+      act(() => mounted!.root.unmount());
+      mounted = null;
+    }
+  });
+});

@@ -181,16 +181,6 @@ export class StaleQuestionError extends Error {
   }
 }
 
-/** The relay refused a decline because the desktop that asked cannot file one (docs/protocol.md section 6.1). */
-export class DeclineUnsupportedError extends Error {
-  constructor(
-    message = 'The computer that asked this can’t take a dismissal until its Daintree is updated. The question stays open until it expires.',
-  ) {
-    super(message);
-    this.name = 'DeclineUnsupportedError';
-  }
-}
-
 /**
  * Refuses to sign an action against anything the human did not review: the question must still be at the
  * revision they saw and the action must still be legal there. Called right before signing, not at render time.

@@ -47,6 +47,9 @@ import { QuestionRow, type PendingAnswer } from './QuestionRow.js';
 import { StatusGlyph } from './StatusGlyph.js';
 import { SearchField, useDebounced } from './SearchField.js';
 
+/** Which of a question's entries on their way its row shows: the one that says the most about it. */
+const PENDING_RANK: Record<PendingAnswer['kind'], number> = { message: 0, answer: 1, decline: 2 };
+
 export type Presentation = 'page' | 'sheet';
 
 /* ---------------- search focus (Ctrl/⌘+K) ---------------- */
@@ -264,12 +267,18 @@ export function NavigatorPanel({
   void snap.rev; // re-read outbox state on every app change
   const pendingById = new Map<string, PendingAnswer>();
   for (const e of app.outbox?.list() ?? []) {
-    if (e.state !== 'queued' && e.state !== 'sending') continue;
-    const kind = e.kind === 'message' ? 'message' : 'answer';
+    // A dismissal holds its question until it settles, the relay's answer read back included.
+    const active =
+      e.kind === 'decline'
+        ? app.outbox?.declineInFlight(e.questionId) === e
+        : e.state === 'queued' || e.state === 'sending';
+    if (!active) continue;
+    const kind = e.kind === 'message' || e.kind === 'decline' ? e.kind : 'answer';
+    const state = e.state === 'queued' ? 'queued' : 'sending';
     const had = pendingById.get(e.questionId);
-    // An answer on its way says more about the row than a follow-up behind it.
-    if (!had || (had.kind === 'message' && kind === 'answer'))
-      pendingById.set(e.questionId, { kind, state: e.state, selected: e.selected, text: e.text });
+    // A dismissal on its way says the most about the row, then an answer, then a follow-up behind it.
+    if (!had || PENDING_RANK[kind] > PENDING_RANK[had.kind])
+      pendingById.set(e.questionId, { kind, state, selected: e.selected, text: e.text });
   }
   const refusedIds = refusedFollowUps();
   const refusedKey = [...refusedIds].sort().join(',');

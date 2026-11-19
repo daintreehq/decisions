@@ -14,7 +14,14 @@ import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
-import { DeclineUnsupportedError, StaleQuestionError } from '../../domain/answer.js';
+import { StaleQuestionError } from '../../domain/answer.js';
+import {
+  DeclineBlockedError,
+  declineActive,
+  declineOutcomeText,
+  declineProgressText,
+  declineStanding,
+} from '../../domain/decline.js';
 import {
   composeShape,
   verdict as computeVerdict,
@@ -169,8 +176,15 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const entries = app.outbox!.forQuestion(id);
   const isRefused = (e: (typeof entries)[number]) =>
     e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired';
-  // The person's answer (or confirmation) on its way, and the follow-ups queued behind it: separate lanes.
-  const actionEntries = entries.filter((e) => e.kind !== 'message');
+  // The person's answer (or confirmation) on its way, the follow-ups queued behind it, and a dismissal: separate lanes.
+  const actionEntries = entries.filter((e) => e.kind !== 'message' && e.kind !== 'decline');
+  // This device's latest dismissal of the question, and where it stands. While it is on its way it holds the question:
+  // nothing else is sent on it, and it is shown as saved here until the relay has it.
+  const declineEntry = entries.filter((e) => e.kind === 'decline').at(-1);
+  const decline = declineEntry
+    ? declineStanding(declineEntry, view, app.getSnapshot().config?.deviceId ?? '')
+    : null;
+  const dismissing = !!decline && declineActive(decline);
   // An answer the relay has committed is the thread's own from then on, even while its local copy is being let go.
   const committed = new Set(view.actions.map((a) => a.actionId));
   const onItsWay = (e: OutboxEntry) =>
@@ -205,7 +219,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   // Only a model answer can be replaced, by overruling it; the person's own answer is final, and anything more they
   // want to say is a follow-up.
   const canCorrect =
-    verified && !!content && kind === 'override' && canOverrule(view, now) && !pendingEntry;
+    verified &&
+    !!content &&
+    kind === 'override' &&
+    canOverrule(view, now) &&
+    !pendingEntry &&
+    !dismissing;
   const ask = pendingAsk(view, now);
   const followUps = app.followUpsFor(view);
   // Follow-ups open once the decision is made (sent or on its way), while the thread takes messages. A model answer
@@ -215,7 +234,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     (status === 'proxy-answered' && (!modelReview || !!ask)) ||
     (status === 'open' && !!pendingEntry);
   const canFollowUp =
-    verified && !!content && followUps === 'yes' && failed.length === 0 && decided;
+    verified && !!content && followUps === 'yes' && failed.length === 0 && decided && !dismissing;
 
   const answerDraft = useDraft(id, 'answer', view.revision);
   const correctionDraft = useDraft(id, 'correction', view.revision);
@@ -227,6 +246,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const composing =
     verified &&
     !!content &&
+    !dismissing &&
     (following || (!pendingEntry && failed.length === 0 && (status === 'open' || inCorrection)));
   const shape = content ? composeShape(content, mode) : null;
   // Photos go with an answer, a correction or a follow-up, when the desktop that asked takes them.
@@ -641,8 +661,16 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
   // Declining is deliberate and final, so it lives here behind a confirmation, never in the composer.
-  // Only where the desktop that asked can file a decline; an older one would leave the question open.
-  if (status === 'open' && verified && !pendingEntry && app.declinesFor(view))
+  // Only where the desktop that asked can file a decline; an older one would leave the question open. Never while
+  // something from this device is still on its way on the question, a dismissal included.
+  if (
+    status === 'open' &&
+    verified &&
+    !pendingEntry &&
+    pendingMessages.length === 0 &&
+    !dismissing &&
+    app.declinesFor(view)
+  )
     menu.push({
       label: 'Dismiss question…',
       onSelect: () => {
@@ -697,6 +725,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     );
   } else if (pendingEntry && !following) {
     // The reply and its receipt are in the thread; the dock offers what comes next.
+    dock = <AnswerDock>{moveOn()}</AnswerDock>;
+  } else if (dismissing) {
+    // The dismissal and where it stands are in the thread; the dock offers what comes next.
     dock = <AnswerDock>{moveOn()}</AnswerDock>;
   } else if (failed.length > 0) {
     dock = (
@@ -1107,7 +1138,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // While this device's own answer is in conflict with it, the conflict card owns what happens next
             // (Use as correction, or Confirm model answer).
             review={
-              modelReview && a === proxy && !confirmed && !pendingEntry && failed.length === 0
+              modelReview &&
+              a === proxy &&
+              !confirmed &&
+              !pendingEntry &&
+              failed.length === 0 &&
+              !dismissing
             }
             busy={busy}
             error={confirmError}
@@ -1295,7 +1331,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             }
             dismissDiscards={status !== 'open'}
             onKeepCurrent={
-              modelReview && answer === proxy && !confirmed && !pendingEntry
+              modelReview && answer === proxy && !confirmed && !pendingEntry && !dismissing
                 ? () => void confirmModel()
                 : undefined
             }
@@ -1320,6 +1356,41 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           />
         </div>,
       );
+    if (declineEntry && decline) {
+      const line = declineProgressText(decline, navigator.onLine);
+      if (line)
+        items.push(
+          <SystemLine
+            key={`decline-${declineEntry.id}`}
+            now={now}
+            at={new Date(declineEntry.createdAt).toISOString()}
+            icon={<ClockIcon size={14} />}
+            detail={line.note}
+          >
+            <span role="status">{line.text}</span>
+          </SystemLine>,
+        );
+      else if (decline.kind === 'settled')
+        items.push(
+          <SystemLine
+            key={`decline-${declineEntry.id}`}
+            now={now}
+            tone="warn"
+            icon={<WarningIcon size={14} />}
+            detail={
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => void app.outbox?.discard(declineEntry.id)}
+              >
+                OK
+              </button>
+            }
+          >
+            {declineOutcomeText(decline.outcome)}
+          </SystemLine>,
+        );
+    }
     if (composing && mode === 'answer' && stale)
       items.push(
         <SystemLine
@@ -1712,17 +1783,22 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
                 setDeclining(true);
                 setDeclineError(null);
                 if (dictation.isActive()) void dictation.stop();
+                // Resolves once the dismissal is sealed on this device; the thread shows it from there to settled.
                 app
                   .declineQuestion(view, at)
                   .then(() => {
                     setDeclineAt(null);
-                    announce('Question dismissed.');
+                    announce(
+                      navigator.onLine
+                        ? 'Dismissal saved on this device and sending.'
+                        : 'Dismissal saved on this device. It sends when you’re back online.',
+                    );
                   })
                   .catch((e: unknown) => {
                     setDeclineError(
-                      e instanceof StaleQuestionError || e instanceof DeclineUnsupportedError
+                      e instanceof StaleQuestionError || e instanceof DeclineBlockedError
                         ? e.message
-                        : 'Could not dismiss it. Check your connection and try again.',
+                        : 'Could not save the dismissal on this device. Try again.',
                     );
                     setDeclineAt(at);
                   })
@@ -1737,6 +1813,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         <p>
           You won’t answer it. It leaves Needs you on all your devices and stops reminders. If your
           agent is still waiting, it is told you declined, and nothing is approved.
+        </p>
+        <p className="muted">
+          It is saved on this device first, and sent as soon as your relay can be reached.
         </p>
         {declineError && (
           <p className="status error" role="alert">
