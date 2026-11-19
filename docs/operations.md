@@ -4,8 +4,27 @@
 
 - `pnpm decisions:doctor --url <relay>` runs unauthenticated checks (health, protocol range, claim state, headers, CSP, manifest, service worker).
 - `decisions doctor` also runs authenticated checks: a signed request, a WebSocket upgrade, an encrypted attachment round trip, and the push configuration.
-- `decisions status` shows relay connection, queued work, and delivery states. In Daintree the same information is in Settings → Decisions.
+- `decisions status` shows relay connection, queued work, delivery states, and the last HTTP sync of a listener without a socket. In Daintree, Settings → Decisions shows the relay connection, queue and delivery states.
 - `GET /api/v1/admin/diagnostics` (owner) returns counters only: jobs, alarm time, attachment totals, sockets, push health. It never contains content.
+
+## Listening without a live socket
+
+`decisions listen` and `decisions mcp` normally keep a WebSocket open to the relay, which pushes each answer the moment it is committed. Where a socket cannot stay open (a proxy that drops long-lived connections, a sandbox, a batch job), receive over HTTP instead:
+
+| Command                        | What it does                                                                                                                                                                                                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `decisions listen`             | Keeps the live socket (the default).                                                                                                                                                                                                                     |
+| `decisions listen --no-socket` | Polls the relay over HTTP and keeps running until Ctrl-C (SIGINT/SIGTERM).                                                                                                                                                                               |
+| `decisions listen --once`      | Fetches what the relay holds, delivers it to the sink, and exits: 0 when the relay was read (even if nothing was waiting), 1 when it could not be. An answer that arrives later waits for the next run, as may one the sink held back (`exec:` exit 75). |
+| `decisions mcp --no-socket`    | Serves the MCP as usual and polls the relay over HTTP for the outcomes.                                                                                                                                                                                  |
+
+A polling listener reads again 15 seconds after each successful sync. When a read fails, it retries after 1–2 s, then 2–4 s, doubling with jitter up to 30–60 s, or later when the relay asks for a longer wait (`retry_after_ms`, honoured up to 15 minutes). Each request a sync makes (the feature declaration, the event pages and the receipt for them) has a 10-second deadline and is not retried within the sync, apart from one correction for clock skew. A relay that refuses this device's signature for any reason but revocation (a clock it cannot correct, a relay that does not know the installation) is asked again only every 5 minutes, which keeps the listener's own reads far under the relay's limit on failed authentications from one address. A relay that needs a newer client (`upgrade_required`) stops the listener with status 1. The listener resumes from the event cursor saved in its state directory (`--home`, `$DECISIONS_HOME`, by default `~/.decisions`), so a restart or an outage of any length loses no event, and an answer the sink confirmed is not typed again after a restart; one whose write is uncertain is flagged for attention, never retried. If the relay reports the device revoked, the listener stops and exits with status 1.
+
+Each sync is reported on standard error: the first success, every failure with the error code and the next retry, and the recovery. `decisions status` shows the last HTTP sync: when it last read the whole ledger, at which event, and, while it is failing, the error code and how many attempts in a row have failed since the listener started. It is a record kept in the state directory, not a liveness check: a listener that has stopped leaves its last result behind. None of this includes question or answer text.
+
+Run one receiving process per state directory (`--home`): every `decisions` command that runs the bridge (`listen`, `mcp`, `ask`) delivers what it finds to its own sink.
+
+**From an MCP client.** Run `decisions mcp --no-socket --sink file:./decisions.log` (or `exec:<command>`, or the default stdout) and add it to the agent with the line it prints. `ask_human` returns the question ID at once. When the person answers or dismisses the question, or it expires, the next sync fetches the outcome and writes the notice to the sink. An agent that cannot be woken by the sink calls `get_decision` with that ID. It reads this listener's local copy, which catches up with the relay at the next sync that reads and applies the outcome: normally within one poll interval, later while the relay is unreachable. Only `status: human-answered` with `provenance: human` is the person's decision. A dismissal (`closed_reason: declined`) or an expiry never authorises the gated step. Restart with the same `--home` and token to carry on where it stopped.
 
 ## Limits and costs (verify against Cloudflare's pages before relying on them)
 

@@ -6,7 +6,7 @@ import {
   type LedgerEvent,
   type ProtocolFeature,
 } from '@daintreehq/decisions-protocol';
-import { RelayError } from './errors.js';
+import { RelayError, isDeviceRevoked } from './errors.js';
 import { backoffMs, type RelayClient } from './relay.js';
 
 /** The subset of the WHATWG WebSocket that the socket needs; `ws` and Electron's WebSocket both fit. */
@@ -152,10 +152,12 @@ export class RelaySocket {
       };
     } catch (e) {
       const err = e as Error;
+      // The relay refuses a revoked device's ticket with `401 unknown or revoked device`; reconnecting cannot help.
       if (
-        err instanceof RelayError &&
-        (err.code === 'forbidden' || err.code === 'not_authenticated') &&
-        err.status === 403
+        isDeviceRevoked(err) ||
+        (err instanceof RelayError &&
+          (err.code === 'forbidden' || err.code === 'not_authenticated') &&
+          err.status === 403)
       ) {
         this.handleRevoked();
         return;

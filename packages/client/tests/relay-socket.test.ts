@@ -309,6 +309,45 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
     expect(log).toContain('revoked');
     expect(sock.currentState).toBe('stopped');
   });
+  it.each([
+    ['unknown or revoked device', true],
+    ['bad signature', false],
+  ] as const)(
+    'a ticket refused with 401 "%s" stops the socket for good: %s',
+    async (message, revoked) => {
+      const identity = await makeIdentity();
+      const log: string[] = [];
+      const retries: number[] = [];
+      const client = new RelayClient({
+        identity,
+        sleep: async () => {},
+        maxRetries: 0,
+        fetch: (async () =>
+          json(401, { code: 'not_authenticated', message })) as unknown as typeof fetch,
+      });
+      const sock = new RelaySocket({
+        client,
+        handlers: {
+          onEvent: () => undefined,
+          onRevoked: () => void log.push('revoked'),
+          onError: () => void log.push('error'),
+        },
+        getCursor: async () => 0,
+        rand: () => 1,
+        webSocket: (u) => new FakeSocket(u),
+        schedule: (ms) => {
+          retries.push(ms);
+          return () => undefined;
+        },
+      });
+      sock.start();
+      await vi.waitFor(() => expect(log.length).toBeGreaterThan(0));
+      expect(log.includes('revoked')).toBe(revoked);
+      expect(retries.length > 0).toBe(!revoked);
+      expect(sock.currentState).toBe(revoked ? 'stopped' : 'backoff');
+      sock.stop();
+    },
+  );
   it('keeps alive with the text ping and ignores pong', async () => {
     const { sock, ws, hello, timers } = await mkSocket();
     sock.start();

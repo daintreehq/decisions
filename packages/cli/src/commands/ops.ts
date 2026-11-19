@@ -12,9 +12,11 @@ import {
   exportRecoveryKit,
   importDecisions,
   importRecoveryKit,
+  readHttpSyncStatus,
   verifiedDevices,
   verifyRecoveryKit,
   loadIdentity,
+  type HttpSyncStatus,
 } from '@daintreehq/decisions-client';
 import {
   encryptAttachment,
@@ -33,6 +35,8 @@ import {
   type GlobalOptions,
 } from '../runtime.js';
 
+const STATUS_PROBE_MS = 5_000;
+
 export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   const rt = await openRuntime(ctx, g);
   try {
@@ -41,7 +45,8 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
     const outbox = await rt.store.dueOutbox(Number.MAX_SAFE_INTEGER, 1000);
     let relay: { reachable: boolean; info?: InfoResponse; error?: string } = { reachable: false };
     try {
-      relay = { reachable: true, info: await rt.client.info() };
+      // A deadline, so an unreachable relay still lets the local state (the last HTTP sync above all) be shown.
+      relay = { reachable: true, info: await rt.client.info(STATUS_PROBE_MS) };
     } catch (e) {
       relay = { reachable: false, error: (e as Error).message };
     }
@@ -75,6 +80,7 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
           error: q.error_code,
         })),
       unsent: outbox.length,
+      last_http_sync: await readHttpSyncStatus(rt.store),
     };
     print(
       ctx,
@@ -85,6 +91,7 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
         `Event cursor   ${data.cursor}`,
         `Questions      ${data.questions.total} total · ${data.questions.queued} queued · ${data.questions.open} open · ${data.questions.proxy_answered} proxy-answered · ${data.questions.answered} answered`,
         `Unsent         ${data.unsent} item(s) waiting to publish`,
+        `Last HTTP sync ${describeHttpSync(data.last_http_sync)}`,
         ...data.needs_attention.map(
           (n) =>
             `! q-${n.alias} ${n.status} (${n.error ?? 'unknown'}): answer saved but not typed into the agent`,
@@ -95,6 +102,25 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   } finally {
     await rt.store.close();
   }
+}
+
+/**
+ * What the last HTTP sync (`decisions listen --no-socket` or `--once`, `decisions mcp --no-socket`) recorded. It is a
+ * record, not a liveness check: a listener that stopped leaves its last result behind.
+ */
+export function describeHttpSync(s: HttpSyncStatus | null): string {
+  if (!s || s.last_attempt_at === null)
+    return 'never (only a listener without a live socket records one)';
+  const at = (ms: number) => new Date(ms).toISOString();
+  const success =
+    s.last_success_at === null
+      ? 'no successful sync yet'
+      : `last success ${at(s.last_success_at)} at event ${s.last_success_cursor}`;
+  if (s.outcome === 'ok') return success;
+  if (s.outcome === 'revoked') return `stopped: this device was revoked (${success})`;
+  if (s.outcome === 'fatal')
+    return `stopped: the relay refuses this client (${s.reason ?? 'unknown'}) (${success})`;
+  return `failing: ${s.reason ?? 'unknown'}, ${s.failures} in a row, last tried ${at(s.last_attempt_at)} (${success})`;
 }
 
 interface Check {

@@ -834,7 +834,7 @@ export class DeliveryEngine {
       case 'delivered':
         for (const i of chunk) {
           if (i.kind === 'answer') {
-            await ctx.store.updateIntent(i.intentId, { state: 'typed', updated_at: ctx.now() });
+            // Records the intent `typed` and the entry delivered in one write (`markDelivered`).
             await this.markDelivered(
               i.q.question_id,
               i.entry.entry_id,
@@ -919,7 +919,10 @@ export class DeliveryEngine {
     /** The sink's proof of the write; null when a crash-recovery marker was found instead. */
     proof: string | null,
   ): Promise<void> {
-    // Re-read inside the shared lock so a concurrent inbox append is never overwritten with a stale copy.
+    // Re-read inside the shared lock so a concurrent inbox append is never overwritten with a stale copy. The intent
+    // becomes `typed` in the same write as its entry becomes delivered: with the two apart, a failure between them
+    // would leave the intent proven and the entry pending, and the next drain would type the answer again.
+    const typed = { state: 'typed' as const, updated_at: this.ctx.now() };
     const q = await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(questionId);
       if (!row) return null;
@@ -927,7 +930,7 @@ export class DeliveryEngine {
         e.entry_id === entryId ? { ...e, delivered: true, injection_id: injectionId } : e,
       );
       const stillPending = entries.some((e) => e.deliver && !e.delivered);
-      await this.ctx.store.updateQuestion(questionId, {
+      await this.ctx.store.settleIntent(injectionId, typed, questionId, {
         answers_json: serializeAnswers(entries),
         delivered_revision: Math.max(row.delivered_revision, revision),
         delivery_status: stillPending ? row.delivery_status : 'terminal-delivered',
@@ -936,7 +939,10 @@ export class DeliveryEngine {
       });
       return row;
     });
-    if (!q) return;
+    if (!q) {
+      await this.ctx.store.updateIntent(injectionId, typed);
+      return;
+    }
     await this.ctx.audit.log({
       event: 'answer.delivered',
       question_id: questionId,
@@ -1227,8 +1233,9 @@ export class DeliveryEngine {
   }
 
   /**
-   * Startup reconciliation for injections interrupted by a crash. A marker found in the terminal means the
-   * text was typed (mark delivered, do not repeat). No marker proves nothing, so the answer or follow-up is
+   * Startup reconciliation for injections interrupted by a crash. An intent already recorded as `typed` (the sink
+   * confirmed it; only its receipt was still owed), or a marker found in the terminal, means the text was typed
+   * (mark delivered, do not repeat). No marker proves nothing, so the answer or follow-up is
    * flagged `delivery-uncertain` for a human; it is NEVER re-injected automatically. Each block in a batch
    * carries its own injection id, so each is reconciled on its own.
    */
@@ -1255,7 +1262,9 @@ export class DeliveryEngine {
         else if (r === 'uncertain') uncertain++;
         continue;
       }
-      if (await this.markerFound(q, intent)) {
+      // `typed` was recorded once the sink confirmed the write: only the entry's own record and the receipt may be
+      // owed, so a sink that keeps no markers (stdout, a command) still gets no second copy and no false alarm.
+      if (intent.state === 'typed' || (await this.markerFound(q, intent))) {
         const entry = parseAnswers(q.answers_json).find(
           (e) => e.revision === intent.answer_revision && e.deliver && !e.delivered,
         );

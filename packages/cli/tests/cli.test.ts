@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { RelayError, loadIdentity } from '@daintreehq/decisions-client';
 import {
   exportPublicKey,
@@ -11,10 +11,17 @@ import {
   issueDeviceCert,
   newId,
 } from '@daintreehq/decisions-crypto';
-import type { DeviceCert } from '@daintreehq/decisions-protocol';
+import { PROTOCOL_VERSION, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
-import { DemoSink, ask, cliOrigin, mcpAddLines, parseSink } from '../src/commands/daemon.js';
+import {
+  DemoSink,
+  ask,
+  cliOrigin,
+  daemon,
+  mcpAddLines,
+  parseSink,
+} from '../src/commands/daemon.js';
 import {
   deleteData,
   doctor,
@@ -356,6 +363,141 @@ describe('ask / status / devices', () => {
   });
 });
 
+describe('listen without a live socket', () => {
+  const emptyPage = () => ({
+    protocol_version: PROTOCOL_VERSION,
+    from_exclusive: 0,
+    high_water_seq: 0,
+    events: [],
+    next_after: 0,
+    has_more: false,
+  });
+  const refusal = (status: number, code: string, message: string) =>
+    new Response(JSON.stringify({ code, message }), { status });
+  const down = () => refusal(503, 'temporarily_unavailable', 'down');
+  const relay = (events: () => unknown = emptyPage) => ({
+    'POST /api/v1/socket-ticket': () => ({
+      ticket: 't',
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+      ws_path: '/api/v1/socket',
+    }),
+    'GET /api/v1/events': events,
+    'POST /api/v1/deliveries/received': () => ({ ok: true }),
+  });
+  const FAST = { intervalMs: 10, retryBaseMs: 10, retryCapMs: 20 };
+
+  it('offers --once on listen, and --no-socket on listen and mcp', () => {
+    const flags = (name: string) =>
+      buildProgram()
+        .commands.find((c) => c.name() === name)!
+        .options.map((o) => o.long);
+    expect(flags('listen')).toEqual(expect.arrayContaining(['--no-socket', '--once']));
+    expect(flags('mcp')).toContain('--no-socket');
+  });
+
+  it('--once declares its features, reads the relay once and exits without claiming to listen', async () => {
+    const m = await ready({ routes: relay() });
+    await daemon(m.ctx, {}, { once: true });
+    const paths = m.calls.map((c) => `${c.method} ${c.path}`);
+    const ticket = paths.indexOf('POST /api/v1/socket-ticket');
+    expect(ticket).toBeGreaterThanOrEqual(0);
+    expect(ticket).toBeLessThan(paths.indexOf('GET /api/v1/events'));
+    expect(paths.filter((p) => p === 'GET /api/v1/events')).toHaveLength(1);
+    expect(m.out.join('\n')).not.toMatch(/Listening/);
+    expect(m.err.join('\n')).toMatch(/HTTP sync ok \(event 0\); done/);
+    m.out.length = 0;
+    await status(m.ctx, {});
+    expect(m.out.join('\n')).toMatch(/Last HTTP sync last success \S+ at event 0/);
+  });
+
+  it('--once gives up at its deadline when the relay never answers', async () => {
+    const m = await ready({ routes: relay() });
+    const inner = m.ctx.fetch;
+    m.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+      if (!String(u).includes('/api/v1/events')) return inner(u as string, init);
+      return new Promise<Response>((_, reject) =>
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        ),
+      );
+    }) as typeof fetch;
+    const ended = await daemon(m.ctx, {}, { once: true, onceDeadlineMs: 100 }).catch(
+      (e: unknown) => e,
+    );
+    expect(ended).toBeInstanceOf(CliError);
+    expect((ended as CliError).message).toMatch(/did not finish within two minutes/);
+    expect((ended as CliError).exitCode).toBe(1);
+  });
+
+  it('--once fails when the relay cannot be read', async () => {
+    const m = await ready({ routes: relay(down) });
+    await expect(daemon(m.ctx, {}, { once: true })).rejects.toThrow(
+      'could not sync with the relay over HTTP (temporarily_unavailable)',
+    );
+    m.out.length = 0;
+    await status(m.ctx, {});
+    expect(m.out.join('\n')).toMatch(
+      /Last HTTP sync failing: temporarily_unavailable, 1 in a row, .*no successful sync yet/,
+    );
+  });
+
+  it('--no-socket keeps polling, reports a failure and the recovery, and stops when told', async () => {
+    let reads = 0;
+    const m = await ready({ routes: relay(() => (++reads === 2 ? down() : emptyPage())) });
+    let release!: () => void;
+    const until = new Promise<void>((r) => (release = r));
+    const done = daemon(m.ctx, {}, { socket: false, until, poll: FAST });
+    try {
+      await vi.waitFor(() => expect(reads).toBeGreaterThan(3), { timeout: 5_000 });
+    } finally {
+      release();
+      await done;
+    }
+    expect(m.out.join('\n')).toContain('Listening for answers over HTTP (no live socket).');
+    const err = m.err.join('\n');
+    expect(err).toMatch(/\[relay\] HTTP sync ok \(event 0\); polling every 0s/);
+    expect(err).toMatch(
+      /\[relay\] HTTP sync failed \(temporarily_unavailable, 1 in a row\); retrying in 0s/,
+    );
+    expect(err).toMatch(/\[relay\] HTTP sync recovered \(event 0\)/);
+    const after = reads;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(reads).toBe(after);
+  });
+
+  it('stops, and fails, when the relay says this device was revoked', async () => {
+    const m = await ready({
+      routes: relay(() => refusal(401, 'not_authenticated', 'unknown or revoked device')),
+    });
+    const never = new Promise<void>(() => undefined);
+    const ended = await daemon(m.ctx, {}, { socket: false, until: never, poll: FAST }).catch(
+      (e: unknown) => e,
+    );
+    expect(ended).toBeInstanceOf(CliError);
+    expect((ended as CliError).message).toMatch(/revoked from the relay/);
+    expect((ended as CliError).exitCode).toBe(1);
+    expect(m.out.join('\n')).toContain('Listening for answers over HTTP');
+  });
+
+  it('stops, and fails, when the relay needs a newer client', async () => {
+    const m = await ready({
+      routes: relay(() => refusal(426, 'upgrade_required', 'unsupported protocol version')),
+    });
+    const never = new Promise<void>(() => undefined);
+    const ended = await daemon(m.ctx, {}, { socket: false, until: never, poll: FAST }).catch(
+      (e: unknown) => e,
+    );
+    expect(ended).toBeInstanceOf(CliError);
+    expect((ended as CliError).message).toBe(
+      'stopped listening: the relay refuses this client (upgrade_required); update decisions',
+    );
+    expect((ended as CliError).exitCode).toBe(1);
+    m.out.length = 0;
+    await status(m.ctx, {});
+    expect(m.out.join('\n')).toMatch(/Last HTTP sync stopped: the relay refuses this client/);
+  });
+});
+
 describe('doctor', () => {
   const now = new Date().toISOString();
   const deviceRow = (cert: { device_id: string; role: string }, features: string[]) => ({
@@ -543,6 +685,18 @@ describe('exec sink', () => {
     expect(await sink.inject(await target, 'hello', 'i')).toEqual({
       outcome: 'held',
       reason: 'exec_tempfail',
+    });
+  });
+
+  it('close() ends a command that never exits, which settles as ambiguous', async () => {
+    const sink = new DemoSink({ kind: 'exec', cmd: 'cat >/dev/null; sleep 30' }, () => undefined);
+    const pending = sink.inject(await target, 'hello', 'i');
+    await new Promise((r) => setTimeout(r, 100));
+    sink.close();
+    const late = new Promise((r) => setTimeout(() => r('hung'), 5_000));
+    expect(await Promise.race([pending, late])).toEqual({
+      outcome: 'ambiguous',
+      reason: 'exec_exit_signal',
     });
   });
 

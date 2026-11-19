@@ -45,3 +45,18 @@ export class RelayError extends Error {
     return this.code === 'network_error' || this.status === 429 || this.status >= 500;
   }
 }
+
+/**
+ * The relay no longer accepts this device: `401 not_authenticated` with the message the relay gives a revoked (or
+ * deleted) device, checked after the client has had its chance to correct a clock skew. Other `not_authenticated`
+ * refusals (an unknown installation, a bad signature, a skew) can be a misrouted or misconfigured relay that recovers,
+ * so they are not revocations.
+ */
+export function isDeviceRevoked(e: unknown): boolean {
+  return (
+    e instanceof RelayError &&
+    e.code === 'not_authenticated' &&
+    e.status === 401 &&
+    e.message === 'unknown or revoked device'
+  );
+}
