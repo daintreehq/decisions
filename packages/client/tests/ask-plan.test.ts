@@ -812,8 +812,10 @@ describe('over MCP', () => {
     });
     await e.relay.plainActionEvent({ questionId: declined, signer: e.phone, action: 'cancel' });
     await e.relay.plainActionEvent({ questionId: withdrawn, signer: desktop, action: 'cancel' });
-    e.relay.push('decision.expired', expired, 0, { reason: 'expired' });
-    e.relay.push('decision.expired', advised, 0, { reason: 'expired' });
+    // The relay expires a question at its signed deadline, and the bridge believes it only once that has passed.
+    e.relay.expiryEvent({ questionId: expired });
+    e.relay.expiryEvent({ questionId: advised });
+    e.setNow(T0 + 16 * MIN);
     await e.bridge.catchUp();
 
     const get = (id: string) => call('get_decision', { question_id: id });
