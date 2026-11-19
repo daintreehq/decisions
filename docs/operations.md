@@ -131,14 +131,14 @@ Publishing uses npm trusted publishing (OIDC), so there is no npm token in the r
 
 ### Cutting a release
 
-1. Create `release/<version>` from the latest `develop` (for example, `git switch develop`, `git pull --ff-only origin develop`, then `git switch -c release/0.2.0`). Set the new version everywhere with `pnpm release:version 0.2.0`. This rewrites the `version` of every workspace package and the version constants the CLI, the MCP server and the Worker report. Commit it (`chore: release v0.2.0`), push the release branch, and open a pull request targeting `main`. Once CI passes, merge it with a merge commit.
+1. Create `release/<version>` from the latest `develop` (for example, `git switch develop`, `git pull --ff-only origin develop`, then `git switch -c release/0.2.0`). Set the new version everywhere with `pnpm release:version 0.2.0`. This rewrites the `version` of every workspace package and the version constants the CLI, the MCP server and the Worker report. Commit it (`chore: release v0.2.0`), run `pnpm compat:check --old <previous version>` ([below](#checking-against-the-previous-release)), push the release branch, and open a pull request targeting `main`. Once CI passes, merge it with a merge commit.
 2. Tag the merged commit on `main` and push the tag:
    ```bash
    git switch main && git pull --ff-only origin main
    git tag v0.2.0 && git push origin v0.2.0
    ```
 3. The workflow runs `verify` (the tag must equal `v` + every package's version, then typecheck and tests), then `npm` and `github-release` in parallel. The `npm` job runs in the `npm` GitHub environment.
-4. Check the result: `npm view @daintreehq/decisions-cli@0.2.0` and the "Provenance" panel on each package's npm page.
+4. Check the result: `npm view @daintreehq/decisions-cli@0.2.0` and the "Provenance" panel on each package's npm page. Then run the same compatibility check against what was published: `pnpm compat:check --old <previous version> --new 0.2.0`.
 5. Open a pull request from `main` back into `develop` and merge it with a merge commit so the version bump and release fixes return to the integration branch. The release branch can then be deleted.
 
 For an urgent patch, start `hotfix/<name>` from the latest `main`, make the fix and patch version bump there, and follow steps 2–5 after its pull request into `main` passes CI and merges. Also merge `main` into any active release branch. Regular features and bug fixes target `develop`; [CONTRIBUTING.md](../CONTRIBUTING.md#branching-git-flow) describes the branch conventions.
@@ -146,6 +146,23 @@ For an urgent patch, start `hotfix/<name>` from the latest `main`, make the fix 
 A version with a prerelease suffix (`pnpm release:version 0.3.0-rc.1`, tag `v0.3.0-rc.1`) is published under the `next` dist-tag, never `latest`.
 
 If the `npm` job fails partway, fix the cause and use "Re-run failed jobs": every `name@version` already on npm is skipped, and the rest are published in order. npm never accepts the same version twice, so if a published package turns out to be broken, release the next patch version; do not move or delete a tag that has been published.
+
+### Checking against the previous release
+
+Installations upgrade one piece at a time: a relay updated before Daintree, Daintree before the relay, a Remote Host left behind. [`tools/compat-check/compat-check.mjs`](../tools/compat-check/compat-check.mjs) runs the released packages against the new ones, in both directions, with real relays under `wrangler dev`:
+
+```bash
+pnpm compat:check --old 0.8.0                # before publishing: a packed build of this tree
+pnpm compat:check --old 0.8.0 --new 0.9.0    # after publishing: what npm serves
+```
+
+The old side is installed from npm, and its relay is the bundle attached to its GitHub release, checked against that release's `SHA256SUMS` and against the npm relay package of the same version. The new side is packed from the working tree (`--new packed`, the default) or installed from npm. Each side runs from its own scratch project outside the workspace, through its installed `decisions` CLI and its library, and a simulated phone answers and declines with signed requests as the phone app does. It checks that:
+
+1. **an older desktop against the new relay** (the older CLI as the owner) still asks and receives answers and declines, and that while a newer Remote Host asks an advisory question, the older desktop's own reader refuses it if it predates advice (as 0.8.0 does, for its `reply_mode`), reads everything else, and its bridge keeps working with no error and no refused request;
+2. **the new desktop against the older relay** still asks and receives answers and declines (`ask --wait`, `get`, `wait`, and the library). Against a relay without advice, an advisory ask is refused as `not_supported: relay-unsupported` and asks nothing; against one without agent-stopped pushes, a push request reports `unsupported`;
+3. **an older host with open questions that moves to the new version, and then its relay**, still answers them, keeps the deadline of a reopen made before the upgrade, and expires, reopens and answers a question asked before both upgrades on the new relay, which reads the storage the older one wrote. There, an agent-stopped push request now reaches the relay.
+
+It needs the network and the workspace's dependencies, and takes a few minutes (scenario 3 waits for a real deadline). It uses ports from 8870 (`--port` moves them) and refuses to start a relay on a port something already answers on. `--only 1,3` runs some scenarios, `--no-build` packs the existing build, and `--keep` keeps the scratch directory with every relay, CLI and library log; a failed run always keeps it. A phone app cached from an older release is not covered here.
 
 To see exactly what a release would do without uploading anything, run the same script locally (CI runs it on every pull request):
 
