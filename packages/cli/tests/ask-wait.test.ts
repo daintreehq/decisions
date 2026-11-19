@@ -641,6 +641,39 @@ describe('recovering an outcome by ID', () => {
     expect(listener.out.join('\n')).not.toContain('Answer two');
   });
 
+  it('leaves publishing to a running receiver, and takes it over once that receiver is gone', async () => {
+    const e = await env();
+    const listener = e.proc({ json: false });
+    let release!: () => void;
+    const until = new Promise<void>((r) => (release = r));
+    const listening = daemon(
+      listener.ctx,
+      {},
+      {
+        socket: false,
+        poll: FAST,
+        pumpIntervalMs: 20,
+        until,
+      },
+    );
+    await vi.waitFor(() => expect(listener.out.join('\n')).toMatch(/Listening for answers/));
+    const a = e.proc();
+    expect(await ask(a.ctx, {}, { question: 'One?', stopped: never() })).toBe(0);
+    expect(e.created()).toHaveLength(1);
+    expect(a.calls).not.toContain('POST /api/v1/questions');
+    release();
+    await listening;
+
+    // A receiver that holds the lock and publishes nothing, then exits: this ask takes over and publishes.
+    const held = ReceiverLock.forHome(e.home);
+    expect(held.tryAcquire()).toBe(true);
+    setTimeout(() => held.release(), 300);
+    const b = e.proc();
+    expect(await ask(b.ctx, {}, { question: 'Two?', stopped: never() })).toBe(0);
+    expect(e.created()).toHaveLength(2);
+    expect(b.calls).toContain('POST /api/v1/questions');
+  });
+
   it('asks once for two asks at once with the same correlation id', async () => {
     const e = await env();
     const [a, b] = [e.proc(), e.proc()];
@@ -778,6 +811,20 @@ describe('the standalone flow through decisions mcp', () => {
         expect(readFileSync(notices, 'utf8')).toContain('status: advisory-unanswered'),
       );
       expect(waiter.records().map((r) => r.record)).toEqual(['result']);
+
+      // Neither the tool list nor the instructions promise that anything is typed into the agent's terminal.
+      const rpc = async (method: string) => {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params: {} }),
+        });
+        return JSON.stringify(((await r.json()) as { result: unknown }).result);
+      };
+      for (const said of [await rpc('tools/list'), await rpc('initialize')]) {
+        expect(said).toContain('get_decision');
+        expect(said).not.toMatch(/typed into this terminal|arrives as a new message|arrive here/);
+      }
 
       // The agent recovers the same facts with get_decision, and a script with `decisions get --pane mcp`.
       const viaMcp = (await call('get_decision', { question_id: id })).structuredContent;

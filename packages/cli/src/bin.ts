@@ -275,7 +275,7 @@ export function buildProgram(): Command {
     .option('--wait', `wait here for the question's outcome; ${WAIT_HELP}`)
     .option(
       '--wait-timeout <duration>',
-      'with --wait: stop waiting after this long (1s to 365d), leaving the question open',
+      'with --wait: stop waiting after this long (1s to 365d), leaving the question as it is',
     )
     .option('--sink <sink>', SINK_HELP, 'stdout')
     .option('--no-socket', NO_SOCKET_HELP)
@@ -292,7 +292,7 @@ export function buildProgram(): Command {
     )
     .option(
       '--wait-timeout <duration>',
-      'stop waiting after this long (1s to 365d), leaving the question open',
+      'stop waiting after this long (1s to 365d), leaving the question as it is',
     )
     .option('--sink <sink>', SINK_HELP, 'stdout')
     .option('--no-socket', NO_SOCKET_HELP)

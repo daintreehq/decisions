@@ -174,8 +174,10 @@ export const exitCodeOf = (r: Pick<WaitResult, 'outcome' | 'signal'>): number =>
 const TICK_MS = 1_000;
 /** How long a wait that receives here gives its own sink to write the outcome's notice before it reports. */
 const SETTLE_MS = 10_000;
-/** How long `ask` without `--wait` tries to publish before leaving it to the next receiver. */
+/** How long `ask` without `--wait` sees to its question's publication before leaving it to the next receiver. */
 const PUBLISH_MS = 30_000;
+/** How often it looks again meanwhile. */
+const PUBLISH_TICK_MS = 250;
 
 interface WaitArgs {
   ctx: Ctx;
@@ -281,8 +283,13 @@ async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
             receiving = true;
             if (observing)
               ctx.err('[decisions] the other receiver stopped; receiving here from now on');
+            // A start that fails leaves nothing receiving: the wait ends, and so does its hold on the lock.
             a.starting.push(
-              bridge.start(a.start).catch((e: Error) => ctx.err(`warning: ${e.message}`)),
+              bridge
+                .start(a.start)
+                .catch((e: Error) =>
+                  fail(new CliError(`stopped waiting: could not start receiving (${e.message})`)),
+                ),
             );
           } else if (!observing) {
             observing = true;
@@ -389,13 +396,23 @@ function resultText(r: WaitResult, timeoutMs: number | null): string {
   return lines.join('\n');
 }
 
+/**
+ * The `get_decision` fields, with `fallback_due` true only when the outcome reported says the stated plan may go ahead:
+ * a process that does not receive cannot see a replay under way elsewhere, so its own reading of the ledger never
+ * lets a plan go ahead on its own.
+ */
+const decisionFields = (v: DecisionView, outcome: WaitOutcome | null) => ({
+  ...decisionResult(v),
+  fallback_due: (outcome === 'advisory-expired' || outcome === 'never-published') && v.fallbackDue,
+});
+
 const resultRecord = (r: WaitResult) => ({
   record: 'result',
   outcome: r.outcome,
   exit_code: exitCodeOf(r),
   delivery: r.delivery,
   ...(r.signal ? { signal: r.signal } : {}),
-  ...decisionResult(r.view),
+  ...decisionFields(r.view, r.outcome),
 });
 
 /** A library refusal, as the CLI reports it: a request the library finds invalid is a usage error. */
@@ -505,7 +522,8 @@ async function waitAndReport(
   w: Waiter,
   a: Omit<WaitArgs, 'ctx' | 'bridge' | 'lock' | 'halt' | 'starting'>,
 ): Promise<number> {
-  let res: WaitResult;
+  let res: WaitResult | null = null;
+  let fatal: unknown = null;
   try {
     res = await waitForOutcome({
       ...a,
@@ -516,16 +534,64 @@ async function waitAndReport(
       starting: w.also,
     });
   } catch (e) {
-    throw cliErrorOf(e);
+    fatal = cliErrorOf(e);
   }
   await w.quiesce();
   const view = await w.bridge.getDecision(a.questionId, a.pane).catch(() => null);
   const outcome = view ? outcomeOf(view, { receiving: false }) : null;
-  if (view && outcome) res = { outcome, view, delivery: deliveryOf(view, outcome) };
-  else if (view && res.outcome !== 'interrupted' && res.outcome !== 'wait-timeout')
-    res = { ...res, delivery: deliveryOf(view, res.outcome) };
+  if (view && outcome) {
+    // An outcome that came while the wait stopped (a signal, the timeout, an error) is the one reported; for the same
+    // outcome in the same round, the latest read says how its notice's write ended.
+    const same = res && res.outcome === outcome && res.view.revision === view.revision;
+    const stopped = !res || res.outcome === 'interrupted' || res.outcome === 'wait-timeout';
+    if (same || stopped) res = { outcome, view, delivery: deliveryOf(view, outcome) };
+    // Otherwise the question moved on to another round meanwhile: the result keeps the round it reports.
+  }
+  if (!res) throw fatal;
+  if (fatal) ctx.err(`error: ${(fatal as Error).message}`);
   await writeLine(ctx, ctx.json ? JSON.stringify(resultRecord(res)) : resultText(res, a.timeoutMs));
   return exitCodeOf(res);
+}
+
+/**
+ * `ask` without `--wait`: sees its question published, for up to `PUBLISH_MS`. While this process may receive, it
+ * publishes it itself (a pump). While another process receives, it leaves the publishing to that one and watches, and
+ * takes over if that process exits first. True once the question has left this computer's queue; false (with a word on
+ * standard error) when it is still queued, for the next receiver to send.
+ */
+async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean> {
+  const until = performance.now() + PUBLISH_MS;
+  let interrupt: () => void = () => undefined;
+  const stopped = new Promise<void>((resolve) => (interrupt = resolve));
+  w.halt.onStop = () => interrupt();
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const after = (ms: number) =>
+    new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
+  try {
+    for (;;) {
+      if (w.halt.signal) return false;
+      const row = await w.bridge.getDecision(questionId).catch(() => null);
+      if (row && row.status !== 'queued') return true;
+      const left = until - performance.now();
+      if (left <= 0) break;
+      // At least a tick between looks, a pump of its own included, and never past the deadline or a signal.
+      const pause = after(Math.min(left, PUBLISH_TICK_MS));
+      let step: Promise<unknown> = pause;
+      if (w.lock.tryAcquire()) {
+        const send = w.bridge.pump();
+        w.also.push(send);
+        step = Promise.all([send.catch((e: Error) => ctx.err(`warning: ${e.message}`)), pause]);
+      }
+      await Promise.race([step, stopped, after(left)]);
+    }
+  } finally {
+    w.halt.onStop = null;
+    for (const t of timers) clearTimeout(t);
+  }
+  ctx.err(
+    '[decisions] the question is not published yet: it stays queued on this computer, and the decisions process that receives for this state directory sends it (a running listen or mcp, or the next one to start).',
+  );
+  return false;
 }
 
 /** How long `ask` waits for another `ask` in the same state directory to finish registering. */
@@ -549,10 +615,13 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
   // Two asks at once with the same correlation id: the second sees what the first committed.
   const registering = o.correlationId !== undefined ? ReceiverLock.forRegistration(ctx.home) : null;
   try {
-    if (registering && !(await registering.acquire(REGISTER_WAIT_MS)))
+    if (registering && !(await registering.acquire(REGISTER_WAIT_MS, () => !!w.halt.signal))) {
+      // Stopped while another ask registered: nothing was asked.
+      if (w.halt.signal) return SIGNAL_EXIT[w.halt.signal];
       throw new CliError(
         'another decisions ask in this state directory did not finish registering',
       );
+    }
     // Receiving elsewhere, this process only asks and reads: that receiver publishes, within seconds.
     w.lock.tryAcquire();
     let r: RegisterResult;
@@ -590,26 +659,10 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
         : text,
     );
     if (!o.wait) {
-      if (w.lock.held && !w.halt.signal) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let wake!: () => void;
-        const stopped = new Promise<void>((resolve) => (wake = resolve));
-        w.halt.onStop = wake;
-        const send = w.bridge.pump();
-        w.also.push(send);
-        await Promise.race([
-          send.catch((e: Error) => ctx.err(`warning: ${e.message}`)),
-          stopped,
-          new Promise<void>((resolve) => (timer = setTimeout(resolve, PUBLISH_MS))),
-        ]);
-        clearTimeout(timer);
-        w.halt.onStop = null;
-      }
-      if (!ctx.json)
+      const published = await publish(ctx, w, r.questionId);
+      if (!ctx.json && published)
         ctx.out(
-          w.lock.held
-            ? 'The outcome is delivered by a running `decisions listen` (or `decisions mcp`), or here with --wait.'
-            : 'Another decisions process receives for this state directory: it publishes the question, and its sink gets the outcome.',
+          'The outcome is delivered by a running `decisions listen` (or `decisions mcp`), or here with --wait.',
         );
       return w.halt.signal ? SIGNAL_EXIT[w.halt.signal] : 0;
     }
@@ -683,7 +736,7 @@ export async function getCmd(
     const json = {
       outcome,
       delivery: outcome ? deliveryOf(v, outcome) : 'none',
-      ...decisionResult(v),
+      ...decisionFields(v, outcome),
     };
     ctx.out(
       ctx.json

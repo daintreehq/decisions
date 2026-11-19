@@ -1265,8 +1265,11 @@ export class DecisionsBridge {
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
     // Whether an advisory notice would wait for the ledger is read before the row: an event applied in between is
-    // then in the row, and one applied after it was still unsettled here.
-    const unsettled = await this.delivery.ledgerHolds(questionId).catch(() => true);
+    // then in the row, and one applied after it was still unsettled here. It starts no clock: the question may still be
+    // open, and the two-minute hold is timed only once its notice waits (`view`).
+    const unsettled = await this.delivery
+      .ledgerHolds(questionId, { start: false })
+      .catch(() => true);
     const row = await this.owned(questionId, pane);
     return this.view(row, unsettled);
   }
@@ -1299,10 +1302,14 @@ export class DecisionsBridge {
     const timeout = this.advisoryTimeout(row, entries);
     // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
     // ahead here either.
-    const waiting =
+    const noticeWaits =
       timeout?.inForce === true &&
-      (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention') &&
-      (unsettled === true || (await this.delivery.ledgerHolds(row.question_id).catch(() => true)));
+      (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention');
+    // Read (and the hold timed from now, if it is not yet) only once a notice waits; an earlier unsettled read wins.
+    const held = noticeWaits
+      ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
+      : false;
+    const waiting = noticeWaits && (unsettled === true || held);
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;

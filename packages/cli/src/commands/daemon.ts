@@ -352,10 +352,13 @@ export async function quiesceBridge(
 ): Promise<void> {
   sink.close();
   rt.client.close();
-  await bridge.stop();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The bound covers stopping too: a stop waits for a sync whose requests may not honour their abort.
   await Promise.race([
-    Promise.all([bridge.idle(), ...also.map((p) => p.catch(() => undefined))]),
+    (async () => {
+      await bridge.stop();
+      await Promise.all([bridge.idle(), ...also.map((p) => p.catch(() => undefined))]);
+    })(),
     new Promise<void>((resolve) => {
       timer = setTimeout(resolve, DRAIN_WAIT_MS);
       (timer as { unref?: () => void }).unref?.();

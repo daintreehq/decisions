@@ -49,11 +49,14 @@ export class ReceiverLock {
     return true;
   }
 
-  /** Takes the lock, trying again every 50 ms for up to `timeoutMs`; false if it never came free. */
-  async acquire(timeoutMs: number): Promise<boolean> {
+  /**
+   * Takes the lock, trying again every 50 ms for up to `timeoutMs`; false if it never came free, or once `stop` says
+   * to give up.
+   */
+  async acquire(timeoutMs: number, stop: () => boolean = () => false): Promise<boolean> {
     const until = Date.now() + timeoutMs;
     while (!this.tryAcquire()) {
-      if (Date.now() >= until) return false;
+      if (stop() || Date.now() >= until) return false;
       await new Promise((r) => setTimeout(r, 50));
     }
     return true;

@@ -838,6 +838,30 @@ function bearer(req: IncomingMessage): string | null {
 }
 
 /** `TOOLS` as served, with the host's own words for an attachment id. Leaves `TOOLS` itself untouched. */
+/** The sentences of `ask_human` and `send_followup` that say answers are typed into the agent's terminal. */
+const TERMINAL_TOOL_TEXT: Record<string, [string, string]> = {
+  ask_human: [
+    ' end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
+    ' this host does not type the answer into your terminal, so call get_decision with its question_id when you cannot go on without it.',
+  ],
+  send_followup: ['arrive here marked as follow-ups.', "appear in get_decision's thread."],
+};
+
+/**
+ * The tool list as a host advertises it: `ask_human`'s attachment ids described as the host resolves them, and, for a
+ * host whose agents check for answers (`AnswerArrival` `poll`), no promise that answers are typed into the terminal.
+ */
+export function toolsFor(o: { attachmentIdDescription?: string; answerArrival?: AnswerArrival }) {
+  const tools = toolsWithAttachmentIdDescription(
+    o.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
+  );
+  if (o.answerArrival !== 'poll') return tools;
+  return tools.map((t) => {
+    const swap = TERMINAL_TOOL_TEXT[t.name];
+    return swap ? { ...t, description: t.description.replace(swap[0], swap[1]) } : t;
+  });
+}
+
 export function toolsWithAttachmentIdDescription(description: string) {
   return TOOLS.map((t) => {
     if (t.name !== 'ask_human') return t;
@@ -875,10 +899,13 @@ export function createDecisionsMcpHandler(
   const limit = opts.rateLimitPerMinute ?? 60;
   const now = opts.now ?? Date.now;
   const hits = new Map<string, number[]>();
-  const tools = toolsWithAttachmentIdDescription(
-    opts.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
-  );
   const arrival = opts.answerArrival ?? 'terminal';
+  const tools = toolsFor({
+    ...(opts.attachmentIdDescription !== undefined
+      ? { attachmentIdDescription: opts.attachmentIdDescription }
+      : {}),
+    answerArrival: arrival,
+  });
 
   const limited = (key: string): boolean => {
     const t = now();

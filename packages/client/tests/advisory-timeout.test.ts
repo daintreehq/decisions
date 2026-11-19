@@ -592,6 +592,19 @@ describe('where the advisory notice goes', () => {
     expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
   });
 
+  it('reading a question starts no clock: the two-minute hold is timed from when its notice waits', async () => {
+    const e = await advised();
+    // Polled while open, before this desktop has read the relay in full, as an agent polling get_decision does.
+    expect((await e.bridge.getDecision(e.qid)).status).toBe('open');
+    e.setNow(e.now + 3 * ADVISORY_LEDGER_WAIT_MS);
+    // The first time a notice waits, the hold starts then, not at that earlier read.
+    expect(await e.bridge.delivery.ledgerHolds(e.qid)).toBe(true);
+    e.setNow(e.now + ADVISORY_LEDGER_WAIT_MS - 1);
+    expect(await e.bridge.delivery.ledgerHolds(e.qid)).toBe(true);
+    e.setNow(e.now + 1);
+    expect(await e.bridge.delivery.ledgerHolds(e.qid)).toBe(false);
+  });
+
   it('waits two minutes at most for a read that does not get through', async () => {
     const e = await advised();
     e.sink.panes.get('pane-1')!.idle = false;
