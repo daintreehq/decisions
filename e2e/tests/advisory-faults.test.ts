@@ -202,26 +202,48 @@ const TEARDOWN_STEP_MS = 20_000;
 
 /**
  * What one test started, stopped last first when the test ends, however it ends. Every step runs even if one before
- * it fails or hangs, so the receivers, Chromium contexts and wrangler always stop. Something a timed-out test starts
- * after its scope closed is stopped as soon as it is added, never left to the next test.
+ * it fails or hangs, so the receivers, Chromium contexts and wrangler always stop; a step that hangs fails the
+ * teardown once the rest have run. Something a timed-out test starts after its scope closed is stopped as soon as it
+ * is added, and the next test waits for that before it starts (`Scope.stragglers`).
  */
 class Scope {
+  private static readonly late = new Set<Promise<boolean>>();
   private steps: (() => unknown)[] = [];
   private closed = false;
 
+  /** Waits for what closed scopes are still stopping. */
+  static async stragglers(): Promise<void> {
+    await Promise.all(Scope.late);
+  }
+
   add(step: () => unknown): void {
-    if (this.closed) void Scope.run(step);
-    else this.steps.push(step);
+    if (!this.closed) {
+      this.steps.push(step);
+      return;
+    }
+    const stopping = Scope.run(step);
+    Scope.late.add(stopping);
+    void stopping.finally(() => Scope.late.delete(stopping));
   }
 
   async close(): Promise<void> {
     this.closed = true;
-    for (const step of this.steps.splice(0).reverse()) await Scope.run(step);
+    let hung = 0;
+    for (const step of this.steps.splice(0).reverse()) if (!(await Scope.run(step))) hung++;
+    if (hung) throw new Error(`${hung} teardown step(s) did not finish in ${TEARDOWN_STEP_MS} ms`);
   }
 
-  private static run(step: () => unknown): Promise<unknown> {
-    return within(Promise.resolve().then(step), TEARDOWN_STEP_MS, 'a teardown step').catch(
-      () => undefined,
+  /** False when the step neither ended nor failed in time. A step that fails has still ended. */
+  private static run(step: () => unknown): Promise<boolean> {
+    return within(
+      Promise.resolve()
+        .then(step)
+        .catch(() => undefined),
+      TEARDOWN_STEP_MS,
+      'a teardown step',
+    ).then(
+      () => true,
+      () => false,
     );
   }
 }
@@ -238,15 +260,19 @@ describe.skipIf(!chromiumPath)(
       browser = await chromium.launch({ executablePath: chromiumPath!, headless: true });
     }, 60_000);
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      await Scope.stragglers();
       scope = new Scope();
-    });
+    }, 30_000);
 
     afterEach(async () => {
-      await scope.close();
-      // Only once the receivers have stopped, so none finds its terminal idle again while it shuts down.
-      vi.restoreAllMocks();
-    }, 120_000);
+      try {
+        await scope.close();
+      } finally {
+        // Only once the receivers have stopped, so none finds its terminal idle again while it shuts down.
+        vi.restoreAllMocks();
+      }
+    }, 240_000);
 
     afterAll(async () => {
       await browser?.close().catch(() => undefined);
@@ -377,13 +403,13 @@ describe.skipIf(!chromiumPath)(
           onReady: (h) => ready({ bridge: h.bridge, url: h.mcp!.url, token: h.token! }),
         },
       );
-      let stopped = false;
-      const stop = async () => {
-        if (stopped) return;
-        stopped = true;
-        release();
-        await serving.catch(() => undefined);
-      };
+      // One stop, however many ask for it: a teardown after a stop cut short by a timeout still waits for it to end.
+      let stopping: Promise<void> | null = null;
+      const stop = () =>
+        (stopping ??= (async () => {
+          release();
+          await serving.catch(() => undefined);
+        })());
       s.scope.add(stop);
       // Ends a wait below as soon as the receiver ends on its own, with what it reported.
       const exited = serving.then(
@@ -746,11 +772,15 @@ describe.skipIf(!chromiumPath)(
       // 6. The socket returns, and the relay's history brings the expiry. It is taken in, and its notice waits for the
       // busy terminal.
       busy.mockClear();
+      const away = tap.connections;
       first.bridge.socket.start();
+      // Everything the relay holds since the receiver last read: up to the catch-up's final `caught_up`.
       await until(
-        async () => tap.events(id, 'decision.expired').length > 0,
+        async () =>
+          tap.frames.some((f) => f.conn > away && f.t === 'caught_up' && f.has_more === false) &&
+          tap.events(id, 'decision.expired').length > 0,
         30_000,
-        'the expiry sent to the receiver',
+        'the receiver caught up with the expiry',
       );
       // The relay's history holds the question once, created at the receipt's event, then expired: the retry added
       // nothing to it.
