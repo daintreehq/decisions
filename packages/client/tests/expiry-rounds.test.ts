@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DEFAULTS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import {
   DecisionsBridge,
@@ -789,11 +789,11 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
   }
   /** Reopened to `expiresAt`, stored the way an earlier bridge left it: the first round's deadline kept. */
   async function legacy(
-    expiresAt: string | null,
+    expiresAt: string | null | ((e: Env) => string | null),
     before: (e: Env) => Promise<void> = async () => {},
   ) {
     const e = await asked();
-    await e.reopen(1, expiresAt);
+    await e.reopen(1, typeof expiresAt === 'function' ? expiresAt(e) : expiresAt);
     await before(e);
     await e.bridge.catchUp();
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
@@ -804,6 +804,9 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
   const events = async (e: Env) => (await e.store.listAudit(100)).map((a) => a.event);
   const directoryReads = (e: Env) =>
     e.relay.calls.filter((c) => c.path.endsWith('/devices')).length;
+  /** The background pass has settled every question and marked the store. */
+  const settled = (e: Env) =>
+    vi.waitFor(async () => expect(await e.store.getMeta('rounds-reconciled')).not.toBeNull());
 
   it('the next pass takes the deadline of the verified reopen that started the round', async () => {
     const e = await legacy(null);
@@ -811,6 +814,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     const cancel = e.relay.events.find((ev) => ev.event_type === 'decision.cancelled')!;
     await e.store.updateQuestion(e.qid, { remote_event_seq: cancel.seq });
     await e.again.catchUp();
+    await settled(e);
     expect(await e.again.getDecision(e.qid)).toMatchObject({
       status: 'open',
       revision: 1,
@@ -837,6 +841,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
     (e.store as unknown as { meta: Map<string, string> }).meta.delete('rounds-reconciled');
     await e.again.catchUp();
+    await settled(e);
     expect((await e.row()).expires_at).toBeNull();
     expect(await events(e)).not.toContain('round.ambiguous');
   });
@@ -844,10 +849,12 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
   it('once a store has been searched, a restart does not search it again', async () => {
     const e = await legacy(null);
     await e.again.catchUp();
+    await settled(e);
     expect((await e.row()).expires_at).toBeNull();
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
     const third = await restart({ ...e, bridge: e.again });
     await third.catchUp();
+    await tick(20);
     expect((await e.row()).expires_at).toBe(e.deadline);
   });
 
@@ -859,6 +866,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     });
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
     await e.again.catchUp();
+    await settled(e);
     expect(await e.again.getDecision(e.qid)).toMatchObject({ revision: 2, expiresAt: later });
   });
 
@@ -873,6 +881,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     });
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
     await e.again.catchUp();
+    await settled(e);
     expect(await e.again.getDecision(e.qid)).toMatchObject({
       status: 'human-answered',
       revision: 2,
@@ -888,10 +897,12 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     });
     await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
     await e.again.catchUp();
+    await settled(e);
     expect((await e.row()).expires_at).toBeNull();
+    expect(await events(e)).not.toContain('round.ambiguous');
   });
 
-  it("while the directory cannot be read, only that question's expiry waits for its round to be settled", async () => {
+  it('while the directory cannot be read, nothing waits: an expiry is judged by what the stored reopen signed', async () => {
     let other = '';
     const e = await legacy(null, async (x) => {
       other = (
@@ -899,23 +910,76 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
       ).questionId;
       await x.bridge.pump();
     });
-    // Another question's expiry, ahead in the ledger, needs nothing from the directory.
-    e.relay.expiryEvent({ questionId: other });
     e.relay.expiryEvent({ questionId: e.qid, revision: 1, at: e.later(e.deadline, MIN) });
+    e.relay.expiryEvent({ questionId: other });
     e.at(e.deadline, 2 * MIN);
     e.relay.devicesFail = true;
     await e.again.catchUp();
-    expect((await e.again.getDecision(other)).status).toBe('expired');
+    await vi.waitFor(async () => expect(await events(e)).toContain('rounds.unreconciled'));
+    // The row still holds the first round's deadline, but its reopen signed none: the claim is refused, at once.
+    expect((await e.row()).expires_at).toBe(e.deadline);
     expect((await e.row()).local_status).toBe('open');
-    expect((await e.store.listAudit(100)).map((a) => a.event)).toContain('rounds.unreconciled');
+    expect(await e.rejected()).toEqual(['expiry-without-deadline']);
+    expect((await e.again.getDecision(other)).status).toBe('expired');
     expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
+    // A minute on, with the directory back, the next pass repairs the row.
     e.relay.devicesFail = false;
+    e.at(e.deadline, 4 * MIN);
     await e.again.catchUp();
-    expect(await e.again.getDecision(e.qid)).toMatchObject({ status: 'open', expiresAt: null });
-    expect(await e.rejected()).toContain('expiry-without-deadline');
+    await settled(e);
+    expect((await e.row()).expires_at).toBeNull();
   });
 
-  it('two verified reopens into the same round are ambiguous: the row is left alone', async () => {
+  it('reopens into one round that disagree, a deadline then none, count as none, before and after repair', async () => {
+    let later = '';
+    const e = await legacy(
+      (x) => (later = x.later(x.deadline, DAY)),
+      async (x) => {
+        // A second signed reopen into the same round, with no deadline: the old bridge refused it, the question being
+        // open already, but kept it with the rest.
+        await x.relay.plainActionEvent({
+          questionId: x.qid,
+          signer: x.desktop,
+          action: 'reopen',
+          expectedRevision: 0,
+          expiresAt: null,
+        });
+      },
+    );
+    await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
+    e.relay.devicesFail = true;
+    e.relay.expiryEvent({ questionId: e.qid, revision: 1, at: e.later(later, MIN) });
+    e.at(later, 2 * MIN);
+    await e.again.catchUp();
+    expect((await e.row()).local_status).toBe('open');
+    expect(await e.rejected()).toEqual(['transition:invalid_state', 'expiry-without-deadline']);
+    e.relay.devicesFail = false;
+    e.at(later, 4 * MIN);
+    await e.again.catchUp();
+    await settled(e);
+    expect((await e.row()).expires_at).toBeNull();
+  });
+
+  it('until a reopened row is repaired, an expiry before its signed later deadline is early', async () => {
+    let later = '';
+    const e = await legacy(null, async (x) => {
+      later = x.later(x.deadline, 2 * DAY);
+      await x.reopen(2, later);
+    });
+    await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
+    e.relay.devicesFail = true;
+    e.relay.expiryEvent({ questionId: e.qid, revision: 2, at: e.later(e.deadline, MIN) });
+    e.at(e.deadline, 2 * MIN);
+    await e.again.catchUp();
+    expect((await e.row()).local_status).toBe('open');
+    expect(await e.rejected()).toEqual(['expiry-before-deadline']);
+    e.relay.expiryEvent({ questionId: e.qid, revision: 2, at: later });
+    e.at(later, MIN);
+    await e.again.catchUp();
+    expect((await e.row()).local_status).toBe('expired');
+  });
+
+  it('two verified reopens into the same round that disagree give the later deadline, here none', async () => {
     const e = await legacy(null, async (x) => {
       // The old bridge rejects the second (the question is already open) but keeps it with the rest.
       await x.relay.plainActionEvent({
@@ -927,9 +991,9 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
       });
     });
     await e.again.catchUp();
-    expect((await e.row()).expires_at).toBe(e.deadline);
+    await settled(e);
+    expect((await e.row()).expires_at).toBeNull();
     expect(await events(e)).toContain('round.ambiguous');
-    expect(await events(e)).not.toContain('round.reconciled');
   });
 
   it('a row whose deadline already matches costs no verification', async () => {
@@ -940,6 +1004,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     const again = await restart(e);
     const reads = directoryReads(e);
     await again.catchUp();
+    await settled(e);
     expect(directoryReads(e)).toBe(reads);
     expect(await events(e)).not.toContain('round.reconciled');
     expect(await e.store.getMeta('rounds-reconciled')).not.toBeNull();

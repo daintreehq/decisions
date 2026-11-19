@@ -78,6 +78,12 @@ export function withdrawClosures(entries: AnswerEntry[], revision: number): Answ
   );
 }
 
+/** The latest of several deadlines; null (never) when any of them is. */
+function latestDeadline(deadlines: (string | null)[]): string | null {
+  if (deadlines.some((d) => d === null)) return null;
+  return (deadlines as string[]).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+}
+
 /** Meta key: the stored history was searched for reopens whose deadline an earlier bridge did not keep. */
 const ROUNDS_RECONCILED = 'rounds-reconciled';
 
@@ -116,12 +122,13 @@ function protocolStatus(s: QuestionRow['local_status']): QuestionStatus | null {
 export class Inbox {
   private readonly serial = new Mutex();
   private readonly transientAttempts = new Map<number, { n: number; since: number }>();
-  /** Rows written before reopens kept their deadline are reconciled before any event applies (`reconcileRounds`). */
-  private reconciled = false;
-  /** Questions whose round the stored history could not settle yet: an expiry for one waits until it does. */
-  private readonly unsettled = new Set<string>();
-  /** The stored reopens `reconcileRounds` reads, once per run. */
-  private history: LedgerEvent[] | null = null;
+  /**
+   * Rows written before reopens kept their deadline are repaired in the background (`reconcileRounds`), never in the
+   * way of an event. Until a pass has settled them all, an expiry is judged by `roundDeadline` instead.
+   */
+  private reconciling: Promise<void> | null = null;
+  private reconcileDone = false;
+  private reconcileAfter = 0;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -155,7 +162,11 @@ export class Inbox {
   processPending(): Promise<boolean> {
     return this.serial.run(async () => {
       let drain = false;
-      if (!this.reconciled) this.reconciled = await this.reconcileRounds();
+      if (!this.reconcileDone && !this.reconciling && this.ctx.now() >= this.reconcileAfter) {
+        this.reconciling = this.reconcileRounds().finally(() => {
+          this.reconciling = null;
+        });
+      }
       for (;;) {
         const cursor = await this.ctx.store.getCursor();
         const batch = (await this.ctx.store.unprocessedEvents(50)).filter((e) => e.seq <= cursor);
@@ -384,61 +395,58 @@ export class Inbox {
 
   /**
    * A bridge before this one stored a reopen's status and revision but kept the previous round's deadline. For each
-   * reopened question, take the deadline signed by the latest verified reopen in the stored history that the row's
-   * revision has reached. Nothing is guessed: no verified reopen, or reopens into that round that disagree on the
-   * deadline, leave the row as it is.
+   * reopened question, write the deadline signed by the latest verified reopen in the stored history that the row's
+   * revision has reached. Runs beside event processing; the store is marked once a pass has settled every question,
+   * and an unfinished pass is tried again a minute later.
    */
-  private async reconcileRounds(): Promise<boolean> {
+  private async reconcileRounds(): Promise<void> {
     const { ctx } = this;
-    if (!ctx.store.processedEventsOfType) return true;
-    // Every reopen applied since keeps its deadline: one complete pass over the history is all a store needs.
-    if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return true;
+    let settled = false;
     try {
-      // The history is read once per run; a later pass looks again only at the questions it did not settle.
-      const first = this.history === null;
+      if (!ctx.store.processedEventsOfType) return void (settled = true);
+      if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return void (settled = true);
       const rows = (await ctx.store.listQuestions()).filter(
-        (q) =>
-          !q.history_only &&
-          q.question_revision > 0 &&
-          (first || this.unsettled.has(q.question_id)),
+        (q) => !q.history_only && q.question_revision > 0,
       );
-      this.history ??=
+      const reopens =
         rows.length === 0
           ? []
           : (await ctx.store.processedEventsOfType('decision.reopened')).map(
               (e) => JSON.parse(e.json) as LedgerEvent,
             );
-      this.unsettled.clear();
+      let open = 0;
       for (const row of rows) {
-        let settled: boolean;
-        try {
-          settled = await this.reconcileRow(row, this.history);
-        } catch (e) {
-          if (!(e instanceof TransientError)) throw e;
-          settled = false; // the directory could not be read: tried again on the next pass
-        }
-        if (!settled) this.unsettled.add(row.question_id);
+        const done = await this.reconcileRow(row, reopens).catch(async (e: Error) => {
+          await ctx.audit.log({
+            event: 'round.unreconciled',
+            question_id: row.question_id,
+            result: e.message.slice(0, 80),
+          });
+          return false;
+        });
+        if (!done) open++;
       }
+      if (open > 0) {
+        await ctx.audit.log({ event: 'rounds.unreconciled', result: `${open}` });
+        return;
+      }
+      await ctx.store.setMeta(ROUNDS_RECONCILED, String(ctx.now()));
+      settled = true;
     } catch (e) {
-      await ctx.audit.log({
-        event: 'rounds.unreconciled',
-        result: (e as Error).message.slice(0, 80),
-      });
-      return false;
+      await ctx.audit
+        .log({ event: 'rounds.unreconciled', result: (e as Error).message.slice(0, 80) })
+        .catch(() => undefined);
+    } finally {
+      if (settled) this.reconcileDone = true;
+      else this.reconcileAfter = ctx.now() + 60_000;
     }
-    if (this.unsettled.size > 0) {
-      await ctx.audit.log({ event: 'rounds.unreconciled', result: `${this.unsettled.size}` });
-      return false;
-    }
-    await ctx.store.setMeta(ROUNDS_RECONCILED, String(ctx.now()));
-    return true;
   }
 
   /**
    * One question's deadline from its stored history: the one signed by the latest verified reopen its revision has
-   * reached. True once that is settled: repaired, already right, no reopen at all, or reopens into that round that
-   * disagree (nothing can be told from them). False when it is not settled yet: a reopen claims another deadline but
-   * none verifies, or the row changed meanwhile.
+   * reached. Reopens into that round that disagree give the latest of their deadlines (none, if any has none), as
+   * `roundDeadline` does. True once settled; false when a reopen claims another deadline but none verifies, or the
+   * row moved on meanwhile (a later pass looks again).
    */
   private async reconcileRow(row: QuestionRow, reopens: LedgerEvent[]): Promise<boolean> {
     const { ctx } = this;
@@ -456,12 +464,12 @@ export class Inbox {
     ) {
       return true;
     }
-    let deadlines: Set<string | null> | null = null;
+    let deadlines: (string | null)[] | null = null;
     const rounds = [...new Set(mine.map((ev) => ev.question_revision!))].sort((a, b) => b - a);
     for (const round of rounds) {
-      const found = new Set<string | null>();
+      const found: (string | null)[] = [];
       for (const ev of mine.filter((e) => e.question_revision === round)) {
-        const v = await this.verifier.verifyAction(ev); // may throw TransientError
+        const v = await this.verifier.verifyAction(ev); // may throw TransientError: looked at again later
         const declared = EventData.action.safeParse(ev.data).data;
         if (
           v.ok &&
@@ -470,20 +478,18 @@ export class Inbox {
           declared?.revision === round &&
           declared.status === 'open'
         ) {
-          found.add(v.record.expires_at);
+          found.push(v.record.expires_at);
         }
       }
-      if (found.size > 0) {
+      if (found.length > 0) {
         deadlines = found;
         break;
       }
     }
     if (!deadlines) return false;
-    if (deadlines.size > 1) {
+    if (new Set(deadlines).size > 1)
       await ctx.audit.log({ event: 'round.ambiguous', question_id: row.question_id });
-      return true;
-    }
-    const [deadline] = [...deadlines] as [string | null];
+    const deadline = latestDeadline(deadlines);
     if (deadline === row.expires_at) return true;
     return ctx.lock.run(async () => {
       const fresh = await ctx.store.getQuestion(row.question_id);
@@ -502,6 +508,28 @@ export class Inbox {
   }
 
   /**
+   * The deadline an expiry is judged by. Once the store's rows are reconciled, the row's own. Until then a reopened
+   * round's row may still hold the round before's, so the deadlines the stored reopens into this round claim are
+   * used instead, unverified: the latest of them, or none if any has none. A claim the relay made up can only make
+   * that later, never earlier, so nothing is released early.
+   */
+  private async roundDeadline(row: QuestionRow): Promise<string | null> {
+    const { ctx } = this;
+    if (this.reconcileDone || row.question_revision === 0 || !ctx.store.processedEventsOfType)
+      return row.expires_at;
+    if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return row.expires_at;
+    const claims = (await ctx.store.processedEventsOfType('decision.reopened'))
+      .map((e) => JSON.parse(e.json) as LedgerEvent)
+      .filter(
+        (ev) =>
+          ev.question_id === row.question_id && ev.question_revision === row.question_revision,
+      )
+      .map((ev) => EventData.action.safeParse(ev.data).data?.record.expires_at)
+      .filter((d): d is string | null => d !== undefined);
+    return claims.length === 0 ? row.expires_at : latestDeadline(claims);
+  }
+
+  /**
    * The relay's word that the round's deadline passed. Unsigned, so it is believed only against what this desktop
    * verified: the current round, the deadline signed for it (the question's, or its latest reopen's), this
    * question's host, and the ledger order. Even then it can only ever close the question with a "not authorised"
@@ -514,8 +542,6 @@ export class Inbox {
   ): Promise<boolean> {
     // An answer, cancellation or earlier expiry already in force stays in force; a duplicate changes nothing.
     if (row.local_status !== 'open' && row.local_status !== 'queued') return false;
-    // Its deadline may be one an earlier bridge left behind: the claim waits until the history settles it.
-    if (this.unsettled.has(row.question_id)) throw new TransientError('round not reconciled yet');
     const d = EventData.expired.safeParse(ev.data);
     if (!d.success) return this.reject(row, 'malformed-event');
     if (ev.question_revision !== row.question_revision)
@@ -524,8 +550,9 @@ export class Inbox {
       return this.reject(row, 'stale-expiry');
     if (d.data.target_host_id !== (await hostRef(row.origin.host_id)))
       return this.reject(row, 'expiry-for-another-host');
-    if (row.expires_at === null) return this.reject(row, 'expiry-without-deadline');
-    const deadline = Date.parse(row.expires_at);
+    const signed = await this.roundDeadline(row);
+    if (signed === null) return this.reject(row, 'expiry-without-deadline');
+    const deadline = Date.parse(signed);
     // The relay's two clocks, and when this desktop first held the claim (with room for its clock to lag).
     if (
       Date.parse(ev.occurred_at) < deadline ||
