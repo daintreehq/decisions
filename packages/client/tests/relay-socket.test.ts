@@ -292,9 +292,13 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
     await opened();
     b.ws().recv(b.hello);
     await tick(5);
+    const beforeB = b.timers.length;
     b.ws().close(4409, 'replaced');
     expect(b.log).toContain('replaced');
     expect(b.sock.currentState).toBe('stopped');
+    expect(
+      b.timers.slice(beforeB).filter((t) => t.ms < 60_000 && !t.cancelled && t.ms >= 1000),
+    ).toHaveLength(0);
     const n = FakeSocket.instances.length;
     await tick(5);
     expect(FakeSocket.instances.length).toBe(n);
@@ -438,6 +442,9 @@ describe('bridge + socket: persist before ack, contiguous cursor', () => {
     b.bridge.on('replaced', () => void others++);
     await b.bridge.start();
     await opened(2);
+    // A connection lost on the way is no replacement: the socket backs off to reconnect.
+    FakeSocket.instances.at(-1)!.close(1006, 'lost');
+    expect(b.bridge.socket.currentState).toBe('backoff');
     await b.bridge.stop();
     const c = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
     c.bridge.on('replaced', () => void others++);

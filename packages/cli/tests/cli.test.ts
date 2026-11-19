@@ -627,18 +627,24 @@ describe('doctor', () => {
       receiving?: boolean;
       /** The test socket, given the state directory; by default it says hello at once. */
       webSocket?: (home: string) => NonNullable<Ctx['webSocket']>;
+      /** Called as doctor reads the device list, given the state directory. */
+      onDevices?: (home: string) => void;
     } = {},
   ) {
     let own: DeviceCert | null = null;
     let phone: DeviceCert | null = null;
+    let doctoring = false;
     const tickets: { features?: string[] }[] = [];
     const m = mkCtx({
       routes: {
-        'GET /api/v1/devices': () => ({
-          key_epoch: 1,
-          owner_device_id: own!.device_id,
-          devices: devices(own!, phone!),
-        }),
+        'GET /api/v1/devices': () => {
+          if (doctoring) o.onDevices?.(m.ctx.home);
+          return {
+            key_epoch: 1,
+            owner_device_id: own!.device_id,
+            devices: devices(own!, phone!),
+          };
+        },
         'POST /api/v1/socket-ticket': (body) => {
           tickets.push(body as { features?: string[] });
           return { ticket: 't', expires_at: now, ws_path: '/api/v1/socket' };
@@ -678,13 +684,16 @@ describe('doctor', () => {
       });
     const receiver = ReceiverLock.forHome(m.ctx.home);
     if (o.receiving) expect(receiver.tryAcquire()).toBe(true);
+    const t0 = performance.now();
+    doctoring = true;
     try {
       // This fake relay fails checks unrelated to the ticket (health, storage, push), so doctor reports problems.
       await expect(doctor(m.ctx, {}, {})).rejects.toThrow(CliError);
     } finally {
+      doctoring = false;
       receiver.release();
     }
-    return { ...m, tickets };
+    return { ...m, tickets, ms: performance.now() - t0 };
   }
 
   it("re-declares this device's features on its test ticket, so the relay keeps what it gates on them", async () => {
@@ -727,12 +736,25 @@ describe('doctor', () => {
     expect(text).toContain(`${failures} check(s) failed.`);
   });
 
-  it('holds the receiver lock through its socket check, so no receiver starts and loses its socket to it', async () => {
-    const during: boolean[] = [];
+  it('holds the receiver lock from reading the declaration to the end of its socket check, then closes the socket', async () => {
+    /** Whether another process could take the lock: as doctor reads the device list, and as its socket says hello. */
+    const free: Record<string, boolean> = {};
+    const probe = (home: string, at: string) => {
+      const other = ReceiverLock.forHome(home);
+      free[at] = other.tryAcquire();
+      other.release();
+    };
     let home = '';
+    const sockets: {
+      onmessage: ((ev: { data: unknown }) => void) | null;
+      onclose: unknown;
+      onerror: unknown;
+      closed: number[];
+    }[] = [];
     const { tickets, out } = await doctorWorld(
       (own, phone) => [deviceRow(phone, []), deviceRow(own, [])],
       {
+        onDevices: (h) => probe(h, 'devices'),
         webSocket: (h) => {
           home = h;
           return () => {
@@ -740,12 +762,12 @@ describe('doctor', () => {
               onmessage: null as ((ev: { data: unknown }) => void) | null,
               onerror: null,
               onclose: null,
-              close: () => {},
+              closed: [] as number[],
+              close: (code = 1000) => void ws.closed.push(code),
             };
+            sockets.push(ws);
             setTimeout(() => {
-              const other = ReceiverLock.forHome(h);
-              during.push(other.tryAcquire());
-              other.release();
+              probe(h, 'hello');
               ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) });
             }, 0);
             return ws as never;
@@ -754,28 +776,49 @@ describe('doctor', () => {
       },
     );
     expect(tickets).toHaveLength(1);
-    expect(during).toEqual([false]);
+    expect(free).toEqual({ devices: false, hello: false });
     expect(out.join('\n')).toMatch(/✓ websocket +upgrade \+ hello received/);
+    // Done with it: the test socket is closed and hears nothing more.
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.closed).toEqual([1000]);
+    expect([sockets[0]!.onmessage, sockets[0]!.onclose, sockets[0]!.onerror]).toEqual([
+      null,
+      null,
+      null,
+    ]);
     const after = ReceiverLock.forHome(home);
     expect(after.tryAcquire()).toBe(true);
     after.release();
   });
 
   it('reports a socket the relay closes before hello at once, without waiting out its timer', async () => {
-    const { out } = await doctorWorld((own, phone) => [deviceRow(phone, []), deviceRow(own, [])], {
-      webSocket: () => () => {
-        const ws = {
-          onmessage: null,
-          onerror: null,
-          onclose: null as ((ev: { code: number; reason: string }) => void) | null,
-          close: () => {},
-        };
-        setTimeout(() => ws.onclose?.({ code: 1006, reason: '' }), 0);
-        return ws as never;
+    let socket: { onmessage: unknown; onclose: unknown; onerror: unknown } | null = null;
+    const { out, ms } = await doctorWorld(
+      (own, phone) => [deviceRow(phone, []), deviceRow(own, [])],
+      {
+        webSocket: () => () => {
+          const ws = {
+            onmessage: null,
+            onerror: null,
+            onclose: null as ((ev: { code: number; reason: string }) => void) | null,
+            close: () => {},
+          };
+          socket = ws;
+          setTimeout(() => ws.onclose?.({ code: 1006, reason: '' }), 0);
+          return ws as never;
+        },
       },
-    });
+    );
     expect(out.join('\n')).toMatch(/✗ websocket +could not open the hibernatable socket/);
-  }, 4_000);
+    // Settled by the close, not the 8 s timer, and done with the socket.
+    expect(ms).toBeLessThan(4_000);
+    expect(socket).toEqual({
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      close: expect.any(Function),
+    });
+  }, 15_000);
 
   it('skips the socket check rather than declaring nothing when this device is not listed', async () => {
     const { tickets, out } = await doctorWorld((_own, phone) => [

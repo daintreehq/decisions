@@ -1008,21 +1008,46 @@ function relaySockets(e: Awaited<ReturnType<typeof env>>) {
   };
   /** The sockets the relay still holds open, newest last. */
   const live = () => opened.filter((s) => s.readyState === 1);
-  return { opened, live, webSocket, close: () => clearInterval(timer) };
+  /** Until the newest open socket has replayed to its client. */
+  const synced = () =>
+    vi.waitFor(() => expect(live().at(-1)?.sent).toBeTypeOf('number'), { timeout: 10_000 });
+  return { opened, live, synced, webSocket, close: () => clearInterval(timer) };
+}
+
+/** Stops what a test started (waits as a signal would, listeners through `until`) when it ends, however it ends. */
+function teardown() {
+  const stops: (() => void)[] = [];
+  return {
+    signal(): Promise<StopSignal> {
+      return new Promise<StopSignal>((r) => stops.push(() => r('SIGINT')));
+    },
+    until(): { until: Promise<void>; stop: () => void } {
+      let stop!: () => void;
+      const until = new Promise<void>((r) => (stop = r));
+      stops.push(stop);
+      return { until, stop };
+    },
+    end: () => stops.forEach((stop) => stop()),
+  };
 }
 
 describe('a receiver beside decisions doctor', () => {
   it('doctor leaves a socket-mode wait receiving: an answer that arrives afterwards still reaches it', async () => {
     const e = await env();
     const sockets = relaySockets(e);
+    const t = teardown();
     try {
       const asker = e.proc();
       await ask(asker.ctx, {}, { question: 'Ship it?', stopped: never() });
       const id = asker.records()[0]!.question_id as string;
       const waiter = e.proc();
       waiter.ctx.webSocket = sockets.webSocket;
-      const w = waitCmd(waiter.ctx, {}, id, { stopped: never(), waitTimeout: '20s', tickMs: 10 });
-      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      const w = waitCmd(waiter.ctx, {}, id, {
+        stopped: t.signal(),
+        waitTimeout: '20s',
+        tickMs: 10,
+      });
+      await sockets.synced();
 
       const doc = e.proc({ json: false });
       doc.ctx.webSocket = sockets.webSocket;
@@ -1043,6 +1068,7 @@ describe('a receiver beside decisions doctor', () => {
         text: 'Ship it',
       });
     } finally {
+      t.end();
       sockets.close();
     }
   }, 30_000);
@@ -1050,6 +1076,7 @@ describe('a receiver beside decisions doctor', () => {
   it('a wait whose socket another connection replaced stops and says so, and the wait observing takes over', async () => {
     const e = await env();
     const sockets = relaySockets(e);
+    const t = teardown();
     try {
       const asker = e.proc();
       await ask(asker.ctx, {}, { question: 'Merge it?', stopped: never() });
@@ -1057,19 +1084,24 @@ describe('a receiver beside decisions doctor', () => {
       const first = e.proc();
       first.ctx.webSocket = sockets.webSocket;
       const a = waitCmd(first.ctx, {}, id, {
-        stopped: never(),
+        stopped: t.signal(),
         waitTimeout: '20s',
         tickMs: 10,
       }).then(
         (code) => code,
         (x: unknown) => x as Error,
       );
-      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      await sockets.synced();
       const second = e.proc();
       second.ctx.webSocket = sockets.webSocket;
-      const b = waitCmd(second.ctx, {}, id, { stopped: never(), waitTimeout: '20s', tickMs: 10 });
-      await vi.waitFor(() =>
-        expect(second.err.join('\n')).toMatch(/another decisions process receives/),
+      const b = waitCmd(second.ctx, {}, id, {
+        stopped: t.signal(),
+        waitTimeout: '20s',
+        tickMs: 10,
+      });
+      await vi.waitFor(
+        () => expect(second.err.join('\n')).toMatch(/another decisions process receives/),
+        { timeout: 10_000 },
       );
 
       // Another connection for this device (an older doctor, say) opens and goes: the first wait's socket is replaced.
@@ -1092,25 +1124,33 @@ describe('a receiver beside decisions doctor', () => {
       expect(first.records()).toEqual([]);
       expect(sockets.opened).toHaveLength(3);
     } finally {
+      t.end();
       sockets.close();
     }
   }, 30_000);
 
-  it('a listener whose socket another connection replaced stops and frees the state directory; a stop it asked for does not', async () => {
+  it('a listener whose socket another connection replaced stops, closes its MCP and frees the state directory; a stop it asked for does not', async () => {
     const e = await env();
     const sockets = relaySockets(e);
+    const t = teardown();
     try {
       const listener = e.proc({ json: false });
       listener.ctx.webSocket = sockets.webSocket;
-      let release!: () => void;
-      const until = new Promise<void>((r) => (release = r));
-      const listening = daemon(listener.ctx, {}, { until });
-      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      let ready!: (url: string) => void;
+      const up = new Promise<string>((r) => (ready = r));
+      const listening = daemon(
+        listener.ctx,
+        {},
+        { until: t.until().until, mcp: { port: 0 }, onReady: (h) => ready(h.mcp!.url) },
+      );
+      const url = await up;
+      await sockets.synced();
       sockets.webSocket('elsewhere').close(1000);
       await expect(listening).rejects.toThrow(
         /stopped listening: another connection for this device replaced this process's relay socket/,
       );
-      release();
+      // Its MCP server is gone with it, and another receiver can take the state directory.
+      await expect(fetch(url, { method: 'POST' })).rejects.toThrow();
       const lock = ReceiverLock.forHome(e.home);
       expect(lock.tryAcquire()).toBe(true);
       lock.release();
@@ -1118,13 +1158,14 @@ describe('a receiver beside decisions doctor', () => {
       // Stopped on request, it ends quietly.
       const again = e.proc({ json: false });
       again.ctx.webSocket = sockets.webSocket;
-      let stop!: () => void;
-      const done = daemon(again.ctx, {}, { until: new Promise<void>((r) => (stop = r)) });
-      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      const { until, stop } = t.until();
+      const done = daemon(again.ctx, {}, { until });
+      await sockets.synced();
       stop();
       await done;
       expect(again.err.join('\n')).not.toMatch(/replaced/);
     } finally {
+      t.end();
       sockets.close();
     }
   }, 30_000);

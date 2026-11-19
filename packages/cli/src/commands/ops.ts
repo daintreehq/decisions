@@ -38,8 +38,11 @@ import {
 import { ReceiverLock } from '../receiver.js';
 
 const STATUS_PROBE_MS = 5_000;
-/** How long each of doctor's requests may take while it holds the receiver lock for its socket check. */
-const DOCTOR_REQUEST_MS = 10_000;
+/**
+ * How long each of doctor's requests may take while it holds the receiver lock for its socket check. With one attempt
+ * each and the handshake's 8 s, the lock is held for well under the 30 s a plain `ask` gives itself to publish.
+ */
+const DOCTOR_REQUEST_MS = 5_000;
 
 export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   const rt = await openRuntime(ctx, g);
@@ -216,7 +219,10 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
       // socket check is skipped rather than declaring nothing.
       let declared: ProtocolFeature[] | null = null;
       try {
-        const list = await verifiedDevices(client, { timeoutMs: DOCTOR_REQUEST_MS });
+        const list = await verifiedDevices(client, {
+          timeoutMs: DOCTOR_REQUEST_MS,
+          retry: false,
+        });
         add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
         const me = identity.config.deviceId;
         const self = list.find((d) => d.device_id === me);

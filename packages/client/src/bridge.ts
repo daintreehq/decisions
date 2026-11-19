@@ -660,7 +660,7 @@ export class DecisionsBridge {
           this.listeners.socket.forEach((l) => l(s, d));
         },
         onRevoked: () => this.markRevoked(),
-        onReplaced: () => this.listeners.replaced.forEach((l) => l()),
+        onReplaced: () => [...this.listeners.replaced].forEach((l) => l()),
         onError: (e) => this.emitError(e),
       },
     });
