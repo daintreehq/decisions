@@ -635,7 +635,8 @@ export class DecisionsBridge {
           this.socketReplay = s === 'syncing' || (s === 'live' && this.socketReplay);
           if (s === 'syncing') this.ledgerRead = false;
           // What the replay applied was held from delivery while it ran (`onSocketEvent`): deliver it now.
-          if (abandoned && this.running()) void this.deliverNow();
+          if (abandoned && this.running())
+            void this.deliverNow().catch((e) => this.emitError(e as Error));
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
@@ -1228,7 +1229,7 @@ export class DecisionsBridge {
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
     // Whether an advisory notice would wait for the ledger is read before the row: an event applied in between is
     // then in the row, and one applied after it was still unsettled here.
-    const unsettled = await this.delivery.ledgerHolds(questionId);
+    const unsettled = await this.delivery.ledgerHolds(questionId).catch(() => true);
     const row = await this.owned(questionId, pane);
     return this.view(row, unsettled);
   }
@@ -1264,7 +1265,7 @@ export class DecisionsBridge {
     const waiting =
       timeout?.inForce === true &&
       (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention') &&
-      (unsettled ?? (await this.delivery.ledgerHolds(row.question_id)));
+      (unsettled === true || (await this.delivery.ledgerHolds(row.question_id).catch(() => true)));
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1489,8 +1490,6 @@ export class DecisionsBridge {
    */
   private async ledgerUnsettled(questionId: string): Promise<'unapplied' | 'reading' | null> {
     const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
-    // Too many to look through: one of them may be the question's.
-    if (stored.length >= UNAPPLIED_SCAN) return 'unapplied';
     for (const e of stored) {
       let id: unknown;
       try {
@@ -1500,6 +1499,7 @@ export class DecisionsBridge {
       }
       if (id === questionId) return 'unapplied';
     }
+    // More than were looked through: one of them may be the question's, so the wait is bounded like a read's.
     return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
       ? 'reading'
       : null;

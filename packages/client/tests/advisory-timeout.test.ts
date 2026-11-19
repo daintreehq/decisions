@@ -587,6 +587,9 @@ describe('where the advisory notice goes', () => {
     e.relay.down = 1;
     await expect(e.bridge.catchUp()).rejects.toThrow();
     expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(false);
+    // A read that never gets through holds it two minutes at most, here too.
+    e.setNow(e.now + ADVISORY_LEDGER_WAIT_MS);
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
   });
 
   it('waits two minutes at most for a read that does not get through', async () => {

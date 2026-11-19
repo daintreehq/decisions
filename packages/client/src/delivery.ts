@@ -209,6 +209,8 @@ export class DeliveryEngine {
   private readonly closureWrites = new Map<string, Promise<void>>();
   /** An advisory notice waited for the ledger in the latest pass (`DeliveryOptions.replaying`). */
   private held = new Set<string>();
+  /** Extra passes a drain ran for notices that waited for the ledger: one at most. */
+  private holdRuns = 0;
   /** When each question's advisory notice started waiting for a read of the relay. */
   private readonly waitingSince = new Map<string, number>();
 
@@ -227,8 +229,10 @@ export class DeliveryEngine {
     const state = await this.o.replaying?.(questionId);
     if (!state) return false;
     if (state === 'unapplied') return true;
-    const since = this.waitingSince.get(questionId);
-    return since === undefined || this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
+    // The wait is timed from when it was first seen, also by get_decision for a notice no pass tries to type.
+    const since = this.waitingSince.get(questionId) ?? this.ctx.now();
+    this.waitingSince.set(questionId, since);
+    return this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
   }
 
   /**
@@ -265,6 +269,7 @@ export class DeliveryEngine {
     }
     this.running = (async () => {
       const total = EMPTY();
+      this.holdRuns = 0;
       try {
         do {
           this.again = false;
@@ -274,7 +279,9 @@ export class DeliveryEngine {
           total.needsAttention += r.needsAttention;
           total.uncertain += r.uncertain;
           // A notice that waited for the ledger while it settled during the pass is typed now, not on a later wake.
-          if (!this.again && this.held.size > 0 && (await this.anySettled())) this.again = true;
+          // Once per drain: a ledger that keeps changing never keeps it running.
+          if (!this.again && this.held.size > 0 && this.holdRuns++ < 1 && (await this.anySettled()))
+            this.again = true;
         } while (this.again && !this.stopped);
       } finally {
         this.running = null;
@@ -968,7 +975,7 @@ export class DeliveryEngine {
       // The ledger may hold a later event for its round: another pass leaves it waiting and types the rest of the
       // lane, and the host drains again once the ledger settles.
       written();
-      this.again = true;
+      if (this.holdRuns++ < 1) this.again = true;
       res.deferred++;
       return res;
     }
