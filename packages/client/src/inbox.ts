@@ -12,6 +12,7 @@ import {
 import {
   isClosure,
   parseAnswers,
+  supersededClosure,
   serializeAnswers,
   type AnswerContent,
   type AnswerEntry,
@@ -76,6 +77,9 @@ export function withdrawClosures(entries: AnswerEntry[], revision: number): Answ
     isClosure(e) && e.revision < revision && !e.delivered ? { ...e, deliver: false } : e,
   );
 }
+
+/** Meta key: the stored history was searched for reopens whose deadline an earlier bridge did not keep. */
+const ROUNDS_RECONCILED = 'rounds-reconciled';
 
 /** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
@@ -152,12 +156,14 @@ export class Inbox {
           await this.reconcileRounds();
           this.reconciled = true;
         } catch (e) {
-          // A directory that cannot be read now is tried again on the next pass; anything else on the next start.
-          if (!(e instanceof TransientError)) this.reconciled = true;
           await this.ctx.audit.log({
             event: 'rounds.unreconciled',
             result: (e as Error).message.slice(0, 80),
           });
+          // A directory that cannot be read now: no event is applied against a deadline that may be stale, and
+          // the next pass tries again. Anything else is tried again on the next start.
+          if (e instanceof TransientError) return drain;
+          this.reconciled = true;
         }
       }
       for (;;) {
@@ -341,6 +347,32 @@ export class Inbox {
   }
 
   /**
+   * After a reopen: a write of an earlier round's closure notice that may or may not have reached the screen (an
+   * ambiguous sink answer, or a crash recovery found no marker for) no longer holds the question's answers back. The
+   * notice is content-free and replaced, and the uncertainty stays in the audit log. True when the question's
+   * `delivery-uncertain` came only from such writes. Runs under ctx.lock.
+   */
+  private async releaseClosureWrites(reopened: QuestionRow): Promise<boolean> {
+    const { ctx } = this;
+    if (!ctx.store.uncertainIntents) return false;
+    for (const i of await ctx.store.uncertainIntents(reopened.question_id)) {
+      if (!supersededClosure(reopened, i.answer_revision)) continue;
+      await ctx.store.updateIntent(i.injection_id, { state: 'abandoned', updated_at: ctx.now() });
+      await ctx.audit.log({
+        event: 'delivery.superseded',
+        question_id: reopened.question_id,
+        result: 'uncertain',
+      });
+    }
+    // Every uncertain write leaves its intent uncertain, so none left means none holds the question any more (also
+    // when an earlier attempt released them and stopped before the row was written).
+    return (
+      reopened.delivery_status === 'delivery-uncertain' &&
+      !(await ctx.store.hasUncertainIntent(reopened.question_id))
+    );
+  }
+
+  /**
    * Apply a verified reopen once no closure notice of the question is being written to its terminal. The check and
    * the apply share the lock delivery admits a write under, so a notice is either admitted first (and the reopen
    * waits for the sink's answer, outside the lock) or finds itself withdrawn.
@@ -362,54 +394,79 @@ export class Inbox {
 
   /**
    * A bridge before this one stored a reopen's status and revision but kept the previous round's deadline. For each
-   * open question in a reopened round, take the deadline from the one verified reopen that started that round in
-   * the stored history. Nothing is guessed: no such reopen, or more than one, leaves the row as it is.
+   * reopened question, take the deadline signed by the latest verified reopen in the stored history that the row's
+   * revision has reached. Nothing is guessed: no verified reopen, or reopens into that round that disagree on the
+   * deadline, leave the row as it is.
    */
   private async reconcileRounds(): Promise<void> {
     const { ctx } = this;
     if (!ctx.store.processedEventsOfType) return;
+    // Every reopen applied since keeps its deadline: one complete pass over the history is all a store needs.
+    if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return;
+    await this.reconcileRows();
+    await ctx.store.setMeta(ROUNDS_RECONCILED, String(ctx.now()));
+  }
+
+  private async reconcileRows(): Promise<void> {
+    const { ctx } = this;
     const rows = (await ctx.store.listQuestions()).filter(
-      (q) => !q.history_only && q.local_status === 'open' && q.question_revision > 0,
+      (q) => !q.history_only && q.question_revision > 0,
     );
     if (rows.length === 0) return;
     const reopens = (await ctx.store.processedEventsOfType('decision.reopened')).map(
       (e) => JSON.parse(e.json) as LedgerEvent,
     );
     for (const row of rows) {
-      const into = reopens.filter(
+      const mine = reopens.filter(
         (ev) =>
-          ev.question_id === row.question_id && ev.question_revision === row.question_revision,
+          ev.question_id === row.question_id &&
+          ev.question_revision !== null &&
+          ev.question_revision <= row.question_revision,
       );
-      const claimed = into.map((ev) => EventData.action.safeParse(ev.data).data?.record.expires_at);
       // The usual case once reopens keep their deadline: nothing differs, so nothing is verified.
-      if (claimed.every((d) => d === row.expires_at)) continue;
-      const verified: (string | null)[] = [];
-      for (const ev of into) {
-        const v = await this.verifier.verifyAction(ev); // may throw TransientError: retried on the next pass
-        const declared = EventData.action.safeParse(ev.data).data;
-        if (
-          v.ok &&
-          v.action === 'reopen' &&
-          v.record.expected_revision === row.question_revision - 1 &&
-          declared?.revision === row.question_revision &&
-          declared.status === 'open'
-        ) {
-          verified.push(v.record.expires_at);
-        }
-      }
-      if (verified.length !== 1) {
-        if (verified.length > 1)
-          await ctx.audit.log({ event: 'round.ambiguous', question_id: row.question_id });
+      if (
+        mine.every(
+          (ev) => EventData.action.safeParse(ev.data).data?.record.expires_at === row.expires_at,
+        )
+      ) {
         continue;
       }
-      const deadline = verified[0]!;
+      let deadlines: Set<string | null> | null = null;
+      const rounds = [...new Set(mine.map((ev) => ev.question_revision!))].sort((a, b) => b - a);
+      for (const round of rounds) {
+        const found = new Set<string | null>();
+        for (const ev of mine.filter((e) => e.question_revision === round)) {
+          const v = await this.verifier.verifyAction(ev); // may throw TransientError: retried on the next pass
+          const declared = EventData.action.safeParse(ev.data).data;
+          if (
+            v.ok &&
+            v.action === 'reopen' &&
+            v.record.expected_revision === round - 1 &&
+            declared?.revision === round &&
+            declared.status === 'open'
+          ) {
+            found.add(v.record.expires_at);
+          }
+        }
+        if (found.size > 0) {
+          deadlines = found;
+          break;
+        }
+      }
+      if (!deadlines) continue;
+      if (deadlines.size > 1) {
+        await ctx.audit.log({ event: 'round.ambiguous', question_id: row.question_id });
+        continue;
+      }
+      const [deadline] = [...deadlines] as [string | null];
       if (deadline === row.expires_at) continue;
       await ctx.lock.run(async () => {
         const fresh = await ctx.store.getQuestion(row.question_id);
         if (
           !fresh ||
-          fresh.local_status !== 'open' ||
-          fresh.question_revision !== row.question_revision
+          fresh.local_status !== row.local_status ||
+          fresh.question_revision !== row.question_revision ||
+          fresh.expires_at !== row.expires_at
         ) {
           return;
         }
@@ -569,15 +626,23 @@ export class Inbox {
         this.cb.onQuestionClosed?.(row.question_id);
         return declined;
       }
-      case 'reopen':
+      case 'reopen': {
         // A new round: its signed deadline (null: never) replaces the last one, and a closure notice of an earlier
         // round that was not typed yet never will be: the question is open again.
+        const answers_json = serializeAnswers(withdrawClosures(entries, t.revision));
+        const released = await this.releaseClosureWrites({
+          ...row,
+          ...patch,
+          answers_json,
+        } as QuestionRow);
         await ctx.store.updateQuestion(row.question_id, {
           ...patch,
           expires_at: v.record.expires_at,
-          answers_json: serializeAnswers(withdrawClosures(entries, t.revision)),
+          answers_json,
+          ...(released ? { delivery_status: 'desktop-received' as const, error_code: null } : {}),
         });
         return false;
+      }
       case 'proxy-abstain':
         await ctx.store.updateQuestion(row.question_id, { remote_event_seq: ev.seq });
         await ctx.audit.log({

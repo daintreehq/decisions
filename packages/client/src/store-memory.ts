@@ -136,6 +136,13 @@ export class MemoryLocalStore implements LocalStore {
       .filter((i) => i.state === 'intent' || i.state === 'typed')
       .map(clone);
   }
+  async uncertainIntents(questionId: string) {
+    return [...this.intents.values()]
+      .filter(
+        (i) => i.question_id === questionId && i.message_id == null && i.state === 'uncertain',
+      )
+      .map(clone);
+  }
   async hasUncertainIntent(questionId: string) {
     return [...this.intents.values()].some(
       (i) => i.question_id === questionId && i.message_id == null && i.state === 'uncertain',

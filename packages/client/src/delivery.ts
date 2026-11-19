@@ -9,6 +9,7 @@ import {
   closureInForce,
   isClosure,
   parseAnswers,
+  supersededClosure,
   serializeAnswers,
   type AnswerContent,
   type AnswerEntry,
@@ -59,6 +60,11 @@ export interface DeliveryOptions {
   maxBatchBytes?: number;
   /** Where verified phone images go on the host's disk. Without it, each is listed as unavailable. */
   phoneImages?: PhoneImageStore;
+  /**
+   * True while closure notices must wait: during a replay of missed events, a later one (a reopen) may have
+   * replaced the question's closure already.
+   */
+  holdClosures?: () => boolean;
 }
 
 export interface DrainResult {
@@ -177,19 +183,6 @@ interface Thread {
   messages: StoredMessage[];
 }
 
-/**
- * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced:
- * nothing at that revision is still to be typed, and an untyped closure notice there no longer describes the
- * question.
- */
-function supersededClosure(q: QuestionRow, revision: number): boolean {
-  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision && !e.delivered);
-  return (
-    at.some((e) => isClosure(e) && !closureInForce(e, q)) &&
-    !at.some((e) => e.deliver && (!isClosure(e) || closureInForce(e, q)))
-  );
-}
-
 export class DeliveryEngine {
   private running: Promise<DrainResult> | null = null;
   private again = false;
@@ -230,7 +223,12 @@ export class DeliveryEngine {
 
   private pending(q: QuestionRow): AnswerEntry[] {
     return parseAnswers(q.answers_json)
-      .filter((e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, q)))
+      .filter(
+        (e) =>
+          e.deliver &&
+          !e.delivered &&
+          (!isClosure(e) || (closureInForce(e, q) && !this.o.holdClosures?.())),
+      )
       .sort((a, b) => a.revision - b.revision);
   }
 
@@ -748,6 +746,7 @@ export class DeliveryEngine {
     const writing = new Promise<void>((r) => (written = r));
     const closing = new Set<string>();
     const admitted = await ctx.lock.run(async () => {
+      if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
       const rows = new Map<string, QuestionRow>();
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
@@ -827,12 +826,15 @@ export class DeliveryEngine {
       res.deferred++;
       return res;
     }
-    try {
-      return await this.typeChunk(target, chunk, questions, text, res);
-    } finally {
+    const release = () => {
       for (const id of closing)
         if (this.closureWrites.get(id) === writing) this.closureWrites.delete(id);
       written();
+    };
+    try {
+      return await this.typeChunk(target, chunk, questions, text, res, release);
+    } finally {
+      release();
     }
   }
 
@@ -851,6 +853,7 @@ export class DeliveryEngine {
     questions: QuestionRow[],
     text: string,
     res: DrainResult,
+    recorded: () => void,
   ): Promise<DrainResult> {
     const { ctx, o } = this;
     // 2. Type, and take the sink's word only in the shapes the contract allows.
@@ -866,21 +869,25 @@ export class DeliveryEngine {
       // Settle first (below), log afterwards: nothing fallible may run between a possible write and the
       // durable record that it may have happened.
       const message = thrown instanceof Error ? thrown.message : String(thrown);
-      const settled = await this.settleChunk(chunk, questions, result, res);
+      const settled = await this.settleChunk(chunk, questions, result, res, recorded);
       await ctx.audit
         .log({ event: 'inject.threw', result: message.slice(0, 80) })
         .catch(() => undefined);
       return settled;
     }
-    return this.settleChunk(chunk, questions, result, res);
+    return this.settleChunk(chunk, questions, result, res, recorded);
   }
 
-  /** Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. */
+  /**
+   * Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. `recorded` is
+   * called once the outcome is stored locally, before anything is reported to the relay.
+   */
   private async settleChunk(
     chunk: Item[],
     questions: QuestionRow[],
     result: InjectResult & { code?: string },
     res: DrainResult,
+    recorded: () => void = () => {},
   ): Promise<DrainResult> {
     const { ctx } = this;
     switch (result.outcome) {
@@ -903,8 +910,9 @@ export class DeliveryEngine {
               result.proof,
             );
           }
-          await this.ack(i.intentId);
         }
+        recorded();
+        for (const i of chunk) await this.ack(i.intentId);
         res.delivered += chunk.length;
         return res;
       case 'ambiguous': {
@@ -982,7 +990,9 @@ export class DeliveryEngine {
       const entries = parseAnswers(row.answers_json).map((e) =>
         e.entry_id === entryId ? { ...e, delivered: true, injection_id: injectionId } : e,
       );
-      const stillPending = entries.some((e) => e.deliver && !e.delivered);
+      const stillPending = entries.some(
+        (e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, row)),
+      );
       await this.ctx.store.settleIntent(injectionId, typed, questionId, {
         answers_json: serializeAnswers(entries),
         delivered_revision: Math.max(row.delivered_revision, revision),

@@ -387,6 +387,28 @@ describe('question store', () => {
     );
     expect(s.get(id)).toMatchObject({ status: 'open', revision: 1, expiresAt: later });
 
+    // Between the two deadlines, a claim for the reopened round is early, by either relay clock.
+    const between = iso(5_400_000);
+    await s.ingestAll([
+      plainEvent(
+        'decision.expired',
+        id,
+        { expired_at: later, target_host_id: 'host_aaaaaaaa' },
+        { question_revision: 1, occurred_at: between },
+      ),
+      plainEvent(
+        'decision.expired',
+        id,
+        { expired_at: between, target_host_id: 'host_aaaaaaaa' },
+        { question_revision: 1, occurred_at: later },
+      ),
+      plainEvent('decision.expired', id, { reason: 'expired' }, { question_revision: 1 }),
+    ]);
+    expect(s.get(id)!.status).toBe('open');
+    expect(s.get(id)!.integrityIssues.join()).toMatch(
+      /before the signed deadline.*before the signed deadline.*malformed/,
+    );
+
     // After both deadlines: the first round's claim, a claim for no round and one for another host change nothing.
     const after = iso(7_260_000);
     await s.ingestAll([expiry(0, after), expiry(null, after), expiry(1, after, 'host_bbbbbbbb')]);

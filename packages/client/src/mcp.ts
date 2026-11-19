@@ -363,7 +363,7 @@ export const TOOLS = [
         expires_at: {
           type: ['string', 'null'],
           description:
-            "The current round's deadline, as the person signed it when they last reopened the question. Null: no deadline.",
+            "The current round's deadline: the one the question was published with, or the one signed when it was last reopened. Null: no deadline.",
         },
         thread: {
           type: 'array',

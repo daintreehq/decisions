@@ -140,6 +140,18 @@ export function closureInForce(
 }
 
 /**
+ * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced: every
+ * entry at that revision not yet typed is such a notice. An answer at the same revision keeps the intent its own.
+ */
+export function supersededClosure(
+  q: Pick<QuestionRow, 'answers_json' | 'local_status' | 'question_revision'>,
+  revision: number,
+): boolean {
+  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision && !e.delivered);
+  return at.length > 0 && at.every((e) => isClosure(e) && !closureInForce(e, q));
+}
+
+/**
  * Where the person gave a human answer: `computer` when the owner desktop signed it (the person's own answer, made
  * on the computer, never a proxy's), `phone` for a phone or tablet. Null for a proxy answer and an expiry.
  */

@@ -516,6 +516,12 @@ export class SqliteLocalStore implements LocalStore {
     return rows.map((r) => this.intentFrom(r));
   }
 
+  async uncertainIntents(questionId: string) {
+    const rows = this.st(
+      `SELECT * FROM injection_intents WHERE question_id = ? AND message_id IS NULL AND state = 'uncertain'`,
+    ).all(questionId) as Row[];
+    return rows.map((r) => this.intentFrom(r));
+  }
   async hasUncertainIntent(questionId: string) {
     const r = this.st(
       `SELECT 1 AS x FROM injection_intents WHERE question_id = ? AND message_id IS NULL AND state = 'uncertain' LIMIT 1`,

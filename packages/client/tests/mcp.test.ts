@@ -443,6 +443,13 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
   });
   it('get_decision reports the revision and deadline each signed reopen set, down to none at all', async () => {
     const { mcp, bridge, relay, identity } = await boot();
+    const tools = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body).result.tools as {
+      name: string;
+      outputSchema: { properties: Record<string, { type: unknown }> };
+    }[];
+    const schema = tools.find((t) => t.name === 'get_decision')!.outputSchema.properties;
+    expect(schema.revision!.type).toBe('integer');
+    expect(schema.expires_at!.type).toEqual(['string', 'null']);
     const owner = { deviceId: identity.config.deviceId, keys: identity.keys };
     const ask = await call(mcp, 'ask_human', { question: 'Ship it?' });
     const id = ask.structuredContent.question_id as string;

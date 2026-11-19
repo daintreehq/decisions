@@ -62,6 +62,11 @@ export interface LocalStore {
    * stay blocked. A follow-up message's uncertain intent blocks only that message, never the answers.
    */
   hasUncertainIntent(questionId: string): Promise<boolean>;
+  /**
+   * The question's answer intents (`message_id` null) left uncertain, which `hasUncertainIntent` counts. Optional:
+   * without it, a reopen releases none of them.
+   */
+  uncertainIntents?(questionId: string): Promise<InjectionIntent[]>;
   /** Update an intent and its question in ONE atomic write (no crash window between them). */
   settleIntent(
     intentId: string,
