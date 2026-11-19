@@ -13,7 +13,7 @@ import {
   type AttachmentSpool,
   type BridgeContext,
 } from './context.js';
-import { DeliveryEngine, type DrainResult } from './delivery.js';
+import { ADVISORY_LEDGER_WAIT_MS, DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
 import {
@@ -359,8 +359,8 @@ export interface DecisionView {
    * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
    * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
    * desktop to read the relay (a reopen may be on its way), unless its sink refused a write admitted after that read
-   * (`advisoryTimeout.writeRefused`): that one waits only while an event of its question is stored and not yet applied.
-   * It is never an answer or an approval: the person decided nothing.
+   * (`advisoryTimeout.writeRefused`): that one waits only on what this computer's store shows, an event of its question
+   * not yet applied among them. It is never an answer or an approval: the person decided nothing.
    */
   fallbackDue: boolean;
   /**
@@ -1678,17 +1678,17 @@ export class DecisionsBridge {
 
   /**
    * Whether an advisory notice of `row` whose write its sink refused still waits (`view`), from the store alone: an event
-   * of its question is stored and not yet applied (a reopen read past a gap), more are stored than one look reads, the
-   * store cannot be read, or the row has moved on since it was read. Looked at after the row was read, so an event
-   * stored before the refusal is either still waiting here or applied, which the row read again shows.
+   * of its question is stored and not yet applied (a reopen read past a gap), the store cannot be read, or the row has
+   * moved on since it was read. More stored than one look reads may hide one of the question's, so they hold it as a
+   * read under way does, two minutes at most, timed from the refused attempt. Looked at after the row was read, so an
+   * event stored before the refusal is either still waiting here or applied, which the row read again shows.
    */
   private async refusalHeld(row: QuestionRow): Promise<boolean> {
     try {
       const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
-      if (
-        stored.length >= UNAPPLIED_SCAN ||
-        stored.some((e) => eventQuestionId(e) === row.question_id)
-      )
+      if (stored.some((e) => eventQuestionId(e) === row.question_id)) return true;
+      const tried = row.last_attempt_at ? Date.parse(row.last_attempt_at) : NaN;
+      if (stored.length >= UNAPPLIED_SCAN && !(this.ctx.now() - tried >= ADVISORY_LEDGER_WAIT_MS))
         return true;
       const now = await this.ctx.store.getQuestion(row.question_id);
       return (

@@ -713,6 +713,12 @@ describe('where the advisory notice goes', () => {
         processed_at: null,
       });
     expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(false);
+    // As a read under way does, two minutes at most from the refused attempt, in every process alike.
+    e.setNow(e.now + ADVISORY_LEDGER_WAIT_MS - 1);
+    expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(false);
+    e.setNow(e.now + 1);
+    expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(true);
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
   });
 
   it('a retry takes the refusal back, and a reopen supersedes a refused notice', async () => {
