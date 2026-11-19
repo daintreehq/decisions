@@ -190,6 +190,14 @@ describe('the outcome a wait reports', () => {
         v({ ...expired, fallbackDue: true, advisoryTimeout: timeout({ notice: 'uncertain' }) }),
       ),
     ).toBe('advisory-expired');
+    // Nothing written (it needs attention) proves nothing to a process that only reads.
+    const unwritten = v({
+      ...expired,
+      fallbackDue: true,
+      advisoryTimeout: timeout({ notice: 'needs-attention' }),
+    });
+    expect(outcomeOf(unwritten)).toBeNull();
+    expect(outcomeOf(unwritten, { receiving: true })).toBe('advisory-expired');
     const withheld = v({
       ...expired,
       advisoryTimeout: timeout({ disposition: 'fallback-withheld', notice: 'pending' }),
@@ -821,10 +829,15 @@ describe('the standalone flow through decisions mcp', () => {
         });
         return JSON.stringify(((await r.json()) as { result: unknown }).result);
       };
-      for (const said of [await rpc('tools/list'), await rpc('initialize')]) {
-        expect(said).toContain('get_decision');
+      const tools = await rpc('tools/list');
+      const instructions = await rpc('initialize');
+      for (const said of [tools, instructions])
         expect(said).not.toMatch(/typed into this terminal|arrives as a new message|arrive here/);
-      }
+      expect(tools).toContain('call get_decision with its question_id');
+      expect(tools).toContain("appear in get_decision's thread");
+      expect(instructions).toContain(
+        'This host does not type answers into your terminal: when you cannot go further without the answer, call get_decision with its question_id, and check again later if it has none yet.',
+      );
 
       // The agent recovers the same facts with get_decision, and a script with `decisions get --pane mcp`.
       const viaMcp = (await call('get_decision', { question_id: id })).structuredContent;

@@ -101,7 +101,9 @@ export function outcomeOf(
   const advisory = currentAdvisoryTimeout(v);
   if (advisory?.disposition === 'fallback-due') {
     if (!v.fallbackDue) return null;
-    if (!o.receiving && advisory.notice === 'pending') return null;
+    // Written, or perhaps written, by the receiver: it read the relay before it wrote. Nothing written proves nothing.
+    if (!o.receiving && advisory.notice !== 'delivered' && advisory.notice !== 'uncertain')
+      return null;
   }
   switch (v.status) {
     case 'human-answered':
@@ -248,6 +250,8 @@ async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
   let receiving = false;
   let observing = false;
   let attention = false;
+  /** The loop has returned: a start that fails later is only reported. */
+  let done = false;
   const remaining = (now: number) =>
     a.timeoutMs === null ? Infinity : a.timeoutMs - (now - a.since);
   try {
@@ -288,7 +292,11 @@ async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
               bridge
                 .start(a.start)
                 .catch((e: Error) =>
-                  fail(new CliError(`stopped waiting: could not start receiving (${e.message})`)),
+                  done
+                    ? ctx.err(`warning: could not start receiving (${e.message})`)
+                    : fail(
+                        new CliError(`stopped waiting: could not start receiving (${e.message})`),
+                      ),
                 ),
             );
           } else if (!observing) {
@@ -303,6 +311,7 @@ async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
       woken = new Promise<void>((r) => (wake = r));
     }
   } finally {
+    done = true;
     halt.onStop = null;
     clearInterval(timer);
     for (const off of offs) off();
@@ -567,6 +576,7 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
   const timers: ReturnType<typeof setTimeout>[] = [];
   const after = (ms: number) =>
     new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
+  let sending: Promise<unknown> | null = null;
   try {
     for (;;) {
       if (w.halt.signal) return false;
@@ -574,15 +584,16 @@ async function publish(ctx: Ctx, w: Waiter, questionId: string): Promise<boolean
       if (row && row.status !== 'queued') return true;
       const left = until - performance.now();
       if (left <= 0) break;
-      // At least a tick between looks, a pump of its own included, and never past the deadline or a signal.
-      const pause = after(Math.min(left, PUBLISH_TICK_MS));
-      let step: Promise<unknown> = pause;
-      if (w.lock.tryAcquire()) {
+      // One pump of its own at a time, looked at again every tick: a pump held up by another question's notice never
+      // keeps this one from seeing its question go out, a signal or the deadline.
+      if (!sending && w.lock.tryAcquire()) {
         const send = w.bridge.pump();
         w.also.push(send);
-        step = Promise.all([send.catch((e: Error) => ctx.err(`warning: ${e.message}`)), pause]);
+        sending = send
+          .catch((e: Error) => ctx.err(`warning: ${e.message}`))
+          .finally(() => (sending = null));
       }
-      await Promise.race([step, stopped, after(left)]);
+      await Promise.race([after(Math.min(left, PUBLISH_TICK_MS)), stopped]);
     }
   } finally {
     w.halt.onStop = null;
@@ -615,13 +626,13 @@ export async function ask(ctx: Ctx, g: GlobalOptions, o: AskOptions): Promise<nu
   // Two asks at once with the same correlation id: the second sees what the first committed.
   const registering = o.correlationId !== undefined ? ReceiverLock.forRegistration(ctx.home) : null;
   try {
-    if (registering && !(await registering.acquire(REGISTER_WAIT_MS, () => !!w.halt.signal))) {
-      // Stopped while another ask registered: nothing was asked.
-      if (w.halt.signal) return SIGNAL_EXIT[w.halt.signal];
-      throw new CliError(
-        'another decisions ask in this state directory did not finish registering',
-      );
-    }
+    if (registering && !(await registering.acquire(REGISTER_WAIT_MS, () => !!w.halt.signal)))
+      if (!w.halt.signal)
+        throw new CliError(
+          'another decisions ask in this state directory did not finish registering',
+        );
+    // Stopped before asking (while another ask registered, say): nothing is asked.
+    if (w.halt.signal) return SIGNAL_EXIT[w.halt.signal];
     // Receiving elsewhere, this process only asks and reads: that receiver publishes, within seconds.
     w.lock.tryAcquire();
     let r: RegisterResult;

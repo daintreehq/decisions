@@ -55,11 +55,12 @@ export class ReceiverLock {
    */
   async acquire(timeoutMs: number, stop: () => boolean = () => false): Promise<boolean> {
     const until = Date.now() + timeoutMs;
-    while (!this.tryAcquire()) {
-      if (stop() || Date.now() >= until) return false;
+    for (;;) {
+      if (stop()) return false;
+      if (this.tryAcquire()) return true;
+      if (Date.now() >= until) return false;
       await new Promise((r) => setTimeout(r, 50));
     }
-    return true;
   }
 
   release(): void {
