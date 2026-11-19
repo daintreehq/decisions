@@ -50,6 +50,7 @@ import {
   closureInForce,
   currentDisposition,
   isAdvisoryNotice,
+  parseAnswers,
   sameDigests,
   unpublishedPlanDue,
   type AdvisoryDisposition,
@@ -461,10 +462,42 @@ function sameAsker(o: QuestionOrigin, p: PaneIdentity): boolean {
   );
 }
 
+/**
+ * What a settled delivery carried: an `answer`, a `decline`, an `expiry`, an `advisory-timeout` (the agent was told
+ * its stated plan may or may not go ahead), or a neutral `notice` when the entries that settled mix kinds or none is
+ * identifiable.
+ */
+export type DeliveredKind = 'answer' | 'decline' | 'expiry' | 'advisory-timeout' | 'notice';
+
+function deliveredKind(beforeJson: string, afterJson: string): DeliveredKind {
+  const was = new Set(
+    parseAnswers(beforeJson)
+      .filter((e) => e.delivered)
+      .map((e) => e.entry_id),
+  );
+  const kinds = new Set<DeliveredKind>();
+  for (const e of parseAnswers(afterJson)) {
+    if (!e.delivered || was.has(e.entry_id)) continue;
+    kinds.add(
+      e.kind === 'answer'
+        ? 'answer'
+        : e.kind === 'declined'
+          ? 'decline'
+          : e.kind === 'unpublished'
+            ? // Never-published notices read the same whether or not the plan may go ahead.
+              'notice'
+            : e.advisory_disposition !== undefined
+              ? 'advisory-timeout'
+              : 'expiry',
+    );
+  }
+  return kinds.size === 1 ? [...kinds][0]! : 'notice';
+}
+
 type Listener = {
   state: (s: BridgeState) => void;
   socket: (s: SocketState, detail?: string) => void;
-  delivered: (questionId: string) => void;
+  delivered: (questionId: string, what: DeliveredKind) => void;
   error: (e: Error) => void;
   /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
   answer: (result: OwnerAnswerResult) => void;
@@ -1702,7 +1735,8 @@ export class DecisionsBridge {
           const key = `${q.question_id}:${after.last_injection_id ?? ''}`;
           if (this.announced.has(key)) continue;
           this.announced.add(key);
-          this.listeners.delivered.forEach((l) => l(q.question_id));
+          const what = deliveredKind(q.answers_json, after.answers_json);
+          this.listeners.delivered.forEach((l) => l(q.question_id, what));
         }
       }
     }
