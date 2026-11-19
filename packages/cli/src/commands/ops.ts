@@ -17,6 +17,7 @@ import {
   verifyRecoveryKit,
   loadIdentity,
   type HttpSyncStatus,
+  type WebSocketLike,
 } from '@daintreehq/decisions-client';
 import {
   encryptAttachment,
@@ -34,8 +35,11 @@ import {
   type Ctx,
   type GlobalOptions,
 } from '../runtime.js';
+import { ReceiverLock } from '../receiver.js';
 
 const STATUS_PROBE_MS = 5_000;
+/** How long each of doctor's requests may take while it holds the receiver lock for its socket check. */
+const DOCTOR_REQUEST_MS = 10_000;
 
 export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   const rt = await openRuntime(ctx, g);
@@ -194,58 +198,93 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
 
   if (identity && info?.claimed && identity.config.relayOrigin === origin) {
     const client = new RelayClient({ identity, fetch: ctx.fetch, maxRetries: 1 });
-    // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
-    // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
-    // declared, so running doctor never switches them off. Unknown (the list failed, or lacks this device), the
-    // socket check is skipped rather than declaring nothing.
-    let declared: ProtocolFeature[] | null = null;
+    // The relay closes this device's other sockets when the test socket opens (`replaced`), so the check never runs
+    // beside a process receiving for this state directory, and it holds the receiver lock from reading the declaration
+    // to the end of the handshake: a receiver starting meanwhile waits for it (or, as a listener, refuses) rather than
+    // lose its socket, or its declaration, to this check.
+    const lock = ReceiverLock.forHome(ctx.home);
+    let free: boolean | Error;
     try {
-      const list = await verifiedDevices(client);
-      add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
-      const me = identity.config.deviceId;
-      const self = list.find((d) => d.device_id === me);
-      if (self) declared = [...knownFeatures(self.features)];
+      free = lock.tryAcquire();
     } catch (e) {
-      add(
-        'signed request',
-        false,
-        e instanceof RelayError ? `${e.code}: ${e.message}` : (e as Error).message,
-      );
+      free = e as Error;
     }
-    if (declared === null) {
-      add('websocket', false, "skipped: this device's declared features could not be read", true);
-    } else {
+    try {
+      // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
+      // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
+      // declared, so running doctor never switches them off. Unknown (the list failed, or lacks this device), the
+      // socket check is skipped rather than declaring nothing.
+      let declared: ProtocolFeature[] | null = null;
       try {
-        const t = await client.socketTicket(declared);
-        const url =
-          origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
-        const ok = await new Promise<boolean>((resolve) => {
-          const WS = ctx.webSocket
-            ? null
-            : (globalThis as { WebSocket?: new (u: string) => WebSocket }).WebSocket;
-          const ws = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
-          const timer = setTimeout(() => (ws.close(), resolve(false)), 8000);
-          (ws as WebSocket).onmessage = (ev: MessageEvent) => {
-            try {
-              if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') {
-                clearTimeout(timer);
-                ws.close(1000);
-                resolve(true);
-              }
-            } catch {
-              /* ignore non-JSON frames */
-            }
-          };
-          (ws as WebSocket).onerror = () => (clearTimeout(timer), resolve(false));
-        });
+        const list = await verifiedDevices(client, { timeoutMs: DOCTOR_REQUEST_MS });
+        add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
+        const me = identity.config.deviceId;
+        const self = list.find((d) => d.device_id === me);
+        if (self) declared = [...knownFeatures(self.features)];
+      } catch (e) {
+        add(
+          'signed request',
+          false,
+          e instanceof RelayError ? `${e.code}: ${e.message}` : (e as Error).message,
+        );
+      }
+      if (free instanceof Error) {
+        add('websocket', false, `could not read the receiver lock: ${free.message}`);
+      } else if (!free) {
         add(
           'websocket',
-          ok,
-          ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
+          false,
+          'skipped: another decisions process receives for this state directory, and a test socket would replace its own',
+          true,
         );
-      } catch (e) {
-        add('websocket', false, (e as Error).message);
+      } else if (declared === null) {
+        add('websocket', false, "skipped: this device's declared features could not be read", true);
+      } else {
+        try {
+          const t = await client.socketTicket(declared, { timeoutMs: DOCTOR_REQUEST_MS });
+          const url =
+            origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
+          const ok = await new Promise<boolean>((resolve) => {
+            const WS = ctx.webSocket
+              ? null
+              : (globalThis as { WebSocket?: new (u: string) => WebSocketLike }).WebSocket;
+            const ws: WebSocketLike = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
+            // One way out, whichever comes first: hello, an error, a close, or the timeout.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const finish = (hello: boolean) => {
+              if (timer === undefined) return;
+              clearTimeout(timer);
+              timer = undefined;
+              ws.onmessage = ws.onerror = ws.onclose = null;
+              try {
+                ws.close(1000);
+              } catch {
+                /* already closed */
+              }
+              resolve(hello);
+            };
+            timer = setTimeout(() => finish(false), 8000);
+            ws.onmessage = (ev) => {
+              try {
+                if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') finish(true);
+              } catch {
+                /* ignore non-JSON frames */
+              }
+            };
+            ws.onerror = () => finish(false);
+            ws.onclose = () => finish(false);
+          });
+          add(
+            'websocket',
+            ok,
+            ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
+          );
+        } catch (e) {
+          add('websocket', false, (e as Error).message);
+        }
       }
+    } finally {
+      lock.release();
     }
     try {
       const epoch = await importEpochKey(generateEpochKeyBytes(), 1, false);

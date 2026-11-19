@@ -13,6 +13,7 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { PROTOCOL_VERSION, ProtocolFeature, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
+import { ReceiverLock } from '../src/receiver.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
 import { DemoSink, cliOrigin, daemon, mcpAddLines, parseSink } from '../src/commands/daemon.js';
 import { ask } from '../src/commands/ask.js';
@@ -621,6 +622,12 @@ describe('doctor', () => {
   /** A claimed setup whose relay lists `devices(own cert, a phone cert)` and records socket tickets. */
   async function doctorWorld(
     devices: (own: DeviceCert, phone: DeviceCert) => ReturnType<typeof deviceRow>[],
+    o: {
+      /** Another process receives for this state directory while doctor runs. */
+      receiving?: boolean;
+      /** The test socket, given the state directory; by default it says hello at once. */
+      webSocket?: (home: string) => NonNullable<Ctx['webSocket']>;
+    } = {},
   ) {
     let own: DeviceCert | null = null;
     let phone: DeviceCert | null = null;
@@ -658,17 +665,25 @@ describe('doctor', () => {
       signingPub: await exportPublicKey(keys.signing.publicKey),
       exchangePub: await exportPublicKey(keys.exchange.publicKey),
     });
-    m.ctx.webSocket = () => {
-      const ws = {
-        onmessage: null as ((ev: { data: unknown }) => void) | null,
-        onerror: null,
-        close: () => {},
-      };
-      setTimeout(() => ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) }), 0);
-      return ws as never;
-    };
-    // This fake relay fails checks unrelated to the ticket (health, storage, push), so doctor reports problems.
-    await expect(doctor(m.ctx, {}, {})).rejects.toThrow(CliError);
+    m.ctx.webSocket =
+      o.webSocket?.(m.ctx.home) ??
+      (() => {
+        const ws = {
+          onmessage: null as ((ev: { data: unknown }) => void) | null,
+          onerror: null,
+          close: () => {},
+        };
+        setTimeout(() => ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) }), 0);
+        return ws as never;
+      });
+    const receiver = ReceiverLock.forHome(m.ctx.home);
+    if (o.receiving) expect(receiver.tryAcquire()).toBe(true);
+    try {
+      // This fake relay fails checks unrelated to the ticket (health, storage, push), so doctor reports problems.
+      await expect(doctor(m.ctx, {}, {})).rejects.toThrow(CliError);
+    } finally {
+      receiver.release();
+    }
     return { ...m, tickets };
   }
 
@@ -693,6 +708,74 @@ describe('doctor', () => {
     expect(text).toMatch(/✓ signed request +2 active device/);
     expect(text).toMatch(/✓ websocket +upgrade \+ hello received/);
   });
+
+  it('opens no test socket while another process receives for the state directory, and fails nothing for it', async () => {
+    const { tickets, out } = await doctorWorld(
+      (own, phone) => [deviceRow(phone, []), deviceRow(own, ['owner-desktop-answers-v1'])],
+      { receiving: true },
+    );
+    // No ticket either: one would re-declare this device's features under the receiver's feet.
+    expect(tickets).toEqual([]);
+    const text = out.join('\n');
+    expect(text).toMatch(/✓ signed request +2 active device/);
+    expect(text).toMatch(
+      /! websocket +skipped: another decisions process receives for this state directory/,
+    );
+    // The checks after it still run, and the skip is not one of the failures.
+    expect(text).toMatch(/R2 round trip/);
+    const failures = text.split('\n').filter((l) => l.startsWith('✗')).length;
+    expect(text).toContain(`${failures} check(s) failed.`);
+  });
+
+  it('holds the receiver lock through its socket check, so no receiver starts and loses its socket to it', async () => {
+    const during: boolean[] = [];
+    let home = '';
+    const { tickets, out } = await doctorWorld(
+      (own, phone) => [deviceRow(phone, []), deviceRow(own, [])],
+      {
+        webSocket: (h) => {
+          home = h;
+          return () => {
+            const ws = {
+              onmessage: null as ((ev: { data: unknown }) => void) | null,
+              onerror: null,
+              onclose: null,
+              close: () => {},
+            };
+            setTimeout(() => {
+              const other = ReceiverLock.forHome(h);
+              during.push(other.tryAcquire());
+              other.release();
+              ws.onmessage?.({ data: JSON.stringify({ t: 'hello' }) });
+            }, 0);
+            return ws as never;
+          };
+        },
+      },
+    );
+    expect(tickets).toHaveLength(1);
+    expect(during).toEqual([false]);
+    expect(out.join('\n')).toMatch(/✓ websocket +upgrade \+ hello received/);
+    const after = ReceiverLock.forHome(home);
+    expect(after.tryAcquire()).toBe(true);
+    after.release();
+  });
+
+  it('reports a socket the relay closes before hello at once, without waiting out its timer', async () => {
+    const { out } = await doctorWorld((own, phone) => [deviceRow(phone, []), deviceRow(own, [])], {
+      webSocket: () => () => {
+        const ws = {
+          onmessage: null,
+          onerror: null,
+          onclose: null as ((ev: { code: number; reason: string }) => void) | null,
+          close: () => {},
+        };
+        setTimeout(() => ws.onclose?.({ code: 1006, reason: '' }), 0);
+        return ws as never;
+      },
+    });
+    expect(out.join('\n')).toMatch(/✗ websocket +could not open the hibernatable socket/);
+  }, 4_000);
 
   it('skips the socket check rather than declaring nothing when this device is not listed', async () => {
     const { tickets, out } = await doctorWorld((_own, phone) => [

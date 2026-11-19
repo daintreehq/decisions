@@ -79,3 +79,10 @@ export class ReceiverLock {
 /** What a receiving command says when another process already receives for the state directory. */
 export const RECEIVER_BUSY =
   'another decisions process (listen, mcp, a wait, or an ask while it publishes) is already receiving for this state directory (--home): run one receiver per state directory, or stop that one first';
+
+/**
+ * What a receiving command says when another connection for this device replaced its relay socket (4409): nothing more
+ * arrives here, so it stops rather than keep the right to receive while reading nothing, and another one can take over.
+ */
+export const socketReplaced = (stopped: 'listening' | 'waiting') =>
+  `stopped ${stopped}: another connection for this device replaced this process's relay socket, so nothing more arrives here. Another listen, mcp or wait can receive for this state directory now; if this keeps happening, something else uses this device's identity (an older decisions doctor, or a copy of this state directory)`;

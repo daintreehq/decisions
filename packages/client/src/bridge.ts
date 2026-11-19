@@ -474,6 +474,12 @@ type Listener = {
   followUp: (result: OwnerFollowUpResult) => void;
   /** An HTTP sync (`sync`) finished, with what it recorded. */
   sync: (status: HttpSyncStatus) => void;
+  /**
+   * Another connection for this device replaced this bridge's socket (4409): the socket stopped and reads nothing more,
+   * while the bridge goes on running. Never on `stop` or a revocation. What to do is the host's call: the desktop app
+   * yields, as two processes sharing an identity must not fight over the one socket.
+   */
+  replaced: () => void;
 };
 
 /**
@@ -568,6 +574,7 @@ export class DecisionsBridge {
     decline: [],
     followUp: [],
     sync: [],
+    replaced: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -653,6 +660,7 @@ export class DecisionsBridge {
           this.listeners.socket.forEach((l) => l(s, d));
         },
         onRevoked: () => this.markRevoked(),
+        onReplaced: () => this.listeners.replaced.forEach((l) => l()),
         onError: (e) => this.emitError(e),
       },
     });

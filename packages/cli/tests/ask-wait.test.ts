@@ -3,11 +3,18 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { DecisionsBridge, MemoryKeyStore, type DecisionView } from '@daintreehq/decisions-client';
+import {
+  DecisionsBridge,
+  MemoryKeyStore,
+  type DecisionView,
+  type WebSocketLike,
+} from '@daintreehq/decisions-client';
+import { PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { FakeRelay, makeIdentity, makePhone } from '../../client/tests/helpers.js';
 import { CliError, type Ctx } from '../src/runtime.js';
 import { ReceiverLock } from '../src/receiver.js';
 import { daemon } from '../src/commands/daemon.js';
+import { doctor } from '../src/commands/ops.js';
 import {
   OUTCOME_EXIT,
   ask,
@@ -933,4 +940,190 @@ describe('the standalone flow through decisions mcp', () => {
     expect(p.records().map((r) => r.record)).toEqual(['asked', 'result']);
     expect(result(p.records())).toMatchObject({ outcome: 'answered', delivery: 'delivered' });
   });
+});
+
+/** One socket as the relay sees it: it replays from the cursor a `sync` names, then sends each new event as committed. */
+class RelaySideSocket implements WebSocketLike {
+  readyState = 1;
+  onopen: ((ev: unknown) => void) | null = null;
+  onmessage: ((ev: { data: unknown }) => void) | null = null;
+  onclose: ((ev: { code: number; reason: string }) => void) | null = null;
+  onerror: ((ev: unknown) => void) | null = null;
+  /** The highest seq sent, once the client has synced; null before. */
+  sent: number | null = null;
+  constructor(private readonly relay: FakeRelay) {}
+  send(data: string): void {
+    if (data === 'ping') return;
+    const f = JSON.parse(data) as { t: string; after?: number };
+    if (f.t !== 'sync') return;
+    const high = this.relay.events.at(-1)?.seq ?? 0;
+    for (const event of this.relay.events.filter((ev) => ev.seq > f.after!))
+      this.frame({ t: 'event', event });
+    this.frame({ t: 'caught_up', high_water: high, has_more: false });
+    this.sent = high;
+  }
+  /** Sends what was committed since the last frame, as the relay broadcasts each event. */
+  broadcast(): void {
+    if (this.sent === null) return;
+    for (const event of this.relay.events.filter((ev) => ev.seq > this.sent!)) {
+      this.frame({ t: 'event', event });
+      this.sent = event.seq;
+    }
+  }
+  frame(f: unknown): void {
+    if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(f) });
+  }
+  close(code = 1000, reason = ''): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    setTimeout(() => this.onclose?.({ code, reason }), 0);
+  }
+}
+
+/**
+ * The relay's sockets for this computer's one device: a new socket closes every older one with `replaced` (4409), as
+ * the relay does, and each socket says hello, replays and broadcasts.
+ */
+function relaySockets(e: Awaited<ReturnType<typeof env>>) {
+  const opened: RelaySideSocket[] = [];
+  const timer = setInterval(() => opened.forEach((s) => s.broadcast()), 5);
+  const webSocket = (_url: string): WebSocketLike => {
+    for (const old of opened) old.close(4409, 'replaced by a newer connection');
+    const s = new RelaySideSocket(e.relay);
+    opened.push(s);
+    setTimeout(
+      () =>
+        s.frame({
+          t: 'hello',
+          protocol_version: PROTOCOL_VERSION,
+          device_id: e.identity.config.deviceId,
+          role: 'owner-desktop',
+          key_epoch: e.relay.epoch,
+          high_water: e.relay.events.at(-1)?.seq ?? 0,
+          server_time: new Date().toISOString(),
+        }),
+      0,
+    );
+    return s;
+  };
+  /** The sockets the relay still holds open, newest last. */
+  const live = () => opened.filter((s) => s.readyState === 1);
+  return { opened, live, webSocket, close: () => clearInterval(timer) };
+}
+
+describe('a receiver beside decisions doctor', () => {
+  it('doctor leaves a socket-mode wait receiving: an answer that arrives afterwards still reaches it', async () => {
+    const e = await env();
+    const sockets = relaySockets(e);
+    try {
+      const asker = e.proc();
+      await ask(asker.ctx, {}, { question: 'Ship it?', stopped: never() });
+      const id = asker.records()[0]!.question_id as string;
+      const waiter = e.proc();
+      waiter.ctx.webSocket = sockets.webSocket;
+      const w = waitCmd(waiter.ctx, {}, id, { stopped: never(), waitTimeout: '20s', tickMs: 10 });
+      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+
+      const doc = e.proc({ json: false });
+      doc.ctx.webSocket = sockets.webSocket;
+      // This fake relay fails checks unrelated to the socket (health, storage), so doctor reports problems.
+      await expect(doctor(doc.ctx, {}, {})).rejects.toThrow(CliError);
+      expect(doc.out.join('\n')).toMatch(
+        /! websocket +skipped: another decisions process receives for this state directory/,
+      );
+      // No test ticket re-declared this device's features, and no socket replaced the wait's.
+      expect(doc.calls).not.toContain('POST /api/v1/socket-ticket');
+      expect(sockets.opened).toHaveLength(1);
+
+      await e.relay.answerEvent({ questionId: id, phone: e.phone, text: 'Ship it' });
+      expect(await w).toBe(0);
+      expect(result(waiter.records())).toMatchObject({
+        outcome: 'answered',
+        delivery: 'delivered',
+        text: 'Ship it',
+      });
+    } finally {
+      sockets.close();
+    }
+  }, 30_000);
+
+  it('a wait whose socket another connection replaced stops and says so, and the wait observing takes over', async () => {
+    const e = await env();
+    const sockets = relaySockets(e);
+    try {
+      const asker = e.proc();
+      await ask(asker.ctx, {}, { question: 'Merge it?', stopped: never() });
+      const id = asker.records()[0]!.question_id as string;
+      const first = e.proc();
+      first.ctx.webSocket = sockets.webSocket;
+      const a = waitCmd(first.ctx, {}, id, {
+        stopped: never(),
+        waitTimeout: '20s',
+        tickMs: 10,
+      }).then(
+        (code) => code,
+        (x: unknown) => x as Error,
+      );
+      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      const second = e.proc();
+      second.ctx.webSocket = sockets.webSocket;
+      const b = waitCmd(second.ctx, {}, id, { stopped: never(), waitTimeout: '20s', tickMs: 10 });
+      await vi.waitFor(() =>
+        expect(second.err.join('\n')).toMatch(/another decisions process receives/),
+      );
+
+      // Another connection for this device (an older doctor, say) opens and goes: the first wait's socket is replaced.
+      sockets.webSocket('elsewhere').close(1000);
+      await e.relay.answerEvent({ questionId: id, phone: e.phone, text: 'Merge it' });
+      expect(((await a) as Error).message).toMatch(
+        /^stopped waiting: another connection for this device replaced this process's relay socket/,
+      );
+      // The state directory is free again: the second wait receives, from its stored cursor, what came meanwhile.
+      expect(await b).toBe(0);
+      expect(second.err.join('\n')).toMatch(/the other receiver stopped; receiving here from now on/);
+      expect(second.records().map((r) => r.record)).toEqual(['notice', 'result']);
+      expect(result(second.records())).toMatchObject({
+        outcome: 'answered',
+        delivery: 'delivered',
+        text: 'Merge it',
+      });
+      expect(first.records()).toEqual([]);
+      expect(sockets.opened).toHaveLength(3);
+    } finally {
+      sockets.close();
+    }
+  }, 30_000);
+
+  it('a listener whose socket another connection replaced stops and frees the state directory; a stop it asked for does not', async () => {
+    const e = await env();
+    const sockets = relaySockets(e);
+    try {
+      const listener = e.proc({ json: false });
+      listener.ctx.webSocket = sockets.webSocket;
+      let release!: () => void;
+      const until = new Promise<void>((r) => (release = r));
+      const listening = daemon(listener.ctx, {}, { until });
+      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      sockets.webSocket('elsewhere').close(1000);
+      await expect(listening).rejects.toThrow(
+        /stopped listening: another connection for this device replaced this process's relay socket/,
+      );
+      release();
+      const lock = ReceiverLock.forHome(e.home);
+      expect(lock.tryAcquire()).toBe(true);
+      lock.release();
+
+      // Stopped on request, it ends quietly.
+      const again = e.proc({ json: false });
+      again.ctx.webSocket = sockets.webSocket;
+      let stop!: () => void;
+      const done = daemon(again.ctx, {}, { until: new Promise<void>((r) => (stop = r)) });
+      await vi.waitFor(() => expect(sockets.live()[0]?.sent).toBeTypeOf('number'));
+      stop();
+      await done;
+      expect(again.err.join('\n')).not.toMatch(/replaced/);
+    } finally {
+      sockets.close();
+    }
+  }, 30_000);
 });
