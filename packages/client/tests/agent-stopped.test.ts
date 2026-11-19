@@ -81,11 +81,18 @@ describe('asking for a push', () => {
     const loose = w.bridge.requestAgentStoppedPush as unknown as (...a: unknown[]) => Promise<{
       outcome: AgentStoppedPushOutcome;
     }>;
-    expect(
-      await loose.call(w.bridge, 'claude in pane 3 finished', { pane: 'pane-1', project: 'x' }),
-    ).toEqual({ outcome: 'sent' });
-    expect(w.posts().map((c) => c.body)).toStrictEqual([{ protocol_version: PROTOCOL_VERSION }]);
-    expect(JSON.stringify(w.posts()[0]!.headers)).not.toMatch(/pane|claude|project/);
+    for (const args of [
+      [{ pane: 'pane-1', project: 'secret-project', agent: 'claude' }],
+      ['claude in pane-1 finished', { pane: 'pane-1', project: 'secret-project' }],
+    ]) {
+      expect(await loose.call(w.bridge, ...args)).toEqual({ outcome: 'sent' });
+    }
+    expect(w.posts()).toHaveLength(2);
+    for (const post of w.posts()) {
+      expect(post.query).toBe('');
+      expect(post.body).toStrictEqual({ protocol_version: PROTOCOL_VERSION });
+      expect(JSON.stringify(post.headers)).not.toMatch(/pane|claude|secret-project/);
+    }
   });
 
   it("resolves with each of the relay's outcomes as it gave it", async () => {
@@ -266,21 +273,27 @@ describe('the bridge', () => {
     expect(w.posts()).toEqual([]);
   });
 
-  it('sends nothing when it stops while the relay is asked for its features', async () => {
+  it('sends nothing when it stops while the relay is asked for its features, even once restarted', async () => {
     const w = await world();
     await w.start();
     let release!: () => void;
     w.relay.holdInfo = new Promise<void>((r) => (release = r));
+    const infos = w.infos();
     const asking = w.ask();
-    await vi.waitFor(() => expect(w.relay.calls.at(-1)?.path).toBe(INFO_PATH));
-    await w.bridge.stop();
-    w.relay.holdInfo = null;
-    release();
+    try {
+      await vi.waitFor(() => expect(w.infos()).toBe(infos + 1));
+      // Stopped and started again while the feature check is held: the request belongs to the earlier run.
+      await w.bridge.stop();
+      await w.start();
+    } finally {
+      w.relay.holdInfo = null;
+      release();
+    }
     expect(await asking).toBe('dropped');
     expect(w.posts()).toEqual([]);
-    // A restart asks afresh.
-    await w.start();
+    // The new run asks afresh.
     expect(await w.ask()).toBe('sent');
+    expect(w.posts()).toHaveLength(1);
   });
 
   it('may not ask once the desktop is revoked', async () => {

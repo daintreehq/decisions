@@ -18,9 +18,10 @@ export const AGENT_STOPPED_PUSH_FEATURE = 'agent-stopped-push-v1' as const;
 /**
  * What came of one request. The relay's own outcomes (`AgentStoppedPushResponse`): `sent`, `failed`, `quiet-hours`,
  * `rate-limited`, `no-subscription`. And the library's: `unsupported` when the relay does not advertise
- * `agent-stopped-push-v1` (nothing was sent) or lists it without the route, and `dropped` when the request was not
- * sent or got no outcome: the relay could not be reached or refused it, its reply did not parse, or the bridge
- * stopped first. Every outcome is final; a push may still have gone out for a `dropped` whose reply was lost.
+ * `agent-stopped-push-v1` (its `/info` lacks it, does not parse, or answers with a client error; nothing was sent) or
+ * lists it without the route, and `dropped` when the request was not sent or got no outcome: the relay could not be
+ * reached or refused it, its reply did not parse, or the bridge stopped while the relay's features were read. Every
+ * outcome is final; a push may still have gone out for a `dropped` whose reply was lost.
  */
 export type AgentStoppedPushOutcome =
   AgentStoppedPushResponse['outcome'] | 'unsupported' | 'dropped';

@@ -929,8 +929,9 @@ export class DecisionsBridge {
    * late. Resolves with the outcome (`AgentStoppedPushResult`) and never rejects over the relay.
    *
    * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed, as is a revoked desktop, and
-   * the bridge must be started (`invalid_state`); one stopped before the request goes out sends nothing. This is a
-   * host API: it is not an MCP tool, and a pane's bearer token never reaches it.
+   * the bridge must be started (`invalid_state`); one stopped while the relay's features are read sends nothing, though
+   * a request already being signed or sent still goes out. This is a host API: it is not an MCP tool, and a pane's
+   * bearer token never reaches it.
    */
   async requestAgentStoppedPush(): Promise<AgentStoppedPushResult> {
     if (this.ctx.identity.role !== 'owner-desktop') {

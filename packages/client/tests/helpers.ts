@@ -234,8 +234,6 @@ export class FakeRelay {
     | { status: number; body: Record<string, unknown> | string; headers?: Record<string, string> }
     | 'reset'
   )[] = [];
-  /** While set, agent-stopped POSTs wait for it before the relay looks at them (a slow relay). */
-  holdAgentStopped: Promise<void> | null = null;
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -671,7 +669,6 @@ export class FakeRelay {
       });
     }
     if (method === 'POST' && p === '/api/v1/push/agent-stopped' && this.agentStoppedRoute) {
-      if (this.holdAgentStopped) await this.holdAgentStopped;
       // The body is strict, as the relay's is: anything but the version is refused.
       if (!AgentStoppedPushBody.safeParse(body).success)
         return json(400, { code: 'validation_error', message: 'invalid body' });

@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSignedInvolvement, decryptEnvelope } from '@daintreehq/decisions-crypto';
 import { AgentMessageContentV1, type SignedMessage } from '@daintreehq/decisions-protocol';
 import {
@@ -338,13 +338,21 @@ describe('HTTP MCP: protocol', () => {
     const { mcp, relay, bridge } = await boot();
     relay.features = ['thread-messages-v1', 'agent-stopped-push-v1'];
     await bridge.start({ socket: false });
-    for (const name of ['request_agent_stopped_push', 'requestAgentStoppedPush', 'agent_stopped']) {
+    const asked = vi.spyOn(bridge, 'requestAgentStoppedPush');
+    const names = [
+      'request_agent_stopped_push',
+      'requestAgentStoppedPush',
+      'agent_stopped',
+      'agent_stopped_push',
+    ];
+    for (const name of names) {
       const r = await raw(mcp, { body: rpc('tools/call', { name, arguments: {} }) });
       expect(JSON.parse(r.body).error.code).toBe(-32602);
     }
-    for (const method of ['requestAgentStoppedPush', 'request_agent_stopped_push']) {
+    for (const method of names) {
       expect(JSON.parse((await raw(mcp, { body: rpc(method, {}) })).body).error.code).toBe(-32601);
     }
+    expect(asked).not.toHaveBeenCalled();
     // A host's forwarder forwards only these, so it never reaches the bridge through a pane.
     expect([...MCP_BRIDGE_METHODS]).not.toContain('requestAgentStoppedPush');
     expect(relay.calls.filter((c) => c.path === '/api/v1/push/agent-stopped')).toEqual([]);
