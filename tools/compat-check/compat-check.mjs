@@ -2148,23 +2148,31 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     trace.push({ kind: 'phase', name: 'restart', at: restartAt });
     keep({ src: 'run', kind: 'phase', name: 'restart', at: restartAt });
     await updated.getByRole('button', { name: 'Restart to update' }).click();
-    const declared = await seen(
-      (e) =>
-        e.page === 'updated' &&
-        e.at >= restartAt &&
-        e.method === 'POST' &&
-        e.path === '/api/v1/push/subscriptions' &&
-        Array.isArray(e.sent?.features) &&
-        e.sent.features.includes(AGENT_STOPPED),
+    // The page reloads into the update as the declaration goes out, and the reload can cut off its response: then
+    // only the page's own trace saw it sent. Either way the relay's row is read back below.
+    const declares = (features) => Array.isArray(features) && features.includes(AGENT_STOPPED);
+    const declared = await until(
+      () =>
+        net.find(
+          (e) =>
+            e.page === 'updated' &&
+            e.at >= restartAt &&
+            e.method === 'POST' &&
+            e.path === '/api/v1/push/subscriptions' &&
+            declares(e.sent?.features),
+        ) ?? trace.find((e) => e.kind === 'push-post' && e.at >= restartAt && declares(e.features)),
       60_000,
       'the updated phone to declare agent-stopped pushes',
     ).catch((e) => (fail(e.message), null));
-    // The page reloads into the update as the declaration goes out, so its response is read back from the relay below.
-    if (declared)
+    if (declared?.src === 'net')
       check(
         declared.status === 201 && declared.sent.endpoint === sub.endpoint,
         `once the new worker is active, the phone declares ${AGENT_STOPPED} on its subscription`,
         show(declared),
+      );
+    else if (declared)
+      ok(
+        `once the new worker is active, the phone sends ${AGENT_STOPPED} on its subscription (the reload cut off the response)`,
       );
     await until(
       async () => {
