@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DecisionsBridge,
   MemoryKeyStore,
@@ -789,6 +789,201 @@ describe('recovering an outcome by ID', () => {
       lock.release();
     }
     await daemon(e.proc().ctx, {}, { once: true });
+  });
+});
+
+describe('a late retry refused by a relay that checks the deadline before the receipt (0.8.0)', () => {
+  type Env = Awaited<ReturnType<typeof env>>;
+  /** Run after each test, passed or failed: every gate opened, then every process stopped. */
+  const opens: (() => void)[] = [];
+  const cleanups: (() => unknown)[] = [];
+  afterEach(async () => {
+    for (const f of opens.splice(0)) f();
+    for (const f of cleanups.splice(0).reverse()) await f();
+  });
+  const gate = () => {
+    let open!: () => void;
+    const shut = new Promise<void>((r) => (open = r));
+    opens.push(() => open());
+    return { shut, open };
+  };
+  /** A command that stops as a signal would when the test says so, or when the test ends. */
+  const run = (start: (stopped: Promise<StopSignal>) => Promise<number>) => {
+    let stop!: (s: StopSignal) => void;
+    const done = start(new Promise<StopSignal>((r) => (stop = r)));
+    let settled = false;
+    void done.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    cleanups.push(async () => {
+      stop('SIGINT');
+      await done.catch(() => undefined);
+    });
+    return { done, stop: () => stop('SIGINT'), settled: () => settled };
+  };
+  /**
+   * Routes a process's requests through `route`: `lose` fails one as a network error before it reaches the relay, a
+   * promise holds it until it settles (or fails it as a network error when the process aborts it). Returns every
+   * request it saw, in order.
+   */
+  const intercept = (
+    p: ReturnType<Env['proc']>,
+    route: (method: string, path: string) => Promise<void> | 'lose' | null,
+  ) => {
+    const inner = p.ctx.fetch;
+    const seen: string[] = [];
+    p.ctx.fetch = (async (u: unknown, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      const path = new URL(String(u)).pathname;
+      seen.push(`${method} ${path}`);
+      const r = route(method, path);
+      if (r === 'lose') throw new TypeError('fetch failed');
+      if (r)
+        await new Promise<void>((resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) return reject(new TypeError('fetch failed'));
+          signal?.addEventListener('abort', () => reject(new TypeError('fetch failed')), {
+            once: true,
+          });
+          void r.then(resolve);
+        });
+      return inner(u as string, init);
+    }) as typeof fetch;
+    return seen;
+  };
+  /**
+   * An `ask --wait` that never reads the relay's events. Its first create reaches the relay (unless `loseFirst`: lost
+   * on the way out, so it may have reached the relay as far as it knows); every later one waits for `releaseRetries`.
+   */
+  const asker = (e: Env, o: { loseFirst?: boolean } = {}) => {
+    const p = e.proc();
+    const retries = gate();
+    let creates = 0;
+    const seen = intercept(p, (method, path) => {
+      if (path === '/api/v1/events') return 'lose';
+      if (method !== 'POST' || path !== '/api/v1/questions') return null;
+      creates++;
+      if (creates === 1) return o.loseFirst ? 'lose' : null;
+      return retries.shut;
+    });
+    const r = run((stopped) =>
+      ask(
+        p.ctx,
+        {},
+        {
+          question: 'Deploy?',
+          option: ['yes=Yes', 'no=No'],
+          expiresIn: '2m',
+          wait: true,
+          stopped,
+          ...QUICK,
+        },
+      ),
+    );
+    return { ...r, p, seen, creates: () => creates, releaseRetries: retries.open };
+  };
+  const status = async (e: Env, id: string) => {
+    const g = e.proc();
+    await getCmd(g.ctx, {}, id);
+    expect(g.calls).toEqual([]);
+    return JSON.parse(g.out[0]!) as Record<string, unknown>;
+  };
+  /** Past the deadline, the relay refuses the create's retry without saying whether it holds the question. */
+  const refuseLateRetry = (e: Env) => {
+    e.relay.rejectCreate = 400;
+    e.clock.skew = 3 * MIN;
+  };
+
+  it('has wait read back the late retry the relay refused, and report the answer the relay holds', async () => {
+    const e = await env();
+    // Committed, its reply lost; the asker's own retry waits until the asker stops, and fails as it does.
+    e.relay.dropCreateReply = 1;
+    const a = asker(e);
+    await vi.waitFor(() => expect(a.creates()).toBe(2));
+    const id = e.created()[0]!;
+    a.stop();
+    expect(await a.done).toBe(130);
+    expect(await status(e, id)).toMatchObject({
+      outcome: null,
+      status: 'queued',
+      publication: 'possibly-committed',
+    });
+    await e.relay.answerEvent({
+      questionId: id,
+      phone: e.phone,
+      options: ['yes'],
+      text: 'Ship it',
+    });
+    e.relay.answerState.set(id, { status: 'human-answered', revision: 1 });
+
+    // Past the deadline, with nothing receiving: `wait` receives, and the relay refuses its retry of the create.
+    refuseLateRetry(e);
+    const w = e.proc();
+    const read = gate();
+    const events = gate();
+    const seen = intercept(w, (method, path) =>
+      method === 'GET' && path === `/api/v1/questions/${id}`
+        ? read.shut
+        : path === '/api/v1/events'
+          ? events.shut
+          : null,
+    );
+    const waiting = run((stopped) => waitCmd(w.ctx, {}, id, { stopped, ...QUICK }));
+    await vi.waitFor(() => expect(seen).toContain(`GET /api/v1/questions/${id}`));
+    expect(seen.filter((c) => c === 'POST /api/v1/questions')).toHaveLength(1);
+    // Refused, and the relay not read back yet: no outcome, here or for `get`.
+    expect(await status(e, id)).toMatchObject({
+      outcome: null,
+      status: 'queued',
+      publication: 'possibly-committed',
+    });
+    expect(waiting.settled()).toBe(false);
+
+    // The relay holds it: only the receipt was lost. The outcome is what its events say.
+    read.open();
+    await vi.waitFor(async () =>
+      expect(await status(e, id)).toMatchObject({
+        outcome: null,
+        status: 'open',
+        publication: 'accepted',
+        error_code: null,
+      }),
+    );
+    expect(waiting.settled()).toBe(false);
+    events.open();
+    expect(await waiting.done).toBe(0);
+    expect(w.records().filter((r) => r.record === 'result')).toHaveLength(1);
+    expect(result(w.records())).toMatchObject({
+      outcome: 'answered',
+      status: 'human-answered',
+      publication: 'accepted',
+      choice: 'yes',
+      text: 'Ship it',
+    });
+    expect(await status(e, id)).toMatchObject({ outcome: 'answered' });
+  });
+
+  it('reports the refusal once the relay says it holds no such question', async () => {
+    const e = await env();
+    const a = asker(e, { loseFirst: true });
+    await vi.waitFor(() => expect(a.creates()).toBe(2));
+    const id = a.p.records()[0]!.question_id as string;
+    expect(await status(e, id)).toMatchObject({ outcome: null, publication: 'possibly-committed' });
+    refuseLateRetry(e);
+    a.releaseRetries();
+    expect(await a.done).toBe(15);
+    expect(a.seen.indexOf(`GET /api/v1/questions/${id}`)).toBeGreaterThan(
+      a.seen.lastIndexOf('POST /api/v1/questions'),
+    );
+    expect(e.created()).toEqual([]);
+    expect(result(a.p.records())).toMatchObject({
+      outcome: 'refused',
+      status: 'publish-failed',
+      publication: 'refused',
+      error_code: 'validation_error',
+    });
+    expect(await status(e, id)).toMatchObject({ outcome: 'refused' });
   });
 });
 
