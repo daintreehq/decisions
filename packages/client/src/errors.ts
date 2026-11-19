@@ -96,5 +96,6 @@ export function isUnsentError(e: unknown): boolean {
     const code = (c as { code?: unknown }).code;
     return typeof code === 'string' && UNSENT_CODES.has(code);
   };
+  if (e instanceof AggregateError) return unsent(e);
   return unsent(e) || (!!e && typeof e === 'object' && unsent((e as { cause?: unknown }).cause));
 }

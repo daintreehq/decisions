@@ -1736,6 +1736,13 @@ export class DecisionsBridge {
   private async maybeRunProxy(questionId: string): Promise<void> {
     const row = await this.ctx.store.getQuestion(questionId);
     if (!row || row.requirement === 'human-required' || !this.o.proxy) return;
+    // A create replayed well after its deadline: the relay has expired it, so a proxy answer could only be refused.
+    // The allowance keeps a round this clock reads as just past due but the relay's may not.
+    if (
+      row.expires_at !== null &&
+      Date.parse(row.expires_at) + LIMITS.requestSkewMs <= this.ctx.now()
+    )
+      return;
     await this.runProxy(questionId);
   }
 
@@ -1757,8 +1764,6 @@ export class DecisionsBridge {
       );
     }
     if (!this.o.proxy || row.local_status !== 'open') return 'skipped';
-    // A create replayed after its deadline: the relay has expired it, or will, so a proxy answer could only be refused.
-    if (row.expires_at !== null && Date.parse(row.expires_at) <= ctx.now()) return 'skipped';
     const markerKey = `proxy:${questionId}`;
     if (await ctx.store.getMeta(markerKey)) return 'skipped';
     await ctx.store.setMeta(markerKey, 'started');

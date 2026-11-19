@@ -286,6 +286,9 @@ const V6 = [
   `ALTER TABLE push_subscriptions ADD COLUMN agent_stopped_capable INTEGER NOT NULL DEFAULT 0`,
 ];
 
+/** Since when (ms) this relay has kept a record of every question it committed (`neverCommitted`). */
+export const NEVER_COMMITTED_FROM_META = 'never_committed_from';
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -300,6 +303,16 @@ export function migrate(sql: SqlStorage): void {
   if (current < 4) for (const stmt of V4) sql.exec(stmt);
   if (current < 5) for (const stmt of V5) sql.exec(stmt);
   if (current < 6) for (const stmt of V6) sql.exec(stmt);
+  // An overdue create is shown never committed (routes/questions.ts) only for history this relay kept whole: one
+  // upgraded from before that rule may have wiped its questions with no record of it, so it counts from now.
+  if (
+    sql.exec(`SELECT 1 FROM meta WHERE key = ?`, NEVER_COMMITTED_FROM_META).toArray().length === 0
+  )
+    sql.exec(
+      `INSERT INTO meta (key, value) VALUES (?, ?)`,
+      NEVER_COMMITTED_FROM_META,
+      String(current >= 1 ? Date.now() : 0),
+    );
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),

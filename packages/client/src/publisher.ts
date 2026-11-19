@@ -1963,7 +1963,9 @@ export class Publisher {
       const stored = live.payload as CreatePayload;
       const first = claim && !stored.maybePublished;
       if (first && this.overdue(p)) throw new CreateOverdue();
-      if (first) {
+      if (claim) {
+        // Every send claims anew, with a nonce of its own, so a send that never left can tell whether another has
+        // claimed since: only then is its own claim the one still standing.
         p.maybePublished = true;
         p.claim = newId(this.ctx.now());
       } else if (stored.maybePublished) {
@@ -2007,6 +2009,14 @@ export class Publisher {
    * next turn, `unpublishedQuestion`). The caller drops the spooled images.
    */
   private async withdrawUnpublished(questionId: string, items: OutboxItem[]): Promise<void> {
+    // Its creates are unsent first, so a crash before they go leaves ones the next flush drops (`closeCreate`), never
+    // ones it sends.
+    for (const o of items) {
+      const p = o.payload as CreatePayload;
+      if (o.kind !== 'create' || !p.maybePublished) continue;
+      const { maybePublished: _claimed, claim: _nonce, ...unsent } = p;
+      await this.ctx.store.putOutbox({ ...o, payload: unsent });
+    }
     await this.ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });
     await this.dropMessages(questionId, 'never-published');
     for (const o of items)

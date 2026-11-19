@@ -225,6 +225,17 @@ describe('question creation', () => {
     }
   });
 
+  it('says nothing about a create made before the relay began keeping a record of every question', async () => {
+    const w = await claimRelay();
+    // A relay upgraded from before the rule: it may have wiped questions with no record of it.
+    await inRoom((room) =>
+      room.run(`UPDATE meta SET value = ? WHERE key = 'never_committed_from'`, String(Date.now())),
+    );
+    const overdue = await ask(w, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect(overdue.res.status).toBe(400);
+    expect(overdue.res.json.details).toBeUndefined();
+  });
+
   it('checks the deadline when the create commits, not when it arrives', async () => {
     const w = await claimRelay();
     const deadline = Date.now() + 60_000;

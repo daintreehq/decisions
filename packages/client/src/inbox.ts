@@ -316,7 +316,16 @@ export class Inbox {
             return this.reject(row, 'created-by-another-device');
           }
           const patch: Partial<QuestionRow> = { remote_event_seq: ev.seq };
-          if (row.local_status === 'queued') patch.local_status = 'open';
+          // The relay committed it: a question still queued, or one a refused retry closed although an earlier attempt
+          // had landed (a relay that checked the deadline before the receipt), is open. One settled as never
+          // published on the relay's own word stays as it was settled.
+          const refused =
+            row.local_status === 'publish-failed' &&
+            !parseAnswers(row.answers_json).some((e) => e.kind === 'unpublished');
+          if (row.local_status === 'queued' || refused) {
+            patch.local_status = 'open';
+            if (refused) patch.error_code = null;
+          }
           await ctx.store.updateQuestion(row.question_id, patch);
           return false;
         }

@@ -19,6 +19,7 @@ import {
   type Requirement,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { NEVER_COMMITTED_FROM_META } from '../db/schema.js';
 import { deviceHasFeature } from '../room/features.js';
 import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler, Room } from '../room/types.js';
@@ -204,7 +205,8 @@ const WIPE_CLOCK_MARGIN_MS = 7 * 86_400_000;
  * Sync, inside `room.tx`, after the receipt and the question were looked up and not found: whether this relay can show
  * no question with this id was ever committed. A committed question always has a `decision.*` event, and a deletion
  * leaves its `decision.deleted` tombstone; only a wipe of every question removes them, so a wipe since the record was
- * made (with room for the desktop's clock) leaves it unknown.
+ * made (with room for the desktop's clock), or history from before this relay kept the record (`migrate`), leaves it
+ * unknown.
  */
 function neverCommitted(room: Room, questionId: string, createdAt: string): boolean {
   if (
@@ -214,13 +216,15 @@ function neverCommitted(room: Room, questionId: string, createdAt: string): bool
     )
   )
     return false;
-  const wiped = room.q1<{ value: string }>(
-    `SELECT value FROM meta WHERE key = ?`,
-    QUESTIONS_WIPED_META,
+  const meta = (key: string) =>
+    room.q1<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key)?.value;
+  // History is whole only since the later of the last wipe and when this relay began keeping it (`migrate`).
+  const since = Math.max(
+    Number(meta(QUESTIONS_WIPED_META) ?? 0),
+    Number(meta(NEVER_COMMITTED_FROM_META) ?? Number.POSITIVE_INFINITY),
   );
-  if (!wiped) return true;
   const made = Date.parse(createdAt);
-  return Number.isFinite(made) && Number(wiped.value) < made - WIPE_CLOCK_MARGIN_MS;
+  return Number.isFinite(made) && since < made - WIPE_CLOCK_MARGIN_MS;
 }
 
 export const createQuestion: Handler = async (room, c) => {
