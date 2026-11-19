@@ -534,8 +534,9 @@ const refused = (
  * The executable transition table of section 21: each case starts from a round and applies its events in order with
  * `applyRoundEvent`, and every implementation (the relay, the publishing desktop, the phone app, Daintree) must
  * observe exactly the same. Times are relay commit times around the advisory deadline `D`, fifteen minutes after
- * `FIXTURE_NOW`. The cases assume what the relay checks before a round event (section 21): the publishing desktop
- * declared every feature they use, the open-question quota has room, and no phone images are involved.
+ * `FIXTURE_NOW`. The cases assume the checks the relay makes beside the table pass (section 21): the publishing
+ * desktop declared every feature they use, the open-question quota has room, a confirmation names the latest proxy
+ * answer, and no phone images are involved.
  */
 export const ROUND_CASES: RoundCase[] = [
   {

@@ -100,6 +100,8 @@ describe('the round transition table (section 21)', () => {
           expect(r.state, label).toEqual(before);
         }
         const t = r.transition;
+        if (t) expect(t.state, label).toEqual(r.state);
+        else if (r.expired) expect(r.expired.state, label).toEqual(r.state);
         if (step.authority !== undefined) expect(t?.authority, label).toBe(step.authority);
         if (step.provenance !== undefined) expect(t?.provenance, label).toBe(step.provenance);
         if (step.deliverable !== undefined) expect(t?.deliverable, label).toBe(step.deliverable);
@@ -251,19 +253,31 @@ describe('the signed advisory contract', () => {
     }
   });
 
-  it('fails content whose plan is blank, oversize or not text, and leaves an absent one absent', () => {
+  it('drops a blank, oversize or non-text plan, so the advisory question is refused and a blocking one still reads', () => {
     const base = ADVISORY_QUESTION_FIXTURE.content;
-    for (const planned_fallback of ['', '   ', 'x'.repeat(LIMITS.plannedFallbackChars + 1), 42]) {
-      expect(DecisionContentV1.safeParse({ ...base, planned_fallback }).success).toBe(false);
+    const adv = signed(ADVISORY_QUESTION_FIXTURE);
+    const block = signed(BLOCKING_APPROVAL_FIXTURE);
+    for (const planned_fallback of [
+      '',
+      '   ',
+      'x'.repeat(LIMITS.plannedFallbackChars + 1),
+      42,
+      null,
+    ]) {
+      const c = DecisionContentV1.parse({ ...base, planned_fallback });
+      expect(c.planned_fallback).toBeUndefined();
+      expect(c.question).toBe(base.question);
+      expect(advisoryContentIssue(adv, c)).toBe('no-plan');
+      expect(advisoryContentIssue(block, c)).toBeNull();
     }
     const { planned_fallback: _omitted, ...withoutPlan } = base;
     expect(DecisionContentV1.parse(withoutPlan).planned_fallback).toBeUndefined();
-    expect(
-      DecisionContentV1.parse({
-        ...base,
-        planned_fallback: 'x'.repeat(LIMITS.plannedFallbackChars),
-      }).planned_fallback,
-    ).toHaveLength(LIMITS.plannedFallbackChars);
+    const longest = DecisionContentV1.parse({
+      ...base,
+      planned_fallback: 'x'.repeat(LIMITS.plannedFallbackChars),
+    });
+    expect(longest.planned_fallback).toHaveLength(LIMITS.plannedFallbackChars);
+    expect(advisoryContentIssue(adv, longest)).toBeNull();
   });
 
   it('refuses advisory content that is an approval or states no plan, whoever signed it', () => {

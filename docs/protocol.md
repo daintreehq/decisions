@@ -978,7 +978,8 @@ anything, and a step that needs approval is never asked this way.
 - **No gate.** `workflow_gate_id_hash` is null.
 - **Plan.** `DecisionContentV1.planned_fallback`, the agent's plan in its own words: at most
   `LIMITS.plannedFallbackChars` (1,000 UTF-16 code units, as JavaScript counts a string), not blank, inside the
-  encrypted content. A plan that breaks either rule fails the content. It is bound to the question
+  encrypted content. The content parse drops a plan that breaks either rule, which leaves an advisory question with
+  no plan (refused below). It is bound to the question
   and its first round because the ciphertext's AAD names the question id, revision 0 and sender, and the envelope digest
   is signed into the record beside the deadline. The relay never sees it, and no hash of it is published, since a
   short plan could be guessed from one.
@@ -986,7 +987,8 @@ anything, and a step that needs approval is never asked this way.
 Every reader of a signed question (`SignedQuestion`, `EventData.created`, `QuestionDetail`) refuses an advisory
 question with a null deadline or a gate hash, and the mode on any other envelope (another record type, revision or
 purpose). The relay answers `400 validation_error`. A client treats such a question as malformed. Once it decrypts the
-content, a reader also refuses an advisory question that is an approval or states no plan (`advisoryContentIssue`),
+content, a reader also refuses an advisory question that is an approval or has no plan, none sent or one the parse
+dropped (`advisoryContentIssue`),
 whoever signed it, and treats it as malformed: it is never shown as optional, nor with a plan it could not read.
 
 **Rounds.** The advisory round is the one the create opens, at revision 0 (`ADVISORY_ROUND_REVISION`,
@@ -1002,11 +1004,12 @@ The order is the relay's. The route's role check comes first, and a refusal ther
 commits (`RoundResult.expired`), because the relay sweeps due questions before it decides. Then the event applies to
 the round as it now stands (`transition`, or `error`). A relay that finds the deadline passed inside the submission's
 own transaction (it fell between the sweep and the decision) commits the expiry and answers `410 expired` whatever the
-action. The round is expired either way, and the submitter re-reads it. The table covers what the relay decides from
-the round alone. Before any of it, the relay also refuses a `confirm-proxy` that does not name the latest proxy answer
-(`400`), a person's action or message the publishing desktop has not declared it accepts
-(`409 creator-missing-feature`, section 19), phone images that do not bind (section 17), and a reopen past the
-open-question quota (`429`).
+action. The round is expired either way, and the submitter re-reads it. The table covers what the relay decides from the round alone. Once the table admits an event, and before the event
+commits, the relay also refuses a `confirm-proxy` that does not name the latest proxy answer (`400 validation_error`),
+a person's action the publishing desktop has not declared it accepts (`409 invalid_state` with
+`creator-missing-feature`, section 19), a human message on a question whose desktop takes no messages
+(`409 invalid_state`, section 16), phone images that do not bind (section 17), and a reopen past the open-question
+quota (`429 rate_limited`). A deadline that committed first stays committed.
 
 | Input                                       | Authority                                                        | From                         | Revision           | Result                                                                                                             |
 | ------------------------------------------- | ---------------------------------------------------------------- | ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
@@ -1031,13 +1034,14 @@ never re-signing the old submission for a newer round. A fresh submission, by th
   A message still posts, after `D` too;
 - answered by a proxy: an answer `409 revision_conflict`; the person confirms or overrides instead, after `D` too;
 - declined or withdrawn: an answer `409 invalid_state`; another cancel at the same revision is a `200` no-op;
-- reopened and open: anything signed for the earlier round `409 revision_conflict`. Once that round expires too, an
+- reopened and open: an answer or cancel signed for the earlier round `409 revision_conflict`. Once that round expires too, an
   answer is `410 expired`, whatever revision it names;
 - deleted: `404 not_found` (a role the route refuses is `403 forbidden` first).
 
-A retry is not a fresh submission. The same idempotency key with the same body returns the original receipt, even
-after the question changed or was deleted. The same signed action under a new key returns `200` with the question's
-current status and revision and the original event's seq. `applyRoundEvent` describes fresh submissions only.
+A retry is not a fresh submission. The same idempotency key with the same body returns the original receipt while
+the relay keeps it, even after the question changed or was deleted. The same signed action under a new key returns
+`200` with the question's current status and revision and the original event's seq while the question exists, and
+`404 not_found` once it was deleted. `applyRoundEvent` describes fresh submissions only.
 
 **Plan, notice and action** are three separate facts:
 

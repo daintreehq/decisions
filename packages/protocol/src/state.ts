@@ -472,10 +472,12 @@ const refused = (e: unknown, expired: RoundTransition | null, state: RoundState 
  * commits (`expired`), then the event applies to the round as it now stands. So a late answer is `410 expired`, a
  * late dismissal `409 invalid_state`, and a late reopen succeeds on the expired round.
  *
- * It covers what the relay decides from the round alone. The relay also refuses, before anything commits: a
- * `confirm-proxy` that does not name the latest proxy answer (`400`), a person's action or message the publishing
- * desktop has not declared it accepts (`409 creator-missing-feature`, section 19), phone images that do not bind
- * (section 17), and a reopen past the open-question quota (`429`). Callers check those first.
+ * It covers what the relay decides from the round alone. Once it admits an event, and before the event commits, the
+ * relay also refuses a `confirm-proxy` that does not name the latest proxy answer (`400`), a person's action the
+ * publishing desktop has not declared it accepts (`409 invalid_state`, `creator-missing-feature`, section 19), a human
+ * message on a question whose desktop takes no messages (`409 invalid_state`), phone images that do not bind
+ * (section 17), and a reopen past the open-question quota (`429`). Callers check those after this table admits the
+ * event; a deadline that committed first (`expired`) stays committed.
  */
 export function applyRoundEvent(state: RoundState | null, ev: RoundEvent): RoundResult {
   if (ev.type === 'delete') {

@@ -442,11 +442,11 @@ export const DecisionContentV1 = z.object({
   /**
    * An advisory question's plan (section 21): what the agent intends to do if no answer commits by the deadline,
    * in the agent's words. A plan, never an action taken or an answer. Bound to the question and its first round by
-   * the signed `envelope_digest` and the AAD. A blank or oversize one fails the content, and an advisory question
-   * without one is refused by `advisoryContentIssue`: a reader never shows an advisory question whose plan it
-   * dropped.
+   * the signed `envelope_digest` and the AAD. A blank or oversize one is dropped, so a blocking question never fails
+   * on a field that means nothing to it; an advisory question left without one is refused by `advisoryContentIssue`,
+   * so a reader never shows an advisory question whose plan it dropped.
    */
-  planned_fallback: PlannedFallback.optional(),
+  planned_fallback: PlannedFallback.optional().catch(undefined),
 });
 export type DecisionContentV1 = z.infer<typeof DecisionContentV1>;
 
@@ -462,6 +462,7 @@ export function advisoryContentIssue(
 ): 'approval' | 'no-plan' | null {
   if (replyModeOf(question.envelope) !== 'advisory') return null;
   if (content.kind === 'approval') return 'approval';
+  // Absent, or dropped by the content parse as blank or oversize: either way there is no plan to show.
   if (content.planned_fallback === undefined) return 'no-plan';
   return null;
 }

@@ -220,6 +220,22 @@ describe("an answer made on the computer, as the person's", () => {
     expect(host.textContent).not.toMatch(/model answer/i);
   });
 
+  it('claims no requirement for a question it could not verify, such as an advisory one', () => {
+    const verified = render(createElement(ActivityTimeline, { view: view(answer()), now: NOW }));
+    expect(verified.textContent).toContain('Human decision required');
+    const unreadable: QuestionView = {
+      ...view(answer()),
+      status: 'open',
+      revision: 0,
+      content: null,
+      actions: [],
+      verification: { ok: false, reason: 'this app cannot show an advisory question yet' },
+    };
+    const host = render(createElement(ActivityTimeline, { view: unreadable, now: NOW }));
+    expect(host.textContent).toContain('Asked by your agent');
+    expect(host.textContent).not.toContain('Human decision required');
+  });
+
   it('tells an unsent answer on this phone that it was answered on the computer first', () => {
     const a = answer();
     const entry: OutboxEntry = {
