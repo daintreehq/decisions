@@ -42,7 +42,7 @@ export class TokenMapAuthenticator implements PaneAuthenticator {
 }
 
 /** The `get_decision` structured result: the decision fields first, in the MCP surface's snake_case. */
-function decisionResult(v: DecisionView) {
+export function decisionResult(v: DecisionView) {
   return {
     question_id: v.questionId,
     alias: v.alias,
@@ -126,6 +126,39 @@ function decisionResult(v: DecisionView) {
   };
 }
 
+/**
+ * The `get_decision` result text: where the question stands, in words, and how many follow-ups its thread holds. The
+ * CLI's `decisions get` and `decisions ask --wait` print the same words.
+ */
+export function decisionText(v: DecisionView): string {
+  const summary = v.provenance
+    ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+    : v.status === 'expired'
+      ? v.fallbackDue
+        ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
+        : v.advisoryTimeout?.revision === v.revision &&
+            v.advisoryTimeout.disposition === 'fallback-due'
+          ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
+          : v.advisoryTimeout?.revision === v.revision
+            ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
+            : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+      : v.closedReason === 'never-published'
+        ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
+        : v.publication === 'possibly-committed'
+          ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
+          : v.publication === 'never-published' && v.closedReason === 'withdrawn'
+            ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
+            : v.status === 'publish-failed'
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
+              : v.closedReason === 'declined'
+                ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                : `q-${v.alias} is ${v.status}; no answer in force.`;
+  const messages = v.thread.filter((t) => t.kind === 'message').length;
+  return messages > 0
+    ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
+    : summary;
+}
+
 /** The `get_involvement` structured result: every field present, null where it does not apply. */
 function involvementResult(v: InvolvementView) {
   const on = v.status === 'available' ? v : null;
@@ -185,15 +218,40 @@ export const SERVER_INSTRUCTIONS =
   'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. When the person would have to see something to decide (a UI, a design, a layout, a chart, an error on screen), attach screenshots to ask_human as its attachments field describes, instead of describing it in words, with roles before and after for a change. If the images change after an approval, ask again: an approval covers only the images it was given. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
   "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
+/**
+ * Where an agent finds what the person said: `terminal` when the host types answers and follow-ups into the agent's
+ * own terminal, which wakes it (Daintree); `poll` when they go somewhere the agent may never see, such as the terminal,
+ * file or command of a standalone `decisions mcp`, so the agent checks with `get_decision` instead.
+ */
+export type AnswerArrival = 'terminal' | 'poll';
+
+const TERMINAL_ARRIVAL =
+  ', and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal.';
+const POLL_ARRIVAL =
+  '. This host does not type answers into your terminal: when you cannot go further without the answer, call get_decision with its question_id, and check again later if it has none yet.';
+const TERMINAL_FOLLOWUPS = 'which arrive in this terminal marked as follow-ups';
+const POLL_FOLLOWUPS = "which appear in get_decision's thread";
+
+/** `SERVER_INSTRUCTIONS` for a host whose agents check for answers with `get_decision` (`AnswerArrival`). */
+export function serverInstructions(arrival: AnswerArrival = 'terminal'): string {
+  return arrival === 'terminal'
+    ? SERVER_INSTRUCTIONS
+    : SERVER_INSTRUCTIONS.replace(TERMINAL_ARRIVAL, POLL_ARRIVAL)
+        .replace(TERMINAL_FOLLOWUPS, POLL_FOLLOWUPS)
+        .replace('a reply arrives the same way', 'a reply appears the same way');
+}
+
 /** How the `ask_human` result text begins: where the answer arrives, and what to do meanwhile. */
-export const askedInstruction = (alias: number) =>
-  `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`;
+export const askedInstruction = (alias: number, arrival: AnswerArrival = 'terminal') =>
+  arrival === 'terminal'
+    ? `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`
+    : `Asked as q-${alias}. Carry on with anything that does not depend on the answer. This host does not type the answer into your terminal: once you cannot go further without it, call get_decision with this question_id to see whether it has been answered, and check again later if not. The answer is final: the person may still send follow-ups, even after answering, which appear in get_decision's thread without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies appear the same way.`;
 
 const policyName = (a: Pick<PolicyAdjustment, 'source' | 'gateId'>) =>
   a.source === 'gate' ? `the workflow gate ${a.gateId}` : 'the host';
 
 /** One change policy made, in words. */
-function adjustmentText(a: PolicyAdjustment): string {
+export function adjustmentText(a: PolicyAdjustment): string {
   const by = policyName(a);
   if (a.field === 'expires_at')
     return a.requested === null
@@ -215,9 +273,11 @@ export type AskedReceipt = Pick<
   Partial<RegisterResult>;
 
 /** The deadline and mode as they apply from now on. */
-function planText(r: RegisterResult): string {
+function planText(r: RegisterResult, arrival: AnswerArrival = 'terminal'): string {
   if (r.replyMode === 'advisory')
-    return `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is typed here as usual. If none is, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`;
+    return arrival === 'terminal'
+      ? `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is typed here as usual. If none is, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`
+      : `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is the answer, as usual. If none is, get_decision says fallback_due once this host has seen the deadline pass unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`;
   return r.expiresAt
     ? `It waits for a decision until ${r.expiresAt} (UTC); unanswered by then, it expires, and expiry authorises nothing.`
     : 'It has no deadline: it waits for a decision until it is answered, declined or cancelled.';
@@ -235,7 +295,7 @@ function askedAsText(r: RegisterResult): string {
  * The `ask_human` result text: where the answer arrives, the deadline and mode that apply, what policy changed, and
  * how to find the question again. A repeated question is described as it was asked, and pointed at `get_decision`.
  */
-export function askedText(r: AskedReceipt): string {
+export function askedText(r: AskedReceipt, arrival: AnswerArrival = 'terminal'): string {
   const q = `q-${r.alias}`;
   const recover = `call get_decision with question_id ${r.questionId}`;
   const full = r.expiresAt !== undefined ? (r as RegisterResult) : null;
@@ -245,11 +305,11 @@ export function askedText(r: AskedReceipt): string {
     : '';
   if (r.duplicate)
     return `Already asked as ${q}: this correlation_id and request match it, so this is that question, not a new one.${full ? ` ${askedAsText(full)}` : ''}${policy} It may have been answered, closed or reopened since: ${recover} to see where it stands before you act on it.`;
-  return `${askedInstruction(r.alias)}${full ? ` ${planText(full)}` : ''}${policy} To check on it later, or if you lose track of it, ${recover}.`;
+  return `${askedInstruction(r.alias, arrival)}${full ? ` ${planText(full, arrival)}` : ''}${policy} To check on it later, or if you lose track of it, ${recover}.`;
 }
 
 /** The `ask_human` structured result: the question and the plan that applies to it, in the MCP surface's snake_case. */
-function askedResult(r: AskedReceipt, instruction: string) {
+export function askedResult(r: AskedReceipt, instruction: string) {
   return {
     question_id: r.questionId,
     status: r.status,
@@ -275,10 +335,18 @@ function askedResult(r: AskedReceipt, instruction: string) {
 }
 
 /** The `send_followup` result text. */
-export const followupInstruction = (alias: number, expectsReply: boolean) =>
-  expectsReply
-    ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
-    : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
+export const followupInstruction = (
+  alias: number,
+  expectsReply: boolean,
+  arrival: AnswerArrival = 'terminal',
+) =>
+  arrival === 'poll'
+    ? expectsReply
+      ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply. This host does not type it into your terminal: the reply appears in get_decision's thread for this question, and it does not change the answer.`
+      : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups appear in get_decision's thread for this question, and they do not change the answer.`
+    : expectsReply
+      ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
+      : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
 
 /**
  * How an agent names an image to attach, as Daintree resolves it: a path inside the agent's working directory.
@@ -678,6 +746,11 @@ export interface McpHandlerOptions {
    * relative to the agent's working directory. Agents attach only what this tells them they can name.
    */
   attachmentIdDescription?: string;
+  /**
+   * Where agents find what the person said (`AnswerArrival`); default `terminal`. A host whose sink does not type
+   * into the agent's own terminal passes `poll`, so its instructions and receipts send the agent to `get_decision`.
+   */
+  answerArrival?: AnswerArrival;
   /** Exact `Host` header values accepted. Defaults to the loopback names on `port`. */
   allowedHosts?: () => string[];
   /**
@@ -765,6 +838,30 @@ function bearer(req: IncomingMessage): string | null {
 }
 
 /** `TOOLS` as served, with the host's own words for an attachment id. Leaves `TOOLS` itself untouched. */
+/** The sentences of `ask_human` and `send_followup` that say answers are typed into the agent's terminal. */
+const TERMINAL_TOOL_TEXT: Record<string, [string, string]> = {
+  ask_human: [
+    ' end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
+    ' this host does not type the answer into your terminal, so call get_decision with its question_id when you cannot go on without it.',
+  ],
+  send_followup: ['arrive here marked as follow-ups.', "appear in get_decision's thread."],
+};
+
+/**
+ * The tool list as a host advertises it: `ask_human`'s attachment ids described as the host resolves them, and, for a
+ * host whose agents check for answers (`AnswerArrival` `poll`), no promise that answers are typed into the terminal.
+ */
+export function toolsFor(o: { attachmentIdDescription?: string; answerArrival?: AnswerArrival }) {
+  const tools = toolsWithAttachmentIdDescription(
+    o.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
+  );
+  if (o.answerArrival !== 'poll') return tools;
+  return tools.map((t) => {
+    const swap = TERMINAL_TOOL_TEXT[t.name];
+    return swap ? { ...t, description: t.description.replace(swap[0], swap[1]) } : t;
+  });
+}
+
 export function toolsWithAttachmentIdDescription(description: string) {
   return TOOLS.map((t) => {
     if (t.name !== 'ask_human') return t;
@@ -802,9 +899,13 @@ export function createDecisionsMcpHandler(
   const limit = opts.rateLimitPerMinute ?? 60;
   const now = opts.now ?? Date.now;
   const hits = new Map<string, number[]>();
-  const tools = toolsWithAttachmentIdDescription(
-    opts.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
-  );
+  const arrival = opts.answerArrival ?? 'terminal';
+  const tools = toolsFor({
+    ...(opts.attachmentIdDescription !== undefined
+      ? { attachmentIdDescription: opts.attachmentIdDescription }
+      : {}),
+    answerArrival: arrival,
+  });
 
   const limited = (key: string): boolean => {
     const t = now();
@@ -829,43 +930,15 @@ export function createDecisionsMcpHandler(
           r.expiresAt === undefined &&
           (args.expires_in !== undefined || args.planned_fallback !== undefined);
         const instruction = unconfirmed
-          ? `${askedText(r)} This host could not confirm expires_in or planned_fallback and may have ignored them: treat it as a question that waits for a decision, with its default deadline.`
-          : askedText(r);
+          ? `${askedText(r, arrival)} This host could not confirm expires_in or planned_fallback and may have ignored them: treat it as a question that waits for a decision, with its default deadline.`
+          : askedText(r, arrival);
         return text(instruction, askedResult(r, instruction));
       }
       if (name === 'get_decision') {
         if (typeof args.question_id !== 'string')
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
-        const summary = v.provenance
-          ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
-          : v.status === 'expired'
-            ? v.fallbackDue
-              ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
-              : v.advisoryTimeout?.revision === v.revision &&
-                  v.advisoryTimeout.disposition === 'fallback-due'
-                ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
-                : v.advisoryTimeout?.revision === v.revision
-                  ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
-                  : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : v.closedReason === 'never-published'
-              ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
-              : v.publication === 'possibly-committed'
-                ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
-                : v.publication === 'never-published' && v.closedReason === 'withdrawn'
-                  ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
-                  : v.status === 'publish-failed'
-                    ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
-                    : v.closedReason === 'declined'
-                      ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-                      : `q-${v.alias} is ${v.status}; no answer in force.`;
-        const messages = v.thread.filter((t) => t.kind === 'message').length;
-        return text(
-          messages > 0
-            ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
-            : summary,
-          decisionResult(v),
-        );
+        return text(decisionText(v), decisionResult(v));
       }
       if (name === 'cancel_question') {
         if (typeof args.question_id !== 'string')
@@ -882,7 +955,7 @@ export function createDecisionsMcpHandler(
       }
       if (name === 'send_followup') {
         const r = await bridge.postMessage(args, pane);
-        const instruction = followupInstruction(r.alias, r.expectsReply);
+        const instruction = followupInstruction(r.alias, r.expectsReply, arrival);
         return text(instruction, {
           question_id: r.questionId,
           message_id: r.messageId,
@@ -913,7 +986,7 @@ export function createDecisionsMcpHandler(
           protocolVersion: SUPPORTED_VERSIONS.includes(asked) ? asked : SUPPORTED_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'daintree-decisions', version: SERVER_VERSION },
-          instructions: SERVER_INSTRUCTIONS,
+          instructions: serverInstructions(arrival),
         });
       }
       case 'notifications/initialized':

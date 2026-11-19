@@ -43,7 +43,11 @@ import {
   shapeForGates,
   validateOptions,
 } from './content.js';
-import { advisoryContentHolds, type AdvisorySupport } from './advisory.js';
+import {
+  advisoryContentHolds,
+  type AdvisorySupport,
+  type AdvisorySupportSnapshot,
+} from './advisory.js';
 import {
   MemorySpool,
   gateHash,
@@ -173,6 +177,12 @@ const OUTBOX_SCAN = 1_000;
  */
 const SPOOL_GRACE_MS = 24 * 60 * 60_000;
 
+/**
+ * How long a registration that asked to wait for what advice needs (`RegisterOptions.awaitAdvisorySupport`) waits for
+ * that read: the relay's `/info` and the device directory, each with a 10-second deadline of their own.
+ */
+const ADVISORY_SUPPORT_WAIT_MS = 25_000;
+
 /** A create's item went while it was being sent (withdrawn or settled): it is not written back, and not sent. */
 class CreateWithdrawn extends Error {}
 /** A create's deadline passed before it was first sent: it goes no further, and is settled as never published. */
@@ -189,6 +199,16 @@ export interface PolicyAdjustment {
   /** The host's own policy, or a workflow gate (named by `gateId`). */
   source: 'host' | 'gate';
   gateId: string | null;
+}
+
+/** How a host registers a question, beyond what the agent asked (`DecisionsBridge.registerQuestion`). */
+export interface RegisterOptions {
+  /**
+   * When what the relay and the person's devices support for advice is not known yet, read it once and wait for that
+   * read, instead of refusing at once with `support-unknown`. For a short-lived host (the CLI) that asks as soon as it
+   * starts, before any background read could have run. Only an advisory ask that passed every local check waits.
+   */
+  awaitAdvisorySupport?: boolean;
 }
 
 export interface RegisterResult {
@@ -344,7 +364,11 @@ export class Publisher {
   ) {}
 
   /** Commit locally and return. NOTHING here touches the network. */
-  async register(origin: QuestionOrigin, rawInput: unknown): Promise<RegisterResult> {
+  async register(
+    origin: QuestionOrigin,
+    rawInput: unknown,
+    opts: RegisterOptions = {},
+  ): Promise<RegisterResult> {
     const parsed = AskHumanInput.safeParse(rawInput);
     if (!parsed.success) {
       throw new BridgeError(
@@ -364,9 +388,11 @@ export class Publisher {
     const corrKey = input.correlation_id
       ? `corr:${await originScope(origin)}:${input.correlation_id}`
       : null;
-    if (!corrKey) return this.registerParsed(origin, input, null);
+    if (!corrKey) return this.registerParsed(origin, input, null, opts);
     const prev = this.registering.get(corrKey) ?? Promise.resolve();
-    const run = prev.catch(() => undefined).then(() => this.registerParsed(origin, input, corrKey));
+    const run = prev
+      .catch(() => undefined)
+      .then(() => this.registerParsed(origin, input, corrKey, opts));
     const tail = run.catch(() => undefined);
     this.registering.set(corrKey, tail);
     try {
@@ -380,6 +406,7 @@ export class Publisher {
     origin: QuestionOrigin,
     input: AskHumanInput,
     corrKey: string | null,
+    opts: RegisterOptions,
   ): Promise<RegisterResult> {
     const { ctx } = this;
     // The origin's gate is trusted (registered by the host) and is the floor. A gate the agent names can only
@@ -507,7 +534,8 @@ export class Publisher {
       expiresAt,
       plannedFallback: input.planned_fallback,
     };
-    if (replyMode === 'advisory') await this.admitAdvisory(advisoryAsk);
+    if (replyMode === 'advisory')
+      await this.admitAdvisory(advisoryAsk, opts.awaitAdvisorySupport === true);
     const adjustments = policyAdjustments({
       input,
       requestedExpiresAt,
@@ -710,24 +738,47 @@ export class Publisher {
   /**
    * Refuses an advisory ask the host may not sign (protocol section 21, `advisoryRefusal`). The host's own rules are
    * checked first; then what the relay and the person's devices support, as last read in the background. Unknown
-   * support refuses too, and starts a read, so a retry a moment later can be decided.
+   * support refuses too, and starts a read, so a retry a moment later can be decided; with `awaitSupport`, that read is
+   * waited for once first.
    */
   private async admitAdvisory(
     q: Pick<
       Parameters<typeof advisoryRefusal>[0],
       'originGateId' | 'namedGateId' | 'kind' | 'expiresAt' | 'plannedFallback'
     >,
+    awaitSupport = false,
   ): Promise<void> {
-    const facts = {
+    // The host's own rules, read now: again after any wait below, since the host may change them meanwhile.
+    const localFacts = () => ({
       ...q,
       hostSupport: this.advisory?.hostSupport === true,
       policyAllows: this.ctx.policy.advisoryQuestions,
-    };
+    });
+    let facts = localFacts();
     const local = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
     if (local) throw advisoryError(local);
-    const known = await this.advisory!.known();
-    if (known.relay === null || (known.relay && known.reader === null)) {
-      void this.advisory!.refreshIfDue();
+    const unknown = (k: AdvisorySupportSnapshot) =>
+      k.relay === null || (k.relay && k.reader === null);
+    let known = await this.advisory!.known();
+    if (awaitSupport && unknown(known)) {
+      // One read, bounded here whatever the fetch does with its abort signal.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.advisory!.refreshIfDue(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ADVISORY_SUPPORT_WAIT_MS);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+      facts = localFacts();
+      const again = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
+      if (again) throw advisoryError(again);
+      known = await this.advisory!.known();
+    }
+    if (known.relay === null || unknown(known)) {
+      // A caller that waited for a read is not handed a second one: it asks again when it chooses.
+      if (!awaitSupport) void this.advisory!.refreshIfDue();
       throw advisoryError('support-unknown');
     }
     const remote = advisoryRefusal({

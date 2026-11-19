@@ -12,6 +12,8 @@ decisions setup --url https://<your-worker>.workers.dev   # asks for the claim s
 decisions pair      # scan the QR code with your phone
 decisions mcp       # prints the line that adds the MCP to your agent
 decisions listen    # receive answers into stdout, a file (--sink file:<path>) or a command (--sink exec:<cmd>)
+decisions ask "Ship it?" --expires-in 15m --wait   # ask, and exit with the outcome (0 answered)
+decisions wait <question_id>   # wait for a question asked earlier; decisions get <question_id> shows it now
 decisions remove https://<your-worker>.workers.dev   # take the relay out of Cloudflare (--dry-run lists it)
 decisions --help
 ```
@@ -25,5 +27,7 @@ local socket (`--host-channel`). More in the [self-hosting guide](https://github
 instead (every 15 s, backing off while the relay is unreachable), and `listen --once` fetches what is waiting,
 delivers it and exits. The [operations guide](https://github.com/daintreehq/decisions/blob/main/docs/operations.md#listening-without-a-live-socket)
 has the retry schedule, exit codes, what `decisions status` reports, and how an MCP client gets its answers this way.
+It also has [the outcomes, exit codes and JSON records](https://github.com/daintreehq/decisions/blob/main/docs/operations.md#asking-from-a-script-or-an-agent-without-daintree)
+of `ask --wait` and `wait`, and which process's sink gets a notice.
 
 Node 22+. Apache-2.0.

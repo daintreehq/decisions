@@ -112,10 +112,10 @@ You need a Cloudflare account (the free plan is enough for one person), Node 22+
 5. **Test it.**
 
    ```bash
-   pnpm decisions ask "Does this work?" --option yes=Yes --option no=No
+   pnpm decisions ask "Does this work?" --option yes=Yes --option no=No --wait
    ```
 
-   Answer on your phone.
+   Answer on your phone. `--wait` stays until the outcome and exits with it (0 answered); `--expires-in 15m` sets a reply window, `--planned-fallback` asks for advice instead of a decision, and `decisions wait <question_id>` picks the wait up again later. [docs/operations.md](docs/operations.md#asking-from-a-script-or-an-agent-without-daintree) has the outcomes, exit codes and JSON records.
 
 > [!IMPORTANT]
 > Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.** See [docs/key-recovery.md](docs/key-recovery.md).

@@ -401,6 +401,46 @@ describe('planned_fallback: asking for advice', () => {
     });
   });
 
+  it('a host that asks to wait reads support once, and checks its own policy again after the read', async () => {
+    const e = await env({ advisory: true });
+    e.relay.features = ['thread-messages-v1', ADVISORY];
+    e.relay.deviceFeatures.set(e.phone.deviceId, [ADVISORY]);
+    const waiting = (input: Record<string, unknown>) =>
+      e.bridge.registerQuestion({
+        origin: origin(),
+        input: { question: 'q', ...input },
+        pump: false,
+        awaitAdvisorySupport: true,
+      });
+    // Cold: the read is waited for, and the question is advisory without a retry.
+    const r = await waiting({ expires_in: '15m', planned_fallback: PLAN });
+    expect(r.replyMode).toBe('advisory');
+    // `pump: false`: nothing was sent.
+    expect(e.relay.calls.some((c) => c.path === '/api/v1/questions')).toBe(false);
+    expect((await e.store.getQuestion(r.questionId))!.local_status).toBe('queued');
+
+    // The host turns advice off while the read is under way: the question is refused, and nothing is queued.
+    const f = await env({ advisory: true });
+    f.relay.features = ['thread-messages-v1', ADVISORY];
+    f.relay.deviceFeatures.set(f.phone.deviceId, [ADVISORY]);
+    let release!: () => void;
+    f.relay.holdInfo = new Promise<void>((resolve) => (release = resolve));
+    const asked = f.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q', expires_in: '15m', planned_fallback: PLAN },
+      pump: false,
+      awaitAdvisorySupport: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    f.policy.advisoryQuestions = false;
+    release();
+    await expect(asked).rejects.toMatchObject({
+      code: 'forbidden',
+      message: expect.stringMatching(/^policy-disallowed: /),
+    });
+    expect(await f.store.listQuestions()).toHaveLength(0);
+  });
+
   it('a stopped bridge forgets what it read, and a read that finishes after the stop restores nothing', async () => {
     const e = await env({ advisory: true });
     e.relay.features = ['thread-messages-v1', ADVISORY];

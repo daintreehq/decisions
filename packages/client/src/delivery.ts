@@ -225,13 +225,17 @@ export class DeliveryEngine {
   }
 
   /** Whether `questionId`'s advisory notice, still to be typed, would wait for the ledger now (no effects). */
-  async ledgerHolds(questionId: string): Promise<boolean> {
+  async ledgerHolds(questionId: string, opts: { start?: boolean } = {}): Promise<boolean> {
     const state = await this.o.replaying?.(questionId);
     if (!state) return false;
     if (state === 'unapplied') return true;
-    // The wait is timed from when it was first seen, also by get_decision for a notice no pass tries to type.
-    const since = this.waitingSince.get(questionId) ?? this.ctx.now();
-    this.waitingSince.set(questionId, since);
+    // The wait is timed from when it was first seen, also by get_decision for a notice no pass tries to type. With
+    // `start: false` (a read of a question that may have no notice waiting yet) it is not started: it holds meanwhile.
+    const since = this.waitingSince.get(questionId);
+    if (since === undefined) {
+      if (opts.start !== false) this.waitingSince.set(questionId, this.ctx.now());
+      return true;
+    }
     return this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
   }
 
@@ -258,6 +262,18 @@ export class DeliveryEngine {
     }
     this.held.add(questionId);
     return true;
+  }
+
+  /**
+   * Settles once the drain in flight, if any, has finished and recorded what its sink reported; never rejects. A host
+   * that stops the bridge and ends its sink's commands waits on it before closing the store, so a write the sink
+   * answers while shutting down (an `exec:` command's exit 75) is still recorded.
+   */
+  idle(): Promise<void> {
+    return (this.running ?? Promise.resolve()).then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   /** Serialised: concurrent callers share one pass plus at most one follow-up pass. */

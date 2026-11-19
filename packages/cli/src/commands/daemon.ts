@@ -28,7 +28,8 @@ import {
   type GlobalOptions,
   type Runtime,
 } from '../runtime.js';
-import { PaneDirectoryResolver, humanFileResolver, noAttachmentsResolver } from '../resolvers.js';
+import { RECEIVER_BUSY, ReceiverLock } from '../receiver.js';
+import { PaneDirectoryResolver, noAttachmentsResolver } from '../resolvers.js';
 
 /**
  * The origin the CLI uses for everything it asks itself. Each named demo "pane" lives as long as the
@@ -58,11 +59,14 @@ export function parseSink(spec: string | undefined): SinkSpec {
   if (!spec || spec === 'stdout') return { kind: 'stdout' };
   if (spec.startsWith('file:') && spec.length > 5) return { kind: 'file', path: spec.slice(5) };
   if (spec.startsWith('exec:') && spec.length > 5) return { kind: 'exec', cmd: spec.slice(5) };
-  throw new CliError('--sink must be stdout, file:<path> or exec:<command>');
+  throw new CliError('--sink must be stdout, file:<path> or exec:<command>', 2);
 }
 
 /** Exit status an exec sink command uses to say "nothing done, try again later" (sysexits EX_TEMPFAIL). */
 export const EXEC_SINK_TEMPFAIL = 75;
+
+/** How long an `exec:` command has to exit after SIGTERM before it is killed. */
+const EXEC_KILL_GRACE_MS = 2_000;
 
 /**
  * Demo sink so the whole loop works without Daintree: prints, appends to a file, or pipes the notice to a
@@ -83,10 +87,17 @@ export const EXEC_SINK_TEMPFAIL = 75;
 export class DemoSink implements TerminalSink {
   /** `exec:` commands still running, so shutdown can end them instead of waiting on them. */
   private readonly running = new Set<ChildProcess>();
+  /** Shutting down: nothing more is written, and what was not written is held for the next receiver. */
+  private closed = false;
   constructor(
     private readonly spec: SinkSpec,
     /** Writes one line; when it returns a promise, the line counts as written only once that resolves. */
     private readonly out: (line: string) => void | Promise<void>,
+    /**
+     * `json`: standard output carries one JSON record per line (`ask --json`, `wait --json`), so the stdout sink writes
+     * each notice as a `{"record":"notice"}` line and an `exec:` command's own output goes to standard error.
+     */
+    private readonly opts: { json?: boolean } = {},
   ) {}
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     if (o.host_id !== 'cli') return { state: 'gone' };
@@ -106,11 +117,16 @@ export class DemoSink implements TerminalSink {
   async isIdle(): Promise<boolean> {
     return true;
   }
-  async inject(_t: TerminalTarget, text: string, _injectionId?: string): Promise<InjectResult> {
+  async inject(_t: TerminalTarget, text: string, injectionId?: string): Promise<InjectResult> {
+    if (this.closed) return { outcome: 'held', reason: 'sink_closed' };
     switch (this.spec.kind) {
       case 'stdout':
         try {
-          await this.out('\n' + text + '\n');
+          await this.out(
+            this.opts.json
+              ? JSON.stringify({ record: 'notice', injection_id: injectionId ?? null, text })
+              : '\n' + text + '\n',
+          );
           return { outcome: 'delivered', proof: 'stdout' };
         } catch {
           return { outcome: 'ambiguous', reason: 'stdout_write_failed' };
@@ -147,7 +163,11 @@ export class DemoSink implements TerminalSink {
     return new Promise<InjectResult>((resolve) => {
       let spawned = false;
       let inputWritten = false;
-      const p = spawn(cmd, { shell: true, stdio: ['pipe', 'inherit', 'inherit'] });
+      // Under --json, standard output belongs to the records: the command's own output goes to standard error.
+      const p = spawn(cmd, {
+        shell: true,
+        stdio: ['pipe', this.opts.json ? 2 : 'inherit', 'inherit'],
+      });
       this.running.add(p);
       p.on('exit', () => this.running.delete(p));
       p.on('spawn', () => (spawned = true));
@@ -166,8 +186,9 @@ export class DemoSink implements TerminalSink {
         else resolve({ outcome: 'delivered', proof: 'exec:exit-0' });
       });
       // A command that exits before reading its input raises EPIPE on stdin; the exit decides the outcome.
-      p.stdin.on('error', () => undefined);
-      p.stdin.end(data, (err?: Error | null) => (inputWritten = !err));
+      const stdin = p.stdin!; // piped: never null
+      stdin.on('error', () => undefined);
+      stdin.end(data, (err?: Error | null) => (inputWritten = !err));
     });
   }
   /**
@@ -175,7 +196,15 @@ export class DemoSink implements TerminalSink {
    * process up. One that may already have acted settles as ambiguous, never retried.
    */
   close(): void {
-    for (const p of this.running) p.kill('SIGTERM');
+    this.closed = true;
+    const ending = [...this.running];
+    for (const p of ending) p.kill('SIGTERM');
+    if (ending.length === 0) return;
+    // A command that ignores SIGTERM is killed, so it can neither keep the process up nor settle after the store closed.
+    const timer = setTimeout(() => {
+      for (const p of ending) if (this.running.has(p)) p.kill('SIGKILL');
+    }, EXEC_KILL_GRACE_MS);
+    timer.unref();
   }
 
   async hasMarker(_t: TerminalTarget, injectionId: string): Promise<boolean> {
@@ -188,10 +217,13 @@ export class DemoSink implements TerminalSink {
   }
 }
 
+/** How often a CLI receiver sends what is queued, retries and delivers, beside its socket or polling. */
+const CLI_PUMP_MS = 5_000;
+
 export function buildBridge(
   rt: Runtime,
   sink: TerminalSink,
-  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver } = {},
+  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver; pumpIntervalMs?: number } = {},
 ): DecisionsBridge {
   return new DecisionsBridge({
     identity: rt.identity,
@@ -203,10 +235,15 @@ export function buildBridge(
     spool: new FileSpool(join(rt.ctx.home, 'spool')),
     // Default: no attachments. Callers choose between the human's unrestricted --attach and a pane folder.
     resolver: extra.resolver ?? noAttachmentsResolver,
-    // The CLI's sinks type the library's text as given, follow-up blocks included.
+    // The CLI's sinks type the library's text as given, follow-up blocks and advisory notices included.
     followUps: true,
+    advisoryDeadlines: true,
     auditPath: rt.auditPath,
-    policy: extra.policy ?? new PolicyRegistry(),
+    // A question is advisory only when its asker states a plan (`--planned-fallback`, `planned_fallback`), and never
+    // under a gate or for an approval; the relay and a phone or tablet must support it as well.
+    policy: extra.policy ?? new PolicyRegistry({ advisoryQuestions: true }),
+    // Only the receiver publishes: a question another `decisions` process asked meanwhile goes out within seconds.
+    pumpIntervalMs: extra.pumpIntervalMs ?? CLI_PUMP_MS,
     ...(rt.ctx.webSocket ? { webSocket: rt.ctx.webSocket } : {}),
     now: rt.ctx.now,
   });
@@ -268,6 +305,8 @@ export interface DaemonOptions {
   poll?: HttpPollOptions;
   /** How long `once` may take before it stops (tests); default two minutes. */
   onceDeadlineMs?: number;
+  /** How often the bridge sends what is queued and delivers (tests); default `CLI_PUMP_MS`. */
+  pumpIntervalMs?: number;
   mcp?: {
     port?: number;
     /** Path the MCP answers on, exactly (default `/mcp`). */
@@ -290,8 +329,54 @@ export interface DaemonOptions {
 const ONCE_DEADLINE_MS = 120_000;
 const ONCE_TIMED_OUT = 'listen --once did not finish within two minutes; stopped';
 
-const REVOKED =
+export const REVOKED =
   'This device was revoked from the relay. Stopped; re-pair or restore from a recovery kit.';
+
+/**
+ * How long stopping waits for the bridge's work in flight to be recorded. Longer than `EXEC_KILL_GRACE_MS`, so a
+ * command that ignores SIGTERM has been killed, and its outcome recorded, by then.
+ */
+const DRAIN_WAIT_MS = 5_000;
+
+/**
+ * Ends a bridge's run without closing its store: the sink stops writing and its commands are ended, the relay requests
+ * are aborted, the bridge stops, and then this waits for what the bridge had in flight (a pump, applying events, a
+ * delivery) to record what happened (an `exec:` command that answers SIGTERM with exit 75 is held, not left for a
+ * restart to call uncertain), or for `DRAIN_WAIT_MS`. `also` is other work on the store to wait for the same way.
+ */
+export async function quiesceBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  sink.close();
+  rt.client.close();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The bound covers stopping too: a stop waits for a sync whose requests may not honour their abort.
+  await Promise.race([
+    (async () => {
+      await bridge.stop();
+      await Promise.all([bridge.idle(), ...also.map((p) => p.catch(() => undefined))]);
+    })(),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DRAIN_WAIT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/** `quiesceBridge`, then the store closes. */
+export async function closeBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  await quiesceBridge(rt, bridge, sink, also);
+  await rt.store.close();
+}
 
 /** Seconds until `at`, for a status line. */
 const secondsUntil = (at: number, now: number) => Math.max(0, Math.round((at - now) / 1000));
@@ -300,7 +385,7 @@ const secondsUntil = (at: number, now: number) => Math.max(0, Math.round((at - n
  * Reports a polling listener's HTTP syncs on stderr: the first success, each failure with its retry, and the
  * recovery. Only codes, cursors and times: nothing of any question.
  */
-function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
+export function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
   let last: HttpSyncStatus['outcome'] | null = null;
   bridge.on('sync', (s) => {
     if (s.outcome === 'ok' && last !== 'ok')
@@ -325,13 +410,23 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
       throw new CliError(`--path: ${(e as Error).message}`);
     }
   }
+  const sinkSpec = parseSink(o.sink);
   const rt = await openRuntime(ctx, g);
-  const sink = new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out);
+  // One receiver per state directory: a second would deliver beside this one and take its writes for crashed ones.
+  const lock = ReceiverLock.forHome(ctx.home);
+  try {
+    if (!lock.tryAcquire()) throw new CliError(RECEIVER_BUSY);
+  } catch (e) {
+    await rt.store.close();
+    throw e;
+  }
+  const sink = new DemoSink(sinkSpec, ctx.outAcked ?? ctx.out);
   // Agents reach files only through a folder the human designated (per pane), never by naming a path.
   const bridge = buildBridge(rt, sink, {
     resolver: o.mcp?.attachmentsDir
       ? new PaneDirectoryResolver(o.mcp.attachmentsDir)
       : noAttachmentsResolver,
+    ...(o.pumpIntervalMs !== undefined ? { pumpIntervalMs: o.pumpIntervalMs } : {}),
   });
   const http = o.once === true || o.socket === false;
   // One way to stop, whatever asks: a signal, the caller's `until`, a revocation or a sync no retry can fix. It
@@ -388,6 +483,8 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         authenticator: auth,
         ...(o.mcp.port !== undefined ? { port: o.mcp.port } : {}),
         ...(o.mcp.path !== undefined ? { path: o.mcp.path } : {}),
+        // Its sink is this process's terminal, a file or a command, never the agent's own terminal: agents check back.
+        answerArrival: 'poll',
         // This host resolves an id inside the pane's human-designated folder, not the agent's worktree, so it says so.
         attachmentIdDescription: o.mcp.attachmentsDir
           ? 'The relative path the human gave you of an image in the attachments folder set up for this terminal; nothing else can be attached.'
@@ -450,76 +547,10 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     stopping = true;
     sink.close();
     await mcp?.close();
-    rt.client.close();
-    await bridge.stop();
-    await rt.store.close();
-  }
-}
-
-export async function ask(
-  ctx: Ctx,
-  g: GlobalOptions,
-  o: {
-    question: string;
-    context?: string;
-    option?: string[];
-    require?: string;
-    attach?: string[];
-    wait?: boolean;
-    sink?: string;
-    until?: Promise<void>;
-  },
-): Promise<void> {
-  const rt = await openRuntime(ctx, g);
-  const bridge = buildBridge(rt, new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out), {
-    resolver: humanFileResolver,
-  });
-  try {
-    const options = (o.option ?? []).map((s) => {
-      const i = s.indexOf('=');
-      if (i < 1) throw new CliError(`--option must look like id=Label, got "${s}"`);
-      return { id: s.slice(0, i), label: s.slice(i + 1) };
-    });
-    const r = await bridge.registerQuestion({
-      origin: cliOrigin(),
-      input: {
-        question: o.question,
-        ...(o.context ? { context: o.context } : {}),
-        ...(options.length ? { options } : {}),
-        ...(o.require ? { requested_requirement: o.require } : {}),
-        ...(o.attach?.length
-          ? { attachments: o.attach.map((p) => ({ local_resource_id: p })) }
-          : {}),
-      },
-    });
-    await bridge.pump();
-    ctx.out(
-      ctx.json
-        ? JSON.stringify({
-            question_id: r.questionId,
-            alias: r.alias,
-            enforced_requirement: r.requirement,
-          })
-        : `Asked as q-${r.alias} (${r.questionId}), requirement: ${r.requirement}.`,
-    );
-    if (!o.wait) {
-      ctx.out(
-        ctx.json
-          ? ''
-          : 'The answer is delivered by a running `decisions listen`. Use --wait to wait here.',
-      );
-      return;
+    try {
+      await closeBridge(rt, bridge, sink);
+    } finally {
+      lock.release();
     }
-    await bridge.start();
-    const done = new Promise<void>((resolve) => {
-      bridge.on('delivered', (id) => id === r.questionId && resolve());
-    });
-    await Promise.race([
-      done,
-      o.until ?? new Promise<void>((resolve) => process.once('SIGINT', () => resolve())),
-    ]);
-  } finally {
-    await bridge.stop();
-    await rt.store.close();
   }
 }

@@ -14,14 +14,8 @@ import {
 import { PROTOCOL_VERSION, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
-import {
-  DemoSink,
-  ask,
-  cliOrigin,
-  daemon,
-  mcpAddLines,
-  parseSink,
-} from '../src/commands/daemon.js';
+import { DemoSink, cliOrigin, daemon, mcpAddLines, parseSink } from '../src/commands/daemon.js';
+import { ask } from '../src/commands/ask.js';
 import {
   deleteData,
   doctor,
@@ -131,6 +125,8 @@ describe('program surface', () => {
       'revoke',
       'listen',
       'ask',
+      'wait',
+      'get',
       'mcp',
       'status',
       'doctor',
@@ -143,6 +139,25 @@ describe('program surface', () => {
       expect(names).toContain(c);
     const rec = buildProgram().commands.find((c) => c.name() === 'recovery')!;
     expect(rec.commands.map((c) => c.name()).sort()).toEqual(['export', 'import', 'verify']);
+    const flags = (name: string) =>
+      buildProgram()
+        .commands.find((c) => c.name() === name)!
+        .options.map((o) => o.long);
+    expect(flags('ask')).toEqual(
+      expect.arrayContaining([
+        '--expires-in',
+        '--expires-at',
+        '--planned-fallback',
+        '--correlation-id',
+        '--wait',
+        '--wait-timeout',
+        '--no-socket',
+      ]),
+    );
+    expect(flags('wait')).toEqual(
+      expect.arrayContaining(['--pane', '--wait-timeout', '--sink', '--no-socket']),
+    );
+    expect(flags('get')).toEqual(['--pane']);
   });
   it('turns errors into friendly one-liners', () => {
     expect(describeError(new CliError('nope'))).toBe('nope');
@@ -685,6 +700,21 @@ describe('exec sink', () => {
     expect(await sink.inject(await target, 'hello', 'i')).toEqual({
       outcome: 'held',
       reason: 'exec_tempfail',
+    });
+  });
+
+  it('close() kills a command that ignores SIGTERM, and writes nothing more afterwards', async () => {
+    const sink = new DemoSink(
+      parseSink("exec:trap '' TERM; cat >/dev/null; while :; do sleep 0.1; done"),
+      () => {},
+    );
+    const result = sink.inject(await target, 'answer', 'i');
+    await new Promise((r) => setTimeout(r, 200));
+    sink.close();
+    expect(await result).toEqual({ outcome: 'ambiguous', reason: 'exec_exit_signal' });
+    expect(await sink.inject(await target, 'later', 'j')).toEqual({
+      outcome: 'held',
+      reason: 'sink_closed',
     });
   });
 
