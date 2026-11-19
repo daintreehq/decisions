@@ -26,6 +26,7 @@ describe('push payload shaping', () => {
         body: 'An agent stopped',
         tag: 'agent-stopped',
         renotify: true,
+        requireInteraction: false,
         data: { url: '/' },
       },
     });

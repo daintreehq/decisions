@@ -279,6 +279,15 @@ describe('declaring the agent-stopped push for an app updated in place', () => {
     },
   );
 
+  it('asks the worker before reading the rows, so the rows it sends on are fresh', async () => {
+    const { relay } = relayListing([row(ROW, true, null)]);
+    expect(await declareAgentStoppedPush(relay, asReg(), served)).toBe(true);
+    const asked = reg.active!.postMessage.mock.invocationCallOrder[0]!;
+    const json = vi.mocked(relay.json).mock;
+    const listed = json.invocationCallOrder[json.calls.findIndex(([m]) => m === 'GET')]!;
+    expect(asked).toBeLessThan(listed);
+  });
+
   it('leaves it unmarked while the active worker is stale, even with a capable one waiting', async () => {
     reg.active = stale();
     reg.waiting = waitingUpdate();
