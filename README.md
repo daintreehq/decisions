@@ -120,6 +120,33 @@ You need a Cloudflare account (the free plan is enough for one person), Node 22+
 > [!IMPORTANT]
 > Back up your keys: `pnpm decisions recovery export --out decisions-recovery.json`. **If you lose every device that holds your keys, the encrypted data on Cloudflare cannot be recovered.** See [docs/key-recovery.md](docs/key-recovery.md).
 
+## A 15-minute question with a planned fallback
+
+Some questions are worth asking but not worth blocking on. Give one a deadline and say what you will do if nobody answers:
+
+```bash
+pnpm decisions --json ask "Which fixture should I use?" \
+  --option mem="In memory" --option disk="On disk" \
+  --expires-in 15m \
+  --planned-fallback "I will use the in-memory fixture." \
+  --wait
+```
+
+An agent does the same through `ask_human` with `expires_in: "15m"` and `planned_fallback`, and gets the question ID back at once. If the relay cannot be read at that moment, the call is refused with `invalid_state: support-unknown`; ask again once it can be reached.
+
+- **Answered in time:** the answer is the person's decision (`status: human-answered` with `provenance: human`), and its notice is written to the sink of the process that receives for this computer (in Daintree, typed into the asking terminal).
+- **No answer in 15 minutes:** once this computer has read the relay's expiry, the question ends as `advisory-expired` (exit 13, `fallback_due: true`). The stated plan is the agent's to carry out at its own discretion. Nothing was decided or approved. If the deadline passed before the question reached the relay, the outcome is `never-published` (exit 14) and `fallback_due` says whether the plan may go ahead; a host that does not allow the plan to go ahead reports `expired` (exit 12) instead.
+- **A question that is not advisory, or an approval:** an approval cannot carry a planned fallback, and a question without one waits for a decision. When it expires the outcome is `expired` (exit 12) and nothing may go ahead. An expired question never turns into consent.
+
+To get an outcome back later by question ID, for example after a restart or a lost terminal:
+
+```bash
+pnpm decisions wait <question_id>   # waits again, with the same outcomes and exit codes
+pnpm decisions get <question_id>    # says where the question stands now, without waiting
+```
+
+An agent connected through `decisions mcp` calls `get_decision` with the ID, or runs `decisions wait <question_id> --pane mcp` from its shell (`decisions wait` and `decisions get` take `--pane mcp` for a question asked through the MCP). The full walkthrough, with the outcomes, exit codes and JSON records, is in [docs/operations.md](docs/operations.md#asking-from-a-script-or-an-agent-without-daintree).
+
 ## Repository layout
 
 | Path                       | What it is                                                                                                        |
