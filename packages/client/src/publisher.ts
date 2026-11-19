@@ -1616,9 +1616,7 @@ export class Publisher {
           continue;
       }
       if (
-        (item.kind === 'cancel' ||
-          item.kind === 'proxy-answer' ||
-          item.kind === 'proxy-abstain') &&
+        (item.kind === 'cancel' || item.kind === 'proxy-answer' || item.kind === 'proxy-abstain') &&
         (await this.unpublishedQuestion(item.question_id))
       ) {
         // Left by a crash after its question closed unpublished: there is nothing on the relay to act on.

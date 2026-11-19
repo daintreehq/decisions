@@ -10,6 +10,7 @@ import {
   RelayClient,
   RelayError,
   currentEpochKey,
+  isUnsentError,
   openQuestionContent,
   type CreatePayload,
 } from '../src/index.js';
@@ -64,7 +65,9 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     } finally {
       jitter.mockRestore();
     }
-    const [backedOff] = (await env.store.outboxFor(r.questionId)).filter((o) => o.kind === 'create');
+    const [backedOff] = (await env.store.outboxFor(r.questionId)).filter(
+      (o) => o.kind === 'create',
+    );
     expect(backedOff!.next_attempt_at).toBe(deadline);
     const before = await env.bridge.getDecision(r.questionId);
     expect(before).toMatchObject({ status: 'queued', publication: 'not-sent', closedReason: null });
@@ -150,7 +153,9 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('status: never-published');
     expect(notice).toContain('authorised: no');
-    expect(notice).toContain("it never reached the person's phone and no answer to it was recorded");
+    expect(notice).toContain(
+      "it never reached the person's phone and no answer to it was recorded",
+    );
     expect(notice).not.toMatch(/expired without an answer|did not answer|person never saw/);
     expect(await bridge.getDecision(r.questionId)).toMatchObject({
       closedReason: 'never-published',
@@ -242,7 +247,10 @@ describe('a question whose deadline passes before it reaches the relay', () => {
 
   it.each([
     ['a create refused before its deadline', false],
-    ['a possibly-committed create refused past its deadline without the relay showing it never took it', true],
+    [
+      'a possibly-committed create refused past its deadline without the relay showing it never took it',
+      true,
+    ],
   ] as const)('keeps %s as an ordinary refusal, with no notice', async (_why, late) => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
@@ -311,7 +319,14 @@ describe('a question whose deadline passes before it reaches the relay', () => {
       throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
     };
     await env.bridge.pump();
-    now += 300_000; // past the deadline too: still withdrawn, never an unpublished notice
+    // Before the deadline nothing is sent for it; past the deadline it is still withdrawn, never an unpublished notice.
+    now += 1_000;
+    for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+      await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+    env.client.createQuestion = RelayClient.prototype.createQuestion.bind(env.client);
+    await env.bridge.pump();
+    expect(env.relay.calls.filter((c) => c.path.includes('/questions'))).toHaveLength(0);
+    now += 300_000;
     await env.bridge.pump();
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'cancelled',
@@ -791,7 +806,10 @@ describe('an advisory question that never reached the relay', () => {
         envelope,
         createdAt: was.created_at,
       });
-      await env.store.putOutbox({ ...item, payload: { ...(item.payload as CreatePayload), signed } });
+      await env.store.putOutbox({
+        ...item,
+        payload: { ...(item.payload as CreatePayload), signed },
+      });
     }
     now = deadline;
     await env.bridge.pump();
@@ -830,7 +848,10 @@ describe('an advisory question that never reached the relay', () => {
     ['the content states no plan', { advisoryDeadlines: true, policy: true }],
     ['the plan is blank', { advisoryDeadlines: true, policy: true, plan: '   ' }],
     ['the plan is not text', { advisoryDeadlines: true, policy: true, plan: 42 }],
-    ['it asks for an approval', { advisoryDeadlines: true, policy: true, plan: 'Go.', kind: 'approval' }],
+    [
+      'it asks for an approval',
+      { advisoryDeadlines: true, policy: true, plan: 'Go.', kind: 'approval' },
+    ],
     [
       'only the local copy says advisory, not the create that was signed',
       { advisoryDeadlines: true, policy: true, plan: 'Go.', rowOnly: true },
@@ -844,5 +865,57 @@ describe('an advisory question that never reached the relay', () => {
     const notice = env.sink.typed[0]!.text;
     expect(notice).toContain('NOT authorised to continue');
     expect(notice).not.toContain('plan you stated');
+  });
+});
+
+describe('telling a request that never left this computer', () => {
+  const coded = (code: string) => Object.assign(new Error(code), { code });
+  const failed = (cause: unknown) => new TypeError('fetch failed', { cause });
+
+  it('counts only a direct connect failure, on every address tried', () => {
+    expect(isUnsentError(failed(coded('ENOTFOUND')))).toBe(true);
+    expect(isUnsentError(failed(coded('ECONNREFUSED')))).toBe(true);
+    expect(isUnsentError(failed(coded('UND_ERR_CONNECT_TIMEOUT')))).toBe(true);
+    expect(
+      isUnsentError(failed(new AggregateError([coded('ECONNREFUSED'), coded('ENETUNREACH')]))),
+    ).toBe(true);
+    // A reset or closed socket may come after the request was written; so may anything mixed or nested deeper.
+    expect(isUnsentError(failed(coded('ECONNRESET')))).toBe(false);
+    expect(isUnsentError(failed(coded('UND_ERR_SOCKET')))).toBe(false);
+    expect(
+      isUnsentError(failed(new AggregateError([coded('ECONNREFUSED'), coded('ECONNRESET')]))),
+    ).toBe(false);
+    expect(isUnsentError(failed(new AggregateError([])))).toBe(false);
+    expect(isUnsentError(failed(new Error('x', { cause: coded('ENOTFOUND') })))).toBe(false);
+    expect(isUnsentError(new TypeError('fetch failed'))).toBe(false);
+  });
+
+  it('sends a create with redirects refused, and reports it unsent only when every attempt failed to connect', async () => {
+    const identity = await makeIdentity();
+    const seen: (RequestRedirect | undefined)[] = [];
+    let outcome: 'refused' | 'reset-then-refused' = 'refused';
+    let calls = 0;
+    const client = new RelayClient({
+      identity,
+      sleep: async () => {},
+      maxRetries: 1,
+      fetch: async (_input, init) => {
+        seen.push(init?.redirect);
+        calls++;
+        if (outcome === 'reset-then-refused' && calls === 1) throw failed(coded('ECONNRESET'));
+        throw failed(coded('ECONNREFUSED'));
+      },
+    });
+    const question = { record: {}, envelope: {} } as never;
+    await expect(client.createQuestion('k', question)).rejects.toMatchObject({ notSent: true });
+    expect(seen).toEqual(['error', 'error']);
+    outcome = 'reset-then-refused';
+    calls = 0;
+    await expect(client.createQuestion('k', question)).rejects.toMatchObject({ notSent: false });
+    // A request that may follow a redirect never claims it was not sent.
+    await expect(client.info()).rejects.toBeDefined();
+    await expect(client.request('POST', '/api/v1/anything', { body: {} })).rejects.toMatchObject({
+      notSent: false,
+    });
   });
 });

@@ -207,9 +207,17 @@ const WIPE_CLOCK_MARGIN_MS = 7 * 86_400_000;
  * made (with room for the desktop's clock) leaves it unknown.
  */
 function neverCommitted(room: Room, questionId: string, createdAt: string): boolean {
-  if (room.q1(`SELECT 1 FROM events WHERE question_id = ? AND event_type LIKE 'decision.%' LIMIT 1`, questionId))
+  if (
+    room.q1(
+      `SELECT 1 FROM events WHERE question_id = ? AND event_type LIKE 'decision.%' LIMIT 1`,
+      questionId,
+    )
+  )
     return false;
-  const wiped = room.q1<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, QUESTIONS_WIPED_META);
+  const wiped = room.q1<{ value: string }>(
+    `SELECT value FROM meta WHERE key = ?`,
+    QUESTIONS_WIPED_META,
+  );
   if (!wiped) return true;
   const made = Date.parse(createdAt);
   return Number.isFinite(made) && Number(wiped.value) < made - WIPE_CLOCK_MARGIN_MS;
