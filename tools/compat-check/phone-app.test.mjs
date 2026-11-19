@@ -99,11 +99,7 @@ describe('judgeDeclarations', () => {
     const missing = good().filter((e) => !(e.kind === 'sw-message' && e.type === 'FEATURES'));
     assert.match(problemsOf(missing).join('\n'), /no updated page was seen asking/);
     // Asked, but of the waiting worker, or with nothing waiting, or after the restart: none of these is the case.
-    for (const wrong of [
-      { target: 'waiting' },
-      { waiting: false },
-      { at: 102 },
-    ]) {
+    for (const wrong of [{ target: 'waiting' }, { waiting: false }, { at: 102 }]) {
       const t = good().map((e) =>
         e.kind === 'sw-message' && e.type === 'FEATURES' ? { ...e, ...wrong } : e,
       );

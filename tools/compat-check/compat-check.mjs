@@ -1571,6 +1571,13 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
   const browser = startBrowser('4');
   const phoneLog = createWriteStream(join(logs, 'phone-4.jsonl'));
   const keep = (entry) => phoneLog.write(`${JSON.stringify(entry)}\n`);
+  const pathOf = (url) => {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return null;
+    }
+  };
   try {
     const oldFeatures = (await info(relay.origin)).features ?? [];
     if (oldFeatures.includes(ADVISORY) || oldFeatures.includes(AGENT_STOPPED)) {
@@ -1603,13 +1610,6 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       keep({ src: 'page', ...entry });
     });
     await context.addInitScript(phoneFixture, sub);
-    const pathOf = (url) => {
-      try {
-        return new URL(url).pathname;
-      } catch {
-        return null;
-      }
-    };
     context.on('page', (page) => {
       page.on('pageerror', (e) => {
         const entry = {
@@ -1636,7 +1636,13 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       const path = pathOf(res.url());
       if (!path?.startsWith('/api/v1/')) return;
       const req = res.request();
-      const entry = { src: 'net', at: Date.now(), method: req.method(), path, status: res.status() };
+      const entry = {
+        src: 'net',
+        at: Date.now(),
+        method: req.method(),
+        path,
+        status: res.status(),
+      };
       if (!READ.has(path)) {
         net.push(entry);
         keep(entry);
@@ -1749,8 +1755,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     const subscribeAt = Date.now();
     await tab.getByRole('button', { name: /^(Set up notifications|Turn on)$/ }).click();
     const subscribed = await seen(
-      (e) =>
-        e.at >= subscribeAt && e.method === 'POST' && e.path === '/api/v1/push/subscriptions',
+      (e) => e.at >= subscribeAt && e.method === 'POST' && e.path === '/api/v1/push/subscriptions',
       30_000,
       'the phone to send its push subscription',
     );
@@ -1845,8 +1850,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
             e.at >= bridgeAt &&
             e.path === '/api/v1/devices' &&
             e.body?.some?.(
-              (d) =>
-                d.device_id === owner.deviceId && d.features.includes('person-declines-v1'),
+              (d) => d.device_id === owner.deviceId && d.features.includes('person-declines-v1'),
             ),
         );
       },
@@ -1908,11 +1912,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(refusedPush),
     );
     const after = await readSubscriptions('after it');
-    check(
-      untouched(after),
-      `nothing was sent to the ${OLD.label} app's subscription`,
-      show(after),
-    );
+    check(untouched(after), `nothing was sent to the ${OLD.label} app's subscription`, show(after));
 
     // Advice from the library: refused for the same reason, and nothing reaches the relay or the phone.
     const advisoryLib = await neu.call('bridgeAsk', {
@@ -2062,14 +2062,19 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       60_000,
       'the updated phone to declare agent-stopped pushes',
     ).catch((e) => (fail(e.message), null));
+    // The page reloads into the update as the declaration goes out, so its response is read back from the relay below.
     if (declared)
       check(
-        declared.status === 201 &&
-          declared.body?.subscription_id === subscriptionId &&
-          declared.body.features?.includes(AGENT_STOPPED),
-        `once the new worker is active, the same subscription declares ${AGENT_STOPPED}`,
+        declared.status === 201 && declared.sent.endpoint === sub.endpoint,
+        `once the new worker is active, the phone declares ${AGENT_STOPPED} on its subscription`,
         show(declared),
       );
+    await until(
+      () => trace.find((e) => e.kind === 'doc' && e.at > restartAt),
+      30_000,
+      'the phone to reload into the update',
+    );
+    await updated.waitForLoadState('load');
     const judged = judgeDeclarations(trace, sub);
     for (const problem of judged.problems) fail(problem);
     if (!judged.problems.length)
@@ -2088,6 +2093,26 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the phone now runs the ${NEW.label} app under the ${NEW.label} worker`,
       show(reg),
     );
+    const rowsAt = Date.now();
+    await updated.goto(`${relay.origin}/settings/notifications`);
+    const read = await seen(
+      (e) =>
+        e.at >= rowsAt &&
+        e.method === 'GET' &&
+        e.path === '/api/v1/push/subscriptions' &&
+        e.status === 200,
+      30_000,
+      'the updated phone to read its push subscriptions',
+    );
+    const declaredRows = read.body?.subscriptions ?? [];
+    check(
+      declaredRows.length === 1 &&
+        declaredRows[0].subscription_id === subscriptionId &&
+        declaredRows[0].enabled === true &&
+        declaredRows[0].features?.includes(AGENT_STOPPED),
+      `the relay keeps the phone's one subscription, the same one, now declaring ${AGENT_STOPPED}`,
+      show(declaredRows),
+    );
     if (declared) {
       const sentPush = await neu.call('bridgeAgentStopped', { name: 'owner' });
       check(
@@ -2101,10 +2126,12 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     const unreadable = /Not readable here|Could not verify/;
     await updated.goto(`${relay.origin}/q/${asked.A.id}`);
     await updated.getByText(asked.A.question).first().waitFor({ timeout: 30_000 });
-    await updated.getByText('Answered by you').first().waitFor({ timeout: 30_000 });
+    const answerA = updated.locator('#ws-answer').filter({ hasText: 'In memory' });
+    await answerA.getByText('Your answer').first().waitFor({ timeout: 30_000 });
+    await answerA.getByText('Typed into the terminal').first().waitFor({ timeout: 30_000 });
     check(
       !unreadable.test(await updated.locator('main').innerText()),
-      `the ${NEW.label} app shows A, answered in the ${OLD.label} app, as answered by the person`,
+      `the ${NEW.label} app shows A as the person answered it in the ${OLD.label} app, typed into the terminal`,
     );
     await updated.goto(`${relay.origin}/q/${asked.B.id}`);
     await updated.getByText(asked.B.question).first().waitFor({ timeout: 30_000 });
@@ -2157,6 +2184,23 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(pageErrors.map((e) => e.message)),
     );
     checkBridgeHealth(final, `the ${NEW.label} bridge`);
+  } catch (e) {
+    // What each page showed when the scenario stopped, beside phone-4.jsonl.
+    const browserNow = await browser.launched.catch(() => null);
+    let n = 0;
+    for (const context of browserNow?.contexts() ?? [])
+      for (const page of context.pages()) {
+        n++;
+        await page
+          .screenshot({ path: join(logs, `phone-4-page-${n}.png`), fullPage: true })
+          .catch(() => undefined);
+        const text = await page
+          .locator('body')
+          .innerText({ timeout: 2000 })
+          .catch(() => '');
+        keep({ src: 'stopped', page: n, path: pathOf(page.url()), text: text.slice(0, 3000) });
+      }
+    throw e;
   } finally {
     await neu.stop();
     await browser.stop();
