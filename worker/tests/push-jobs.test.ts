@@ -1698,6 +1698,9 @@ describe("a question's push lives only while the person can answer it (docs/prot
     expect(await statuses('notify_reply')).toEqual(['pending']);
     // The model answers for the person: the deadline ends, and the agent's message still waits on them.
     expect((await proxyAnswer(questionId)).res.status).toBe(201);
+    // Its notice is due at once: run it into its quiet-hour deferral, so it cannot go once quiet hours end.
+    await runDue('notify_new');
+    expect(await statuses('notify_new', questionId)).toEqual(['cancelled', 'pending']);
     await quiet(false);
     await runDue('notify_reply');
     expect(await sent(s)).toEqual([['decision-reply', 86_400]]);
