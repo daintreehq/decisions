@@ -137,7 +137,10 @@ async function pushJob(
   );
   for (const r of results) if (r.ok) done.add(r.subscription_id);
   // A retry once the deadline has passed would only be dropped.
-  if (results.some((r) => !r.ok && isTransient(r.status)) && pushTtlSeconds(nowMs(), deadline) !== null) {
+  if (
+    results.some((r) => !r.ok && isTransient(r.status)) &&
+    pushTtlSeconds(nowMs(), deadline) !== null
+  ) {
     room.run(
       `UPDATE scheduled_jobs SET payload = ? WHERE job_id = ?`,
       JSON.stringify({ ...payload, done: [...done] }),

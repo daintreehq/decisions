@@ -1463,8 +1463,7 @@ describe("a question's push lives only while the person can answer it (docs/prot
   });
 
   /** The TTL header a push service received, in seconds. */
-  const ttl = (c: { init: RequestInit }) =>
-    Number((c.init.headers as Record<string, string>).TTL);
+  const ttl = (c: { init: RequestInit }) => Number((c.init.headers as Record<string, string>).TTL);
   const inMs = (ms: number) => new Date(Date.now() + ms).toISOString();
   /** Moves a question's deadline to `ms` from now, as if relay time had moved on. */
   const deadlineIn = (questionId: string, ms: number) =>

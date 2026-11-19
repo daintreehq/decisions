@@ -109,7 +109,11 @@ export async function sendNotification(
         body,
         keys,
         room.env.PUSH_SUBJECT || room.getMeta('origin') || 'https://localhost',
-        { urgency: opts.urgency ?? 'normal', ttlSeconds, ...(opts.topic ? { topic: opts.topic } : {}) },
+        {
+          urgency: opts.urgency ?? 'normal',
+          ttlSeconds,
+          ...(opts.topic ? { topic: opts.topic } : {}),
+        },
       );
     } catch {
       status = null;
