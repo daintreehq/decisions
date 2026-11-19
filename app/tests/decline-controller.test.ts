@@ -75,6 +75,8 @@ async function phone(
     cacheKey?: CryptoKey;
     /** How long a failed send waits before the outbox tries again on its own; never, by default. */
     retryDelays?: number[];
+    /** How long one send of a decline may go unanswered. */
+    declineTimeoutMs?: number;
   } = {},
 ) {
   const q = o.q ?? (await openQuestion());
@@ -120,6 +122,7 @@ async function phone(
     }),
     inside(c).outboxHooks(),
     o.retryDelays ?? [],
+    o.declineTimeoutMs,
   );
   inside(c).outbox = outbox;
   const unsubscribe = store.subscribe(() => outbox.reconcile());
@@ -384,6 +387,14 @@ describe('a dismissal queued on this device until it settles', () => {
       kind: 'settled',
       outcome: { status: 'withdrawn', label: 'Withdrawn on studio-mac' },
     });
+    // Kept on this device, not only in memory.
+    await vi.waitFor(async () => {
+      const reread = new Outbox(p.db, p.cacheKey, () => ({ jsonRaw: (async () => ({})) as never }));
+      await reread.load();
+      expect(reread.list()[0]).toMatchObject({
+        outcome: { status: 'withdrawn', label: 'Withdrawn on studio-mac' },
+      });
+    });
     // Reopened since: the note still says what happened to the round it was signed for.
     await p.store.ingest(
       await actionEvent(p.w, { questionId: p.view.id, action: 'reopen', expectedRevision: 0 }),
@@ -482,17 +493,21 @@ describe('a dismissal queued on this device until it settles', () => {
     await p.outbox.flush();
     await p.idle();
     expect(p.outbox.list()[0]).toMatchObject({ id: refusedAnswer.id, state: 'conflicted' });
-    const first = await p.c.declineQuestion(p.view, 0);
-    await p.idle();
-    expect(p.standing()).toEqual({ kind: 'settled', outcome: { status: 'changed' } });
-    // The desktop withdrew and reopened it meanwhile: the old decline is never moved onto the new round.
+    // The desktop withdrew and reopened it before the dismissal arrived; this phone has not read that yet.
     p.unread.push(await actionEvent(p.w, { questionId: p.view.id, action: 'cancel' }));
     p.unread.push(
       await actionEvent(p.w, { questionId: p.view.id, action: 'reopen', expectedRevision: 0 }),
     );
-    await p.catchUp();
+    const first = await p.c.declineQuestion(p.view, 0);
+    await p.idle();
+    // The refusal reads the thread as far as the relay reported, and names what closed the dismissed round.
+    expect(p.catchUp).toHaveBeenCalled();
     expect(p.store.get(p.view.id)).toMatchObject({ status: 'open', revision: 1 });
-    expect(p.standing()).toEqual({ kind: 'settled', outcome: { status: 'changed' } });
+    expect(p.standing()).toEqual({
+      kind: 'settled',
+      outcome: { status: 'withdrawn', label: 'Withdrawn on studio-mac' },
+    });
+    // Never moved onto the reopened round.
     await expect(p.c.declineQuestion(p.view, 0)).rejects.toBeInstanceOf(StaleQuestionError);
     // Dismissing again is a new decline, deliberately confirmed for the round in view.
     p.relay.answer = async (body) => p.commit(body);
@@ -502,25 +517,30 @@ describe('a dismissal queued on this device until it settles', () => {
     expect(JSON.parse(second.bodyText).action.record.expected_revision).toBe(1);
     // The note about the first goes with it; the second settles as declined. The refused answer stays.
     await p.idle();
-    expect(p.outbox.list().map((e: OutboxEntry) => e.id)).toEqual([refusedAnswer.id]);
+    expect(p.outbox.list()).toEqual([
+      expect.objectContaining({ id: refusedAnswer.id, text: 'kept words', selected: ['yes'] }),
+    ]);
     expect(p.store.get(p.view.id)!.status).toBe('cancelled');
   });
 
   it('is remembered as sent from the moment it goes, so a restart mid-send never calls it unsent', async () => {
     const p = await phone();
     // The request leaves and nothing comes back: the app is closed while it hangs.
-    let posted = false;
+    // What a restart would find, read the moment the request leaves.
+    let atPost: Promise<OutboxEntry[]> | null = null;
     p.relay.answer = () => {
-      posted = true;
+      atPost = (async () => {
+        const reread = new Outbox(p.db, p.cacheKey, () => ({
+          jsonRaw: (async () => ({})) as never,
+        }));
+        await reread.load();
+        return reread.list();
+      })();
       return new Promise(() => undefined);
     };
     const e = await p.c.declineQuestion(p.view, 0);
-    await vi.waitFor(() => expect(posted).toBe(true));
-    await vi.waitFor(async () => {
-      const reread = new Outbox(p.db, p.cacheKey, () => ({ jsonRaw: (async () => ({})) as never }));
-      await reread.load();
-      expect(reread.list()).toMatchObject([{ id: e.id, state: 'queued', attempts: 1 }]);
-    });
+    await vi.waitFor(() => expect(atPost).not.toBeNull());
+    expect(await atPost!).toMatchObject([{ id: e.id, state: 'queued', attempts: 1 }]);
   });
 
   it('admits one of an answer and a dismissal confirmed at the same moment, never both', async () => {
@@ -577,5 +597,41 @@ describe('a dismissal queued on this device until it settles', () => {
     expect(p.posts[1]!.body).toBe(p.posts[0]!.body);
     expect(p.outbox.list()).toEqual([]);
     expect(p.store.get(p.view.id)!.status).toBe('cancelled');
+  });
+
+  it('never holds the queue behind a send that does not answer', async () => {
+    const p = await phone({ declineTimeoutMs: 20 });
+    let hung = true;
+    p.relay.answer = async (body) => {
+      if (hung) {
+        hung = false;
+        return new Promise(() => undefined);
+      }
+      return p.commit(body);
+    };
+    await p.c.declineQuestion(p.view, 0);
+    // The hung send counts as a dropped connection: the flush ends, and the decline waits, unconfirmed.
+    await p.idle();
+    expect(p.standing()).toEqual({ kind: 'unconfirmed' });
+    // Sent again, the same request, it is taken.
+    await p.outbox.flush();
+    await p.idle();
+    expect(p.posts.map((x) => x.body)).toEqual([p.posts[0]!.body, p.posts[0]!.body]);
+    expect(p.outbox.list()).toEqual([]);
+  });
+
+  it('never retries a refused entry while a dismissal of its question is being stored', async () => {
+    const p = await phone();
+    p.relay.answer = async () => {
+      throw new RelayError('payload_too_large', 413, 'too big');
+    };
+    await p.c.sendMessage({ view: p.view, text: 'a refused follow-up' });
+    await p.idle();
+    const refused = p.outbox.list()[0]!;
+    expect(refused.state).toBe('rejected');
+    // Dismiss confirmed, and Try again tapped before it is stored: the retry waits its turn, then finds it.
+    const [dismissal] = await Promise.all([p.c.declineQuestion(p.view, 0), p.c.retry(refused.id)]);
+    expect(p.outbox.list().find((e) => e.id === refused.id)!.state).toBe('rejected');
+    expect(p.outbox.declineInFlight(p.view.id)!.id).toBe(dismissal.id);
   });
 });

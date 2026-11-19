@@ -33,8 +33,13 @@ export function useActionCount(now: number, except?: (v: QuestionView) => boolea
   const refused = refusedFollowUps();
   // A question the person declined holds nothing for them, whatever its refused follow-ups; nor does one they have
   // dismissed on this device, while that dismissal is on its way.
+  const dismissing = new Set(
+    (app.outbox?.list() ?? [])
+      .filter((e) => e.kind === 'decline' && !e.outcome)
+      .map((e) => e.questionId),
+  );
   return all.filter(
-    (v) => !except?.(v) && !app.outbox?.declineInFlight(v.id) && countsForAction(v, now, refused),
+    (v) => !except?.(v) && !dismissing.has(v.id) && countsForAction(v, now, refused),
   ).length;
 }
 

@@ -148,6 +148,8 @@ export type PhotoState =
   | { kind: 'interrupted' };
 
 const label = (id: string) => `outbox:${id}`;
+/** How long one send of a decline may take, as the owner desktop's decline (`OWNER_DECLINE_TIMEOUT_MS`). */
+export const DECLINE_TIMEOUT_MS = 15_000;
 const blobLabel = (entryId: string, attachmentId: string) =>
   `outbox-image:${entryId}:${attachmentId}`;
 const blobId = blobLabel;
@@ -200,6 +202,11 @@ export class Outbox {
     private readonly hooks: OutboxHooks = {},
     /** How long an entry with photos waits before trying again after the relay was unreachable mid-upload. */
     private readonly retryDelays: readonly number[] = [3_000, 10_000, 30_000],
+    /**
+     * How long one send of a decline may go unanswered before it counts as a dropped connection (and is sent again,
+     * the same request): a hung request never holds the queue, and everything in it, behind a dismissal.
+     */
+    private readonly declineTimeoutMs = DECLINE_TIMEOUT_MS,
   ) {}
 
   subscribe = (l: () => void) => {
@@ -236,15 +243,15 @@ export class Outbox {
     return this.list().filter((e) => e.questionId === questionId);
   }
   /**
-   * The person's decline of the question from this device while it is still on its way: queued here, being sent, or
-   * on the relay and not yet read back into the thread. At most one is ever in flight per question.
+   * The person's decline of the question from this device while it is still on its way: queued here, being sent, on
+   * the relay and not yet read back into the thread, or refused and waiting for the thread to say what settled its
+   * round. At most one is ever in flight per question.
    */
   declineInFlight(questionId: string): OutboxEntry | undefined {
     return this.forQuestion(questionId).find(
-      (e) =>
-        e.kind === 'decline' &&
-        !e.outcome &&
-        (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
+      // Every decline is either let go once the thread holds it or keeps how it settled: until then it is on its way,
+      // a refusal still being read back included.
+      (e) => e.kind === 'decline' && !e.outcome,
     );
   }
   pendingState(questionId: string): 'queued' | 'sending' | undefined {
@@ -549,6 +556,26 @@ export class Outbox {
     return true;
   }
 
+  /** A request that has not answered within `ms` counts as a dropped connection; a late answer is ignored. */
+  private async withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new RelayError('network', 0, 'Your relay did not answer in time')),
+            ms,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      // Its answer, whenever it comes, is the relay's receipt for the same request: the next send gets it again.
+      p.catch(() => undefined);
+    }
+  }
+
   private scheduleRetry() {
     if (this.retryTimer || this.retryDelays.length === 0) return;
     const ms = this.retryDelays[Math.min(this.retryStep, this.retryDelays.length - 1)]!;
@@ -581,10 +608,11 @@ export class Outbox {
         try {
           await this.persist(e);
         } catch {
-          // Not written, so not sent: it waits as it was for the next flush.
+          // Not written, so not sent: it waits as it was, and is tried again on its own.
           e.state = 'queued';
           e.attempts--;
           this.changed();
+          if (typeof navigator === 'undefined' || navigator.onLine !== false) this.scheduleRetry();
           return;
         }
       }
@@ -597,7 +625,8 @@ export class Outbox {
           photoPhase = false;
         }
         try {
-          await this.poster().jsonRaw('POST', e.path, e.bodyText);
+          const sent = this.poster().jsonRaw('POST', e.path, e.bodyText);
+          await (e.kind === 'decline' ? this.withDeadline(sent, this.declineTimeoutMs) : sent);
         } catch (err) {
           // The record's photos did not bind (one passed its orphan deadline): they go again under fresh ids.
           if (e.images?.length && definite(err) && err.code === 'validation_error')
@@ -655,7 +684,7 @@ export class Outbox {
         // The thread already holds the decline this send was for (it arrived while the answer was lost): settled.
         if (e.kind === 'decline' && this.hooks.declineSettlement?.(e) === 'accepted') {
           await this.discard(e.id);
-          return;
+          continue;
         }
         const online = typeof navigator === 'undefined' || navigator.onLine !== false;
         // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.

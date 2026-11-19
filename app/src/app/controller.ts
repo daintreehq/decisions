@@ -464,11 +464,13 @@ export class AppController {
     this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
     await this.outbox.load();
-    // A note about how a dismissal settled whose question has since been deleted has nothing left to show it in. The
-    // thread was rebuilt in full above, so a question it lacks is gone.
+    // A dismissal of a question since deleted has nothing left to settle against or show it in. Only a deletion this
+    // device has read counts: a question merely missing may be a thread still being rebuilt.
+    const deleted = new Set(
+      cached.filter((e) => e.event_type === 'decision.deleted').map((e) => e.question_id),
+    );
     for (const e of this.outbox.list())
-      if (e.kind === 'decline' && e.outcome && !this.store.get(e.questionId))
-        await this.outbox.discard(e.id);
+      if (e.kind === 'decline' && deleted.has(e.questionId)) await this.outbox.discard(e.id);
 
     const sync = (this.sync = new SyncEngine({
       relay: this.relay,
@@ -846,7 +848,7 @@ export class AppController {
     /** Photos going with the answer (answer and override only). */
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
-    return this.admit(args.view.id, async () => {
+    await this.admit(args.view.id, async () => {
       if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
       // Nothing else goes on a question while this device's dismissal of it is on its way.
       if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
@@ -884,9 +886,10 @@ export class AppController {
         },
         sealed?.ciphertexts,
       );
-      await this.drafts?.delete(args.view.id);
-      void this.outbox.flush();
     });
+    // Stored, so admitted: the draft goes only now, outside the admission, which holds nothing it need not.
+    await this.drafts?.delete(args.view.id);
+    void this.outbox?.flush();
   }
 
   /** By question, the admission to the outbox under way: each waits for the one before it. */
@@ -920,11 +923,32 @@ export class AppController {
    * its way for the question is returned instead of a second. The relay stops its pushes and every paired device files
    * it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
    */
-  declineQuestion(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
     // A second tap waits for the first, then finds it stored.
-    return this.admit(view.id, async () => {
+    const entry = await this.admit(view.id, async () => {
       const existing = this.outbox?.declineInFlight(view.id);
       return existing ?? this.storeDecline(view, expectedRevision);
+    });
+    const outbox = this.outbox;
+    if (outbox) {
+      // An earlier decline of this question that settled is only a note about how: this one replaces it.
+      for (const e of outbox.forQuestion(view.id))
+        if (e.kind === 'decline' && e.id !== entry.id && e.outcome) await outbox.discard(e.id);
+      void outbox.flush();
+    }
+    return entry;
+  }
+
+  /**
+   * Sends a refused entry again, as it was, through the same admission as everything else on its question: never
+   * while this device's dismissal of it is on its way, or being stored.
+   */
+  retry(id: string): Promise<void> {
+    const e = this.outbox?.list().find((x) => x.id === id);
+    if (!e) return Promise.resolve();
+    return this.admit(e.questionId, async () => {
+      if (this.outbox?.declineInFlight(e.questionId)) return;
+      await this.outbox?.retry(id);
     });
   }
 
@@ -949,7 +973,7 @@ export class AppController {
       view,
       expectedRevision,
     });
-    const entry = await outbox.enqueue({
+    return outbox.enqueue({
       id: newId(),
       questionId: view.id,
       kind: 'decline',
@@ -962,18 +986,6 @@ export class AppController {
       text: '',
       reason: '',
     });
-    // An earlier decline of this question the relay refused is only a note about how it settled: this one replaces it.
-    for (const e of outbox.forQuestion(view.id))
-      if (
-        e.kind === 'decline' &&
-        e.id !== entry.id &&
-        e.state !== 'queued' &&
-        e.state !== 'sending' &&
-        e.state !== 'committed'
-      )
-        await outbox.discard(e.id);
-    void outbox.flush();
-    return entry;
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */

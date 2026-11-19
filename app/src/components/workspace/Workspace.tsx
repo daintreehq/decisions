@@ -1294,11 +1294,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </div>
           <div className="row">
             {!closedThread && e.errorCode !== 'payload_too_large' && !dismissing && (
-              <button
-                type="button"
-                className="btn small"
-                onClick={() => void app.outbox?.retry(e.id)}
-              >
+              <button type="button" className="btn small" onClick={() => void app.retry(e.id)}>
                 Try again
               </button>
             )}
@@ -1359,7 +1355,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             note={handOverNote}
             onRetry={
               e.refusedAt === 'image' && e.errorCode === 'image_lost' && !dismissing
-                ? () => void app.outbox?.retry(e.id)
+                ? () => void app.retry(e.id)
                 : undefined
             }
           />

@@ -165,21 +165,43 @@ describe('how a dismissal from this device settled (docs/protocol.md section 6.1
       { status: 'unsupported' },
     );
     expect(refused({ state: 'expired', errorCode: 'expired' })).toEqual({ status: 'expired' });
-    // A desktop (or model) answer won the race: the revision moved, and the relay says to what.
+    // The relay reports a revision this thread has not read: what closed the round may be in what it has not read.
     expect(
       refused({
         errorCode: 'revision_conflict',
         latestRevision: 1,
         latestStatus: 'human-answered',
       }),
-    ).toEqual({ status: 'answered' });
+    ).toBeNull();
     expect(
-      refused({
-        errorCode: 'revision_conflict',
-        latestRevision: 1,
-        latestStatus: 'proxy-answered',
+      declineStanding(
+        entry(id, {
+          state: 'conflicted',
+          attempts: 1,
+          errorCode: 'revision_conflict',
+          latestRevision: 1,
+        }),
+        view(),
+        w.phone.id,
+      ),
+    ).toEqual({ kind: 'confirming' });
+    // Read that far: a desktop (or model) answer won the race, and nothing closed the round before it.
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: id,
+        action: 'answer',
+        expectedRevision: 0,
+        signer: w.owner,
       }),
-    ).toEqual({ status: 'answered' });
+    );
+    expect(view().revision).toBe(1);
+    for (const status of ['human-answered', 'proxy-answered'])
+      expect(
+        refused({ errorCode: 'revision_conflict', latestRevision: 1, latestStatus: status }),
+      ).toEqual({ status: 'answered' });
+    expect(
+      refused({ errorCode: 'revision_conflict', latestRevision: 1, latestStatus: 'expired' }),
+    ).toEqual({ status: 'expired' });
     // Reopened: the old round's decline is never moved onto the new one.
     expect(
       refused({ errorCode: 'revision_conflict', latestRevision: 1, latestStatus: 'open' }),
@@ -192,7 +214,6 @@ describe('how a dismissal from this device settled (docs/protocol.md section 6.1
       code: 'forbidden',
     });
     // Once kept, an outcome is never worked out again from a thread that moved on.
-    await s.ingest(await actionEvent(w, { questionId: id, action: 'answer', expectedRevision: 0 }));
     expect(refused({ errorCode: 'expired', outcome: { status: 'changed' } })).toEqual({
       status: 'changed',
     });

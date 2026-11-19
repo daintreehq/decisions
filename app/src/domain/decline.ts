@@ -34,7 +34,7 @@ export type DeclineStanding =
   /** Sent at least once, with no answer from the relay yet (a dropped connection or a restart mid-send). */
   | { kind: 'unconfirmed' }
   | { kind: 'sending' }
-  /** The relay answered; the thread has not yet shown how it settled. */
+  /** The relay answered (or refused); the thread has not yet shown how it settled. */
   | { kind: 'confirming' }
   /** The thread holds it: the question is declined. */
   | { kind: 'declined' }
@@ -67,8 +67,11 @@ function otherCloser(e: OutboxEntry, v: QuestionView): DeclineOutcome | null {
     : { status: 'withdrawn', label: withdrawnLabel(v) };
 }
 
-/** The outcome a refusal names on its own, from the relay's code and details, never its message. */
-function fromRefusal(e: OutboxEntry, v: QuestionView | undefined): DeclineOutcome {
+/**
+ * The outcome a refusal names, from the relay's code and details, never its message. Null when it depends on history
+ * the thread has not read yet (a conflict reported at a revision the thread has not reached).
+ */
+function fromRefusal(e: OutboxEntry, v: QuestionView | undefined): DeclineOutcome | null {
   if (e.refusalReason === CREATOR_MISSING_FEATURE) return { status: 'unsupported' };
   switch (e.errorCode) {
     case 'expired':
@@ -80,6 +83,10 @@ function fromRefusal(e: OutboxEntry, v: QuestionView | undefined): DeclineOutcom
       // says more than where the question is now (withdrawn, reopened and then answered reads as withdrawn).
       const closer = v && otherCloser(e, v);
       if (closer) return closer;
+      // What the relay reports is where the question is now; until the thread has read that far, a cancel that closed
+      // the person's round on the way may still be in what it has not read.
+      if (!v || (typeof e.latestRevision === 'number' && v.revision < e.latestRevision))
+        return null;
       switch (e.latestStatus) {
         case 'human-answered':
         case 'proxy-answered':
@@ -139,8 +146,8 @@ export function declineStanding(
   if (s === 'accepted') return { kind: 'declined' };
   if (s) return { kind: 'settled', outcome: s };
   if (e.state === 'sending') return { kind: 'sending' };
-  if (e.state === 'committed') return { kind: 'confirming' };
-  return e.attempts > 0 ? { kind: 'unconfirmed' } : { kind: 'queued' };
+  if (e.state === 'queued') return e.attempts > 0 ? { kind: 'unconfirmed' } : { kind: 'queued' };
+  return { kind: 'confirming' };
 }
 
 /** Whether a decline is still on its way: it holds the question until it settles. */
