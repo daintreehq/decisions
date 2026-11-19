@@ -1,5 +1,11 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { LocalStore } from './store.js';
+import {
+  STORE_FORMAT,
+  STORE_FORMAT_KEY,
+  StoreFormatError,
+  checkStoreFormat,
+} from './store-format.js';
 import type {
   AuditEntry,
   InboundEvent,
@@ -12,9 +18,11 @@ import type {
 type Row = Record<string, unknown>;
 
 /**
- * One schema step. `up` runs inside the same transaction that bumps `PRAGMA user_version`, so a step either
- * applies completely or not at all. Use SQL for schema changes and a function when rows have to be rewritten
- * in code (for example re-encoding a column). Steps are append-only: never edit one that has shipped.
+ * One schema step. `up` runs inside the same transaction that bumps `PRAGMA user_version` (with every other step the
+ * open applies), so a step either applies completely or not at all. Use SQL for schema changes and a function when
+ * rows have to be rewritten in code (for example re-encoding a column). Steps are append-only: never edit one that has
+ * shipped. A database whose version is past the last step was written by a newer client and is refused. A change to
+ * what the rows hold that an older client may misread moves `STORE_FORMAT` on as well, schema step or not.
  */
 interface Migration {
   name: string;
@@ -246,30 +254,93 @@ export class SqliteLocalStore implements LocalStore {
   private db: DatabaseSync;
   private stmts = new Map<string, StatementSync>();
 
+  /**
+   * Opens (or creates) the database at `path`. Throws `StoreFormatError`, leaving the file as it was, when a newer
+   * client wrote it: a schema version past this client's last step, or a data format past `STORE_FORMAT`.
+   */
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    // secure_delete zeroes the space a deleted or rewritten row leaves behind, so content that was ever in a
-    // row does not linger in free space; `compact()` also rewrites the file and empties the WAL.
-    this.db.exec(
-      'PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;',
-    );
-    this.migrate();
+    try {
+      // secure_delete zeroes the space a deleted or rewritten row leaves behind, so content that was ever in a
+      // row does not linger in free space; `compact()` also rewrites the file and empties the WAL.
+      this.db.exec(
+        'PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;',
+      );
+      this.admit();
+      // The journal mode is kept in the file, so it is set only once the file is one this client may use.
+      this.db.exec('PRAGMA journal_mode = WAL;');
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
   }
 
-  private migrate(): void {
-    const v = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
-    for (let i = v; i < MIGRATIONS.length; i++) {
-      const step = MIGRATIONS[i]!;
-      this.db.exec('BEGIN IMMEDIATE');
+  /** The schema version and data format the database holds; throws `StoreFormatError` for a newer client's. */
+  private version(): { schema: number; format: number } {
+    const schema = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (schema > MIGRATIONS.length)
+      throw new StoreFormatError('schema', String(schema), MIGRATIONS.length);
+    // `meta` arrives with the first step: a database without it has never held anything.
+    const raw =
+      schema === 0
+        ? undefined
+        : (this.db.prepare('SELECT value FROM meta WHERE key = ?').get(STORE_FORMAT_KEY) as
+            Row | undefined);
+    return { schema, format: checkStoreFormat(raw ? raw.value : null) };
+  }
+
+  /**
+   * `version()` read in one snapshot, so a version and a format another client committed together are seen together.
+   */
+  private versionSnapshot(): { schema: number; format: number } {
+    this.db.exec('BEGIN');
+    try {
+      const v = this.version();
+      this.db.exec('COMMIT');
+      return v;
+    } catch (e) {
       try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* nothing left to roll back: report what failed */
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Refuse a database a newer client wrote, then bring an older one up to date: its missing schema steps and this
+   * client's data format, in one transaction. A database already up to date is only read, so opening it never waits
+   * for, or fails on, another process's write. Everything is read again under the write lock, so an older client never
+   * lowers a format a newer one stamped in between.
+   */
+  private admit(): void {
+    const seen = this.versionSnapshot();
+    if (seen.schema === MIGRATIONS.length && seen.format === STORE_FORMAT) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const now = this.version();
+      for (let i = now.schema; i < MIGRATIONS.length; i++) {
+        const step = MIGRATIONS[i]!;
         if (typeof step.up === 'string') this.db.exec(step.up);
         else step.up(this.db);
         this.db.exec(`PRAGMA user_version = ${i + 1}`);
-        this.db.exec('COMMIT');
-      } catch (e) {
-        this.db.exec('ROLLBACK');
-        throw e;
       }
+      if (now.format < STORE_FORMAT)
+        this.db
+          .prepare(
+            'INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+          )
+          .run(STORE_FORMAT_KEY, String(STORE_FORMAT));
+      this.db.exec('COMMIT');
+    } catch (e) {
+      // SQLite may already have rolled back (a full disk): the error that caused it is the one worth reporting.
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* nothing left to roll back */
+      }
+      throw e;
     }
   }
 

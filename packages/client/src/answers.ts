@@ -199,6 +199,30 @@ export function parseAnswers(json: string): AnswerEntry[] {
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
 
+const KNOWN_KINDS: ReadonlySet<string> = new Set<AnswerEntry['kind']>([
+  'answer',
+  'expired',
+  'declined',
+  'unpublished',
+]);
+
+/**
+ * Why this client cannot type `e`, or null when it can. A newer client may store an entry of a kind this one does not
+ * know (`answer_unknown_kind`), or one from a source this client does not expect for its kind
+ * (`answer_unknown_source`): an answer from anyone but the person or the proxy, or a decline from anyone but the
+ * person. Typed, either would read as the person's answer or decision. Delivery holds such an entry and reports its
+ * question instead. An expiry's notice says who closed the question itself, so its stored source is not checked.
+ */
+export function unsupportedEntry(
+  e: Pick<AnswerEntry, 'kind' | 'source'>,
+): 'answer_unknown_kind' | 'answer_unknown_source' | null {
+  if (!KNOWN_KINDS.has(e.kind)) return 'answer_unknown_kind';
+  if (e.kind === 'answer' && e.source !== 'human' && e.source !== 'proxy')
+    return 'answer_unknown_source';
+  if (e.kind === 'declined' && e.source !== 'human') return 'answer_unknown_source';
+  return null;
+}
+
 /** An expiry notice of an advisory round, typed as the advisory notice (`advisory_disposition`). */
 export const isAdvisoryNotice = (e: Pick<AnswerEntry, 'kind' | 'advisory_disposition'>): boolean =>
   e.kind === 'expired' && e.advisory_disposition !== undefined;
