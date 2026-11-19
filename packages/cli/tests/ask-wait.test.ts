@@ -1080,7 +1080,9 @@ describe('a receiver beside decisions doctor', () => {
       );
       // The state directory is free again: the second wait receives, from its stored cursor, what came meanwhile.
       expect(await b).toBe(0);
-      expect(second.err.join('\n')).toMatch(/the other receiver stopped; receiving here from now on/);
+      expect(second.err.join('\n')).toMatch(
+        /the other receiver stopped; receiving here from now on/,
+      );
       expect(second.records().map((r) => r.record)).toEqual(['notice', 'result']);
       expect(result(second.records())).toMatchObject({
         outcome: 'answered',
