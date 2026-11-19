@@ -157,11 +157,24 @@ export function phoneFixture(sub) {
       const type = typeof message?.type === 'string' ? message.type : null;
       const target = role(this);
       const state = workers();
+      // A transfer list may be any iterable, and one that can be read only once is read here, before the browser.
+      const [options, ...more] = rest;
+      const iterable = (v) =>
+        v && typeof v !== 'string' && typeof v[Symbol.iterator] === 'function';
+      const list = iterable(options)
+        ? [...options]
+        : iterable(options?.transfer)
+          ? [...options.transfer]
+          : [];
+      const args = iterable(options)
+        ? [list, ...more]
+        : iterable(options?.transfer)
+          ? [{ ...options, transfer: list }, ...more]
+          : rest;
       // Sent first: a message the browser refused is not one the app sent.
-      const result = post.call(this, message, ...rest);
+      const result = post.call(this, message, ...args);
       report({ kind: 'sw-message', type, target, ...state });
-      const list = rest[0]?.[Symbol.iterator] ? rest[0] : (rest[0]?.transfer ?? []);
-      const mine = type === 'FEATURES' ? [...list].map((p) => ends.get(p)).find(Boolean) : null;
+      const mine = type === 'FEATURES' ? list.map((p) => ends.get(p)).find(Boolean) : null;
       if (mine) {
         const worker = this;
         const q = { worker, target, settled: false, answered: false };

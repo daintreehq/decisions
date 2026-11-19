@@ -1581,6 +1581,8 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
   const phoneLog = createWriteStream(join(logs, 'phone-4.jsonl'));
   const keep = (entry) => phoneLog.write(`${JSON.stringify(entry)}\n`);
   const reading = new Set();
+  // The response bodies still being read, for at most ten seconds: one that stalls never holds the run.
+  const drained = () => Promise.race([Promise.allSettled([...reading]), sleep(10_000)]);
   const pathOf = (url) => {
     try {
       return new URL(url).pathname;
@@ -1620,9 +1622,10 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       await browser.launched
     ).newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'allow' });
     await context.grantPermissions(['notifications'], { origin: relay.origin });
-    await context.exposeBinding('__compatTrace', (_source, entry) => {
-      trace.push(entry);
-      keep({ src: 'page', ...entry });
+    await context.exposeBinding('__compatTrace', (source, entry) => {
+      const traced = { ...entry, page: pages.get(source.page) ?? null };
+      trace.push(traced);
+      keep({ src: 'page', ...traced });
     });
     await context.addInitScript(phoneFixture, sub);
     context.on('page', (page) => {
@@ -1863,17 +1866,6 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       'the cached page to get a socket ticket from the new relay',
     );
     await stillCached('after the relay was upgraded');
-    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
-    check(
-      tickets.every(
-        (t) =>
-          Array.isArray(t.features) &&
-          !t.features.includes(ADVISORY) &&
-          !t.features.includes(AGENT_STOPPED),
-      ),
-      `the ${OLD.label} app's socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
-      show(tickets.map((t) => t.features)),
-    );
     const listedNow = await neu.call('ownerDevices', { home });
     const phone = listedNow.find((d) => d.device_id === phoneId);
     check(
@@ -2080,6 +2072,19 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(onRelay),
     );
     await stillCached('after answering and declining');
+    // Every ticket the cached page got from the new relay, reconnects included (one that declares nothing is fine).
+    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
+    check(
+      tickets.every(
+        (t) =>
+          t.features === null ||
+          (Array.isArray(t.features) &&
+            !t.features.includes(ADVISORY) &&
+            !t.features.includes(AGENT_STOPPED)),
+      ),
+      `the ${OLD.label} app's ${tickets.length} socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
+      show(tickets.map((t) => t.features)),
+    );
 
     // The phone updates in place. The browser finds the new worker while the cached page is open, so it waits; a
     // second page of the same phone then loads the new app under the old worker, and the cached page closes.
@@ -2090,10 +2095,11 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
         .then((r) => r?.update())
         .catch(() => undefined);
     });
-    await tab.waitForFunction(
-      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
-      null,
-      { timeout: 60_000, polling: 500 },
+    // Polled from here: Playwright's waitForFunction takes an async predicate's promise itself as the answer.
+    await until(
+      () => tab.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.waiting),
+      60_000,
+      'the browser to install the new worker, which waits while the cached page is open',
     );
     await stillCached('once the new worker waits');
     const updated = await context.newPage();
@@ -2148,32 +2154,20 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     trace.push({ kind: 'phase', name: 'restart', at: restartAt });
     keep({ src: 'run', kind: 'phase', name: 'restart', at: restartAt });
     await updated.getByRole('button', { name: 'Restart to update' }).click();
-    // The page reloads into the update as the declaration goes out, and the reload can cut off its response: then
-    // only the page's own trace saw it sent. Either way the relay's row is read back below.
+    // The phone's own record of sending the declaration, from the page that is updating or the one it reloads into.
     const declares = (features) => Array.isArray(features) && features.includes(AGENT_STOPPED);
-    const declared = await until(
+    const sent = await until(
       () =>
-        net.find(
+        trace.find(
           (e) =>
+            e.kind === 'push-post' &&
             e.page === 'updated' &&
             e.at >= restartAt &&
-            e.method === 'POST' &&
-            e.path === '/api/v1/push/subscriptions' &&
-            declares(e.sent?.features),
-        ) ?? trace.find((e) => e.kind === 'push-post' && e.at >= restartAt && declares(e.features)),
+            declares(e.features),
+        ),
       60_000,
       'the updated phone to declare agent-stopped pushes',
     ).catch((e) => (fail(e.message), null));
-    if (declared?.src === 'net')
-      check(
-        declared.status === 201 && declared.sent.endpoint === sub.endpoint,
-        `once the new worker is active, the phone declares ${AGENT_STOPPED} on its subscription`,
-        show(declared),
-      );
-    else if (declared)
-      ok(
-        `once the new worker is active, the phone sends ${AGENT_STOPPED} on its subscription (the reload cut off the response)`,
-      );
     await until(
       async () => {
         const d = await docOf(updated).catch(() => null);
@@ -2183,6 +2177,35 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       'the phone to reload into the update',
     );
     await updated.waitForLoadState('load');
+    // The relay's answer to it. The reload can cut off the answer to one sent just before it; one the reloaded page
+    // sends is waited for, so nothing below navigates away from a declaration still on its way.
+    const declared = sent
+      ? await until(
+          () =>
+            net.find(
+              (e) =>
+                e.page === 'updated' &&
+                e.at >= restartAt &&
+                e.method === 'POST' &&
+                e.path === '/api/v1/push/subscriptions' &&
+                declares(e.sent?.features),
+            ),
+          15_000,
+          "the relay's answer to the declaration",
+        ).catch(() => null)
+      : null;
+    if (declared)
+      check(
+        declared.status === 201 && declared.sent.endpoint === sub.endpoint,
+        `once the new worker is active, the phone declares ${AGENT_STOPPED} on its subscription`,
+        show(declared),
+      );
+    else if (sent)
+      check(
+        sent.doc === mixedDoc,
+        `once the new worker is active, the phone sends ${AGENT_STOPPED} on its subscription (the reload cut off the relay's answer)`,
+        `sent from ${sent.doc}, the page it reloaded into, and never answered`,
+      );
     const now = await updated.evaluate(async () => {
       const r = await navigator.serviceWorker.getRegistration();
       return {
@@ -2222,7 +2245,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       `the relay keeps the phone's one subscription, the same one, now declaring ${AGENT_STOPPED}`,
       show(declaredRows),
     );
-    if (declared) {
+    if (sent) {
       // `failed` is a send the relay attempted for an eligible subscription: the phone's is the only one there is.
       const sentPush = await neu.call('bridgeAgentStopped', { name: 'owner' });
       check(
@@ -2295,6 +2318,29 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       30_000,
       `the ${NEW.label} bridge to type the answer to B's reopened round`,
     ).catch((e) => fail(e.message));
+    // The relay's row once more, at the end: nothing since disabled, removed or withdrew it.
+    const endAt = Date.now();
+    await updated.goto(`${relay.origin}/settings/notifications`);
+    await onNewApp('its notification settings again');
+    const last = await seen(
+      (e) =>
+        e.page === 'updated' &&
+        e.at >= endAt &&
+        e.method === 'GET' &&
+        e.path === '/api/v1/push/subscriptions' &&
+        e.status === 200,
+      30_000,
+      'the updated phone to read its push subscriptions at the end',
+    );
+    const lastRows = last.body?.subscriptions ?? [];
+    check(
+      lastRows.length === 1 &&
+        lastRows[0].subscription_id === subscriptionId &&
+        lastRows[0].enabled === true &&
+        lastRows[0].features?.includes(AGENT_STOPPED),
+      `at the end the relay still holds the phone's one subscription, enabled and declaring ${AGENT_STOPPED}`,
+      show(lastRows),
+    );
     const final = await settled(neu, 'owner');
     const all = { A: notices(final, asked.A.id), B: notices(final, asked.B.id) };
     const roundTwo = all.B.filter((n) => n.fields.revision === '2');
@@ -2309,7 +2355,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     );
 
     // The whole trace, now that nothing more is asked of the phone.
-    await Promise.allSettled([...reading]);
+    await drained();
     const judged = judgeDeclarations(trace, sub, { mixedDoc, requests: subscriptionPosts });
     for (const problem of judged.problems) fail(problem);
     check(
@@ -2352,7 +2398,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     await neu.stop();
     await browser?.stop();
     await relay.stop();
-    await Promise.allSettled([...reading]);
+    await drained();
     await new Promise((r) => phoneLog.end(r));
   }
 }
