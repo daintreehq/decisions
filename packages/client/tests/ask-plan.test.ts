@@ -889,9 +889,9 @@ describe('over MCP', () => {
       requested_expires_at: at(15 * MIN),
       planned_fallback: PLAN,
       policy_adjustments: [],
-      instruction: res.content[0].text,
+      instruction: res.content[0]!.text,
     });
-    const text = res.content[0].text;
+    const text = res.content[0]!.text;
     expect(text.startsWith(askedInstruction(1))).toBe(true);
     expect(text).toContain(`Asked for advice, due ${at(15 * MIN)} (UTC).`);
     expect(text).toContain('a notice arrives here that the deadline passed unanswered');
@@ -911,15 +911,15 @@ describe('over MCP', () => {
       reply_mode: 'advisory',
     });
     expect(again.structuredContent.planned_fallback).toBe(PLAN);
-    expect(again.content[0].text).toMatch(/^Already asked as q-1: /);
-    expect(again.content[0].text).toContain(
+    expect(again.content[0]!.text).toMatch(/^Already asked as q-1: /);
+    expect(again.content[0]!.text).toContain(
       `It was asked for advice, with a deadline of ${at(15 * MIN)} (UTC) and the plan in planned_fallback.`,
     );
-    expect(again.content[0].text).toContain(
+    expect(again.content[0]!.text).toContain(
       `call get_decision with question_id ${id} to see where it stands`,
     );
     // Nothing forward-looking: what happened since is get_decision's to say.
-    expect(again.content[0].text).not.toContain('a notice arrives');
+    expect(again.content[0]!.text).not.toContain('a notice arrives');
   });
 
   it('a capped approval: the receipt says blocking, names the gate and what it changed', async () => {
@@ -957,10 +957,10 @@ describe('over MCP', () => {
         },
       ],
     });
-    expect(res.content[0].text).toContain(
+    expect(res.content[0]!.text).toContain(
       `Policy: the workflow gate release moved the deadline you asked for (${at(15 * MIN)}) to ${at(5 * MIN)}; the workflow gate release raised the requirement from proxy-ok to human-required.`,
     );
-    expect(res.content[0].text).toContain(
+    expect(res.content[0]!.text).toContain(
       'unanswered by then, it expires, and expiry authorises nothing',
     );
   });
@@ -977,9 +977,9 @@ describe('over MCP', () => {
     });
     expect(res.isError).toBe(true);
     expect(res.structuredContent).toEqual({ error: 'not_supported' });
-    expect(res.content[0].text).toMatch(/^not_supported: relay-unsupported: /);
+    expect(res.content[0]!.text).toMatch(/^not_supported: relay-unsupported: /);
     const both = await call('ask_human', { question: 'q', expires_in: '15m', expires_at: at(DAY) });
-    expect(both.content[0].text).toBe(
+    expect(both.content[0]!.text).toBe(
       'validation_error: expires_in: supply only one of expires_at and expires_in',
     );
   });
@@ -1073,7 +1073,7 @@ describe('over MCP', () => {
       });
     // What an older bridge may have dropped is said, not assumed.
     const advice = await call({ question: 'q2', expires_in: '15m', planned_fallback: PLAN });
-    expect(advice.content[0].text).toContain(
+    expect(advice.content[0]!.text).toContain(
       'This host could not confirm expires_in or planned_fallback and may have ignored them',
     );
     expect(res.isError).toBeUndefined();
@@ -1083,9 +1083,9 @@ describe('over MCP', () => {
       status: 'queued',
       duplicate: false,
       enforced_requirement: 'human-required',
-      instruction: res.content[0].text,
+      instruction: res.content[0]!.text,
     });
-    expect(res.content[0].text).toBe(
+    expect(res.content[0]!.text).toBe(
       `${askedInstruction(1)} To check on it later, or if you lose track of it, call get_decision with question_id ${id}.`,
     );
   });
@@ -1193,7 +1193,7 @@ describe('over MCP', () => {
       choice: null,
       text: '',
     });
-    expect(x.content[0].text).toContain('you are not authorised to continue');
+    expect(x.content[0]!.text).toContain('you are not authorised to continue');
     const a = await get(advised);
     expect(a.structuredContent).toMatchObject({
       status: 'expired',
@@ -1206,7 +1206,7 @@ describe('over MCP', () => {
       planned_fallback: PLAN,
       error_code: null,
     });
-    expect(a.content[0].text).toContain('nothing was decided or approved');
+    expect(a.content[0]!.text).toContain('nothing was decided or approved');
     // Answered in time, it is still the question asked for advice, now with an answer in force.
     expect((await get(answeredAdvice)).structuredContent).toMatchObject({
       status: 'human-answered',
@@ -1231,7 +1231,7 @@ describe('over MCP', () => {
       reply_mode: 'blocking',
       planned_fallback: null,
     });
-    expect(a.content[0].text).toContain(
+    expect(a.content[0]!.text).toContain(
       'the plan you stated (planned_fallback) is yours to carry out',
     );
     const f = await get(failed);
@@ -1242,6 +1242,6 @@ describe('over MCP', () => {
       provenance: null,
       closed_reason: null,
     });
-    expect(f.content[0].text).toContain('could not be published (validation_error)');
+    expect(f.content[0]!.text).toContain('could not be published (validation_error)');
   });
 });
