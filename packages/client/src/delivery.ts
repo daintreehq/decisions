@@ -7,6 +7,9 @@ import {
 import {
   answeredOn,
   closureInForce,
+  currentDisposition,
+  type AdvisoryDisposition,
+  isAdvisoryNotice,
   isClosure,
   parseAnswers,
   supersededClosure,
@@ -14,13 +17,14 @@ import {
   type AnswerContent,
   type AnswerEntry,
 } from './answers.js';
+import { replyModeOfRow } from './advisory.js';
 import { openAnswerContent, openMessageContent, openQuestionContent } from './at-rest.js';
 import { RelayError } from './errors.js';
 import { TransientError } from './mutex.js';
 import type { BridgeContext } from './context.js';
 import { hostRef } from './context.js';
 import { newId, sha256Hex } from '@daintreehq/decisions-crypto';
-import { messageDeliveryKey } from '@daintreehq/decisions-protocol';
+import { ADVISORY_ROUND_REVISION, messageDeliveryKey } from '@daintreehq/decisions-protocol';
 import {
   isPendingMessage,
   isUndeliveredMessage,
@@ -60,7 +64,26 @@ export interface DeliveryOptions {
   maxBatchBytes?: number;
   /** Where verified phone images go on the host's disk. Without it, each is listed as unavailable. */
   phoneImages?: PhoneImageStore;
+  /**
+   * The host delivers advisory outcomes (`BridgeOptions.advisoryDeadlines`). Off, an advisory notice not yet typed is
+   * typed as the ordinary expiry block, which every sink reads.
+   */
+  advisoryOutcomes?: boolean;
+  /**
+   * Whether the ledger may hold a later event (a reopen, a deletion) for the round an advisory notice of `questionId`
+   * closed, so the notice waits: `unapplied` when an event of that question is stored and not yet applied (it waits
+   * as long as that lasts), `reading` while a read of the relay is under way, ended part-way or has not reached the
+   * relay's end yet (it waits `ADVISORY_LEDGER_WAIT_MS` at most), null once settled. The host drains again when it
+   * settles (`replayHeld`).
+   */
+  replaying?: (questionId: string) => Promise<'unapplied' | 'reading' | null>;
 }
+
+/**
+ * The longest advisory notices wait for the ledger to settle (`DeliveryOptions.replaying`), so a read that never
+ * finishes, or an event that cannot be applied, never strands them.
+ */
+export const ADVISORY_LEDGER_WAIT_MS = 2 * 60_000;
 
 export interface DrainResult {
   delivered: number;
@@ -184,11 +207,58 @@ export class DeliveryEngine {
   stopped = false;
   /** Closure notices being written to a terminal, by question (see `closureWrite`). */
   private readonly closureWrites = new Map<string, Promise<void>>();
+  /** An advisory notice waited for the ledger in the latest pass (`DeliveryOptions.replaying`). */
+  private held = new Set<string>();
+  /** Extra passes a drain ran for notices that waited for the ledger: one at most. */
+  private holdRuns = 0;
+  /** When each question's advisory notice started waiting for a read of the relay. */
+  private readonly waitingSince = new Map<string, number>();
 
   constructor(
     private readonly ctx: BridgeContext,
     private readonly o: DeliveryOptions,
   ) {}
+
+  /** True while an advisory notice is waiting for the ledger: the host drains again once the ledger settles. */
+  get replayHeld(): boolean {
+    return this.held.size > 0;
+  }
+
+  /** Whether `questionId`'s advisory notice, still to be typed, would wait for the ledger now (no effects). */
+  async ledgerHolds(questionId: string): Promise<boolean> {
+    const state = await this.o.replaying?.(questionId);
+    if (!state) return false;
+    if (state === 'unapplied') return true;
+    // The wait is timed from when it was first seen, also by get_decision for a notice no pass tries to type.
+    const since = this.waitingSince.get(questionId) ?? this.ctx.now();
+    this.waitingSince.set(questionId, since);
+    return this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
+  }
+
+  /**
+   * Whether `questionId`'s advisory notice must wait for the ledger; remembered so the host drains again. A ledger
+   * that cannot be read counts as one to wait for.
+   */
+  private async heldForReplay(questionId: string): Promise<boolean> {
+    let state: 'unapplied' | 'reading' | null | undefined;
+    try {
+      state = await this.o.replaying?.(questionId);
+    } catch {
+      state = 'unapplied';
+    }
+    if (!state) {
+      this.waitingSince.delete(questionId);
+      return false;
+    }
+    if (state === 'reading') {
+      const now = this.ctx.now();
+      const since = this.waitingSince.get(questionId);
+      if (since === undefined || now < since) this.waitingSince.set(questionId, now);
+      else if (now - since >= ADVISORY_LEDGER_WAIT_MS) return false;
+    }
+    this.held.add(questionId);
+    return true;
+  }
 
   /** Serialised: concurrent callers share one pass plus at most one follow-up pass. */
   async drain(): Promise<DrainResult> {
@@ -199,6 +269,7 @@ export class DeliveryEngine {
     }
     this.running = (async () => {
       const total = EMPTY();
+      this.holdRuns = 0;
       try {
         do {
           this.again = false;
@@ -207,6 +278,10 @@ export class DeliveryEngine {
           total.deferred = r.deferred;
           total.needsAttention += r.needsAttention;
           total.uncertain += r.uncertain;
+          // A notice that waited for the ledger while it settled during the pass is typed now, not on a later wake.
+          // Once per drain: a ledger that keeps changing never keeps it running.
+          if (!this.again && this.held.size > 0 && this.holdRuns++ < 1 && (await this.anySettled()))
+            this.again = true;
         } while (this.again && !this.stopped);
       } finally {
         this.running = null;
@@ -214,6 +289,13 @@ export class DeliveryEngine {
       return total;
     })();
     return this.running;
+  }
+
+  /** Whether the ledger settled for some advisory notice that waited for it in the latest pass. */
+  private async anySettled(): Promise<boolean> {
+    for (const id of this.held)
+      if (!(await this.o.replaying?.(id).catch(() => 'unapplied'))) return true;
+    return false;
   }
 
   private pending(q: QuestionRow): AnswerEntry[] {
@@ -225,6 +307,7 @@ export class DeliveryEngine {
   private async pass(): Promise<DrainResult> {
     const { ctx } = this;
     const out = EMPTY();
+    this.held = new Set();
     await this.flushAcks();
     const rows = (await ctx.store.listQuestions()).filter((q) => !q.history_only);
     await this.flushMessageReceipts(rows);
@@ -254,6 +337,11 @@ export class DeliveryEngine {
             : [],
       ),
     );
+    // A wait clock lasts as long as its notice waits to be typed.
+    const advisory = new Set(
+      rows.filter((q) => this.pending(q).some(isAdvisoryNotice)).map((q) => q.question_id),
+    );
+    for (const id of this.waitingSince.keys()) if (!advisory.has(id)) this.waitingSince.delete(id);
     const threads: Thread[] = [];
     for (const q of rows) {
       const t = await this.thread(q, unsettled, unsettledMessages);
@@ -289,6 +377,7 @@ export class DeliveryEngine {
       (q.delivery_status === 'needs-attention' ||
         q.delivery_status === 'delivery-uncertain' ||
         unsettled.has(q.question_id) ||
+        (pending.some(isAdvisoryNotice) && (await this.heldForReplay(q.question_id))) ||
         (await this.ctx.store.hasUncertainIntent(q.question_id)));
     const barrier = held ? Math.min(...pending.map(seqOf)) : Infinity;
     const messages: StoredMessage[] = [];
@@ -392,6 +481,20 @@ export class DeliveryEngine {
     // And on its original host: the relay keeps naming the host the question was published for, and the inbox
     // checks the relay's host-bound claims (an expiry, a snapshot refresh) against this origin.
     if (target.hostId !== q.origin.host_id) return { attention: 'resume_wrong_host' };
+    // An advisory question's notice tells the agent it may carry out the plan IT stated: while the question is in
+    // its advisory round, whatever resumes it (its notice, an answer, a follow-up) must bring back that very session,
+    // known by its id, or the origin would move to a session that never stated the plan. The row is read afresh: a
+    // reopen meanwhile made it a round that waits for a decision.
+    const now = this.o.advisoryOutcomes
+      ? ((await this.ctx.store.getQuestion(q.question_id)) ?? q)
+      : q;
+    if (
+      this.o.advisoryOutcomes === true &&
+      now.question_revision === ADVISORY_ROUND_REVISION &&
+      (replyModeOfRow(now) === 'advisory' || this.pending(now).some(isAdvisoryNotice)) &&
+      (q.origin.agent_session_id === null || target.agentSessionId !== q.origin.agent_session_id)
+    )
+      return { attention: 'resume_wrong_session' };
     const origin: QuestionOrigin = {
       ...q.origin,
       host_id: target.hostId,
@@ -589,6 +692,10 @@ export class DeliveryEngine {
     return formatAnswerNotice({
       kind: e.kind,
       ...(e.fallback_due ? { fallbackDue: true } : {}),
+      // A host that does not deliver advisory outcomes types the ordinary expiry block, which every sink reads.
+      ...(isAdvisoryNotice(e) && this.o.advisoryOutcomes
+        ? { disposition: e.advisory_disposition!, deadline: e.created_at }
+        : {}),
       questionId: i.q.question_id,
       alias: i.q.alias,
       revision: e.revision,
@@ -732,17 +839,40 @@ export class DeliveryEngine {
     // 0b. Every answer and message must still be one to type: fetching images takes time, and a cancellation,
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
     //     the inbox applies cancellations and deletions under, so none lands between them. A closure notice
-    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink.
+    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink. An
+    //     advisory notice waits while the ledger may hold a later event for its round, and must still say what the
+    //     host allows now: one its policy no longer allows is withheld, recorded here, and the chunk is built again
+    //     from the store.
     let written!: () => void;
     const writing = new Promise<void>((r) => (written = r));
     const closing = new Set<string>();
-    const admitted = await ctx.lock.run(async () => {
+    const advisoryDue = chunk.some(
+      (i) => i.kind === 'answer' && i.entry.advisory_disposition === 'fallback-due',
+    );
+    const allows = () => this.o.advisoryOutcomes === true && ctx.policy.advisoryQuestions;
+    const admitted = await ctx.lock.run(async (): Promise<boolean | 'held'> => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
+      const advisory = [
+        ...new Set(
+          chunk.flatMap((i) =>
+            i.kind === 'answer' && isAdvisoryNotice(i.entry) ? [i.q.question_id] : [],
+          ),
+        ),
+      ];
+      const mustWait = async () => {
+        for (const id of advisory) if (await this.heldForReplay(id)) return true;
+        return false;
+      };
+      if (await mustWait()) return 'held';
       const rows = new Map<string, QuestionRow>();
+      const host = { outcomes: this.o.advisoryOutcomes === true, allowed: allows() };
+      let stale = false;
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
         if (row) rows.set(q.question_id, row);
-        const answers = new Set(row ? this.pending(row).map((e) => e.entry_id) : ([] as string[]));
+        const answers = new Map(
+          (row ? this.pending(row) : []).map((e) => [e.entry_id, e] as const),
+        );
         const messages = new Set(
           row
             ? parseMessages(row.messages_json)
@@ -750,15 +880,38 @@ export class DeliveryEngine {
                 .map((m) => m.message_id)
             : ([] as string[]),
         );
+        const withheld = new Map<string, AdvisoryDisposition>();
         for (const i of chunk) {
           if (i.q.question_id !== q.question_id) continue;
-          const live =
-            i.kind === 'answer'
-              ? answers.has(i.entry.entry_id)
-              : messages.has(i.message.message_id);
-          if (!live) return false;
+          if (i.kind === 'message') {
+            if (!messages.has(i.message.message_id)) return false;
+            continue;
+          }
+          const e = answers.get(i.entry.entry_id);
+          if (!e || e.advisory_disposition !== i.entry.advisory_disposition) return false;
+          const now = currentDisposition(e.advisory_disposition, host);
+          if (now && now !== e.advisory_disposition) withheld.set(e.entry_id, now);
+        }
+        if (row && withheld.size > 0) {
+          await ctx.store.updateQuestion(row.question_id, {
+            answers_json: serializeAnswers(
+              parseAnswers(row.answers_json).map((e) =>
+                withheld.has(e.entry_id)
+                  ? { ...e, advisory_disposition: withheld.get(e.entry_id)! }
+                  : e,
+              ),
+            ),
+          });
+          await ctx.audit.log({
+            event: 'delivery.advisory-withheld',
+            question_id: row.question_id,
+            requirement: row.requirement,
+            result: host.outcomes ? 'policy-disallowed' : 'host-unsupported',
+          });
+          stale = true;
         }
       }
+      if (stale) return false;
       const now = ctx.now();
       // 1a. Each follow-up names its attempt first, so recovery can find it from the attempt alone. Nothing is
       //     typed yet: a crash before its intent is written only leaves it waiting, as it was.
@@ -806,9 +959,26 @@ export class DeliveryEngine {
           if (isClosure(i.entry)) closing.add(i.q.question_id);
         }
       }
+      // The ledger and the policy can change at any await above (a read stores a reopen outside this lock; the host
+      // changes a setting): both are read again after the last one. A notice that must wait, or would now be
+      // withheld, is not typed: its intents are closed (nothing was written), and the next pass records it withheld.
+      const wait = await mustWait();
+      if (wait || (advisoryDue && !allows())) {
+        for (const i of chunk)
+          await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
+        return wait ? 'held' : false;
+      }
       for (const id of closing) this.closureWrites.set(id, writing);
       return true;
     });
+    if (admitted === 'held') {
+      // The ledger may hold a later event for its round: another pass leaves it waiting and types the rest of the
+      // lane, and the host drains again once the ledger settles.
+      written();
+      if (this.holdRuns++ < 1) this.again = true;
+      res.deferred++;
+      return res;
+    }
     if (!admitted) {
       written();
       // Stale: another pass rebuilds the lane from the store, without what was settled, so the pane's other
@@ -1187,13 +1357,22 @@ export class DeliveryEngine {
     const { ctx } = this;
     if (uncertainIntentId) {
       // Intent state and the question's delivery state change in ONE atomic write: no crash window in which
-      // the question is still deliverable while its intent is already marked uncertain.
-      await ctx.store.settleIntent(
-        uncertainIntentId,
-        { state: 'uncertain', updated_at: ctx.now() },
-        q.question_id,
-        { delivery_status: status, error_code: code },
-      );
+      // the question is still deliverable while its intent is already marked uncertain. An advisory notice the write
+      // carried also keeps the attempt, so the uncertainty outlives a reopen of its round (`get_decision`); the row
+      // is read again under the lock so nothing the inbox appended meanwhile is lost.
+      await ctx.lock.run(async () => {
+        const marked = await this.markUncertain(q.question_id, uncertainIntentId);
+        await ctx.store.settleIntent(
+          uncertainIntentId,
+          { state: 'uncertain', updated_at: ctx.now() },
+          q.question_id,
+          {
+            delivery_status: status,
+            error_code: code,
+            ...(marked ? { answers_json: marked } : {}),
+          },
+        );
+      });
     } else {
       await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
     }
@@ -1205,6 +1384,9 @@ export class DeliveryEngine {
     });
     // A question that never reached the relay has no delivery there to report on.
     if (q.local_status === 'publish-failed') return;
+    // Nor has an advisory notice: it is no answer, and the relay keeps no delivery of it.
+    const owed = this.pending(q);
+    if (owed.length > 0 && owed.every(isAdvisoryNotice)) return;
     const rev = Math.max(1, ...this.pending(q).map((e) => e.revision), q.question_revision);
     try {
       await ctx.client.deliveriesFailed({
@@ -1218,6 +1400,24 @@ export class DeliveryEngine {
     } catch {
       /* informational for the phone; local state is authoritative */
     }
+  }
+
+  /**
+   * The question's answers with the advisory notice an intent may have typed marked `uncertain_injection_id`, or null
+   * when it carried none. A deletion or reopen meanwhile stopped the notice from being typed again, not the write that
+   * may have reached the screen. Runs under ctx.lock, on a fresh read.
+   */
+  private async markUncertain(questionId: string, injectionId: string): Promise<string | null> {
+    const intent = await this.ctx.store.getIntent(injectionId);
+    const row = await this.ctx.store.getQuestion(questionId);
+    if (!intent || !row) return null;
+    let marked = false;
+    const next = parseAnswers(row.answers_json).map((e) => {
+      if (e.revision !== intent.answer_revision || !isAdvisoryNotice(e) || e.delivered) return e;
+      marked = true;
+      return { ...e, uncertain_injection_id: injectionId };
+    });
+    return marked ? serializeAnswers(next) : null;
   }
 
   /**
@@ -1321,8 +1521,12 @@ export class DeliveryEngine {
       // `typed` was recorded once the sink confirmed the write: only the entry's own record and the receipt may be
       // owed, so a sink that keeps no markers (stdout, a command) still gets no second copy and no false alarm.
       if (intent.state === 'typed' || (await this.markerFound(q, intent))) {
+        // An advisory notice a deletion withdrew meanwhile was still typed: it is recorded as delivered.
         const entry = parseAnswers(q.answers_json).find(
-          (e) => e.revision === intent.answer_revision && e.deliver && !e.delivered,
+          (e) =>
+            e.revision === intent.answer_revision &&
+            (e.deliver || isAdvisoryNotice(e)) &&
+            !e.delivered,
         );
         if (entry)
           await this.markDelivered(
@@ -1339,11 +1543,16 @@ export class DeliveryEngine {
         await this.ack(intent.injection_id);
         reconciled++;
       } else if (supersededClosure(q, intent.answer_revision)) {
-        // A closure notice of a round a reopen has since replaced: content-free, and no longer to be typed, so
-        // whether it reached the screen holds nothing back. The new round's answers must not wait on it.
-        await ctx.store.updateIntent(intent.injection_id, {
-          state: 'abandoned',
-          updated_at: ctx.now(),
+        // A closure notice of a round a reopen (or deletion) has since replaced: content-free, and no longer to be
+        // typed, so whether it reached the screen holds nothing back. The new round's answers must not wait on it. An
+        // advisory notice still keeps the attempt, so get_decision says it may have been typed.
+        await ctx.lock.run(async () => {
+          const marked = await this.markUncertain(q.question_id, intent.injection_id);
+          if (marked) await ctx.store.updateQuestion(q.question_id, { answers_json: marked });
+          await ctx.store.updateIntent(intent.injection_id, {
+            state: 'abandoned',
+            updated_at: ctx.now(),
+          });
         });
         await ctx.audit.log({
           event: 'delivery.superseded',
@@ -1398,18 +1607,21 @@ export class DeliveryEngine {
     const q = await this.ctx.store.getQuestion(questionId);
     if (!q) return;
     // Only answers that still have somewhere to go: a retry for a follow-up leaves a delivered answer's state alone.
-    if (
-      this.pending(q).length > 0 ||
-      q.delivery_status === 'needs-attention' ||
-      q.delivery_status === 'delivery-uncertain'
-    ) {
-      const entries = parseAnswers(q.answers_json).map((e) => (e.deliver && !e.delivered ? e : e));
-      await this.ctx.store.updateQuestion(questionId, {
-        delivery_status: 'desktop-received',
-        error_code: null,
-        answers_json: serializeAnswers(entries),
-      });
-    }
+    // Read again under the lock delivery settles a write under, and only the status written: a copy of the answers
+    // read before a write settled would bring an answer typed meanwhile back as pending.
+    await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(questionId);
+      if (
+        row &&
+        (this.pending(row).length > 0 ||
+          row.delivery_status === 'needs-attention' ||
+          row.delivery_status === 'delivery-uncertain')
+      )
+        await this.ctx.store.updateQuestion(questionId, {
+          delivery_status: 'desktop-received',
+          error_code: null,
+        });
+    });
     await this.ctx.lock.run(async () => {
       const row = await this.ctx.store.getQuestion(questionId);
       if (!row) return;

@@ -1,8 +1,20 @@
-import { InfoResponse, knownFeatures, type ProtocolFeature } from '@daintreehq/decisions-protocol';
+import {
+  ADVISORY_ROUND_REVISION,
+  DecisionContentV1,
+  InfoResponse,
+  advisoryContentIssue,
+  knownFeatures,
+  replyModeOf,
+  type CryptoEnvelope,
+  type ProtocolFeature,
+  type ReplyMode,
+} from '@daintreehq/decisions-protocol';
+import { openQuestionContent, type SealContext } from './at-rest.js';
 import type { BridgeContext } from './context.js';
 import { verifiedDevices } from './devices.js';
 import { RelayError } from './errors.js';
 import { revokedKey } from './inbound.js';
+import type { QuestionRow } from './types.js';
 
 const ADVISORY_FEATURE: ProtocolFeature = 'advisory-deadlines-v1';
 
@@ -153,5 +165,41 @@ export class AdvisorySupport {
       .map((d) => d.device_id);
     if (run !== this.generation) return;
     this.readers = { ids, ...this.stamp() };
+  }
+}
+
+/** A question's reply mode, from the AAD of the envelope it was published with (readable without opening it). */
+export function replyModeOfRow(row: Pick<QuestionRow, 'content_sealed'>): ReplyMode {
+  if (!row.content_sealed) return 'blocking';
+  try {
+    const env = JSON.parse(row.content_sealed) as { aad?: { reply_mode?: unknown } };
+    return env.aad?.reply_mode === 'advisory' ? 'advisory' : 'blocking';
+  } catch {
+    return 'blocking';
+  }
+}
+
+/**
+ * Whether a sealed question envelope is an advisory question that still stands as one (protocol section 21): advisory
+ * in its AAD at the advisory round, with content that opens, parses and states a plan for a question that is not an
+ * approval (`advisoryContentIssue`). The plan is opened in memory only. Never throws: anything it cannot show is false.
+ */
+export async function advisoryContentHolds(
+  ctx: SealContext,
+  questionId: string,
+  envelope: string,
+): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(envelope) as Pick<CryptoEnvelope, 'aad'>;
+    if (replyModeOf(parsed) !== 'advisory' || parsed.aad.revision !== ADVISORY_ROUND_REVISION)
+      return false;
+    const raw = await openQuestionContent(ctx, {
+      question_id: questionId,
+      content_sealed: envelope,
+    });
+    const content = DecisionContentV1.safeParse(raw);
+    return content.success && advisoryContentIssue({ envelope: parsed }, content.data) === null;
+  } catch {
+    return false;
   }
 }

@@ -1,4 +1,5 @@
 import {
+  ADVISORY_ROUND_REVISION,
   ApiError,
   EventData,
   applyAction,
@@ -14,9 +15,11 @@ import {
   parseAnswers,
   supersededClosure,
   serializeAnswers,
+  type AdvisoryDisposition,
   type AnswerContent,
   type AnswerEntry,
 } from './answers.js';
+import { advisoryContentHolds, replyModeOfRow } from './advisory.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import { hostRef, type BridgeContext } from './context.js';
 import {
@@ -55,6 +58,12 @@ export interface InboxOptions {
    * `thread-messages-v1` is never sent them.
    */
   messages?: boolean;
+  /**
+   * The host delivers advisory outcomes (`BridgeOptions.advisoryDeadlines`): an expiry of an advisory question's
+   * advisory round is recorded with its disposition (`AnswerEntry.advisory_disposition`), so the agent is told in the
+   * advisory notice. Off, every expiry is recorded as an ordinary one, whose block every sink reads.
+   */
+  advisoryOutcomes?: boolean;
 }
 
 /** Withdraw every human message not yet typed: kept for the thread, never typed. */
@@ -589,6 +598,7 @@ export class Inbox {
     // Held just before the deadline by this desktop's clock: a clock a little behind the relay's, or a relay that
     // dates its claim ahead. Either way it waits, in ledger order, until the deadline has passed here too.
     if (this.ctx.now() < deadline) throw new TransientError('expiry not yet due');
+    const disposition = await this.advisoryDisposition(row);
     const entries = parseAnswers(row.answers_json);
     entries.push({
       entry_id: `expired-${ev.event_id}`,
@@ -596,6 +606,7 @@ export class Inbox {
       action: 'expire',
       revision: row.question_revision,
       source: 'system',
+      ...(disposition ? { advisory_disposition: disposition } : {}),
       correction: false,
       created_at: new Date(deadline).toISOString(),
       event_seq: ev.seq,
@@ -613,9 +624,38 @@ export class Inbox {
       event: 'question.expired',
       question_id: row.question_id,
       requirement: row.requirement,
+      ...(disposition ? { result: `advisory:${disposition}` } : {}),
     });
     this.cb.onQuestionClosed?.(row.question_id);
     return true;
+  }
+
+  /**
+   * What the verified expiry of `row`'s current round lets its agent be told (protocol section 21), or undefined for an
+   * ordinary expiry: a round other than the advisory one, a question asked for a decision, or a host that does not
+   * deliver advisory outcomes (its sink may not read the advisory notice). `fallback-due` needs the question's own
+   * sealed copy to be advisory at round 0 with a plan, under no workflow gate and with a finite deadline, and the
+   * host's trusted policy to allow advice, read again once the content is open; anything less is `fallback-withheld`.
+   * The content is opened with the keys already held: the inbox never waits on the relay under the lock.
+   */
+  private async advisoryDisposition(row: QuestionRow): Promise<AdvisoryDisposition | undefined> {
+    if (
+      !this.opts.advisoryOutcomes ||
+      row.history_only ||
+      row.question_revision !== ADVISORY_ROUND_REVISION ||
+      replyModeOfRow(row) !== 'advisory'
+    )
+      return undefined;
+    const holds =
+      row.origin.workflow_gate_id === null &&
+      row.expires_at !== null &&
+      !!row.content_sealed &&
+      (await advisoryContentHolds(
+        { identity: this.ctx.identity },
+        row.question_id,
+        row.content_sealed,
+      ));
+    return holds && this.ctx.policy.advisoryQuestions ? 'fallback-due' : 'fallback-withheld';
   }
 
   /** Runs under ctx.lock with a fresh read of the row, so history appends never clobber delivery bookkeeping. */

@@ -1064,7 +1064,10 @@ the relay keeps it, even after the question changed or was deleted. The same sig
 - The **delivered notice** is the asking host telling its agent, once, that no answer committed by the deadline.
   `RoundTransition.fallbackDue` says the host may send it, not that it did. Whether it reached the agent is the host's
   own delivery state, keyed by question id and round. The notice says that nothing was decided or approved and that
-  the agent may carry out the plan it stated, at its own discretion.
+  the agent may carry out the plan it stated, at its own discretion. The reference client types it as the advisory
+  notice (`status: advisory-unanswered`, with the deadline and a `disposition`) and reports its delivery as
+  `get_decision`'s `advisory_timeout`; the integration spec, section 6.4, has the grammar, and
+  `@daintreehq/decisions-protocol/fixtures` the exact bytes (`ADVISORY_TIMEOUT_NOTICE_FIXTURE`).
 - The **action actually taken** is never observed by Decisions. Neither the deadline nor the notice says the agent
   acted. Only the agent's own later report could, and that report carries no authority.
 
