@@ -63,6 +63,65 @@ describe('D: cancel accounts for a create that may already be on the relay', () 
     expect((await env.store.listAudit(50)).some((a) => a.result === 'never-published')).toBe(false);
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
   });
+
+  it.each([
+    ['answered in time', 'human-answered', 1],
+    ['left to expire', 'expired', 0],
+  ] as const)(
+    'a create whose reply was lost, retried past its deadline after a reconnect, keeps the relay history (%s)',
+    async (how, status, revision) => {
+      let now = Date.now();
+      const env = await setupBridge({ now: () => now });
+      env.relay.createNow = () => now; // a new create past its deadline is refused, as the relay does
+      const deadline = now + 120_000;
+      const r = await env.bridge.registerQuestion({
+        origin: origin(),
+        input: {
+          question: 'q?',
+          options: [{ id: 'a', label: 'A' }],
+          expires_at: new Date(deadline).toISOString(),
+        },
+      });
+      env.relay.dropCreateReply = 1; // the relay commits the question; we never see the answer
+      await env.bridge.pump();
+      expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('queued');
+
+      // While the desktop is offline the question is answered in time, or its deadline passes.
+      if (how === 'answered in time') {
+        await env.relay.answerEvent({ questionId: r.questionId, phone: env.phone, options: ['a'] });
+      }
+      now = deadline + 1_000;
+      if (how === 'left to expire') {
+        env.relay.push('decision.expired', r.questionId, 0, {
+          expired_at: new Date(deadline).toISOString(),
+        });
+      }
+      for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+        await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+
+      // Reconnect: the relay's history is applied first, then the outbox retries the create.
+      await env.bridge.catchUp();
+      await env.bridge.pump();
+
+      const creates = env.relay.calls.filter(
+        (c) => c.method === 'POST' && c.path === '/api/v1/questions',
+      );
+      expect(creates).toHaveLength(2);
+      expect(creates[1]!.body).toEqual(creates[0]!.body);
+      const history = env.relay.events.filter((e) => e.question_id === r.questionId);
+      expect(history.filter((e) => e.event_type === 'decision.created')).toHaveLength(1);
+      const row = (await env.store.getQuestion(r.questionId))!;
+      expect(row).toMatchObject({
+        local_status: status,
+        question_revision: revision,
+        remote_event_seq: history.at(-1)!.seq,
+      });
+      expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+      expect((await env.store.listAudit(50)).some((a) => a.result === 'validation_error')).toBe(
+        false,
+      );
+    },
+  );
 });
 
 describe('D: ownership and correlation are scoped to the complete trusted origin', () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CREATOR_MISSING_FEATURE, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import {
@@ -154,6 +154,39 @@ describe('question creation', () => {
 
     // No second creation, push, job or attachment binding came of any of it.
     expect(await ledger()).toEqual(before);
+  });
+
+  it('checks a new create against its deadline when it commits, not when it arrives', async () => {
+    const w = await claimRelay();
+    const deadline = Date.now() + 5_000;
+    let clock = deadline - 1;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    // The deadline arrives as the create's transaction opens, after the signature checks have awaited.
+    await inRoom((room) => {
+      const tx = room.tx.bind(room);
+      room.tx = ((fn) => {
+        clock = deadline;
+        return tx(fn);
+      }) as typeof room.tx;
+    });
+    try {
+      const key = newId();
+      const late = await ask(w, { idempotencyKey: key, expiresAt: new Date(deadline).toISOString() });
+      expect(late.res.status).toBe(400);
+      expect(late.res.json.code).toBe('validation_error');
+      const left = await inRoom((room) => ({
+        questions: room.q(`SELECT 1 FROM questions WHERE question_id = ?`, late.questionId).length,
+        receipts: room.q(`SELECT 1 FROM command_receipts WHERE idempotency_key = ?`, key).length,
+        events: room.q(`SELECT 1 FROM events WHERE question_id = ?`, late.questionId).length,
+        jobs: room.q(`SELECT 1 FROM scheduled_jobs WHERE question_id = ?`, late.questionId).length,
+      }));
+      expect(left).toEqual({ questions: 0, receipts: 0, events: 0, jobs: 0 });
+    } finally {
+      now.mockRestore();
+      await inRoom((room) => {
+        delete (room as { tx?: unknown }).tx;
+      });
+    }
   });
 
   it('rejects tampered records: signature, digest, binding and expiry', async () => {
