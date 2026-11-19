@@ -194,7 +194,6 @@ export const createQuestion: Handler = async (room, c) => {
   const auth = c.auth!;
   const body = c.body(CreateQuestionBody);
   const { record, envelope } = body.question;
-  const t = nowMs();
   const bad = (m: string) => new ApiError('validation_error', m);
 
   if (
@@ -223,9 +222,6 @@ export const createQuestion: Handler = async (room, c) => {
   if (!(await verifyObject(await room.devicePublicKey(signer), record)))
     throw bad('record signature invalid');
   const expiresAt = record.expires_at ? Date.parse(record.expires_at) : null;
-  if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
-    throw bad('expires_at must be in the future and within a year (use null for no expiry)');
-  }
   if (new Set(record.attachment_ids).size !== record.attachment_ids.length)
     throw bad('duplicate attachment id');
   const digest = await c.bodyDigest();
@@ -234,6 +230,8 @@ export const createQuestion: Handler = async (room, c) => {
 
   return room.tx((): ApiResponse => {
     room.assertActive(auth.deviceId);
+    // Read the clock in the final synchronous section: everything above awaited.
+    const t = nowMs();
     const receipt = room.q1<{ request_digest: string; status: number; response_json: string }>(
       `SELECT request_digest, status, response_json FROM command_receipts WHERE device_id = ? AND idempotency_key = ?`,
       auth.deviceId,
@@ -258,13 +256,22 @@ export const createQuestion: Handler = async (room, c) => {
           'question id already exists with different content',
         );
       }
+      // A deadline may have passed since the sweep: expire it now, as an action would, so the reply is current.
+      const q = expireQuestionNow(room, existing)
+        ? room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, record.question_id)!
+        : existing;
       return json(200, {
-        question_id: existing.question_id,
-        revision: existing.revision,
-        status: existing.status,
-        event_seq: existing.last_event_seq,
-        created_at: iso(existing.created_at),
+        question_id: q.question_id,
+        revision: q.revision,
+        status: q.status,
+        event_seq: q.last_event_seq,
+        created_at: iso(q.created_at),
       });
+    }
+    // Only a new question must still be due. A retry of one already taken, answered above, may arrive after its
+    // deadline when the reply was lost on the way back (section 6).
+    if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
+      throw bad('expires_at must be in the future and within a year (use null for no expiry)');
     }
     assertQuota(room, record.origin_ref);
 

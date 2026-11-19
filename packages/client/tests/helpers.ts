@@ -1,4 +1,5 @@
 import {
+  AgentStoppedPushBody,
   ApiError,
   CREATOR_MISSING_FEATURE,
   EventData,
@@ -137,6 +138,11 @@ export class FakeRelay {
   dropAfterReceive = 0;
   /** Number of upcoming question creates the relay COMMITS but whose reply is lost. */
   dropCreateReply = 0;
+  /**
+   * The relay's clock for a create's deadline. When set, a new question already past its signed `expires_at` is
+   * refused, while a retry of one already taken replays its receipt, as the relay does. Unset, no deadline is checked.
+   */
+  createNow: (() => number) | null = null;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
   /** The relay's current key epoch and every device's sealed grants (`GET /devices/{id}/key-grants`). */
   epoch = 1;
@@ -150,6 +156,8 @@ export class FakeRelay {
   features: string[] | undefined = ['thread-messages-v1'];
   /** Number of upcoming `GET /info` reads that fail with a network error. */
   failInfo = 0;
+  /** While set, `GET /info` waits for it before answering (a slow relay). */
+  holdInfo: Promise<void> | null = null;
   /** Thread messages the relay committed, in commit order. */
   messages: { idem: string; message: SignedMessage }[] = [];
   /** The status, code and details every upcoming message POST is refused with, until cleared. */
@@ -218,6 +226,19 @@ export class FakeRelay {
   holdPresence: Promise<void> | null = null;
   /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
   dropPresenceReply = 0;
+  /**
+   * Whether `POST /push/agent-stopped` exists; false makes it unknown (404), like a relay from before
+   * `agent-stopped-push-v1`. Advertising the feature is `features`' job, so a test can make the two disagree.
+   */
+  agentStoppedRoute = true;
+  /**
+   * Replies for upcoming agent-stopped POSTs, in order, each with any headers (a string body is sent as given), or
+   * `reset` for a connection lost before the reply; when empty the relay answers `sent`.
+   */
+  agentStoppedReplies: (
+    | { status: number; body: Record<string, unknown> | string; headers?: Record<string, string> }
+    | 'reset'
+  )[] = [];
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -297,6 +318,7 @@ export class FakeRelay {
     }
 
     if (method === 'GET' && p === '/api/v1/info') {
+      if (this.holdInfo) await this.holdInfo;
       if (this.failInfo > 0) {
         this.failInfo--;
         throw new TypeError('fetch failed');
@@ -417,6 +439,13 @@ export class FakeRelay {
       const prior = this.receipts.get(b.idempotency_key);
       if (prior) return json(201, prior);
       const q = b.question;
+      if (
+        this.createNow &&
+        q.record.expires_at &&
+        Date.parse(q.record.expires_at) <= this.createNow()
+      ) {
+        return json(400, { code: 'validation_error', message: 'expires_at must be in the future' });
+      }
       this.questions.set(q.record.question_id, { signed: q, idem: b.idempotency_key });
       const ev = this.push('decision.created', q.record.question_id, 0, {
         record: q.record,
@@ -650,6 +679,21 @@ export class FakeRelay {
         present,
         until: present ? new Date(this.presenceUntil!).toISOString() : null,
       });
+    }
+    if (method === 'POST' && p === '/api/v1/push/agent-stopped' && this.agentStoppedRoute) {
+      // The body is strict, as the relay's is: anything but the version is refused.
+      if (!AgentStoppedPushBody.safeParse(body).success)
+        return json(400, { code: 'validation_error', message: 'invalid body' });
+      const reply = this.agentStoppedReplies.shift();
+      if (reply === 'reset') throw new TypeError('connection reset');
+      if (reply)
+        return typeof reply.body === 'string'
+          ? new Response(reply.body, {
+              status: reply.status,
+              headers: { 'content-type': 'application/json', ...reply.headers },
+            })
+          : json(reply.status, reply.body, reply.headers);
+      return json(200, { outcome: 'sent' });
     }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
       const served = this.involvement;

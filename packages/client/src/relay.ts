@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   formatFeatures,
   type ActionKind,
+  type AgentStoppedPushBody,
   type ClaimResponse,
   type CommandReceipt,
   type DeviceCert,
@@ -65,6 +66,12 @@ export interface RequestOptions {
   /** `raw` only: refuse a body larger than this many bytes (`payload_too_large`) without reading the rest. */
   maxBytes?: number;
   retry?: boolean;
+  /**
+   * Send at most once: no retry, no resend after a clock-skew refusal, and no redirect followed (a redirect is a
+   * network error). The skew such a refusal shows is still learned, so the next request is signed right. For a
+   * request whose repeat would do harm.
+   */
+  once?: boolean;
   /** Abort an attempt that has not answered within this long (a network error). */
   timeoutMs?: number;
 }
@@ -211,10 +218,12 @@ export class RelayClient {
           },
           body: (opts.rawBody as unknown as BodyInit | undefined) ?? bodyText,
           ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+          // A 307 or 308 would have fetch send the body again, elsewhere.
+          ...(opts.once ? { redirect: 'error' as const } : {}),
         });
       } catch (e) {
         const err = new RelayError('network_error', (e as Error).message || 'network error', 0);
-        if (opts.retry === false || attempt >= this.maxRetries) throw err;
+        if (opts.retry === false || opts.once || attempt >= this.maxRetries) throw err;
         await this.sleep(backoffMs(attempt++));
         continue;
       }
@@ -236,12 +245,14 @@ export class RelayClient {
           const skew = server - this.nowFn();
           if (Math.abs(skew - this.skewMs) > 1000) {
             this.skewMs = skew;
+            if (opts.once) throw err;
             skewRetried = true;
             continue;
           }
         }
       }
-      if (!err.retryable || opts.retry === false || attempt >= this.maxRetries) throw err;
+      if (!err.retryable || opts.retry === false || opts.once || attempt >= this.maxRetries)
+        throw err;
       await this.sleep(err.retryAfterMs ?? backoffMs(attempt));
       attempt++;
     }
@@ -436,6 +447,22 @@ export class RelayClient {
       this.request('PUT', `${API_PREFIX}/presence`, {
         body: { protocol_version: PROTOCOL_VERSION, present },
         retry: false,
+        ...(timeoutMs ? { timeoutMs } : {}),
+      }),
+    );
+  }
+
+  /* ---- agent-stopped push (section 11) ---- */
+  /**
+   * Owner only: ask the relay to tell the person's phone that some agent stopped (`agent-stopped-push-v1`). The body
+   * carries the protocol version alone. Sent once, whatever the outcome, not even again after a clock-skew refusal: a
+   * retry would turn a dropped stop into a late alert (protocol section 11). Unparsed.
+   */
+  postAgentStoppedPush(timeoutMs?: number): Promise<unknown> {
+    return this.ownerOnly('asking for an agent-stopped push', () =>
+      this.request('POST', `${API_PREFIX}/push/agent-stopped`, {
+        body: { protocol_version: PROTOCOL_VERSION } satisfies AgentStoppedPushBody,
+        once: true,
         ...(timeoutMs ? { timeoutMs } : {}),
       }),
     );
