@@ -73,7 +73,7 @@ The result text returned to the agent (`askedText`) begins: `Asked as q-<alias>.
 - `policy_adjustments`: each change trusted policy made, as `{field, requested, effective, source, gate_id}`: the deadline (a cap, or a default where none was asked), the requirement raised, or the kind a gate set, with `source` `host` or `gate` naming the policy that made the change.
 - `duplicate`: true when the call repeated an earlier one (below).
 
-A host that forwards `registerQuestion` from an older library version returns only the first four fields and `duplicate`. The result then leaves out the rest and says nothing about the deadline, rather than guess one.
+A host that forwards `registerQuestion` from an older library version returns only the first four fields and `duplicate`. The result then leaves out the rest and says nothing about the deadline, rather than guess one. If the agent sent `expires_in` or `planned_fallback`, the text says they could not be confirmed and the question should be treated as one that waits for a decision.
 
 **Advice.** `planned_fallback` (1 to 1,000 characters, not blank; anything else is `validation_error: planned_fallback: …`) asks for advice before a step the agent may take on its own, and says what it will do if no answer arrives by the deadline. The bridge signs it as an advisory question (protocol section 21) only when every condition in the advisory bullet of section 5 holds, checked again just before signing when reading the images took time. Otherwise the call fails, nothing is stored, and nothing is asked: it is never made blocking. The tool error gives the reason after its code, as in `not_supported: relay-unsupported: …`. The reasons are `host-unsupported`, `policy-disallowed`, `relay-unsupported` (an older relay), `no-capable-reader`, `gated`, `approval` and `no-deadline` (under a default of never with no deadline asked). Each says to ask again without `planned_fallback` for a decision. Whether the relay and a phone or tablet support advice is read in the background, so `ask_human` never waits on the network. Before the first read, or once the last one is five minutes old, the call fails with `invalid_state: support-unknown`, and a retry a moment later is decided.
 
@@ -85,7 +85,7 @@ While it waits, the agent carries on with anything that does not depend on the a
 - the images, by content, in order, with their roles and captions;
 - the plan, and the deadline as asked (`15m` and `900s` are the same; `expires_in` and `expires_at` are not);
 - the requested requirement, the named gate and the origin's gate (registered or not);
-- the governing gate and the enforced level.
+- the governing gate, its policy version, and the enforced level.
 
 A change to any of them under the same id asks a new question. The id then moves to the new question once it is committed, and the earlier question keeps its own id and answer. A call that fails (a refused plan, a missing image, the open-question limit, a failed commit) moves nothing. The comparison opens the stored question content in memory with the keys the identity already holds. Content it cannot open is never taken as the same. The store keeps no text or hash of the request: `reg:<question id>` in its meta holds only the deadline request, mode, gate ids, requested level and receipt. A correlation id first used before this release is asked afresh once. Identical calls at the same moment, in one bridge, make one question.
 

@@ -992,7 +992,15 @@ describe('over MCP', () => {
       authenticator: auth,
       bridge: {
         registerQuestion: async (a) => {
-          const r = await e.bridge.registerQuestion(a);
+          // An older bridge's parser drops the fields it does not know.
+          const {
+            expires_in: _in,
+            planned_fallback: _plan,
+            ...known
+          } = a.input as Record<string, unknown>;
+          void _in;
+          void _plan;
+          const r = await e.bridge.registerQuestion({ ...a, input: known });
           return {
             questionId: r.questionId,
             alias: r.alias,
@@ -1037,6 +1045,37 @@ describe('over MCP', () => {
         }),
       );
     });
+    const call = async (args: Record<string, unknown>) =>
+      new Promise<{ content: { text: string }[] }>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port: mcp.port,
+            path: '/mcp',
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+          },
+          (r) => {
+            let b = '';
+            r.on('data', (c) => (b += c));
+            r.on('end', () => resolve(JSON.parse(b).result));
+          },
+        );
+        req.on('error', reject);
+        req.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/call',
+            params: { name: 'ask_human', arguments: args },
+          }),
+        );
+      });
+    // What an older bridge may have dropped is said, not assumed.
+    const advice = await call({ question: 'q2', expires_in: '15m', planned_fallback: PLAN });
+    expect(advice.content[0].text).toContain(
+      'This host could not confirm expires_in or planned_fallback and may have ignored them',
+    );
     expect(res.isError).toBeUndefined();
     const id = res.structuredContent.question_id as string;
     expect(res.structuredContent).toEqual({

@@ -776,7 +776,13 @@ export function createDecisionsMcpHandler(
     try {
       if (name === 'ask_human') {
         const r = await bridge.registerQuestion({ origin, input: args });
-        const instruction = askedText(r);
+        // An older bridge drops fields it does not know, and its receipt cannot say what it did with them.
+        const unconfirmed =
+          r.expiresAt === undefined &&
+          (args.expires_in !== undefined || args.planned_fallback !== undefined);
+        const instruction = unconfirmed
+          ? `${askedText(r)} This host could not confirm expires_in or planned_fallback and may have ignored them: treat it as a question that waits for a decision, with its default deadline.`
+          : askedText(r);
         return text(instruction, askedResult(r, instruction));
       }
       if (name === 'get_decision') {
