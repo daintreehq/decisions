@@ -180,7 +180,10 @@ describe('verified answers reach the exact pane', () => {
     await bridge.catchUp();
     expect(sink.typed).toHaveLength(0);
     const row = (await store.getQuestion(qid))!;
-    expect(row).toMatchObject({ delivery_status: 'needs-attention', error_code: 'resume_wrong_host' });
+    expect(row).toMatchObject({
+      delivery_status: 'needs-attention',
+      error_code: 'resume_wrong_host',
+    });
     expect(row.origin.host_id).toBe('host-local');
   });
 

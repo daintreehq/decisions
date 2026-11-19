@@ -830,7 +830,8 @@ export class DeliveryEngine {
     try {
       return await this.typeChunk(target, chunk, questions, text, res);
     } finally {
-      for (const id of closing) if (this.closureWrites.get(id) === writing) this.closureWrites.delete(id);
+      for (const id of closing)
+        if (this.closureWrites.get(id) === writing) this.closureWrites.delete(id);
       written();
     }
   }

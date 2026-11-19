@@ -200,7 +200,7 @@ describe('only an expiry of the current round, at its signed deadline, closes th
     expect(await e.rejected()).toEqual(['expiry-without-deadline']);
   });
 
-  it("an expiry naming another host, a malformed one and a stale one are rejected", async () => {
+  it('an expiry naming another host, a malformed one and a stale one are rejected', async () => {
     const e = await asked();
     e.relay.expiryEvent({ questionId: e.qid, targetHostId: 'h'.repeat(32) });
     e.relay.push('decision.expired', e.qid, 0, { reason: 'expired' });
@@ -256,7 +256,10 @@ describe('the create receipt never takes back what the ledger already applied', 
       await env.relay.answerEvent({ questionId: qid, phone: env.phone, text: 'go' });
       await env.bridge.catchUp();
     };
-    const r = await env.bridge.registerQuestion({ origin: origin(), input: { question: 'Ship it?' } });
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Ship it?' },
+    });
     await env.bridge.pump();
     expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
       status: 'human-answered',
@@ -436,7 +439,10 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     });
   }
   /** Reopened to `expiresAt`, stored the way an earlier bridge left it: the first round's deadline kept. */
-  async function legacy(expiresAt: string | null, before: (e: Env) => Promise<void> = async () => {}) {
+  async function legacy(
+    expiresAt: string | null,
+    before: (e: Env) => Promise<void> = async () => {},
+  ) {
     const e = await asked();
     await e.reopen(1, expiresAt);
     await before(e);
@@ -445,7 +451,8 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     return { ...e, again: await restart(e) };
   }
   const events = async (e: Env) => (await e.store.listAudit(100)).map((a) => a.event);
-  const directoryReads = (e: Env) => e.relay.calls.filter((c) => c.path.endsWith('/devices')).length;
+  const directoryReads = (e: Env) =>
+    e.relay.calls.filter((c) => c.path.endsWith('/devices')).length;
 
   it('the next pass takes the deadline of the verified reopen that started the round', async () => {
     const e = await legacy(null);

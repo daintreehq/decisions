@@ -377,7 +377,8 @@ export class Inbox {
     );
     for (const row of rows) {
       const into = reopens.filter(
-        (ev) => ev.question_id === row.question_id && ev.question_revision === row.question_revision,
+        (ev) =>
+          ev.question_id === row.question_id && ev.question_revision === row.question_revision,
       );
       const claimed = into.map((ev) => EventData.action.safeParse(ev.data).data?.record.expires_at);
       // The usual case once reopens keep their deadline: nothing differs, so nothing is verified.

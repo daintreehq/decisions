@@ -468,9 +468,9 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
         expiresAt,
       });
       await bridge.catchUp();
-      expect((await call(mcp, 'get_decision', { question_id: id })).structuredContent).toMatchObject(
-        { status: 'open', revision: round, expires_at: expiresAt },
-      );
+      expect(
+        (await call(mcp, 'get_decision', { question_id: id })).structuredContent,
+      ).toMatchObject({ status: 'open', revision: round, expires_at: expiresAt });
     }
   });
   it("get_decision reports the owner desktop's answer as the person's, made on their computer", async () => {
