@@ -263,7 +263,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
 });
 
 describe('several senders and the person on one queued create', () => {
-  it('closes the person\'s answer from this computer on a question that never reached the relay, with no network', async () => {
+  it("closes the person's answer from this computer on a question that never reached the relay, with no network", async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
     env.relay.down = 1_000; // offline through the deadline: even `/info` cannot be read
@@ -306,7 +306,10 @@ describe('several senders and the person on one queued create', () => {
     const [item] = await env.store.outboxFor(r.questionId);
     await env.relay.fetch('https://relay.test/api/v1/questions', {
       method: 'POST',
-      body: JSON.stringify({ idempotency_key: item!.id, question: (item!.payload as { signed: unknown }).signed }),
+      body: JSON.stringify({
+        idempotency_key: item!.id,
+        question: (item!.payload as { signed: unknown }).signed,
+      }),
     });
     now = deadline + 1_000;
     // This flush read the item unclaimed; the other sender's claim lands before it decides.
@@ -331,7 +334,7 @@ describe('several senders and the person on one queued create', () => {
     expect(env.sink.typed).toHaveLength(0);
   });
 
-  it('keeps another sender\'s claim when this send provably never left the computer', async () => {
+  it("keeps another sender's claim when this send provably never left the computer", async () => {
     let now = Date.parse('2026-11-19T10:00:00Z');
     const env = await setupBridge({ now: () => now });
     const deadline = now + 120_000;

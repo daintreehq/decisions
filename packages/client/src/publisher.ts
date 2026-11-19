@@ -2019,7 +2019,8 @@ export class Publisher {
     const settled = await ctx.lock.run(async () => {
       const row = await ctx.store.getQuestion(questionId);
       // A question the relay's history has reached meanwhile is the relay's to settle: nothing of it is touched.
-      if (row && row.local_status !== 'queued' && row.local_status !== 'publish-failed') return false;
+      if (row && row.local_status !== 'queued' && row.local_status !== 'publish-failed')
+        return false;
       const items = await ctx.store.outboxFor(questionId);
       creates = items.filter((o) => o.kind === 'create');
       // Claimed since it was read (another process sending it): it may be on the relay now.
