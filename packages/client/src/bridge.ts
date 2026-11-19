@@ -661,6 +661,7 @@ export class DecisionsBridge {
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
         onInvolvementHint: () => this.involvement.hint(),
         closureWrite: (id) => this.delivery.closureWrite(id),
+        onWarning: (e) => this.emitError(e),
       },
       { messages: !!o.followUps, advisoryOutcomes: o.advisoryDeadlines === true },
     );
@@ -800,7 +801,8 @@ export class DecisionsBridge {
     // Revocation is final for this bridge, also once a stop has replaced its state: nothing reads or types again.
     if (this.revokedSeen)
       throw new BridgeError('forbidden', 'this device was revoked from the relay');
-    if (this.state === 'running') return;
+    // A second call returns once a store that cannot be repaired has been reported, as the first does.
+    if (this.state === 'running') return this.inbox.checkHistory();
     const run = ++this.lifecycle;
     this.httpAbort = new AbortController();
     this.state = 'running';
@@ -823,6 +825,8 @@ export class DecisionsBridge {
     else await reopening;
     // Images a crash left with no queued create to use them.
     await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
+    // A store that cannot read its history is reported before anything is read from the relay.
+    await this.inbox.checkHistory();
     // Stopped or revoked while recovering: nothing may start sending in the background now.
     if (run !== this.lifecycle) return;
     this.snapshots.start();

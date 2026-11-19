@@ -21,6 +21,7 @@ import {
 } from './answers.js';
 import { advisoryContentHolds, replyModeOfRow } from './advisory.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
+import { BridgeError } from './content.js';
 import { hostRef, type BridgeContext } from './context.js';
 import { isDeviceRevoked } from './errors.js';
 import {
@@ -50,6 +51,8 @@ export interface InboxCallbacks {
    * opens again or never. Must return without waiting.
    */
   closureWrite?(questionId: string): Promise<void> | null;
+  /** Something the host must act on that stops nothing now, such as a store missing a method. Must not throw. */
+  onWarning?(e: Error): void;
 }
 
 export interface InboxOptions {
@@ -96,6 +99,8 @@ function latestDeadline(deadlines: (string | null)[]): string | null {
 
 /** Meta key: the stored history was searched for reopens whose deadline an earlier bridge did not keep. */
 const ROUNDS_RECONCILED = 'rounds-reconciled';
+/** Audit result: the store has reopened questions but no `processedEventsOfType` to search for their deadlines. */
+const STORE_WITHOUT_HISTORY = 'store-without-history';
 
 /** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
@@ -146,6 +151,8 @@ export class Inbox {
   private readonly reopened = new Set<string>();
   private reconcileDone = false;
   private reconcileAfter = 0;
+  /** The check of a store that cannot read its history, while it runs: `start` and every pass wait for this one. */
+  private historyCheck: Promise<void> | null = null;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -179,11 +186,7 @@ export class Inbox {
   processPending(): Promise<boolean> {
     return this.serial.run(async () => {
       let drain = false;
-      if (!this.reconcileDone && !this.reconciling && this.ctx.now() >= this.reconcileAfter) {
-        this.reconciling = this.reconcileRounds().finally(() => {
-          this.reconciling = null;
-        });
-      }
+      await this.beginReconcile();
       for (;;) {
         const cursor = await this.ctx.store.getCursor();
         const batch = (await this.ctx.store.unprocessedEvents(50)).filter((e) => e.seq <= cursor);
@@ -237,6 +240,98 @@ export class Inbox {
     const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
     this.keyAttempts.set(seq, a);
     return a.n < MAX_KEY_ATTEMPTS || this.ctx.now() - a.since < MIN_KEY_WINDOW_MS;
+  }
+
+  /**
+   * Looks at a store that cannot read its processed history before the bridge reads anything, so the host hears of a
+   * repair that cannot run as it starts. Waits for that check alone, never for a pass applying events. A store that can
+   * read its history is repaired from the first `processPending`, as before.
+   */
+  async checkHistory(): Promise<void> {
+    if (!this.ctx.store.processedEventsOfType) await this.historyChecked();
+  }
+
+  /** Under `serial`: start the background repair, or check a store that cannot read its history, once it is due. */
+  private async beginReconcile(): Promise<void> {
+    // Local reads only, so the pass waits for it: no event is applied before it is done.
+    if (!this.ctx.store.processedEventsOfType) return this.historyChecked();
+    if (this.reconcileDone || this.reconciling || this.ctx.now() < this.reconcileAfter) return;
+    this.reconciling = this.reconcileRounds().finally(() => {
+      this.reconciling = null;
+    });
+  }
+
+  /** The check of a store that cannot read its history: started once it is due, or the one under way, shared. */
+  private historyChecked(): Promise<void> {
+    if (!this.historyCheck && !this.reconcileDone && this.ctx.now() >= this.reconcileAfter) {
+      // Held before the store is first called, so a caller the store reaches meanwhile joins this check.
+      const check: Promise<void> = Promise.resolve()
+        .then(() => this.withoutHistory())
+        .finally(() => {
+          if (this.historyCheck === check) this.historyCheck = null;
+        });
+      this.historyCheck = check;
+    }
+    return this.historyCheck ?? Promise.resolve();
+  }
+
+  /**
+   * A store without `processedEventsOfType` cannot be searched for reopens an earlier bridge stored without their
+   * deadline, so none is repaired. With no reopened question there is nothing to repair, and the store is marked as
+   * a searched one is. Otherwise it stays unmarked, so the repair runs on the first bridge whose store can read its
+   * history, and the host is told when an open question may be affected: a row asked with no deadline and reopened
+   * with one refuses the relay's expiry, and one reopened later or to never can be closed at its earlier deadline.
+   */
+  private async withoutHistory(): Promise<void> {
+    const { ctx } = this;
+    let open = 0;
+    try {
+      if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) === null) {
+        const rows = (await ctx.store.listQuestions()).filter(
+          (q) => !q.history_only && q.question_revision > 0,
+        );
+        if (rows.length === 0) await ctx.store.setMeta(ROUNDS_RECONCILED, String(ctx.now()));
+        else {
+          open = rows.filter(
+            (q) => q.local_status === 'open' || q.local_status === 'queued',
+          ).length;
+          // Best effort: a failed audit write never keeps the host from being told.
+          await ctx.audit
+            .log({ event: 'rounds.unreconciled', result: STORE_WITHOUT_HISTORY })
+            .catch(() => undefined);
+        }
+      }
+    } catch (e) {
+      // The store could not be read: the host is told, and it is looked at again a minute on.
+      this.reconcileAfter = ctx.now() + 60_000;
+      await ctx.audit
+        .log({
+          event: 'rounds.unreconciled',
+          result: String((e as Error)?.message ?? e).slice(0, 80),
+        })
+        .catch(() => undefined);
+      this.warn(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
+    this.reconcileDone = true;
+    this.reopened.clear();
+    if (open === 0) return;
+    this.warn(
+      new BridgeError(
+        'not_supported',
+        `LocalStore.processedEventsOfType is missing, so ${open} open reopened question(s) cannot be checked for a ` +
+          'deadline an earlier version did not store, and may never expire or expire early. Implement it and start ' +
+          'a new bridge over the same store to repair them.',
+      ),
+    );
+  }
+
+  private warn(e: Error): void {
+    try {
+      this.cb.onWarning?.(e);
+    } catch {
+      /* the host's listener: told once, whatever it does */
+    }
   }
 
   /**
@@ -451,7 +546,7 @@ export class Inbox {
     const { ctx } = this;
     let settled = false;
     try {
-      if (!ctx.store.processedEventsOfType) return void (settled = true);
+      if (!ctx.store.processedEventsOfType) return void (settled = true); // `withoutHistory` instead
       if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return void (settled = true);
       const rows = (await ctx.store.listQuestions()).filter(
         (q) => !q.history_only && q.question_revision > 0,
