@@ -1227,8 +1227,9 @@ export class DeliveryEngine {
   }
 
   /**
-   * Startup reconciliation for injections interrupted by a crash. A marker found in the terminal means the
-   * text was typed (mark delivered, do not repeat). No marker proves nothing, so the answer or follow-up is
+   * Startup reconciliation for injections interrupted by a crash. An intent already recorded as `typed` (the sink
+   * confirmed it; only its receipt was still owed), or a marker found in the terminal, means the text was typed
+   * (mark delivered, do not repeat). No marker proves nothing, so the answer or follow-up is
    * flagged `delivery-uncertain` for a human; it is NEVER re-injected automatically. Each block in a batch
    * carries its own injection id, so each is reconciled on its own.
    */
@@ -1255,7 +1256,9 @@ export class DeliveryEngine {
         else if (r === 'uncertain') uncertain++;
         continue;
       }
-      if (await this.markerFound(q, intent)) {
+      // `typed` was recorded once the sink confirmed the write: only the entry's own record and the receipt may be
+      // owed, so a sink that keeps no markers (stdout, a command) still gets no second copy and no false alarm.
+      if (intent.state === 'typed' || (await this.markerFound(q, intent))) {
         const entry = parseAnswers(q.answers_json).find(
           (e) => e.revision === intent.answer_revision && e.deliver && !e.delivered,
         );

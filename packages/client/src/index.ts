@@ -32,6 +32,7 @@ export * from './snapshots.js';
 export * from './involvement.js';
 export * from './presence.js';
 export * from './agent-stopped.js';
+export * from './http-sync.js';
 export * from './bridge.js';
 export * from './mcp.js';
 export * from './export.js';

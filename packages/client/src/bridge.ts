@@ -46,7 +46,7 @@ import {
   sealStoredContent,
 } from './at-rest.js';
 import { messageSentOn, parseMessages, type LocalMessageStatus } from './messages.js';
-import { RelayError } from './errors.js';
+import { RelayError, isDeviceRevoked } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
   MemoryKeyStore,
@@ -57,7 +57,21 @@ import {
 } from './identity.js';
 import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex, TransientError } from './mutex.js';
-import { RelayClient } from './relay.js';
+import { RelayClient, type CallOptions } from './relay.js';
+import {
+  DECLARE_EVERY_MS,
+  DEFAULT_POLL,
+  HTTP_SYNC_META_KEY,
+  NEVER_SYNCED,
+  isFatalSyncError,
+  readHttpSyncStatus,
+  resolvePoll,
+  retryDelayMs,
+  syncFailureReason,
+  type HttpPollOptions,
+  type HttpSyncStatus,
+  type ResolvedPoll,
+} from './http-sync.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
 import type { PhoneImageStore } from './phone-images.js';
 import {
@@ -312,6 +326,8 @@ type Listener = {
   decline: (result: OwnerDeclineResult) => void;
   /** A follow-up from `sendFollowUp` reached its outcome (anything but `queued`), however it was sent. */
   followUp: (result: OwnerFollowUpResult) => void;
+  /** An HTTP sync (`sync`) finished, with what it recorded. */
+  sync: (status: HttpSyncStatus) => void;
 };
 
 /**
@@ -339,6 +355,36 @@ export class DecisionsBridge {
   private lifecycle = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
+  /**
+   * The one paging pass in flight (`catchUp`, `sync`), which a caller arriving while it reads joins. It covers reading
+   * and storing the pages only, never applying or delivering them, so a delivery that takes its time cannot hold up
+   * the next read. `abortable`: started by a sync, whose requests `stop` aborts.
+   */
+  private paging: { pass: Promise<number>; abortable: boolean } | null = null;
+  /** The one HTTP sync in flight (`sync`). */
+  private syncing: Promise<HttpSyncStatus> | null = null;
+  /** Set while this run polls the relay over HTTP (`start({ socket: false, poll })`). */
+  private poll: ResolvedPoll | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Aborts the HTTP sync's requests when the bridge stops or is revoked; a new one for each start. */
+  private httpAbort = new AbortController();
+  /** The run in which the relay last recorded this bridge's features from a sync (`sync`), and when. */
+  private declaredRun = -1;
+  private declaredAt = 0;
+  /** The relay said this device was revoked, or the ledger did: final for this bridge, whatever stops it next. */
+  private revokedSeen = false;
+  /** Failed HTTP syncs in a row. */
+  private syncFailures = 0;
+  /** This run was started to poll: gap recovery and background reads leave the relay to the poll schedule. */
+  private pollMode = false;
+  /** This bridge has synced over HTTP, so its status record is kept current (a revocation included). */
+  private httpSynced = false;
+  /** Status records, written in order; `stop` waits for them so the host can close the store after it. */
+  private statusWrites: Promise<void> = Promise.resolve();
+  /** Applying and delivering what the latest sync read, in the background (`sync({ settle: true })` waits). */
+  private applying: Promise<void> = Promise.resolve();
+  /** Deliveries already announced on `delivered`, so two drains settling the same one announce it once. */
+  private announced = new Set<string>();
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
     state: [],
     socket: [],
@@ -347,6 +393,7 @@ export class DecisionsBridge {
     answer: [],
     decline: [],
     followUp: [],
+    sync: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -497,10 +544,20 @@ export class DecisionsBridge {
 
   /* ---------------- lifecycle ---------------- */
 
-  /** Reconcile interrupted injections, connect the socket, start the retry timer. */
-  async start(opts: { socket?: boolean } = {}): Promise<void> {
+  /**
+   * Reconcile interrupted injections, connect the socket, start the retry timer. Without a socket
+   * (`socket: false`) the host reads events itself (`catchUp`, `sync`), or passes `poll` to have the bridge
+   * sync over HTTP continuously, starting now, until it stops or is revoked.
+   */
+  async start(opts: { socket?: boolean; poll?: HttpPollOptions | true } = {}): Promise<void> {
+    if (opts.poll && opts.socket !== false)
+      throw new BridgeError(
+        'validation_error',
+        'HTTP polling replaces the socket: pass socket: false',
+      );
     if (this.state === 'running') return;
     const run = ++this.lifecycle;
+    this.httpAbort = new AbortController();
     this.state = 'running';
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
@@ -514,6 +571,11 @@ export class DecisionsBridge {
     this.involvement.start();
     this.presence.start();
     if (opts.socket !== false) this.socket.start();
+    if (opts.poll) {
+      this.poll = resolvePoll(opts.poll);
+      this.pollMode = true;
+      this.schedulePoll(0);
+    }
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
       this.timer = setInterval(
@@ -525,10 +587,16 @@ export class DecisionsBridge {
     void this.pump().catch((e) => this.emitError(e as Error));
   }
 
+  /**
+   * Stop everything this bridge started. An HTTP sync in flight has its requests aborted, and `stop` waits for it to
+   * settle, so the host can close the store afterwards; a request that is not the sync's own (a key lookup while
+   * verifying an event) is cut short only by `RelayClient.close()`.
+   */
   async stop(): Promise<void> {
     this.lifecycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.stopPolling();
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
@@ -536,13 +604,29 @@ export class DecisionsBridge {
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
+    // A sync's page read writes events and the cursor: its requests were just aborted, so it settles at once. Applying
+    // and delivering are not waited for, as with the socket: the delivery engine stops admitting on its own.
+    if (this.paging?.abortable) await this.paging.pass.catch(() => undefined);
+    await this.statusWrites;
+  }
+
+  private stopPolling(): void {
+    this.pollMode = false;
+    this.poll = null;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    this.pollTimer = null;
+    this.httpAbort.abort();
   }
 
   private markRevoked(): void {
     if (this.state === 'revoked') return;
+    this.revokedSeen = true;
+    // Recorded before anyone hears of it, so a host that stops (and closes the store) on `revoked` keeps the record.
+    if (this.httpSynced) this.recordRevoked();
     this.lifecycle++;
     this.state = 'revoked';
     this.delivery.stopped = true;
+    this.stopPolling();
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
@@ -1140,7 +1224,9 @@ export class DecisionsBridge {
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();
-        this.involvement.retryIfDue();
+        // A polling bridge reads the preference after each successful sync instead, so a relay refusing this device
+        // hears from it on the sync's slow schedule, not every pump.
+        if (!this.pollMode) this.involvement.retryIfDue();
       } finally {
         this.pumping = null;
       }
@@ -1161,6 +1247,10 @@ export class DecisionsBridge {
           after.delivery_status === 'terminal-delivered' &&
           q.delivery_status !== 'terminal-delivered'
         ) {
+          // Two drains running at once (overlapping catch-ups) can both see this one settle.
+          const key = `${q.question_id}:${after.last_injection_id ?? ''}`;
+          if (this.announced.has(key)) continue;
+          this.announced.add(key);
           this.listeners.delivered.forEach((l) => l(q.question_id));
         }
       }
@@ -1201,6 +1291,8 @@ export class DecisionsBridge {
    * instead of acting on events that arrived out of order. Throttled so a persistent hole cannot loop.
    */
   async recoverGap(): Promise<void> {
+    // Stopped: nothing reads any more. Polling: the next scheduled sync reads the hole, keeping its backoff.
+    if (!this.running() || this.pollMode) return;
     const cursor = await this.ctx.store.getCursor();
     if (cursor === this.lastGap.cursor && this.ctx.now() - this.lastGap.at < 5000) return;
     this.lastGap = { cursor, at: this.ctx.now() };
@@ -1214,13 +1306,54 @@ export class DecisionsBridge {
   }
 
   /**
-   * HTTP catch-up (no socket): page through events after the stored cursor. After each fully persisted page
-   * the cursor moves to `next_after`, which also steps over legitimate tombstone holes.
+   * HTTP catch-up (no socket): page through events after the stored cursor, then apply and deliver them. After each
+   * fully persisted page the cursor moves to `next_after`, which also steps over legitimate tombstone holes. Reading
+   * is one pass at a time: a call while another reads joins that read, so two never page (or move the cursor) at once.
+   * Applying and delivering are not: a call while an earlier one is still delivering reads afresh and applies what it
+   * finds, so a withdrawal still lands while an answer waits to be typed.
    */
-  async catchUp(): Promise<number> {
+  catchUp(): Promise<number> {
+    return this.catchUpWith({});
+  }
+
+  private async catchUpWith(req: CallOptions): Promise<number> {
+    const cursor = await this.readPages(req);
+    await this.reportReceived(cursor, req);
+    await this.applyRead();
+    return cursor;
+  }
+
+  /** Tell the relay how far this desktop has read. Informational, unless the relay says the device was revoked. */
+  private async reportReceived(cursor: number, req: CallOptions): Promise<void> {
+    try {
+      await this.ctx.client.deliveriesReceived(cursor, req);
+    } catch (e) {
+      if (isDeviceRevoked(e)) throw e;
+    }
+  }
+
+  /** Apply the events read and deliver what they bring; after a complete read, also read the preference. */
+  private async applyRead(complete = true): Promise<void> {
+    if (await this.inbox.processPending()) await this.deliverNow();
+    // Without a socket there is no reconnect to read the preference on: read it after each catch-up. Not after a
+    // failed one: the relay is not answering, or refusing this device, and is asked again on the sync's schedule.
+    if (complete && this.socket.currentState !== 'live')
+      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
+  }
+
+  private readPages(req: CallOptions): Promise<number> {
+    if (this.paging) return this.paging.pass;
+    const pass = this.pageEvents(req).finally(() => {
+      if (this.paging?.pass === pass) this.paging = null;
+    });
+    this.paging = { pass, abortable: req.signal !== undefined };
+    return pass;
+  }
+
+  private async pageEvents(req: CallOptions): Promise<number> {
     let after = await this.ctx.store.getCursor();
     for (;;) {
-      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, this.features);
+      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, this.features, req);
       for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
       await this.ctx.store.advanceCursor();
       if (page.next_after > after) {
@@ -1231,17 +1364,160 @@ export class DecisionsBridge {
       }
       if (!page.has_more) break;
     }
-    const cursor = await this.ctx.store.getCursor();
-    try {
-      await this.ctx.client.deliveriesReceived(cursor);
-    } catch {
-      /* informational */
+    return this.ctx.store.getCursor();
+  }
+
+  /**
+   * One HTTP sync, for a host without a socket: declare this bridge's features to the relay (on its first sync after
+   * each start and every few minutes after, through a socket ticket it never uses, since the relay keeps only a
+   * ticket's declaration and another process of the same device may have replaced it), and read every event after
+   * the stored cursor (`catchUp`) with a deadline on each request and no retries of its own. It records the outcome
+   * in the store (`readHttpSyncStatus`) and emits `sync`, then applies and delivers what it read in the background,
+   * so a sink that takes its time never holds up the next read; `settle` waits for that too (a one-shot run). A device
+   * the relay reports revoked stops the bridge as a revocation through the socket would; a relay that needs a newer
+   * client (`fatal`) stops the polling. Never throws: a failure is the result's `outcome`. A call while a sync runs
+   * joins it.
+   */
+  async sync(opts: { settle?: boolean } = {}): Promise<HttpSyncStatus> {
+    if (!this.syncing) {
+      const pass = this.runSync().finally(() => {
+        if (this.syncing === pass) this.syncing = null;
+      });
+      this.syncing = pass;
     }
-    if (await this.inbox.processPending()) await this.deliverNow();
-    // Without a socket there is no reconnect to read the preference on: read it after each catch-up.
-    if (this.socket.currentState !== 'live')
-      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
-    return cursor;
+    const status = await this.syncing;
+    if (opts.settle) await this.applying;
+    return status;
+  }
+
+  private async runSync(): Promise<HttpSyncStatus> {
+    const run = this.lifecycle;
+    this.httpSynced = true;
+    const prev = (await readHttpSyncStatus(this.ctx.store).catch(() => null)) ?? NEVER_SYNCED;
+    if (this.revokedSeen) return { ...prev, outcome: 'revoked', reason: 'device_revoked' };
+    const poll = this.poll;
+    const req: CallOptions = {
+      retry: false,
+      timeoutMs: (poll ?? DEFAULT_POLL).requestTimeoutMs,
+      signal: this.httpAbort.signal,
+    };
+    const startedAt = this.ctx.now();
+    let cursor = 0;
+    let failure: { error: unknown } | null = null;
+    try {
+      if (this.declaredRun !== run || startedAt - this.declaredAt >= DECLARE_EVERY_MS) {
+        await this.ctx.client.socketTicket(this.features, req);
+        this.declaredRun = run;
+        this.declaredAt = startedAt;
+      }
+      cursor = await this.readPages(req);
+      await this.reportReceived(cursor, req);
+    } catch (e) {
+      failure = { error: e };
+      if (isDeviceRevoked(e)) this.markRevoked();
+    }
+    // Read afresh: a revocation (the refusal above, or a `device.revoked` event the pass applied) is final, even when
+    // the host stopped the bridge since; any other change of run means the stop cut this sync short.
+    const revoked = this.revokedSeen as boolean;
+    if (!revoked && (run !== this.lifecycle || this.state === 'stopped'))
+      return { ...prev, outcome: 'stopped', next_attempt_at: null };
+    const now = this.ctx.now();
+    let status: HttpSyncStatus;
+    if (revoked) {
+      status = {
+        ...prev,
+        outcome: 'revoked',
+        last_attempt_at: startedAt,
+        reason: 'device_revoked',
+        next_attempt_at: null,
+      };
+    } else if (!failure) {
+      this.syncFailures = 0;
+      status = {
+        v: 1,
+        outcome: 'ok',
+        last_success_at: now,
+        last_success_cursor: cursor,
+        last_attempt_at: startedAt,
+        failures: 0,
+        reason: null,
+        next_attempt_at: poll ? now + poll.intervalMs : null,
+      };
+    } else {
+      this.syncFailures++;
+      const fatal = isFatalSyncError(failure.error);
+      if (fatal) {
+        // Polling ends, but this run stays one that polls: nothing else starts reading the relay instead.
+        this.poll = null;
+        if (this.pollTimer) clearTimeout(this.pollTimer);
+        this.pollTimer = null;
+      }
+      status = {
+        ...prev,
+        outcome: fatal ? 'fatal' : 'degraded',
+        last_attempt_at: startedAt,
+        failures: this.syncFailures,
+        reason: syncFailureReason(failure.error),
+        next_attempt_at:
+          poll && !fatal ? now + retryDelayMs(this.syncFailures, poll, failure.error) : null,
+      };
+    }
+    // A revocation was recorded as it happened (`markRevoked`).
+    if (!revoked) await this.recordStatus(status);
+    // Whatever was read, a failed sync's earlier pages included, is applied and delivered without holding up the next.
+    if (run === this.lifecycle)
+      this.applying = this.applyRead(!failure).catch((e) => this.emitError(e as Error));
+    for (const l of [...this.listeners.sync]) {
+      try {
+        l(status);
+      } catch (e) {
+        this.emitError(e as Error);
+      }
+    }
+    return status;
+  }
+
+  private recordStatus(status: HttpSyncStatus): Promise<void> {
+    return this.writeStatus(async () => status);
+  }
+
+  /** The device is revoked: what the last sync recorded stays, with that as its outcome. */
+  private recordRevoked(): void {
+    const at = this.ctx.now();
+    void this.writeStatus(async () => ({
+      ...((await readHttpSyncStatus(this.ctx.store)) ?? NEVER_SYNCED),
+      outcome: 'revoked',
+      last_attempt_at: at,
+      reason: 'device_revoked',
+      next_attempt_at: null,
+    }));
+  }
+
+  private writeStatus(make: () => Promise<HttpSyncStatus>): Promise<void> {
+    const write = this.statusWrites
+      .then(async () => this.ctx.store.setMeta(HTTP_SYNC_META_KEY, JSON.stringify(await make())))
+      .catch((e) => this.emitError(e as Error));
+    this.statusWrites = write;
+    return write;
+  }
+
+  private schedulePoll(delayMs: number): void {
+    if (!this.poll || !this.running()) return;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    // Kept referenced: a host that asked for continuous polling stays up while it polls, until `stop`.
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.pollOnce();
+    }, delayMs);
+  }
+
+  /** One scheduled sync; the next is scheduled only once it finishes, so polls never overlap. */
+  private async pollOnce(): Promise<void> {
+    const run = this.lifecycle;
+    const s = await this.sync();
+    if (run !== this.lifecycle || !this.poll) return;
+    const next = s.next_attempt_at ?? this.ctx.now() + this.poll.intervalMs;
+    this.schedulePoll(Math.max(0, next - this.ctx.now()));
   }
 
   /* ---------------- proxy ---------------- */

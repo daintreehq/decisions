@@ -23,6 +23,9 @@ import { VERSION } from './version.js';
 
 const collect = (v: string, prev: string[] = []) => [...prev, v];
 
+const NO_SOCKET_HELP =
+  'without a live socket: poll the relay over HTTP every 15 s instead, backing off to at most a minute while it is unreachable';
+
 const SINK_HELP =
   'stdout | file:<path> | exec:<command> (the command reads the answer on stdin; exit 0 = delivered, 75 = retry later, anything else = may have been delivered, never retried)';
 
@@ -183,8 +186,14 @@ export function buildProgram(): Command {
       'Receive answers and print / pipe them (demo sink; Daintree types them into the agent pane).',
     )
     .option('--sink <sink>', SINK_HELP, 'stdout')
-    .option('--no-socket', 'poll once over HTTP instead of keeping a live socket')
-    .action((o) => run((c, g) => daemon(c, g, { sink: o.sink, socket: o.socket }))());
+    .option('--no-socket', NO_SOCKET_HELP)
+    .option(
+      '--once',
+      'fetch over HTTP what the relay holds now, deliver it and exit (no socket; exit 1 if the relay cannot be read)',
+    )
+    .action((o) =>
+      run((c, g) => daemon(c, g, { sink: o.sink, socket: o.socket, once: o.once === true }))(),
+    );
 
   program
     .command('mcp')
@@ -213,10 +222,12 @@ export function buildProgram(): Command {
       'print the literal bearer token once (otherwise only the token file is named)',
     )
     .option('--sink <sink>', SINK_HELP, 'stdout')
+    .option('--no-socket', NO_SOCKET_HELP)
     .action((o) =>
       run((c, g) =>
         daemon(c, g, {
           sink: o.sink,
+          socket: o.socket,
           mcp: {
             ...(o.port ? { port: o.port } : {}),
             ...(o.path !== undefined ? { path: o.path } : {}),

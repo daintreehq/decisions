@@ -24,6 +24,13 @@ import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
 const store = new SqliteLocalStore('/path/to/decisions.db');
 ```
 
+`bridge.start()` keeps a live socket to the relay. A host that cannot keep one starts with `{ socket: false, poll: true }`
+(or `poll: { intervalMs, retryBaseMs, retryCapMs, requestTimeoutMs }`) and the bridge syncs over HTTP until `stop()`:
+every 15 s, with equal-jitter backoff up to a minute while the relay is unreachable, one sync at a time, resuming from
+the stored cursor. Each sync emits `sync` and records its outcome in the store (`readHttpSyncStatus`); a revoked device
+stops the bridge, and a relay that needs a newer client stops the polling (`fatal`). `bridge.sync()` runs a single sync for a host that schedules its own, and `RelayClient.close()`
+aborts every request in flight when the process shuts down.
+
 The MCP tools tell agents to attach screenshots when a decision is visual, and describe an attachment's
 `local_resource_id` as Daintree resolves it: an image path relative to the folder the agent's terminal started in.
 A host whose `AttachmentResolver` takes something else says so with `attachmentIdDescription` (on
