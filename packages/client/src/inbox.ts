@@ -151,6 +151,8 @@ export class Inbox {
   private readonly reopened = new Set<string>();
   private reconcileDone = false;
   private reconcileAfter = 0;
+  /** The check of a store that cannot read its history, while it runs: `start` and every pass wait for this one. */
+  private historyCheck: Promise<void> | null = null;
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -242,27 +244,37 @@ export class Inbox {
 
   /**
    * Looks at a store that cannot read its processed history before the bridge reads anything, so the host hears of a
-   * repair that cannot run as it starts. A store that can is repaired from the first `processPending`, as before.
+   * repair that cannot run as it starts. Waits for that check alone, never for a pass applying events. A store that can
+   * read its history is repaired from the first `processPending`, as before.
    */
   async checkHistory(): Promise<void> {
-    if (this.ctx.store.processedEventsOfType) return;
-    await this.serial.run(() => this.beginReconcile());
+    if (!this.ctx.store.processedEventsOfType) await this.historyChecked();
   }
 
   /** Under `serial`: start the background repair, or check a store that cannot read its history, once it is due. */
   private async beginReconcile(): Promise<void> {
+    // Local reads only, so the pass waits for it: no event is applied before it is done.
+    if (!this.ctx.store.processedEventsOfType) return this.historyChecked();
     if (this.reconcileDone || this.reconciling || this.ctx.now() < this.reconcileAfter) return;
-    // Local reads only, so it runs in place: done before this pass applies any event.
-    if (!this.ctx.store.processedEventsOfType) return this.withoutHistory();
     this.reconciling = this.reconcileRounds().finally(() => {
       this.reconciling = null;
     });
   }
 
+  /** The check of a store that cannot read its history: started once it is due, or the one under way, shared. */
+  private historyChecked(): Promise<void> {
+    if (!this.historyCheck && !this.reconcileDone && this.ctx.now() >= this.reconcileAfter) {
+      this.historyCheck = this.withoutHistory().finally(() => {
+        this.historyCheck = null;
+      });
+    }
+    return this.historyCheck ?? Promise.resolve();
+  }
+
   /**
    * A store without `processedEventsOfType` cannot be searched for reopens an earlier bridge stored without their
    * deadline, so none is repaired. With no reopened question there is nothing to repair, and the store is marked as
-   * a searched one is. Otherwise it stays unmarked, so the repair runs at the first start whose store can read its
+   * a searched one is. Otherwise it stays unmarked, so the repair runs on the first bridge whose store can read its
    * history, and the host is told when an open question may be affected: a row asked with no deadline and reopened
    * with one refuses the relay's expiry, and one reopened later or to never can be closed at its earlier deadline.
    */
@@ -279,11 +291,14 @@ export class Inbox {
           open = rows.filter(
             (q) => q.local_status === 'open' || q.local_status === 'queued',
           ).length;
-          await ctx.audit.log({ event: 'rounds.unreconciled', result: STORE_WITHOUT_HISTORY });
+          // Best effort: a failed audit write never keeps the host from being told.
+          await ctx.audit
+            .log({ event: 'rounds.unreconciled', result: STORE_WITHOUT_HISTORY })
+            .catch(() => undefined);
         }
       }
     } catch (e) {
-      // The store could not be read: looked at again a minute on.
+      // The store could not be read: the host is told, and it is looked at again a minute on.
       this.reconcileAfter = ctx.now() + 60_000;
       await ctx.audit
         .log({
@@ -291,20 +306,25 @@ export class Inbox {
           result: String((e as Error)?.message ?? e).slice(0, 80),
         })
         .catch(() => undefined);
+      this.warn(e instanceof Error ? e : new Error(String(e)));
       return;
     }
     this.reconcileDone = true;
     this.reopened.clear();
     if (open === 0) return;
+    this.warn(
+      new BridgeError(
+        'not_supported',
+        `LocalStore.processedEventsOfType is missing, so ${open} open reopened question(s) cannot be checked for a ` +
+          'deadline an earlier version did not store, and may never expire or expire early. Implement it and start ' +
+          'a new bridge over the same store to repair them.',
+      ),
+    );
+  }
+
+  private warn(e: Error): void {
     try {
-      this.cb.onWarning?.(
-        new BridgeError(
-          'not_supported',
-          `LocalStore.processedEventsOfType is missing, so ${open} open reopened question(s) cannot be checked for a ` +
-            'deadline an earlier version did not store, and may never expire or expire early. Implement it and ' +
-            'start the bridge again to repair them.',
-        ),
-      );
+      this.cb.onWarning?.(e);
     } catch {
       /* the host's listener: told once, whatever it does */
     }

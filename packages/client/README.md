@@ -28,11 +28,12 @@ A custom store that a 0.8.0 bridge wrote to needs `processedEventsOfType(eventTy
 every processed inbound event of that type, applied or rejected, in `seq` order with its original `json`. A 0.8.0
 bridge kept the earlier round's deadline when a question was reopened, and 0.9.0 repairs those rows from the stored
 reopens it can verify. Without the method nothing is repaired, and such a question can miss its expiry (asked with no
-deadline and reopened with one, it never expires) or be closed at the earlier round's deadline. While any reopened
-question is open, the bridge then reports a `not_supported` error on `bridge.on("error")` before `start()` returns, so
-register the listener first. Implement the method and start the bridge again: the repair runs then, as long as the
-stored events are kept. An expiry the bridge refused in the meantime is not applied again. Both bundled stores
-implement it.
+deadline and reopened with one, it never expires) or be closed at the earlier round's deadline. Such a bridge looks
+once, on its first `start()`, `catchUp()` or `sync()`, and while any reopened question is open reports a
+`not_supported` error on `bridge.on("error")`, before `start()` returns; register the listener before any of them.
+Once the method is implemented, a new bridge over the same store repairs the rows in the background from the stored
+events, as long as they are kept. An expiry refused before then stays refused, and a question closed before then stays
+closed. Both bundled stores implement it.
 
 `bridge.start()` keeps a live socket to the relay. A host that cannot keep one starts with `{ socket: false, poll: true }`
 (or `poll: { intervalMs, retryBaseMs, retryCapMs, requestTimeoutMs }`) and the bridge syncs over HTTP until `stop()`:

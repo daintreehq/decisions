@@ -827,7 +827,7 @@ describe('a superseded closure notice holds nothing back', () => {
 describe('rows reopened before reopens kept their deadline are reconciled from verified history', () => {
   type Env = Awaited<ReturnType<typeof asked>>;
   /** A fresh bridge over the same store and relay, as after an upgrade and a restart. */
-  async function restart(e: Env) {
+  async function restart(e: Env, fetch: typeof globalThis.fetch = e.relay.fetch) {
     await e.bridge.stop();
     return new DecisionsBridge({
       identity: e.identity,
@@ -835,7 +835,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
       sink: e.sink,
       client: new RelayClient({
         identity: e.identity,
-        fetch: e.relay.fetch,
+        fetch,
         sleep: async () => {},
         maxRetries: 0,
       }),
@@ -1097,7 +1097,7 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
   it('a store that cannot read its history says the repair could not run, and repairs once it can', async () => {
     let finite = '';
     const e = await legacy((x) => (finite = x.later(x.deadline, DAY)));
-    // Asked with no deadline, reopened with one: the earlier bridge kept none.
+    // Stored with no deadline, as a question asked with none and reopened with one was: the earlier bridge kept none.
     await e.store.updateQuestion(e.qid, { expires_at: null });
     const restore = withoutHistory(e);
     const errors = errorsOf(e.again);
@@ -1128,7 +1128,17 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect(later).toEqual([]);
   });
 
-  it('a host that starts the bridge has been told by the time start returns, on every call', async () => {
+  it('a host that starts the bridge has been told by the time start returns', async () => {
+    const e = await legacy((x) => x.later(x.deadline, DAY));
+    await e.store.updateQuestion(e.qid, { expires_at: null });
+    withoutHistory(e);
+    const errors = errorsOf(e.again);
+    onTestFinished(() => e.again.stop());
+    await e.again.start({ socket: false });
+    expect(errors.map((x) => (x as { code?: string }).code)).toEqual(['not_supported']);
+  });
+
+  it('a second start called meanwhile returns only once the host has been told, and it is told once', async () => {
     const e = await legacy((x) => x.later(x.deadline, DAY));
     await e.store.updateQuestion(e.qid, { expires_at: null });
     withoutHistory(e);
@@ -1139,6 +1149,64 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect(errors.map((x) => (x as { code?: string }).code)).toEqual(['not_supported']);
     await first;
     expect(errors).toHaveLength(1);
+  });
+
+  it('a start never waits behind a pass held up applying an event', async () => {
+    const e = await legacy((x) => x.later(x.deadline, DAY));
+    await e.store.updateQuestion(e.qid, { expires_at: null });
+    withoutHistory(e);
+    await e.again.stop();
+    // A later answer, whose signer the next bridge looks up: the lookup hangs until released.
+    await e.relay.answerEvent({
+      questionId: e.qid,
+      phone: e.phone,
+      options: ['approve'],
+      expectedRevision: 1,
+    });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let lookups = 0;
+    const again = await restart({ ...e, bridge: e.again }, async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith('/devices')) {
+        lookups++;
+        await held;
+      }
+      return e.relay.fetch(input, init);
+    });
+    const errors = errorsOf(again);
+    onTestFinished(() => again.stop());
+    const pass = again.catchUp();
+    await vi.waitFor(() => expect(lookups).toBe(1));
+    expect(errors).toHaveLength(1);
+    await again.start({ socket: false });
+    expect(errors).toHaveLength(1);
+    release();
+    await pass;
+    expect((await e.row()).local_status).toBe('human-answered');
+  });
+
+  it('a store that cannot be read is reported, and looked at again a minute on', async () => {
+    const e = await legacy((x) => x.later(x.deadline, DAY));
+    await e.store.updateQuestion(e.qid, { expires_at: null });
+    withoutHistory(e);
+    const getMeta = e.store.getMeta.bind(e.store);
+    let fail = true;
+    e.store.getMeta = async (key) => {
+      if (key === 'rounds-reconciled' && fail) throw new Error('database is locked');
+      return getMeta(key);
+    };
+    const errors = errorsOf(e.again);
+    await e.again.catchUp();
+    expect(errors.map((x) => x.message)).toEqual(['database is locked']);
+    expect(await unreconciled(e)).toEqual(['database is locked']);
+    // Within the minute nothing is looked at again; after it, the check runs and the host is told.
+    fail = false;
+    await e.again.catchUp();
+    expect(errors).toHaveLength(1);
+    e.at(new Date(e.bridge.ctx.now()).toISOString(), 2 * MIN);
+    await e.again.catchUp();
+    expect(errors.map((x) => (x as { code?: string }).code)).toEqual([undefined, 'not_supported']);
+    expect(await unreconciled(e)).toEqual(['database is locked', 'store-without-history']);
   });
 
   it('a store that cannot read its history and holds no reopened question is marked, and nothing is said', async () => {
@@ -1152,8 +1220,14 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect(errors).toEqual([]);
     expect(await unreconciled(e)).toEqual([]);
     // Reopened after that, by a bridge that keeps the deadline: a later start has nothing to say either.
-    await e.reopen(1, e.later(e.deadline, DAY));
+    const later1 = e.later(e.deadline, DAY);
+    await e.reopen(1, later1);
     await again.catchUp();
+    expect(await e.row()).toMatchObject({
+      local_status: 'open',
+      question_revision: 1,
+      expires_at: later1,
+    });
     const third = await restart({ ...e, bridge: again });
     const later = errorsOf(third);
     await third.catchUp();
@@ -1172,7 +1246,8 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     withoutHistory(e);
     const errors = errorsOf(e.again);
     await e.again.catchUp();
-    expect((await e.row()).local_status).toBe('human-answered');
+    // Answered in the round the reopen started.
+    expect(await e.row()).toMatchObject({ local_status: 'human-answered', question_revision: 2 });
     expect(errors).toEqual([]);
     expect(await unreconciled(e)).toEqual(['store-without-history']);
     expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
