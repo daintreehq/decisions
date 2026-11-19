@@ -129,7 +129,9 @@ export function phoneFixture(sub) {
     const Channel = window.MessageChannel;
     const Tracked = function MessageChannel() {
       const ch = new Channel();
+      // Whichever end the app sends, it keeps the other.
       ends.set(ch.port2, ch.port1);
+      ends.set(ch.port1, ch.port2);
       return ch;
     };
     Tracked.prototype = Channel.prototype;
@@ -139,12 +141,12 @@ export function phoneFixture(sub) {
       const q = asking.get(this);
       if (q && !q.settled) {
         q.settled = true;
-        report({
-          kind: 'sw-settled',
-          target: q.target,
-          answered: answered.has(q.worker),
-          ...workers(),
-        });
+        const state = workers();
+        // The app closes its end from its own handler of the reply, before this fixture's listener for the same
+        // message has run: report once that dispatch is over, so a reply is never taken for silence.
+        setTimeout(() =>
+          report({ kind: 'sw-settled', target: q.target, answered: q.answered, ...state }),
+        );
       }
       return close.call(this);
     };
@@ -158,13 +160,15 @@ export function phoneFixture(sub) {
       // Sent first: a message the browser refused is not one the app sent.
       const result = post.call(this, message, ...rest);
       report({ kind: 'sw-message', type, target, ...state });
-      const transfer = Array.isArray(rest[0]) ? rest[0] : (rest[0]?.transfer ?? []);
-      const mine = type === 'FEATURES' ? transfer.map((p) => ends.get(p)).find(Boolean) : null;
+      const list = rest[0]?.[Symbol.iterator] ? rest[0] : (rest[0]?.transfer ?? []);
+      const mine = type === 'FEATURES' ? [...list].map((p) => ends.get(p)).find(Boolean) : null;
       if (mine) {
         const worker = this;
-        asking.set(mine, { worker, target, settled: false });
+        const q = { worker, target, settled: false, answered: false };
+        asking.set(mine, q);
         mine.addEventListener('message', (e) => {
           const features = Array.isArray(e.data?.features) ? e.data.features : [];
+          q.answered = true;
           answered.set(worker, features);
           report({ kind: 'sw-answer', target, features, ...workers() });
         });

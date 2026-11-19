@@ -1613,7 +1613,9 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     const net = [];
     const pageErrors = [];
     const pages = new WeakMap();
+    // The subscriptions the pages themselves sent or removed, as the browser saw them.
     let subscriptionPosts = 0;
+    let subscriptionDeletes = 0;
     const context = await (
       await browser.launched
     ).newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'allow' });
@@ -1648,13 +1650,18 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       const path = pathOf(req.url());
       if (!path?.startsWith(API)) return;
       let page = null;
+      let framed = false;
       try {
         page = pages.get(req.frame().page()) ?? null;
+        framed = true;
       } catch {
         /* a service worker's request has no frame */
       }
       started.set(req, { at: Date.now(), page });
+      if (!framed) return;
       if (req.method() === 'POST' && path === '/api/v1/push/subscriptions') subscriptionPosts++;
+      if (req.method() === 'DELETE' && path.startsWith('/api/v1/push/subscriptions/'))
+        subscriptionDeletes++;
     });
     const READ = new Set([
       '/api/v1/push/subscriptions',
@@ -1796,7 +1803,11 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     const subscribeAt = Date.now();
     await tab.getByRole('button', { name: /^(Set up notifications|Turn on)$/ }).click();
     const subscribed = await seen(
-      (e) => e.at >= subscribeAt && e.method === 'POST' && e.path === '/api/v1/push/subscriptions',
+      (e) =>
+        e.page === 'cached' &&
+        e.at >= subscribeAt &&
+        e.method === 'POST' &&
+        e.path === '/api/v1/push/subscriptions',
       30_000,
       'the phone to send its push subscription',
     );
@@ -1852,6 +1863,17 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       'the cached page to get a socket ticket from the new relay',
     );
     await stillCached('after the relay was upgraded');
+    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
+    check(
+      tickets.every(
+        (t) =>
+          Array.isArray(t.features) &&
+          !t.features.includes(ADVISORY) &&
+          !t.features.includes(AGENT_STOPPED),
+      ),
+      `the ${OLD.label} app's socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
+      show(tickets.map((t) => t.features)),
+    );
     const listedNow = await neu.call('ownerDevices', { home });
     const phone = listedNow.find((d) => d.device_id === phoneId);
     check(
@@ -2061,8 +2083,12 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
 
     // The phone updates in place. The browser finds the new worker while the cached page is open, so it waits; a
     // second page of the same phone then loads the new app under the old worker, and the cached page closes.
-    await tab.evaluate(async () => {
-      await (await navigator.serviceWorker.getRegistration())?.update();
+    // Not awaited in the page: an update check that stalls must not hold the wait below past its deadline.
+    await tab.evaluate(() => {
+      navigator.serviceWorker
+        .getRegistration()
+        .then((r) => r?.update())
+        .catch(() => undefined);
     });
     await tab.waitForFunction(
       async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
@@ -2124,6 +2150,7 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     await updated.getByRole('button', { name: 'Restart to update' }).click();
     const declared = await seen(
       (e) =>
+        e.page === 'updated' &&
         e.at >= restartAt &&
         e.method === 'POST' &&
         e.path === '/api/v1/push/subscriptions' &&
@@ -2277,6 +2304,11 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     await Promise.allSettled([...reading]);
     const judged = judgeDeclarations(trace, sub, { mixedDoc, requests: subscriptionPosts });
     for (const problem of judged.problems) fail(problem);
+    check(
+      subscriptionDeletes === 0,
+      "neither app removed the phone's subscription from the relay",
+      `${subscriptionDeletes} removed`,
+    );
     if (!judged.problems.length)
       ok(
         `the trace agrees: one subscription, declared only by the updated app once the new worker said it can show the push (${trace.length} entries, ${subscriptionPosts} sent)`,
@@ -2335,6 +2367,7 @@ const onSignal = (code) => () => {
 };
 process.on('SIGINT', onSignal(130));
 process.on('SIGTERM', onSignal(143));
+process.on('SIGHUP', onSignal(129));
 
 let OLD;
 let NEW;
@@ -2342,8 +2375,13 @@ let NEW;
 const skipped = [];
 const started = Date.now();
 try {
-  // A missing browser is found now, not after the installs.
-  if (!opts.only || opts.only.has(4)) loadChromium();
+  // A missing browser is said now, not after the installs; scenario 4 fails on it only once it applies.
+  if (!opts.only || opts.only.has(4))
+    try {
+      loadChromium();
+    } catch (e) {
+      console.log(`\n  warning: ${e.message}`);
+    }
   OLD = prepareSide('old', opts.old);
   NEW = prepareSide('new', opts.new);
   const oldRelay = await stageReleasedRelay(opts.old, OLD);

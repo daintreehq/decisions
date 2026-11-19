@@ -207,6 +207,94 @@ describe('judgeDeclarations', () => {
   });
 });
 
+describe('judgeDeclarations, at the edges', () => {
+  it('accepts a declaration made only by the reloaded page', () => {
+    const t = [
+      ...replace(good(), isDeclaration),
+      declaration(130, { doc: 'new', path: '/settings/about' }),
+    ];
+    const r = judge(t);
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.declaration.doc, 'new');
+  });
+
+  it('says an early declaration came before the update, whatever the worker state', () => {
+    const t = [...good(), declaration(60, { doc: 'mixed', waiting: true })];
+    assert.match(
+      problemsOf(t, { ...OPTS, requests: 3 }),
+      /declared agent-stopped-push-v1 before the update was applied/,
+    );
+  });
+
+  it('takes a missing worker state as unknown, and a bare answer as no answer', () => {
+    const t = good().map((e) => {
+      if (!isDeclaration(e)) return e;
+      const { waiting: _, ...rest } = e;
+      return rest;
+    });
+    assert.match(problemsOf(t), /with the worker state unknown/);
+    const scalar = replace(good(), isDeclaration, { activeAnswered: FEATURE });
+    assert.match(problemsOf(scalar), /had not told the app it can show one/);
+  });
+
+  it('checks the endpoint and keys of every subscription, however many', () => {
+    const t = [...good(), declaration(130), declaration(140, { auth: 'other' })];
+    assert.match(problemsOf(t, { ...OPTS, requests: 4 }), /sent at 140 names another endpoint/);
+  });
+
+  it('accepts a question to the old worker sent while the new one was still installing', () => {
+    const t = replace(good(), isProbe, { waiting: false, installing: true });
+    assert.deepEqual(judge(t).problems, []);
+  });
+
+  it('counts only a settlement in the mixed page, before the update', () => {
+    for (const wrong of [{ doc: 'new' }, { at: 105 }]) {
+      const t = replace(good(), (e) => e.kind === 'sw-settled', wrong);
+      assert.match(problemsOf(t), /not seen to settle/, show(wrong));
+    }
+  });
+
+  it('takes only the exact feature as the declaration', () => {
+    const t = replace(good(), isDeclaration, {
+      features: ['agent-stopped-push-v2'],
+      activeAnswered: ['agent-stopped-push-v2'],
+    });
+    assert.match(problemsOf(t), /never declared/);
+  });
+
+  it('refuses a withdrawal even when the phone declares again after it', () => {
+    const t = [...good(), post(130), declaration(140)];
+    assert.match(problemsOf(t, { ...OPTS, requests: 4 }), /sent at 130 .* withdraws it/);
+  });
+
+  it('refuses an unsubscribe at any point', () => {
+    const t = [{ kind: 'unsubscribe', doc: 'old', path: '/', at: 5 }, ...good()];
+    assert.match(problemsOf(t), /dropped its push subscription/);
+  });
+
+  it('takes only a phase entry as the restart', () => {
+    const t = replace(good(), (e) => e.kind === 'phase', { kind: 'doc' });
+    assert.match(problemsOf(t), /no restart/);
+  });
+
+  it('accepts the released subscription sent in the same millisecond as subscribing', () => {
+    assert.deepEqual(judge(replace(good(), isBaseline, { at: 10 })).problems, []);
+  });
+
+  it('refuses features that are not a list before the update too', () => {
+    const t = [...good(), post(70, { doc: 'old', features: 'not a list' })];
+    assert.match(
+      problemsOf(t, { ...OPTS, requests: 3 }),
+      /sent at 70 has features that are not a list/,
+    );
+  });
+
+  it('refuses an incomplete trace even when it never declared', () => {
+    const t = replace(good(), isDeclaration);
+    assert.match(problemsOf(t, { ...OPTS, requests: 2 }), /trace has 1: it is incomplete/);
+  });
+});
+
 describe('pushSubscription', () => {
   it('is an https endpoint on the unreachable host, with a P-256 public key and 16 auth bytes', () => {
     const s = pushSubscription();
@@ -216,6 +304,7 @@ describe('pushSubscription', () => {
     assert.ok(PUSH_HOST.endsWith('.invalid'));
     const point = Buffer.from(s.p256dh, 'base64url');
     assert.equal(point.length, 65);
+    assert.equal(point[0], 4);
     // A point that is not on the curve is refused here, as a push service's encryption would refuse it.
     const secret = createECDH('prime256v1');
     secret.generateKeys();
@@ -237,6 +326,11 @@ describe('entryScript', () => {
           '<script type="module" crossorigin src="/assets/index-AbC123.js"></script></head>',
       );
       assert.equal(entryScript(dir), '/assets/index-AbC123.js');
+      writeFileSync(
+        join(dir, 'app/index.html'),
+        '<head><script type="module" src="/assets/index-Plain1.js"></script></head>',
+      );
+      assert.equal(entryScript(dir), '/assets/index-Plain1.js');
       writeFileSync(join(dir, 'app/index.html'), '<head><script src="/legacy.js"></script></head>');
       assert.throws(() => entryScript(dir), /no module script/);
     } finally {
