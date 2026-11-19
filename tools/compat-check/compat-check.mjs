@@ -1582,7 +1582,11 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
   const keep = (entry) => phoneLog.write(`${JSON.stringify(entry)}\n`);
   const reading = new Set();
   // The response bodies still being read, for at most ten seconds: one that stalls never holds the run.
-  const drained = () => Promise.race([Promise.allSettled([...reading]), sleep(10_000)]);
+  const drained = () =>
+    Promise.race([
+      Promise.allSettled([...reading]),
+      new Promise((r) => setTimeout(r, 10_000).unref()),
+    ]);
   const pathOf = (url) => {
     try {
       return new URL(url).pathname;
@@ -2072,19 +2076,6 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(onRelay),
     );
     await stillCached('after answering and declining');
-    // Every ticket the cached page got from the new relay, reconnects included (one that declares nothing is fine).
-    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
-    check(
-      tickets.every(
-        (t) =>
-          t.features === null ||
-          (Array.isArray(t.features) &&
-            !t.features.includes(ADVISORY) &&
-            !t.features.includes(AGENT_STOPPED)),
-      ),
-      `the ${OLD.label} app's ${tickets.length} socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
-      show(tickets.map((t) => t.features)),
-    );
 
     // The phone updates in place. The browser finds the new worker while the cached page is open, so it waits; a
     // second page of the same phone then loads the new app under the old worker, and the cached page closes.
@@ -2097,7 +2088,11 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     });
     // Polled from here: Playwright's waitForFunction takes an async predicate's promise itself as the answer.
     await until(
-      () => tab.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.waiting),
+      () =>
+        Promise.race([
+          tab.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.waiting),
+          sleep(5000).then(() => false),
+        ]),
       60_000,
       'the browser to install the new worker, which waits while the cached page is open',
     );
@@ -2121,6 +2116,19 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     );
     const mixedDoc = mixed.doc;
     await tab.close();
+    // Every ticket the cached page got from the new relay, reconnects included (one that declares nothing is fine).
+    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
+    check(
+      tickets.every(
+        (t) =>
+          t.features === null ||
+          (Array.isArray(t.features) &&
+            !t.features.includes(ADVISORY) &&
+            !t.features.includes(AGENT_STOPPED)),
+      ),
+      `the ${OLD.label} app's ${tickets.length} socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
+      show(tickets.map((t) => t.features)),
+    );
     // The new app asks the active worker whether it can show an agent-stopped push; the old one never answers, and
     // the app gives up after two seconds (app/src/features/push.ts WORKER_ASK_MS) and closes its end.
     await until(
@@ -2241,7 +2249,8 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       declaredRows.length === 1 &&
         declaredRows[0].subscription_id === subscriptionId &&
         declaredRows[0].enabled === true &&
-        declaredRows[0].features?.includes(AGENT_STOPPED),
+        Array.isArray(declaredRows[0].features) &&
+        declaredRows[0].features.includes(AGENT_STOPPED),
       `the relay keeps the phone's one subscription, the same one, now declaring ${AGENT_STOPPED}`,
       show(declaredRows),
     );
@@ -2337,7 +2346,8 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       lastRows.length === 1 &&
         lastRows[0].subscription_id === subscriptionId &&
         lastRows[0].enabled === true &&
-        lastRows[0].features?.includes(AGENT_STOPPED),
+        Array.isArray(lastRows[0].features) &&
+        lastRows[0].features.includes(AGENT_STOPPED),
       `at the end the relay still holds the phone's one subscription, enabled and declaring ${AGENT_STOPPED}`,
       show(lastRows),
     );

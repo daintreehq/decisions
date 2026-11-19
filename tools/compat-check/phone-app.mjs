@@ -166,11 +166,13 @@ export function phoneFixture(sub) {
         : iterable(options?.transfer)
           ? [...options.transfer]
           : [];
-      const args = iterable(options)
-        ? [list, ...more]
-        : iterable(options?.transfer)
-          ? [{ ...options, transfer: list }, ...more]
-          : rest;
+      // Only a list that is not already an array is replaced; the app's own options object is never copied.
+      const args =
+        iterable(options) && !Array.isArray(options)
+          ? [list, ...more]
+          : iterable(options?.transfer) && !Array.isArray(options.transfer)
+            ? [{ transfer: list }, ...more]
+            : rest;
       // Sent first: a message the browser refused is not one the app sent.
       const result = post.call(this, message, ...args);
       report({ kind: 'sw-message', type, target, ...state });
