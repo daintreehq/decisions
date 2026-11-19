@@ -167,6 +167,14 @@ async function getDecisionOverMcp(bridge: DecisionsBridge, questionId: string) {
 }
 
 describe('the advisory notice', () => {
+  it('is announced as an advisory timeout, not an answer', async () => {
+    const e = await advised();
+    const seen: [string, string][] = [];
+    e.bridge.on('delivered', (id, what) => seen.push([id, what]));
+    await e.expire();
+    expect(seen).toEqual([[e.qid, 'advisory-timeout']]);
+  });
+
   it('says the deadline passed unanswered and the plan is due, once, with the question and its deadline', async () => {
     const e = await advised();
     await e.expire();

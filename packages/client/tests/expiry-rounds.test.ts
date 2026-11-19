@@ -123,6 +123,16 @@ describe('only an expiry of the current round, at its signed deadline, closes th
     expect((await e.bridge.getDecision(e.qid)).closedReason).toBe('expired');
   });
 
+  it('announces an expiry as an expiry, never as an answer', async () => {
+    const e = await asked();
+    const seen: [string, string][] = [];
+    e.bridge.on('delivered', (id, what) => seen.push([id, what]));
+    e.relay.expiryEvent({ questionId: e.qid, at: e.deadline });
+    e.at(e.deadline, MIN);
+    await e.bridge.catchUp();
+    expect(seen).toEqual([[e.qid, 'expiry']]);
+  });
+
   it('an expiry exactly at the deadline is in time', async () => {
     const e = await asked();
     e.relay.expiryEvent({ questionId: e.qid });

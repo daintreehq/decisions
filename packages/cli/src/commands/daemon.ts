@@ -12,6 +12,7 @@ import {
   validateMcpPath,
   type AttachmentResolver,
   type HttpPollOptions,
+  type DeliveredKind,
   type HttpSyncStatus,
   type InjectResult,
   type LocateResult,
@@ -401,6 +402,14 @@ export function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
   });
 }
 
+const DELIVERED_LABEL: Record<DeliveredKind, string> = {
+  answer: 'answer',
+  decline: 'decline',
+  expiry: 'expiry notice',
+  'advisory-timeout': 'advisory timeout notice',
+  notice: 'notice',
+};
+
 export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Promise<void> {
   // A bad mount path fails before the runtime opens or a token file is created.
   if (o.mcp?.path !== undefined) {
@@ -464,7 +473,7 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
   let mcp: RunningMcp | null = null;
   let token: string | null = null;
   try {
-    bridge.on('delivered', (id) => ctx.out(`✓ delivered answer for ${id}`));
+    bridge.on('delivered', (id, what) => ctx.out(`✓ delivered ${DELIVERED_LABEL[what]} for ${id}`));
     bridge.on('error', (e) => !stopping && ctx.err(`warning: ${e.message}`));
     bridge.on('socket', (s, d) => ctx.err(`[relay] ${s}${d ? ` (${d})` : ''}`));
     bridge.on('state', (s) => {
