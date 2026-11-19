@@ -53,6 +53,7 @@ import {
   parseAnswers,
   sameDigests,
   unpublishedPlanDue,
+  unsupportedEntry,
   type AdvisoryDisposition,
   type OpenAnswerEntry,
 } from './answers.js';
@@ -74,6 +75,7 @@ import {
 } from './identity.js';
 import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex, TransientError } from './mutex.js';
+import { admitStoreFormat } from './store-format.js';
 import { RelayClient, type CallOptions } from './relay.js';
 import {
   DECLARE_EVERY_MS,
@@ -556,6 +558,10 @@ export class DecisionsBridge {
   state: BridgeState = 'created';
   /** Bumped by every start, stop and revocation: a start still recovering when one comes starts nothing more. */
   private lifecycle = 0;
+  /** The store's admissions `start` waits for, so `idle` waits for their reads too. */
+  private readonly admissions = new Set<Promise<void>>();
+  /** The start admitting the store for this lifecycle: a call made meanwhile is its second call. */
+  private starting: { lifecycle: number; admission: Promise<void> } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
   /**
@@ -803,7 +809,8 @@ export class DecisionsBridge {
   /**
    * Reconcile interrupted injections, connect the socket, start the retry timer. Without a socket
    * (`socket: false`) the host reads events itself (`catchUp`, `sync`), or passes `poll` to have the bridge
-   * sync over HTTP continuously, starting now, until it stops or is revoked.
+   * sync over HTTP continuously, starting now, until it stops or is revoked. Rejects with `StoreFormatError`, having
+   * started nothing, when a newer client wrote the store (`admitStoreFormat`).
    *
    * A stopped bridge can be started again, and delivers again once a write still in flight from before the stop has
    * settled. A revoked one cannot: `start` throws `forbidden`.
@@ -819,6 +826,26 @@ export class DecisionsBridge {
       throw new BridgeError('forbidden', 'this device was revoked from the relay');
     // A second call returns once a store that cannot be repaired has been reported, as the first does.
     if (this.state === 'running') return this.inbox.checkHistory();
+    // A call made while the first admits the store is a second call: the first, which chose the transport, starts.
+    const first = this.starting;
+    if (first && first.lifecycle === this.lifecycle) {
+      await first.admission;
+      return this.running() ? this.inbox.checkHistory() : undefined;
+    }
+    // Nothing reads or writes the store before it is admitted. A stop or a revocation while it was being read wins:
+    // each moves the lifecycle on, and a start made after it admits the store again.
+    const admitting = this.lifecycle;
+    const admission = admitStoreFormat(this.ctx.store);
+    const starting = { lifecycle: admitting, admission };
+    this.starting = starting;
+    this.admissions.add(admission);
+    try {
+      await admission;
+    } finally {
+      this.admissions.delete(admission);
+      if (this.starting === starting) this.starting = null;
+    }
+    if (admitting !== this.lifecycle) return this.running() ? this.inbox.checkHistory() : undefined;
     const run = ++this.lifecycle;
     this.httpAbort = new AbortController();
     this.state = 'running';
@@ -897,7 +924,8 @@ export class DecisionsBridge {
   /**
    * Stop everything this bridge started. An HTTP sync in flight has its requests aborted, and `stop` waits for it to
    * settle, so the host can close the store afterwards; a request that is not the sync's own (a key lookup while
-   * verifying an event) is cut short only by `RelayClient.close()`.
+   * verifying an event) is cut short only by `RelayClient.close()`. A start still admitting the store is waited for by
+   * `idle()`.
    */
   async stop(): Promise<void> {
     this.lifecycle++;
@@ -938,6 +966,7 @@ export class DecisionsBridge {
         () => undefined,
       );
     await Promise.all([
+      ...[...this.admissions].map(quiet),
       quiet(this.pumping),
       quiet(this.syncing),
       quiet(this.paging?.pass),
@@ -1445,7 +1474,9 @@ export class DecisionsBridge {
     let confirmation: OpenAnswerEntry | undefined;
     for (const e of entries) {
       if (e.kind !== 'answer') continue;
-      if (e.action === 'confirm-proxy') confirmation = current ? e : undefined;
+      // Only the person confirms a proxy answer: a confirmation from anyone else (a newer client's) confirms nothing.
+      if (e.action === 'confirm-proxy')
+        confirmation = current && e.source === 'human' ? e : undefined;
       else {
         current = e;
         confirmation = undefined;
@@ -1456,7 +1487,7 @@ export class DecisionsBridge {
     // Only a reopen changes a cancelled question, and it moves the revision on: a decline at this revision is the
     // cancellation in force.
     const declined = entries.some(
-      (e) => e.kind === 'declined' && e.revision === row.question_revision,
+      (e) => e.kind === 'declined' && e.revision === row.question_revision && !unsupportedEntry(e),
     );
     // Every answer, correction or confirmation moves the revision on and is kept with its revision; a reopen moves it
     // without one. So a revision the answers do not account for means the question was reopened into a round that
@@ -1496,12 +1527,14 @@ export class DecisionsBridge {
       plannedFallback,
       errorCode: row.local_status === 'publish-failed' ? row.error_code : null,
       workflowGateId: row.origin.workflow_gate_id,
+      // An answer from a source this client does not know (a newer client's) is reported as no one's, never the
+      // person's.
       provenance: inForce
         ? confirmed
           ? 'human'
-          : inForce.source === 'proxy'
-            ? 'proxy'
-            : 'human'
+          : inForce.source === 'proxy' || inForce.source === 'human'
+            ? inForce.source
+            : null
         : null,
       answeredOn: inForce ? answeredOn(confirmation ?? inForce) : null,
       closedReason:

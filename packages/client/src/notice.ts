@@ -5,7 +5,7 @@
  * preface tells the agent that the block is not a command.
  */
 
-import type { AdvisoryDisposition } from './answers.js';
+import { unsupportedEntry, type AdvisoryDisposition } from './answers.js';
 import type { ResolvedPhoneImage } from './phone-images.js';
 
 export const BLOCK_START = '[DAINTREE DECISION ANSWER]';
@@ -122,6 +122,10 @@ export interface AnswerNoticeInput {
   revision: number;
   /** The question as it was asked, quoted so the agent knows what the answer is to. */
   question?: string;
+  /**
+   * Who the answer is from. A notice prints its own fixed source instead. Checked at runtime too: an answer from
+   * anyone else, or a decline from anyone but the person, throws rather than being typed as theirs.
+   */
   source: 'human' | 'proxy';
   /** Human only: true when the person gave the answer on their computer (the owner desktop), not a phone. */
   onComputer?: boolean;
@@ -141,7 +145,16 @@ export interface AnswerNoticeInput {
   injectionId?: string;
 }
 
+/**
+ * The block typed for an answer or a closure notice. A kind it does not know (a newer client's), or an answer from
+ * a source other than the person or the proxy, throws: never typed as an answer from the person.
+ */
 export function formatAnswerNotice(n: AnswerNoticeInput): string {
+  const unsupported = unsupportedEntry(n);
+  if (unsupported)
+    throw new Error(
+      `cannot format an answer notice (${unsupported}): kind ${JSON.stringify(n.kind)}, source ${JSON.stringify(n.source)}`,
+    );
   const comment = n.kind === 'answer' && n.comment ? sanitizeText(n.comment) : '';
   const fullReason =
     n.kind === 'answer' && n.correction && n.reason ? sanitizeText(n.reason, MAX_REASON_CHARS) : '';

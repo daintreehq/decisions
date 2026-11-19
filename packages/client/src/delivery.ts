@@ -3,6 +3,7 @@ import {
   formatAnswerNotice,
   formatFollowupNotice,
   noticeChunk,
+  type AnswerNoticeInput,
 } from './notice.js';
 import {
   answeredOn,
@@ -13,6 +14,7 @@ import {
   planDue,
   supersededClosure,
   serializeAnswers,
+  unsupportedEntry,
   withholdPlan,
   type AnswerContent,
   type AnswerEntry,
@@ -220,6 +222,8 @@ interface Thread {
   answers: AnswerEntry[];
   /** Pending human messages in thread order, none after anything earlier in the thread that is held. */
   messages: StoredMessage[];
+  /** 1 when building the thread flagged its question for a human (an entry this client cannot type), else 0. */
+  attention: number;
 }
 
 export class DeliveryEngine {
@@ -387,6 +391,7 @@ export class DeliveryEngine {
     const threads: Thread[] = [];
     for (const q of rows) {
       const t = await this.thread(q, unsettled, unsettledMessages);
+      out.needsAttention += t.attention;
       if (t.answers.length > 0 || t.messages.length > 0) threads.push(t);
     }
     // One lane per pane: questions go in creation order (alias is monotonic), each in its thread's order.
@@ -414,9 +419,44 @@ export class DeliveryEngine {
     unsettledMessages: ReadonlySet<string>,
   ): Promise<Thread> {
     const pending = this.pending(q);
+    // An entry this client cannot type (a newer client's) is never typed as an answer: it holds the question's answers
+    // for a human, as an unreadable one does, before any destination is looked up. A question already waiting for a
+    // human keeps the reason it has, and one whose earlier write may have reached the terminal keeps saying so.
+    const unsupported = pending.map(unsupportedEntry).find((c) => c !== null) ?? null;
+    let attention = 0;
+    if (unsupported && !unsettled.has(q.question_id)) {
+      // On a fresh read under the lock the inbox writes under: a reopen or an answer applied since the pass read the
+      // row is never held over an entry it already replaced.
+      const now = await this.ctx.lock.run(async () => {
+        const row = await this.ctx.store.getQuestion(q.question_id);
+        const code =
+          row &&
+          this.pending(row)
+            .map(unsupportedEntry)
+            .find((c) => c !== null);
+        if (
+          !row ||
+          !code ||
+          row.delivery_status === 'needs-attention' ||
+          row.delivery_status === 'delivery-uncertain' ||
+          (await this.ctx.store.hasUncertainIntent(q.question_id))
+        )
+          return null;
+        await this.ctx.store.updateQuestion(q.question_id, {
+          delivery_status: 'needs-attention',
+          error_code: code,
+        });
+        return { row, code };
+      });
+      if (now) {
+        await this.reportAttention(now.row, now.code, 'needs-attention');
+        attention = 1;
+      }
+    }
     const held =
       pending.length > 0 &&
-      (q.delivery_status === 'needs-attention' ||
+      (unsupported !== null ||
+        q.delivery_status === 'needs-attention' ||
         q.delivery_status === 'delivery-uncertain' ||
         unsettled.has(q.question_id) ||
         (pending.some(isAdvisoryNotice) && (await this.heldForReplay(q.question_id))) ||
@@ -432,7 +472,7 @@ export class DeliveryEngine {
       if (unsettledMessages.has(messageDeliveryKey(q.question_id, m.message_id))) break;
       messages.push(m);
     }
-    return { q, answers: held ? [] : pending, messages };
+    return { q, answers: held ? [] : pending, messages, attention };
   }
 
   private async resolveTarget(
@@ -742,7 +782,8 @@ export class DeliveryEngine {
       alias: i.q.alias,
       revision: e.revision,
       ...(i.question ? { question: i.question } : {}),
-      source: e.source === 'proxy' ? 'proxy' : 'human',
+      // The stored source as it is, never mapped to the person's: the formatter refuses one it does not expect.
+      source: e.source as AnswerNoticeInput['source'],
       ...(answeredOn(e) === 'computer' ? { onComputer: true } : {}),
       choices: e.choices,
       comment: e.text,
@@ -1437,6 +1478,16 @@ export class DeliveryEngine {
     } else {
       await ctx.store.updateQuestion(q.question_id, { delivery_status: status, error_code: code });
     }
+    await this.reportAttention(q, code, status);
+  }
+
+  /** Audit a question that now needs a human, and tell the relay when it holds a delivery to report on. */
+  private async reportAttention(
+    q: QuestionRow,
+    code: string,
+    status: 'needs-attention' | 'delivery-uncertain',
+  ): Promise<void> {
+    const { ctx } = this;
     await ctx.audit.log({
       event: 'delivery.attention',
       question_id: q.question_id,

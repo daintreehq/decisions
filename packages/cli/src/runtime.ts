@@ -7,6 +7,7 @@ import {
   defaultHome,
   loadIdentity,
   sealStoredContent,
+  StoreFormatError,
   type Identity,
   type KeyStore,
   type LocalStore,
@@ -130,7 +131,7 @@ export async function openRuntime(ctx: Ctx, g: GlobalOptions = {}): Promise<Runt
     throw new CliError((e as Error).message);
   }
   await mkdir(ctx.home, { recursive: true, mode: 0o700 });
-  const store = new SqliteLocalStore(join(ctx.home, 'decisions.db'));
+  const store = openStore(ctx.home);
   try {
     // A store written before content was sealed is sealed (and compacted) on first open, whatever the command.
     await sealStoredContent({ store, identity });
@@ -140,6 +141,20 @@ export async function openRuntime(ctx: Ctx, g: GlobalOptions = {}): Promise<Runt
   }
   const client = new RelayClient({ identity, fetch: ctx.fetch });
   return { ctx, keyStore, identity, client, store, auditPath: join(ctx.home, 'audit.jsonl') };
+}
+
+/**
+ * The state directory's store. A newer client's store (its schema or data format is newer than this client's) is
+ * refused before anything reads or writes it, so this client never misreads what a newer one left there.
+ */
+function openStore(home: string): SqliteLocalStore {
+  const path = join(home, 'decisions.db');
+  try {
+    return new SqliteLocalStore(path);
+  } catch (e) {
+    if (e instanceof StoreFormatError) throw new CliError(`cannot use ${path}: ${e.message}`);
+    throw e;
+  }
 }
 
 export async function readSecretFile(path: string, create: () => string): Promise<string> {

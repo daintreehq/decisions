@@ -17,6 +17,7 @@ import {
   legacyContent,
   parseAnswers,
   serializeAnswers,
+  unsupportedEntry,
   type AnswerContent,
   type AnswerEntry,
   type OpenAnswerEntry,
@@ -396,7 +397,8 @@ export async function sealStoredContent(
       // flag) is kept rather than overwritten by the stale snapshot.
       const seals = new Map<string, string | null>();
       for (const e of parseAnswers(snapshot.answers_json)) {
-        if (!hasLegacyContent(e)) continue;
+        // An entry this client does not understand (a newer client's) is left exactly as it is.
+        if (!hasLegacyContent(e) || unsupportedEntry(e)) continue;
         seals.set(
           e.entry_id,
           e.sealed ??

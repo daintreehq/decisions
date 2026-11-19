@@ -104,6 +104,8 @@ Question and answer ciphertext is kept until you delete it (it is your decision 
 
 The relay stores ciphertext only; a backup of it is useless without your keys. Back up your keys (`decisions recovery export`), not the relay. See [key-recovery.md](key-recovery.md). To rebuild a relay: deploy again, claim with the same desktop keys, and re-pair phones; history on the old relay is discarded unless you export it first (`decisions export`).
 
+A client refuses a state directory that a newer client has stored something in that it could misread (its local store holds a newer schema or data format). It says so in an error before it reads, migrates, seals or changes any record there; upgrade the client to use the directory. Stop running listeners before upgrading: a client already running when a newer one opens its state directory does not check again, though it never types an answer entry it does not understand.
+
 ## Deleting data
 
 - One question: `DELETE /api/v1/questions/{id}` (owner), which also removes its events and schedules removal of its attachments.

@@ -868,6 +868,33 @@ describe('export / import / recovery / delete-data', () => {
       if (existsSync(p)) expect(readFileSync(p).includes(Buffer.from('OLDPLAIN'))).toBe(false);
     }
   });
+  it('a command refuses a state directory a newer client wrote, before touching it', async () => {
+    const { ctx } = await ready();
+    await ask(ctx, {}, { question: 'Fresh question' });
+    const dbFile = join(ctx.home, 'decisions.db');
+    const raw = new DatabaseSync(dbFile);
+    // A newer client's data format, and a row this client would otherwise seal on open.
+    raw.prepare("UPDATE meta SET value = '2' WHERE key = 'store_format'").run();
+    raw
+      .prepare('UPDATE questions SET content_json = ?, content_sealed = NULL')
+      .run(JSON.stringify({ content_version: 1, question: 'NEWERPLAIN question' }));
+    raw.close();
+    const err = await status(ctx, {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).exitCode).toBe(1);
+    expect((err as CliError).message).toContain(`cannot use ${dbFile}`);
+    expect((err as CliError).message).toMatch(
+      /data format 2, and this client reads formats up to 1.*Upgrade this client/,
+    );
+    const after = new DatabaseSync(dbFile);
+    expect(after.prepare("SELECT value FROM meta WHERE key = 'store_format'").get()).toMatchObject({
+      value: '2',
+    });
+    expect(after.prepare('SELECT content_json FROM questions').get()).toMatchObject({
+      content_json: expect.stringContaining('NEWERPLAIN'),
+    });
+    after.close();
+  });
   it('recovery kit export, verify and restore', async () => {
     const env = { DECISIONS_RECOVERY_PASSPHRASE: 'a long recovery passphrase' };
     const a = await ready({ env });

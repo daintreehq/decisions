@@ -2,9 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLocalStore,
+  STORE_FORMAT,
+  STORE_FORMAT_KEY,
+  StoreFormatError,
   type LocalStore,
   type OutboxItem,
   type QuestionRow,
@@ -429,5 +432,181 @@ describe('SqliteLocalStore migrations', () => {
     );
     expect(cols).not.toContain('ownership_principal');
     after.close();
+  });
+});
+
+describe('SqliteLocalStore refuses a database a newer client wrote', () => {
+  const pragma = (path: string, name: string): unknown => {
+    const raw = new DatabaseSync(path);
+    try {
+      return Object.values(raw.prepare(`PRAGMA ${name}`).get() as Record<string, unknown>)[0];
+    } finally {
+      raw.close();
+    }
+  };
+  const marker = (path: string): string | null => {
+    const raw = new DatabaseSync(path);
+    try {
+      const r = raw.prepare('SELECT value FROM meta WHERE key = ?').get(STORE_FORMAT_KEY) as
+        { value: string } | undefined;
+      return r ? r.value : null;
+    } finally {
+      raw.close();
+    }
+  };
+  const setMarker = (path: string, value: string) => {
+    const raw = new DatabaseSync(path);
+    raw
+      .prepare(
+        'INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+      )
+      .run(STORE_FORMAT_KEY, value);
+    raw.close();
+  };
+  /** A current database holding one question, as this client leaves it. */
+  const current = async (name: string) => {
+    const path = join(dir, name);
+    const s = new SqliteLocalStore(path);
+    await s.commitNewQuestion(row('q1', 1), item('o1', 'q1'));
+    await s.close();
+    return path;
+  };
+
+  it("stamps a new database, and an unmarked one, with this client's format", async () => {
+    const path = await current('stamp.db');
+    expect(marker(path)).toBe(String(STORE_FORMAT));
+    // A store last opened by a client from before formats were kept has no marker.
+    const raw = new DatabaseSync(path);
+    raw.prepare('DELETE FROM meta WHERE key = ?').run(STORE_FORMAT_KEY);
+    raw.close();
+    const s = new SqliteLocalStore(path);
+    expect(await s.getMeta(STORE_FORMAT_KEY)).toBe(String(STORE_FORMAT));
+    await s.close();
+    // Migrated from version 1 the same way.
+    const v1 = join(dir, 'stamp-v1.db');
+    writeVersion1Database(v1);
+    await new SqliteLocalStore(v1).close();
+    expect([userVersion(v1), marker(v1)]).toEqual([SQLITE_SCHEMA_VERSION, String(STORE_FORMAT)]);
+  });
+
+  it('opens a database already up to date without writing, beside another connection writing', async () => {
+    const path = await current('busy.db');
+    const writer = new DatabaseSync(path);
+    writer.exec('BEGIN IMMEDIATE');
+    try {
+      const s = new SqliteLocalStore(path);
+      expect((await s.getQuestion('q1'))!.question_id).toBe('q1');
+      await s.close();
+    } finally {
+      writer.exec('ROLLBACK');
+      writer.close();
+    }
+  });
+
+  it('a newer schema version is refused, and the file left as it was', async () => {
+    const path = await current('newer-schema.db');
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION + 1}`);
+    raw.close();
+    const close = vi.spyOn(DatabaseSync.prototype, 'close');
+    let err: unknown;
+    try {
+      new SqliteLocalStore(path);
+    } catch (e) {
+      err = e;
+    }
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockRestore();
+    expect(err).toBeInstanceOf(StoreFormatError);
+    expect(err).toMatchObject({
+      marker: 'schema',
+      found: String(SQLITE_SCHEMA_VERSION + 1),
+      supported: SQLITE_SCHEMA_VERSION,
+    });
+    expect((err as Error).message).toMatch(/schema version.*newer Decisions client/);
+    expect(userVersion(path)).toBe(SQLITE_SCHEMA_VERSION + 1);
+    const after = new DatabaseSync(path);
+    expect(after.prepare('SELECT question_id FROM questions').all()).toEqual([
+      { question_id: 'q1' },
+    ]);
+    after.close();
+  });
+
+  it('a newer data format is refused on the current schema, with no schema step of its own', async () => {
+    const path = await current('newer-format.db');
+    setMarker(path, String(STORE_FORMAT + 1));
+    const close = vi.spyOn(DatabaseSync.prototype, 'close');
+    expect(() => new SqliteLocalStore(path)).toThrow(StoreFormatError);
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockRestore();
+    expect(() => new SqliteLocalStore(path)).toThrow(
+      new RegExp(`data format ${STORE_FORMAT + 1}.*could misread.*Upgrade this client`),
+    );
+    expect(marker(path)).toBe(String(STORE_FORMAT + 1));
+    // Nothing else in the database changed either.
+    expect(userVersion(path)).toBe(SQLITE_SCHEMA_VERSION);
+  });
+
+  it('a newer data format is refused before an older schema is migrated', async () => {
+    const path = join(dir, 'newer-format-v1.db');
+    writeVersion1Database(path);
+    setMarker(path, String(STORE_FORMAT + 1));
+    const journal = pragma(path, 'journal_mode');
+    expect(() => new SqliteLocalStore(path)).toThrow(StoreFormatError);
+    expect([userVersion(path), marker(path), pragma(path, 'journal_mode')]).toEqual([
+      1,
+      String(STORE_FORMAT + 1),
+      journal,
+    ]);
+    const raw = new DatabaseSync(path);
+    const cols = (raw.prepare('PRAGMA table_info(questions)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    raw.close();
+    expect(cols).not.toContain('ownership_principal');
+  });
+
+  it('a marker that is not a format is refused as unreadable, not as newer', async () => {
+    const path = await current('malformed.db');
+    for (const raw of ['', 'two', '1.5', '-1', '01', ' 1', '1 ']) {
+      setMarker(path, raw);
+      expect(() => new SqliteLocalStore(path), JSON.stringify(raw)).toThrow(
+        /data format .* is not one this client reads/,
+      );
+    }
+    // A BLOB is no format either, whatever its bytes, and is left as it was.
+    for (const blob of ['01', '00', '31']) {
+      const raw = new DatabaseSync(path);
+      raw.exec(`UPDATE meta SET value = X'${blob}' WHERE key = '${STORE_FORMAT_KEY}'`);
+      raw.close();
+      expect(() => new SqliteLocalStore(path), blob).toThrow(StoreFormatError);
+      const after = new DatabaseSync(path);
+      expect(
+        after.prepare('SELECT typeof(value) AS t FROM meta WHERE key = ?').get(STORE_FORMAT_KEY),
+      ).toEqual({ t: 'blob' });
+      after.close();
+    }
+  });
+
+  it('reads the format again under the write lock, so it never lowers a newer stamp', async () => {
+    const path = await current('race.db');
+    const raw = new DatabaseSync(path);
+    raw.prepare('DELETE FROM meta WHERE key = ?').run(STORE_FORMAT_KEY);
+    raw.close();
+    // A newer client stamps its format between this one's first read and its write lock.
+    const exec = DatabaseSync.prototype.exec;
+    const spy = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (
+      this: DatabaseSync,
+      sql: string,
+    ) {
+      if (sql === 'BEGIN IMMEDIATE') setMarker(path, String(STORE_FORMAT + 1));
+      return exec.call(this, sql);
+    });
+    try {
+      expect(() => new SqliteLocalStore(path)).toThrow(StoreFormatError);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(marker(path)).toBe(String(STORE_FORMAT + 1));
   });
 });
