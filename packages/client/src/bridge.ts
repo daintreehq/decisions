@@ -469,10 +469,7 @@ function sameAsker(o: QuestionOrigin, p: PaneIdentity): boolean {
  */
 export type DeliveredKind = 'answer' | 'decline' | 'expiry' | 'advisory-timeout' | 'notice';
 
-function deliveredKind(
-  beforeJson: string,
-  afterJson: string,
-): DeliveredKind {
+function deliveredKind(beforeJson: string, afterJson: string): DeliveredKind {
   const was = new Set(
     parseAnswers(beforeJson)
       .filter((e) => e.delivered)
