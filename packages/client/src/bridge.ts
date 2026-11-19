@@ -3,6 +3,7 @@ import {
   type DecisionContentV1,
   type LedgerEvent,
   type ProtocolFeature,
+  type ReplyMode,
 } from '@daintreehq/decisions-protocol';
 import { AuditLog } from './audit.js';
 import { BridgeError, PostMessageInput } from './content.js';
@@ -12,7 +13,7 @@ import {
   type AttachmentSpool,
   type BridgeContext,
 } from './context.js';
-import { DeliveryEngine, type DrainResult } from './delivery.js';
+import { ADVISORY_LEDGER_WAIT_MS, DeliveryEngine, type DrainResult } from './delivery.js';
 import { EventVerifier } from './inbound.js';
 import { Inbox } from './inbox.js';
 import {
@@ -23,8 +24,15 @@ import {
   type SetInvolvementResult,
 } from './involvement.js';
 import { PresenceReporter } from './presence.js';
+import { AgentStoppedPusher, type AgentStoppedPushResult } from './agent-stopped.js';
 import { PolicyRegistry, gateAllowsText } from './policy.js';
-import { Publisher, type PostMessageResult, type RegisterResult } from './publisher.js';
+import {
+  Publisher,
+  type CreatePayload,
+  type PostMessageResult,
+  type RegisterOptions,
+  type RegisterResult,
+} from './publisher.js';
 import { AnswerQuestionInput, ownerAnswerItemId, type OwnerAnswerResult } from './owner-answer.js';
 import {
   DeclineQuestionInput,
@@ -37,7 +45,18 @@ import {
   ownerMessageItemId,
   type OwnerFollowUpResult,
 } from './owner-message.js';
-import { answeredOn, sameDigests, type OpenAnswerEntry } from './answers.js';
+import {
+  answeredOn,
+  closureInForce,
+  currentDisposition,
+  isAdvisoryNotice,
+  parseAnswers,
+  sameDigests,
+  unpublishedPlanDue,
+  unsupportedEntry,
+  type AdvisoryDisposition,
+  type OpenAnswerEntry,
+} from './answers.js';
 import {
   openAnswers,
   openMessageContent,
@@ -45,7 +64,7 @@ import {
   sealStoredContent,
 } from './at-rest.js';
 import { messageSentOn, parseMessages, type LocalMessageStatus } from './messages.js';
-import { RelayError } from './errors.js';
+import { RelayError, isDeviceRevoked } from './errors.js';
 import { refreshHostGrants } from './host-enrollment.js';
 import {
   MemoryKeyStore,
@@ -56,7 +75,22 @@ import {
 } from './identity.js';
 import type { DecisionLearner, ProxyEngine, ProxyOutcome } from './proxy.js';
 import { Mutex, TransientError } from './mutex.js';
-import { RelayClient } from './relay.js';
+import { admitStoreFormat } from './store-format.js';
+import { RelayClient, type CallOptions } from './relay.js';
+import {
+  DECLARE_EVERY_MS,
+  DEFAULT_POLL,
+  HTTP_SYNC_META_KEY,
+  NEVER_SYNCED,
+  isFatalSyncError,
+  readHttpSyncStatus,
+  resolvePoll,
+  retryDelayMs,
+  syncFailureReason,
+  type HttpPollOptions,
+  type HttpSyncStatus,
+  type ResolvedPoll,
+} from './http-sync.js';
 import type { AgentResumeAdapter, TerminalSink } from './sink.js';
 import type { PhoneImageStore } from './phone-images.js';
 import {
@@ -67,8 +101,9 @@ import {
   type SnapshotPublishResult,
 } from './snapshots.js';
 import { RelaySocket, type SocketState, type WebSocketFactory } from './socket.js';
+import { AdvisorySupport, replyModeOfRow } from './advisory.js';
 import type { LocalStore } from './store.js';
-import type { QuestionOrigin, QuestionRow } from './types.js';
+import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
 
 export interface BridgeOptions {
   identity: Identity;
@@ -102,6 +137,14 @@ export interface BridgeOptions {
    * once it understands the follow-up block (docs/daintree-integration-spec.md section 6.4).
    */
   followUps?: boolean;
+  /**
+   * The host delivers the outcome of an advisory question to its agents (protocol section 21): an answer as usual,
+   * or, when none commits by the deadline, a notice that the plan the agent stated is due. Declares
+   * `advisory-deadlines-v1` to the relay. Off by default, so the bridge never signs an advisory question: a host
+   * turns it on once its sink understands that notice, and its policy must allow them as well
+   * (`PolicyRegistryOptions.advisoryQuestions`).
+   */
+  advisoryDeadlines?: boolean;
   auditPath?: string;
   debugContent?: boolean;
   client?: RelayClient;
@@ -120,6 +163,59 @@ export interface BridgeOptions {
 }
 
 export type BridgeState = 'created' | 'running' | 'revoked' | 'stopped';
+
+/**
+ * Runs a task one run at a time. A kick while it runs asks for one more run after it, never a queue: however often
+ * it is kicked while a run is stuck, it holds one run and one flag. The promise settles when the loop has run out of
+ * kicks; a run's failure is reported and the loop goes on.
+ */
+class Rerun {
+  private loop: Promise<void> | null = null;
+  private again = false;
+  constructor(
+    private readonly task: () => Promise<void>,
+    private readonly onError: (e: Error) => void,
+  ) {}
+  /** Settles once the run in progress, and any it was kicked for, have finished; never rejects. */
+  idle(): Promise<void> {
+    return this.loop ?? Promise.resolve();
+  }
+  kick(): Promise<void> {
+    this.again = true;
+    this.loop ??= (async () => {
+      try {
+        while (this.again) {
+          this.again = false;
+          try {
+            await this.task();
+          } catch (e) {
+            this.onError(e as Error);
+          }
+        }
+      } finally {
+        this.loop = null;
+      }
+    })();
+    return this.loop;
+  }
+}
+
+/** How long `stop` waits for the last status record before letting the host close the store anyway. */
+const STATUS_WAIT_MS = 5_000;
+/** The deadline of each page request a direct `catchUp` makes (it keeps the client's own retries). */
+const CATCH_UP_TIMEOUT_MS = 30_000;
+
+/** How many stored, unapplied events `ledgerUnsettled` looks through for the question's own. */
+const UNAPPLIED_SCAN = 500;
+
+/** The question a stored ledger event is about, when it names one. */
+function eventQuestionId(e: { json: string }): unknown {
+  try {
+    return (JSON.parse(e.json) as { question_id?: unknown }).question_id;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
@@ -142,14 +238,16 @@ export const BRIDGE_FEATURES: readonly ProtocolFeature[] = [
 /**
  * What a bridge declares: `BRIDGE_FEATURES`, plus `thread-messages-v1` and `owner-desktop-messages-v1` when it
  * delivers follow-ups (the second says it also takes the person's follow-up sent from the owner desktop, typed with
- * `sent_from: computer`), and `pane-snapshots-v1` when snapshots are on.
+ * `sent_from: computer`), `pane-snapshots-v1` when snapshots are on, and `advisory-deadlines-v1` when the host
+ * delivers advisory outcomes.
  */
 export function bridgeFeatures(
-  o: Pick<BridgeOptions, 'followUps' | 'snapshots'> = {},
+  o: Pick<BridgeOptions, 'followUps' | 'snapshots' | 'advisoryDeadlines'> = {},
 ): readonly ProtocolFeature[] {
   const extra: ProtocolFeature[] = [
     ...(o.followUps ? (['thread-messages-v1', OWNER_MESSAGE_FEATURE] as const) : []),
     ...(o.snapshots ? [SNAPSHOT_FEATURE] : []),
+    ...(o.advisoryDeadlines ? (['advisory-deadlines-v1'] as const) : []),
   ];
   return extra.length > 0 ? [...BRIDGE_FEATURES, ...extra] : BRIDGE_FEATURES;
 }
@@ -198,14 +296,44 @@ export type ThreadEntryView =
       } | null;
     };
 
+/**
+ * Whether a question reached the relay, from the evidence this desktop keeps durably:
+ * - `not-sent`: queued, and provably never sent (no create request has been attempted);
+ * - `possibly-committed`: queued, and a create request may have reached the relay, but no reply or history has
+ *   confirmed it: its outcome is unknown until the relay can be reached;
+ * - `accepted`: the relay acknowledged it (a receipt or its history). Nothing more: not that the person saw it;
+ * - `never-published`: it never reached the relay, so it never reached the person's phone and no answer to it was
+ *   recorded: its deadline passed first (`closedReason: never-published`), or it was withdrawn before it was sent
+ *   (`closedReason: withdrawn`);
+ * - `refused`: the relay refused it for good (`status: publish-failed`);
+ * - `unknown`: imported history, or a row too old or damaged to tell.
+ */
+export type PublicationState =
+  'not-sent' | 'possibly-committed' | 'accepted' | 'never-published' | 'refused' | 'unknown';
+
 export interface DecisionView {
   questionId: string;
   alias: number;
   status: QuestionRow['local_status'];
+  /** Whether the question reached the relay (`PublicationState`). */
+  publication: PublicationState;
   requirement: QuestionRow['requirement'];
   deliveryStatus: QuestionRow['delivery_status'];
   revision: number;
   expiresAt: string | null;
+  /**
+   * The current round's mode (protocol section 21): `advisory` while the question is in the round its agent asked for
+   * advice in (answered or not), so if no answer commits by that round's deadline the plan it stated is its own to
+   * carry out. `blocking` otherwise, a reopened question included: it waits for a decision.
+   */
+  replyMode: ReplyMode;
+  /**
+   * The plan the agent stated, while `replyMode` is `advisory`; null otherwise, or for content this desktop cannot
+   * open.
+   */
+  plannedFallback: string | null;
+  /** Why the relay refused the question, when it is `publish-failed`; null otherwise. */
+  errorCode: string | null;
   /** The trusted workflow gate that governs the question, if any. */
   workflowGateId: string | null;
   /**
@@ -223,9 +351,25 @@ export interface DecisionView {
   /**
    * Why a closed question is closed without an answer: `declined` when the person dismissed it (from a phone or
    * tablet, or on the computer through the owner desktop's signed decline), `withdrawn` when a desktop cancelled it,
-   * `expired` when its deadline passed. Null otherwise. None of them authorises anything.
+   * `expired` when its deadline passed, `never-published` when its deadline passed before it ever reached the relay,
+   * so no answer to it was recorded (`status: publish-failed`). Null otherwise. None of them authorises anything.
    */
-  closedReason: 'declined' | 'withdrawn' | 'expired' | null;
+  closedReason: 'declined' | 'withdrawn' | 'expired' | 'never-published' | null;
+  /**
+   * True only when the agent may carry out the plan its advisory question stated (protocol section 21): the advisory
+   * round's deadline passed unanswered (`advisoryTimeout`, `fallback-due`), or the question never reached the relay
+   * before it, under a host that delivers advisory outcomes and whose policy allows them. A notice already typed
+   * keeps what it said; one still to be typed follows the policy as it is now, and is false while it waits for this
+   * desktop to read the relay (a reopen may be on its way), unless its sink refused a write admitted after that read
+   * (`advisoryTimeout.writeRefused`): that one waits only on what this computer's store shows, an event of its question
+   * not yet applied among them. It is never an answer or an approval: the person decided nothing.
+   */
+  fallbackDue: boolean;
+  /**
+   * What happened when the advisory round's deadline passed unanswered, kept after a reopen; null for every other
+   * question, and for imported history.
+   */
+  advisoryTimeout: AdvisoryTimeoutView | null;
   /** The option id of the answer in force, or null for a text-only answer or no answer. */
   choice: string | null;
   /** The free text of the answer in force ('' when none). */
@@ -255,6 +399,42 @@ export interface DecisionView {
    * one with its own delivery state. A message never changes the answer in force reported above.
    */
   thread: ThreadEntryView[];
+}
+
+/**
+ * An advisory question's unanswered deadline, as three separate facts (protocol section 21): the deadline elapsed
+ * (`deadline`, the signed one the relay's expiry was checked against); the host told, or will tell, its agent
+ * (`disposition` and `notice`); and what the agent then did, which Decisions never observes (`agentAction`).
+ */
+export interface AdvisoryTimeoutView {
+  /** The round that expired: the advisory round, 0. */
+  revision: number;
+  /** The round's signed deadline that elapsed (ISO 8601, UTC). */
+  deadline: string;
+  /**
+   * What the notice says, or will say: `fallback-due` lets the stated plan go ahead, at the agent's discretion;
+   * `fallback-withheld` does not (the host's policy does not allow advice, or the question could not be read as
+   * advisory). Neither is an answer.
+   */
+  disposition: AdvisoryDisposition;
+  /**
+   * The notice's delivery to the asking agent: `pending` (waiting for its pane, its host or the end of a replay),
+   * `delivered` (the sink proved the write, or a restart found it on screen), `uncertain` (a write may or may not have
+   * reached the terminal; it is never typed again on its own), `needs-attention` (nothing was typed and a person has
+   * to decide), `superseded` (a reopen or deletion replaced the round before anything was typed). Delivered proves
+   * the agent's terminal received it, never that the agent acted on it.
+   */
+  notice: 'pending' | 'delivered' | 'uncertain' | 'needs-attention' | 'superseded';
+  /** The write that delivered the notice, or that may have; null otherwise. */
+  injectionId: string | null;
+  /**
+   * True when the notice needs attention because its sink refused a write this host had admitted, once it had read the
+   * relay for the notice's round as for a write that lands: the plan is settled as for a written notice, although
+   * nothing was typed. False otherwise, a notice that needs attention for another reason (its pane gone) included.
+   */
+  writeRefused: boolean;
+  /** Always `unobserved`: Decisions never sees whether the agent carried out the plan. */
+  agentAction: 'unobserved';
 }
 
 /**
@@ -300,10 +480,42 @@ function sameAsker(o: QuestionOrigin, p: PaneIdentity): boolean {
   );
 }
 
+/**
+ * What a settled delivery carried: an `answer`, a `decline`, an `expiry`, an `advisory-timeout` (the agent was told
+ * its stated plan may or may not go ahead), or a neutral `notice` when the entries that settled mix kinds or none is
+ * identifiable.
+ */
+export type DeliveredKind = 'answer' | 'decline' | 'expiry' | 'advisory-timeout' | 'notice';
+
+function deliveredKind(beforeJson: string, afterJson: string): DeliveredKind {
+  const was = new Set(
+    parseAnswers(beforeJson)
+      .filter((e) => e.delivered)
+      .map((e) => e.entry_id),
+  );
+  const kinds = new Set<DeliveredKind>();
+  for (const e of parseAnswers(afterJson)) {
+    if (!e.delivered || was.has(e.entry_id)) continue;
+    kinds.add(
+      e.kind === 'answer'
+        ? 'answer'
+        : e.kind === 'declined'
+          ? 'decline'
+          : e.kind === 'unpublished'
+            ? // Never-published notices read the same whether or not the plan may go ahead.
+              'notice'
+            : e.advisory_disposition !== undefined
+              ? 'advisory-timeout'
+              : 'expiry',
+    );
+  }
+  return kinds.size === 1 ? [...kinds][0]! : 'notice';
+}
+
 type Listener = {
   state: (s: BridgeState) => void;
   socket: (s: SocketState, detail?: string) => void;
-  delivered: (questionId: string) => void;
+  delivered: (questionId: string, what: DeliveredKind) => void;
   error: (e: Error) => void;
   /** An answer from `answerQuestion` reached its outcome (anything but `queued`), however it was sent. */
   answer: (result: OwnerAnswerResult) => void;
@@ -311,6 +523,14 @@ type Listener = {
   decline: (result: OwnerDeclineResult) => void;
   /** A follow-up from `sendFollowUp` reached its outcome (anything but `queued`), however it was sent. */
   followUp: (result: OwnerFollowUpResult) => void;
+  /** An HTTP sync (`sync`) finished, with what it recorded. */
+  sync: (status: HttpSyncStatus) => void;
+  /**
+   * Another connection for this device replaced this bridge's socket (4409): the socket stopped and reads nothing more,
+   * while the bridge goes on running. Never on `stop` or a revocation. What to do is the host's call: the desktop app
+   * yields, as two processes sharing an identity must not fight over the one socket.
+   */
+  replaced: () => void;
 };
 
 /**
@@ -320,6 +540,8 @@ type Listener = {
 export class DecisionsBridge {
   readonly ctx: BridgeContext;
   readonly publisher: Publisher;
+  /** What the relay and the person's devices support for advisory questions, read in the background. */
+  private readonly advisory: AdvisorySupport;
   readonly verifier: EventVerifier;
   readonly inbox: Inbox;
   readonly delivery: DeliveryEngine;
@@ -329,13 +551,75 @@ export class DecisionsBridge {
   readonly involvement: InvolvementSync;
   /** Keeps the relay's presence lease current while the host reports the person is here (`reportPresence`). */
   readonly presence: PresenceReporter;
+  /** Asks the relay for an agent-stopped push when the host says one is due (`requestAgentStoppedPush`). */
+  readonly agentStopped: AgentStoppedPusher;
   /** What this bridge declares to the relay on its socket ticket and event pages (`bridgeFeatures`). */
   readonly features: readonly ProtocolFeature[];
   state: BridgeState = 'created';
   /** Bumped by every start, stop and revocation: a start still recovering when one comes starts nothing more. */
   private lifecycle = 0;
+  /** The store's admissions `start` waits for, so `idle` waits for their reads too. */
+  private readonly admissions = new Set<Promise<void>>();
+  /** The start admitting the store for this lifecycle: a call made meanwhile is its second call. */
+  private starting: { lifecycle: number; admission: Promise<void> } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private pumping: Promise<void> | null = null;
+  /**
+   * The one paging pass in flight (`catchUp`, `sync`), which a caller arriving while it reads joins. It covers reading
+   * and storing the pages only, never applying or delivering them, so a delivery that takes its time cannot hold up
+   * the next read. `abortable`: started by a sync, whose requests `stop` aborts.
+   */
+  private paging: { pass: Promise<number>; abortable: boolean } | null = null;
+  /**
+   * What this desktop knows of the ledger, for an advisory notice (`ledgerUnsettled`): a socket replay is under way
+   * (from its first segment, or a gap's, to its last), and whether a read reached the relay's end since this run
+   * started and since a read last failed part-way.
+   */
+  private socketReplay = false;
+  private ledgerRead = false;
+  /** The one HTTP sync in flight (`sync`). */
+  private syncing: Promise<HttpSyncStatus> | null = null;
+  /** Set while this run polls the relay over HTTP (`start({ socket: false, poll })`). */
+  private poll: ResolvedPoll | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Aborts the HTTP sync's requests when the bridge stops or is revoked; a new one for each start. */
+  private httpAbort = new AbortController();
+  /** The run in which the relay last recorded this bridge's features from a sync (`sync`), and when. */
+  private declaredRun = -1;
+  private declaredAt = 0;
+  /** The relay said this device was revoked, or the ledger did: final for this bridge, whatever stops it next. */
+  private revokedSeen = false;
+  /** Failed HTTP syncs in a row. */
+  private syncFailures = 0;
+  /** This run was started to poll: gap recovery and background reads leave the relay to the poll schedule. */
+  private pollMode = false;
+  /** This bridge has synced over HTTP, so its status record is kept current (a revocation included). */
+  private httpSynced = false;
+  /** Status records, written in order; `stop` waits for them so the host can close the store after it. */
+  private statusWrites: Promise<void> = Promise.resolve();
+  /**
+   * Applying what syncs read, and delivering what that brings, each one run at a time in the background, so a sink
+   * or a key lookup that hangs holds one run, never a growing queue, and a hung sink does not stop events (a
+   * withdrawal, a revocation) from being applied. `sync({ settle: true })` waits for both.
+   */
+  private readonly applier = new Rerun(
+    () => this.applyStored(),
+    (e) => this.emitError(e),
+  );
+  private readonly deliverer = new Rerun(
+    () => this.deliverNow(),
+    (e) => this.emitError(e),
+  );
+  /** Recovery and the reopening of delivery, chained across starts (`reopenDelivery`); never rejects. */
+  private reopening: Promise<void> = Promise.resolve();
+  /** Starts whose recovery has not finished. */
+  private reopensPending = 0;
+  /** Delivery was just reopened: the applier's next run delivers even when it applies nothing new. */
+  private redeliver = false;
+  /** The last sync was refused this device's signature: background requests wait for the sync's slow retry. */
+  private authRefused = false;
+  /** Deliveries already announced on `delivered`, so two drains settling the same one announce it once. */
+  private announced = new Set<string>();
   private listeners: { [K in keyof Listener]: Listener[K][] } = {
     state: [],
     socket: [],
@@ -344,6 +628,8 @@ export class DecisionsBridge {
     answer: [],
     decline: [],
     followUp: [],
+    sync: [],
+    replaced: [],
   };
 
   constructor(private readonly o: BridgeOptions) {
@@ -371,15 +657,22 @@ export class DecisionsBridge {
       ...(o.learner ? { learner: o.learner } : {}),
       refreshIdentity: (announced) => this.refreshKeys(announced),
     };
-    this.publisher = new Publisher(this.ctx, {
-      onOwnerAnswer: (r) => this.notify('answer', r),
-      onOwnerDecline: (r) => this.notify('decline', r),
-      onOwnerFollowUp: (r) => this.notify('followUp', r),
-    });
+    this.advisory = new AdvisorySupport(this.ctx, o.advisoryDeadlines === true);
+    this.publisher = new Publisher(
+      this.ctx,
+      {
+        onOwnerAnswer: (r) => this.notify('answer', r),
+        onOwnerDecline: (r) => this.notify('decline', r),
+        onOwnerFollowUp: (r) => this.notify('followUp', r),
+        onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
+      },
+      this.advisory,
+    );
     this.verifier = new EventVerifier(this.ctx, { ownerMessages: !!o.followUps });
     this.snapshots = new SnapshotPublisher(this.ctx, o.snapshots, (e) => this.emitError(e));
     this.involvement = new InvolvementSync(this.ctx, this.verifier, (e) => this.emitError(e));
     this.presence = new PresenceReporter(this.ctx, (e) => this.emitError(e));
+    this.agentStopped = new AgentStoppedPusher(this.ctx);
     this.features = bridgeFeatures(o);
     this.inbox = new Inbox(
       this.ctx,
@@ -389,14 +682,18 @@ export class DecisionsBridge {
         onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
         onInvolvementHint: () => this.involvement.hint(),
+        closureWrite: (id) => this.delivery.closureWrite(id),
+        onWarning: (e) => this.emitError(e),
       },
-      { messages: !!o.followUps },
+      { messages: !!o.followUps, advisoryOutcomes: o.advisoryDeadlines === true },
     );
     this.delivery = new DeliveryEngine(this.ctx, {
       sink: o.sink,
       ...(o.adapters ? { adapters: o.adapters } : {}),
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
+      advisoryOutcomes: o.advisoryDeadlines === true,
+      replaying: (id) => this.ledgerUnsettled(id),
     });
     this.socket = new RelaySocket({
       client,
@@ -407,10 +704,19 @@ export class DecisionsBridge {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => {
+          // A replay is under way until its last segment is caught up; a socket that closes abandons it, and what an
+          // HTTP read brought meanwhile may settle a notice that waited.
+          const abandoned = this.socketReplay && s !== 'syncing' && s !== 'live';
+          this.socketReplay = s === 'syncing' || (s === 'live' && this.socketReplay);
+          if (s === 'syncing') this.ledgerRead = false;
+          // What the replay applied was held from delivery while it ran (`onSocketEvent`): deliver it now.
+          if (abandoned && this.running())
+            void this.deliverNow().catch((e) => this.emitError(e as Error));
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
         onRevoked: () => this.markRevoked(),
+        onReplaced: () => [...this.listeners.replaced].forEach((l) => l()),
         onError: (e) => this.emitError(e),
       },
     });
@@ -469,47 +775,112 @@ export class DecisionsBridge {
         this.hostKeys = keyStore;
       }
       ctx.client.identity = ctx.identity;
-      let next: Identity;
+      let grants;
       try {
-        next = await refreshHostGrants(ctx.client, keyStore);
+        ({ grants } = await ctx.client.keyGrants());
       } catch (e) {
-        // Unreachable relay: retry the event later, in order. Anything else (a grant the pinned owner did not
-        // seal, a changed identity) is permanent and fails closed.
-        if (e instanceof RelayError && e.retryable)
-          throw new TransientError(`epoch grants unavailable: ${e.message}`);
-        throw e;
+        // The grants could not be read: an unreachable relay, a refusal that can pass (a clock it could not correct, a
+        // relay being upgraded) or a reply that is no grant list. None of it says anything about the event, which is
+        // retried later, in order. Only the relay saying this device is revoked ends it.
+        if (isDeviceRevoked(e)) throw e;
+        throw new TransientError(`epoch grants unavailable: ${(e as Error).message}`);
       }
-      ctx.identity = next;
+      // What the grants say is final: one the pinned owner did not seal, or a changed identity, fails closed.
+      ctx.identity = await refreshHostGrants(ctx.client, keyStore, grants);
       return;
     }
     if (!o.keyStore) return;
-    const id =
-      announced !== undefined
-        ? await promoteEpoch(o.keyStore, announced)
-        : await loadIdentity(o.keyStore);
+    let id: Identity;
+    try {
+      id =
+        announced !== undefined
+          ? await promoteEpoch(o.keyStore, announced)
+          : await loadIdentity(o.keyStore);
+    } catch (e) {
+      // The key store could not be read (a locked keychain, a file mid-write): that says nothing about the event.
+      throw new TransientError(`key store unavailable: ${(e as Error).message}`);
+    }
     ctx.identity = id;
     ctx.client.identity = id;
   }
 
   /* ---------------- lifecycle ---------------- */
 
-  /** Reconcile interrupted injections, connect the socket, start the retry timer. */
-  async start(opts: { socket?: boolean } = {}): Promise<void> {
-    if (this.state === 'running') return;
+  /**
+   * Reconcile interrupted injections, connect the socket, start the retry timer. Without a socket
+   * (`socket: false`) the host reads events itself (`catchUp`, `sync`), or passes `poll` to have the bridge
+   * sync over HTTP continuously, starting now, until it stops or is revoked. Rejects with `StoreFormatError`, having
+   * started nothing, when a newer client wrote the store (`admitStoreFormat`).
+   *
+   * A stopped bridge can be started again, and delivers again once a write still in flight from before the stop has
+   * settled. A revoked one cannot: `start` throws `forbidden`.
+   */
+  async start(opts: { socket?: boolean; poll?: HttpPollOptions | true } = {}): Promise<void> {
+    if (opts.poll && opts.socket !== false)
+      throw new BridgeError(
+        'validation_error',
+        'HTTP polling replaces the socket: pass socket: false',
+      );
+    // Revocation is final for this bridge, also once a stop has replaced its state: nothing reads or types again.
+    if (this.revokedSeen)
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    // A second call returns once a store that cannot be repaired has been reported, as the first does.
+    if (this.state === 'running') return this.inbox.checkHistory();
+    // A call made while the first admits the store is a second call: the first, which chose the transport, starts.
+    const first = this.starting;
+    if (first && first.lifecycle === this.lifecycle) {
+      await first.admission;
+      return this.running() ? this.inbox.checkHistory() : undefined;
+    }
+    // Nothing reads or writes the store before it is admitted. A stop or a revocation while it was being read wins:
+    // each moves the lifecycle on, and a start made after it admits the store again.
+    const admitting = this.lifecycle;
+    const admission = admitStoreFormat(this.ctx.store);
+    const starting = { lifecycle: admitting, admission };
+    this.starting = starting;
+    this.admissions.add(admission);
+    try {
+      await admission;
+    } finally {
+      this.admissions.delete(admission);
+      if (this.starting === starting) this.starting = null;
+    }
+    if (admitting !== this.lifecycle) return this.running() ? this.inbox.checkHistory() : undefined;
     const run = ++this.lifecycle;
+    this.httpAbort = new AbortController();
     this.state = 'running';
+    this.advisory.start();
+    // This run has read nothing yet: a reopen may be waiting at the relay for an advisory notice still to type.
+    this.ledgerRead = false;
     this.listeners.state.forEach((l) => l(this.state));
     // A store migrated from before content was sealed still holds plaintext: seal it before anything else.
     // A failure is reported, not fatal: legacy rows stay readable, so delivery must not stop over it, and the
     // next start tries again.
     await sealStoredContent(this.ctx).catch((e) => this.emitError(e as Error));
-    await this.delivery.recover();
+    // Recovery waits for a drain still writing from before a stop, and for an earlier start's recovery
+    // (`reopenDelivery`). Behind either, it runs in the background, so a write that never returns does not keep this run
+    // from reading: delivery stays closed until it is done.
+    const behind = this.delivery.draining || this.reopensPending > 0;
+    // Nothing more is typed before recovery has run, also on a first start behind a drain the host began.
+    if (behind) this.delivery.stopped = true;
+    const reopening = this.reopenDelivery(run);
+    if (behind) reopening.catch((e) => this.emitError(e as Error));
+    else await reopening;
+    // Images a crash left with no queued create to use them.
+    await this.publisher.pruneSpool().catch((e) => this.emitError(e as Error));
+    // A store that cannot read its history is reported before anything is read from the relay.
+    await this.inbox.checkHistory();
     // Stopped or revoked while recovering: nothing may start sending in the background now.
     if (run !== this.lifecycle) return;
     this.snapshots.start();
     this.involvement.start();
     this.presence.start();
     if (opts.socket !== false) this.socket.start();
+    if (opts.poll) {
+      this.poll = resolvePoll(opts.poll);
+      this.pollMode = true;
+      this.schedulePoll(0);
+    }
     const every = this.o.pumpIntervalMs ?? 30_000;
     if (every > 0) {
       this.timer = setInterval(
@@ -521,28 +892,113 @@ export class DecisionsBridge {
     void this.pump().catch((e) => this.emitError(e as Error));
   }
 
+  /**
+   * Reconcile interrupted injections for run `run`, then reopen delivery if the last stop closed it. Waits first for
+   * the previous start's recovery, so two never reconcile the same intent, and for a drain still writing from before
+   * the stop: recovery would take its open intent for a crash, and delivery reopened under it would let it type on. A
+   * stop or revocation meanwhile leaves delivery closed.
+   */
+  private reopenDelivery(run: number): Promise<void> {
+    const prior = this.reopening;
+    this.reopensPending++;
+    const next = (async () => {
+      try {
+        await prior;
+        await this.delivery.idle();
+        if (run !== this.lifecycle) return;
+        await this.delivery.recover();
+        if (run !== this.lifecycle || !this.delivery.stopped) return;
+        this.delivery.stopped = false;
+        // A pump that drained while delivery was closed typed nothing, and this run's first pump may only join it. The
+        // applier delivers once more, after applying what is stored, so a withdrawal waiting there is applied first.
+        this.redeliver = true;
+        void this.applier.kick();
+      } finally {
+        this.reopensPending--;
+      }
+    })();
+    this.reopening = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Stop everything this bridge started. An HTTP sync in flight has its requests aborted, and `stop` waits for it to
+   * settle, so the host can close the store afterwards; a request that is not the sync's own (a key lookup while
+   * verifying an event) is cut short only by `RelayClient.close()`. A start still admitting the store is waited for by
+   * `idle()`.
+   */
   async stop(): Promise<void> {
     this.lifecycle++;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.stopPolling();
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
+    this.advisory.stop();
     this.delivery.stopped = true;
     this.state = 'stopped';
     this.listeners.state.forEach((l) => l(this.state));
+    // A sync's page read writes events and the cursor: its requests were just aborted, so it settles at once. Applying
+    // and delivering are not waited for, as with the socket: the delivery engine stops admitting on its own.
+    if (this.paging?.abortable) await this.paging.pass.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.statusWrites,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, STATUS_WAIT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  /**
+   * Settles once the work this bridge already started has finished: a pump or sync in flight, applying what it read,
+   * and delivering, with what the sink reported recorded. For a host that has stopped the bridge (and ended its sink's
+   * commands) and is about to close the store; never rejects. Work started after it is called is not waited for.
+   */
+  async idle(): Promise<void> {
+    const quiet = (p: Promise<unknown> | null | undefined) =>
+      (p ?? Promise.resolve()).then(
+        () => undefined,
+        () => undefined,
+      );
+    await Promise.all([
+      ...[...this.admissions].map(quiet),
+      quiet(this.pumping),
+      quiet(this.syncing),
+      quiet(this.paging?.pass),
+      this.reopening,
+      this.applier.idle(),
+      this.deliverer.idle(),
+    ]);
+    await this.delivery.idle();
+  }
+
+  private stopPolling(): void {
+    this.pollMode = false;
+    this.poll = null;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    this.pollTimer = null;
+    this.httpAbort.abort();
   }
 
   private markRevoked(): void {
     if (this.state === 'revoked') return;
+    this.revokedSeen = true;
+    // Recorded before anyone hears of it, so a host that stops (and closes the store) on `revoked` keeps the record.
+    if (this.httpSynced) this.recordRevoked();
     this.lifecycle++;
     this.state = 'revoked';
     this.delivery.stopped = true;
+    this.stopPolling();
     this.socket.stop();
     this.snapshots.stop();
     this.involvement.stop();
     this.presence.stop();
+    this.advisory.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.listeners.state.forEach((l) => l('revoked'));
@@ -550,15 +1006,26 @@ export class DecisionsBridge {
 
   /* ---------------- Daintree-facing API ---------------- */
 
-  /** Commits locally and returns immediately; publishing happens in the background. */
-  async registerQuestion(args: {
-    origin: QuestionOrigin;
-    input: unknown;
-  }): Promise<RegisterResult> {
+  /**
+   * Commits locally and returns immediately; publishing happens in the background. `pump: false` leaves the publishing
+   * to the host (`pump`, or `publisher.flush` alone when another process on the same store receives), so nothing is
+   * sent or delivered before the host has told its caller the question id.
+   */
+  async registerQuestion(
+    args: {
+      origin: QuestionOrigin;
+      input: unknown;
+    } & RegisterOptions & { pump?: boolean },
+  ): Promise<RegisterResult> {
     if (this.state === 'revoked')
       throw new BridgeError('forbidden', 'this device was revoked from the relay');
-    const r = await this.publisher.register(args.origin, args.input);
-    if (!r.duplicate) void this.pump().catch((e) => this.emitError(e as Error));
+    const r = await this.publisher.register(
+      args.origin,
+      args.input,
+      args.awaitAdvisorySupport ? { awaitAdvisorySupport: true } : {},
+    );
+    if (!r.duplicate && args.pump !== false)
+      void this.pump().catch((e) => this.emitError(e as Error));
     return r;
   }
 
@@ -913,9 +1380,46 @@ export class DecisionsBridge {
     this.presence.report(present);
   }
 
+  /**
+   * Ask the relay to tell the person's phone that an agent stopped (protocol section 11, `agent-stopped-push-v1`).
+   * When to ask (which stops count, whether the person is away, quiet hours, batching stops that land together) is
+   * the host's call; the relay still drops a request in its quiet hours, and accepts at most one a minute.
+   *
+   * It takes nothing, and sends nothing but the protocol version: which agent stopped, where, how many and why stay
+   * on the computer. A relay that does not advertise `agent-stopped-push-v1` is never asked, and asking one resolves
+   * `unsupported`, without an error. The request is sent at most once, never retried, whatever its outcome: a refusal,
+   * rate-limited or otherwise, or a relay that could not be reached, resolves `dropped`, so a stop is never alerted
+   * late. Resolves with the outcome (`AgentStoppedPushResult`) and never rejects over the relay.
+   *
+   * Owner desktop only: a Remote Host is refused (`forbidden`) before anything is signed, as is a revoked desktop, and
+   * the bridge must be started (`invalid_state`); one stopped while the relay's features are read sends nothing, though
+   * a request already being signed or sent still goes out. This is a host API: it is not an MCP tool, and a pane's
+   * bearer token never reaches it.
+   */
+  async requestAgentStoppedPush(): Promise<AgentStoppedPushResult> {
+    if (this.ctx.identity.role !== 'owner-desktop') {
+      throw new BridgeError(
+        'forbidden',
+        'only the owner desktop asks for an agent-stopped push; a Remote Host never does',
+      );
+    }
+    if (this.state === 'revoked')
+      throw new BridgeError('forbidden', 'this device was revoked from the relay');
+    if (this.state !== 'running')
+      throw new BridgeError('invalid_state', 'start the bridge before asking for a push');
+    const run = this.lifecycle;
+    return this.agentStopped.request(() => this.state === 'running' && run === this.lifecycle);
+  }
+
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
+    // Whether an advisory notice would wait for the ledger is read before the row: an event applied in between is
+    // then in the row, and one applied after it was still unsettled here. It starts no clock: the question may still be
+    // open, and the two-minute hold is timed only once its notice waits (`view`).
+    const unsettled = await this.delivery
+      .ledgerHolds(questionId, { start: false })
+      .catch(() => true);
     const row = await this.owned(questionId, pane);
-    return this.view(row);
+    return this.view(row, unsettled);
   }
 
   async listPending(pane?: PaneIdentity): Promise<DecisionView[]> {
@@ -937,15 +1441,42 @@ export class DecisionsBridge {
   }
 
   /** Opens the answers in memory to build the view; nothing decrypted is written back. */
-  private async view(row: QuestionRow): Promise<DecisionView> {
+  private async view(row: QuestionRow, unsettled?: boolean): Promise<DecisionView> {
+    const create = (await this.ctx.store.outboxFor(row.question_id)).find(
+      (o) => o.kind === 'create',
+    );
     const entries = await openAnswers(this.ctx, row);
+    const unpublished = entries.find((e) => e.kind === 'unpublished');
+    const timeout = this.advisoryTimeout(row, entries);
+    // The host as it stands while the answers just read are current, as the published notice's view reads it.
+    const host = {
+      outcomes: this.advisory.hostSupport,
+      allowed: this.ctx.policy.advisoryQuestions,
+    };
+    // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
+    // ahead here either.
+    const noticeWaits =
+      timeout?.inForce === true &&
+      (timeout.view.notice === 'pending' ||
+        (timeout.view.notice === 'needs-attention' && !timeout.view.writeRefused));
+    // Read (and the hold timed from now, if it is not yet) only once a notice waits; an earlier unsettled read wins.
+    const held = noticeWaits
+      ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
+      : false;
+    // One whose admitted write its sink refused was settled as a typed one is, so only what the store shows every
+    // process alike holds it (`refusalHeld`).
+    const refusedWaits =
+      timeout?.inForce === true && timeout.view.writeRefused ? await this.refusalHeld(row) : false;
+    const waiting = (noticeWaits && (unsettled === true || held)) || refusedWaits;
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
     let confirmation: OpenAnswerEntry | undefined;
     for (const e of entries) {
       if (e.kind !== 'answer') continue;
-      if (e.action === 'confirm-proxy') confirmation = current ? e : undefined;
+      // Only the person confirms a proxy answer: a confirmation from anyone else (a newer client's) confirms nothing.
+      if (e.action === 'confirm-proxy')
+        confirmation = current && e.source === 'human' ? e : undefined;
       else {
         current = e;
         confirmation = undefined;
@@ -956,23 +1487,54 @@ export class DecisionsBridge {
     // Only a reopen changes a cancelled question, and it moves the revision on: a decline at this revision is the
     // cancellation in force.
     const declined = entries.some(
-      (e) => e.kind === 'declined' && e.revision === row.question_revision,
+      (e) => e.kind === 'declined' && e.revision === row.question_revision && !unsupportedEntry(e),
     );
+    // Every answer, correction or confirmation moves the revision on and is kept with its revision; a reopen moves it
+    // without one. So a revision the answers do not account for means the question was reopened into a round that
+    // waits for a decision. History an older bridge did not keep reads as reopened: the safe side.
+    const answeredRevisions = new Set(
+      entries.filter((e) => e.kind === 'answer').map((e) => e.revision),
+    ).size;
+    const replyMode: ReplyMode =
+      replyModeOfRow(row) === 'advisory' && row.question_revision <= answeredRevisions
+        ? 'advisory'
+        : 'blocking';
+    let plannedFallback: string | null = null;
+    if (replyMode === 'advisory') {
+      // Opened with the keys already held: reading a decision never asks the relay for one.
+      const content = await openQuestionContent({ identity: this.ctx.identity }, row).catch(
+        () => null,
+      );
+      plannedFallback = content?.planned_fallback ?? null;
+    }
+    // A never-published notice that may have been typed keeps what it said: the question is flagged so, or an intent
+    // for it is still uncertain (a retry clears the flag, never the intent, and delivery stays blocked on it).
+    const planMaybeTyped =
+      unpublished?.fallback_due === true &&
+      !unpublished.delivered &&
+      (row.delivery_status === 'delivery-uncertain' ||
+        (await this.ctx.store.hasUncertainIntent(row.question_id)));
     return {
       questionId: row.question_id,
       alias: row.alias,
       status: row.local_status,
+      publication: publicationOf(row, create, !!unpublished),
       requirement: row.requirement,
       deliveryStatus: row.delivery_status,
       revision: row.question_revision,
       expiresAt: row.expires_at,
+      replyMode,
+      plannedFallback,
+      errorCode: row.local_status === 'publish-failed' ? row.error_code : null,
       workflowGateId: row.origin.workflow_gate_id,
+      // An answer from a source this client does not know (a newer client's) is reported as no one's, never the
+      // person's.
       provenance: inForce
         ? confirmed
           ? 'human'
-          : inForce.source === 'proxy'
-            ? 'proxy'
-            : 'human'
+          : inForce.source === 'proxy' || inForce.source === 'human'
+            ? inForce.source
+            : null
         : null,
       answeredOn: inForce ? answeredOn(confirmation ?? inForce) : null,
       closedReason:
@@ -982,7 +1544,16 @@ export class DecisionsBridge {
             : 'withdrawn'
           : row.local_status === 'expired'
             ? 'expired'
-            : null,
+            : row.local_status === 'publish-failed' && unpublished
+              ? 'never-published'
+              : null,
+      fallbackDue:
+        !row.history_only &&
+        ((row.local_status === 'publish-failed' &&
+          !!unpublished &&
+          unpublishedPlanDue(unpublished, planMaybeTyped, host)) ||
+          (timeout?.inForce === true && timeout.view.disposition === 'fallback-due' && !waiting)),
+      advisoryTimeout: timeout?.view ?? null,
       choice: inForce?.choices[0]?.id ?? null,
       text: inForce?.text ?? '',
       // Only a human answer that carried its own content attests to the images the phone displayed.
@@ -1005,6 +1576,57 @@ export class DecisionsBridge {
           createdAt: e.created_at,
         })),
       thread: await this.thread(row, entries),
+    };
+  }
+
+  /**
+   * The advisory round's unanswered deadline, if it had one, with whether its notice still describes the question.
+   * Imported history has none: its entries were never delivered by this desktop.
+   */
+  private advisoryTimeout(
+    row: QuestionRow,
+    entries: OpenAnswerEntry[],
+  ): { view: AdvisoryTimeoutView; inForce: boolean } | null {
+    const e = entries.findLast(isAdvisoryNotice);
+    if (!e?.advisory_disposition || row.history_only) return null;
+    const inForce = e.deliver && closureInForce(e, row);
+    // A write that may have reached the terminal stays uncertain, also once a reopen or a deletion replaced the round.
+    const notice: AdvisoryTimeoutView['notice'] = e.delivered
+      ? 'delivered'
+      : e.uncertain_injection_id
+        ? 'uncertain'
+        : !inForce
+          ? 'superseded'
+          : row.delivery_status === 'delivery-uncertain'
+            ? 'uncertain'
+            : row.delivery_status === 'needs-attention'
+              ? 'needs-attention'
+              : 'pending';
+    // A notice nothing was typed for yet says what the host allows when it is typed (delivery checks again before
+    // then); one that was typed, or may have been, keeps what it said.
+    const disposition =
+      notice === 'pending' || notice === 'needs-attention'
+        ? (currentDisposition(e.advisory_disposition, {
+            outcomes: this.advisory.hostSupport,
+            allowed: this.ctx.policy.advisoryQuestions,
+          }) ?? e.advisory_disposition)
+        : e.advisory_disposition;
+    return {
+      inForce,
+      view: {
+        revision: e.revision,
+        deadline: e.created_at,
+        disposition,
+        notice,
+        injectionId:
+          notice === 'delivered'
+            ? (e.injection_id ?? null)
+            : notice === 'uncertain'
+              ? (e.uncertain_injection_id ?? null)
+              : null,
+        writeRefused: notice === 'needs-attention' && e.write_refused === true,
+        agentAction: 'unobserved',
+      },
     };
   }
 
@@ -1076,6 +1698,47 @@ export class DecisionsBridge {
     return out.sort((a, b) => a.seq - b.seq).map((x) => x.entry);
   }
 
+  /**
+   * Whether the ledger may hold a later event (a reopen, a deletion) for the round an advisory notice of `questionId`
+   * closed (`DeliveryOptions.replaying`): `unapplied` when an event of that question is stored and not applied yet (a
+   * gap waits for the events before it), `reading` while a read of the relay is under way, a read failed part-way or
+   * none reached the relay's end since this run started, or an event of another question waits to be applied.
+   */
+  private async ledgerUnsettled(questionId: string): Promise<'unapplied' | 'reading' | null> {
+    const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
+    if (stored.some((e) => eventQuestionId(e) === questionId)) return 'unapplied';
+    // More than were looked through: one of them may be the question's, so the wait is bounded like a read's.
+    return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
+      ? 'reading'
+      : null;
+  }
+
+  /**
+   * Whether an advisory notice of `row` whose write its sink refused still waits (`view`), from the store alone: an event
+   * of its question is stored and not yet applied (a reopen read past a gap), the store cannot be read, or the row has
+   * moved on since it was read. More stored than one look reads may hide one of the question's, so they hold it as a
+   * read under way does, two minutes at most, timed from the refused attempt. Looked at after the row was read, so an
+   * event stored before the refusal is either still waiting here or applied, which the row read again shows.
+   */
+  private async refusalHeld(row: QuestionRow): Promise<boolean> {
+    try {
+      const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
+      if (stored.some((e) => eventQuestionId(e) === row.question_id)) return true;
+      const tried = row.last_attempt_at ? Date.parse(row.last_attempt_at) : NaN;
+      if (stored.length >= UNAPPLIED_SCAN && !(this.ctx.now() - tried >= ADVISORY_LEDGER_WAIT_MS))
+        return true;
+      const now = await this.ctx.store.getQuestion(row.question_id);
+      return (
+        !now ||
+        now.local_status !== row.local_status ||
+        now.question_revision !== row.question_revision ||
+        now.answers_json !== row.answers_json
+      );
+    } catch {
+      return true;
+    }
+  }
+
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */
   async notifyPaneIdle(): Promise<DrainResult> {
     return this.delivery.drain();
@@ -1094,8 +1757,17 @@ export class DecisionsBridge {
   /** Flush the outbox, run the proxy for new proxy-capable questions, apply inbound events, deliver. */
   pump(): Promise<void> {
     if (!this.running()) return Promise.resolve();
-    if (this.pumping) return this.pumping;
-    this.pumping = (async () => {
+    // The relay is refusing this device's signature: every signed request now counts against its limit on failed
+    // authentications from this address, so the background work waits for the sync's slow retry to get through.
+    if (this.pollMode && this.authRefused) return Promise.resolve();
+    // Beside the pump, never inside it: a slow relay must not keep a question asked meanwhile from the next flush. It
+    // reads only on a host that could ask for advice, and never throws.
+    const advisory = this.advisory.refreshIfDue();
+    // This run's recovery failed, so delivery is still closed: try it again rather than leave it closed until a restart.
+    if (this.delivery.stopped && this.reopensPending === 0)
+      void this.reopenDelivery(this.lifecycle).catch((e) => this.emitError(e as Error));
+    if (this.pumping) return Promise.all([this.pumping, advisory]).then(() => undefined);
+    const core = (async () => {
       try {
         // A flush that waits behind another, or is still sending when the bridge stops, sends nothing more.
         const flushed = await this.publisher.flush({ proceed: this.running });
@@ -1105,17 +1777,27 @@ export class DecisionsBridge {
         await this.inbox.processPending();
         await this.deliverNow();
         if (await this.inbox.hasGap()) await this.recoverGap();
-        this.involvement.retryIfDue();
+        // A polling bridge reads the preference after each successful sync instead, so a relay refusing this device
+        // hears from it on the sync's slow schedule, not every pump.
+        if (!this.pollMode) this.involvement.retryIfDue();
       } finally {
         this.pumping = null;
       }
     })();
-    return this.pumping;
+    this.pumping = core;
+    return Promise.all([core, advisory]).then(() => undefined);
   }
 
   private async deliverNow(): Promise<void> {
     const before = await this.ctx.store.listQuestions({
-      status: ['open', 'proxy-answered', 'human-answered', 'expired', 'cancelled'],
+      status: [
+        'open',
+        'proxy-answered',
+        'human-answered',
+        'expired',
+        'cancelled',
+        'publish-failed',
+      ],
     });
     const r = await this.delivery.drain();
     if (r.delivered > 0) {
@@ -1126,7 +1808,12 @@ export class DecisionsBridge {
           after.delivery_status === 'terminal-delivered' &&
           q.delivery_status !== 'terminal-delivered'
         ) {
-          this.listeners.delivered.forEach((l) => l(q.question_id));
+          // Two drains running at once (overlapping catch-ups) can both see this one settle.
+          const key = `${q.question_id}:${after.last_injection_id ?? ''}`;
+          if (this.announced.has(key)) continue;
+          this.announced.add(key);
+          const what = deliveredKind(q.answers_json, after.answers_json);
+          this.listeners.delivered.forEach((l) => l(q.question_id, what));
         }
       }
     }
@@ -1141,7 +1828,11 @@ export class DecisionsBridge {
     } catch {
       /* socket closed; the next sync re-sends from the stored cursor */
     }
-    if (await this.inbox.processPending()) await this.deliverNow();
+    // A frame of a replay is applied but not delivered: a later frame of the same replay (a reopen) may replace
+    // what it closed. The pump after the replay's last segment delivers whatever is still in force.
+    const drain = await this.inbox.processPending();
+    if (this.socket.currentState !== 'syncing' && (drain || this.delivery.replayHeld))
+      await this.deliverNow();
     if (await this.inbox.hasGap()) await this.recoverGap();
   }
 
@@ -1155,8 +1846,14 @@ export class DecisionsBridge {
     } catch {
       /* closed */
     }
-    if (!hasMore) await this.pump();
-    else if (await this.inbox.processPending()) await this.deliverNow();
+    if (!hasMore) {
+      // Read in full: the pump applies and delivers what the replay brought, advisory notices included. A pump
+      // already running when the replay ended may have held one: it is delivered now.
+      this.socketReplay = false;
+      this.ledgerRead = true;
+      await this.pump();
+      if (this.delivery.replayHeld) await this.deliverNow();
+    } else await this.inbox.processPending();
   }
 
   private lastGap = { cursor: -1, at: 0 };
@@ -1166,26 +1863,97 @@ export class DecisionsBridge {
    * instead of acting on events that arrived out of order. Throttled so a persistent hole cannot loop.
    */
   async recoverGap(): Promise<void> {
+    // Stopped: nothing reads any more. Polling: the next scheduled sync reads the hole, keeping its backoff.
+    if (!this.running() || this.pollMode) return;
     const cursor = await this.ctx.store.getCursor();
     if (cursor === this.lastGap.cursor && this.ctx.now() - this.lastGap.at < 5000) return;
     this.lastGap = { cursor, at: this.ctx.now() };
     try {
-      if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing')
+      if (this.socket.currentState === 'live' || this.socket.currentState === 'syncing') {
+        this.socketReplay = true;
         this.socket.syncFrom(cursor);
-      else await this.catchUp();
+      } else await this.catchUp();
     } catch (e) {
       this.emitError(e as Error);
     }
   }
 
   /**
-   * HTTP catch-up (no socket): page through events after the stored cursor. After each fully persisted page
-   * the cursor moves to `next_after`, which also steps over legitimate tombstone holes.
+   * HTTP catch-up (no socket): page through events after the stored cursor, then apply and deliver them. After each
+   * fully persisted page the cursor moves to `next_after`, which also steps over legitimate tombstone holes. Reading
+   * is one pass at a time: a call while another reads joins that read, so two never page (or move the cursor) at once.
+   * Applying and delivering are not: a call while an earlier one is still delivering reads afresh and applies what it
+   * finds, so a withdrawal still lands while an answer waits to be typed.
    */
-  async catchUp(): Promise<number> {
+  catchUp(): Promise<number> {
+    // Bounded, and cut short by `stop`, so a sync that joins this read cannot hang behind it.
+    return this.catchUpWith({
+      timeoutMs: CATCH_UP_TIMEOUT_MS,
+      ...(this.running() ? { signal: this.httpAbort.signal } : {}),
+    });
+  }
+
+  private async catchUpWith(req: CallOptions): Promise<number> {
+    const cursor = await this.readPages(req);
+    await this.reportReceived(cursor, req);
+    // An advisory notice held while the ledger was read is delivered now, even when the read brought nothing.
+    const drain = await this.inbox.processPending();
+    if (drain || this.delivery.replayHeld) await this.deliverNow();
+    this.refreshPreference();
+    return cursor;
+  }
+
+  /** Tell the relay how far this desktop has read. Informational, unless the relay says the device was revoked. */
+  private async reportReceived(cursor: number, req: CallOptions): Promise<void> {
+    try {
+      await this.ctx.client.deliveriesReceived(cursor, req);
+    } catch (e) {
+      if (isDeviceRevoked(e)) this.markRevoked();
+    }
+  }
+
+  /** Without a socket there is no reconnect to read the preference on: read it after each complete catch-up. */
+  private refreshPreference(): void {
+    if (this.socket.currentState !== 'live')
+      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
+  }
+
+  /** The applier's run: apply the stored events, and have the deliverer type what they bring. */
+  private async applyStored(): Promise<void> {
+    if (!this.running()) return;
+    const drain = await this.inbox.processPending();
+    const reopened = this.redeliver;
+    this.redeliver = false;
+    if (drain || reopened || this.delivery.replayHeld) void this.deliverer.kick();
+  }
+
+  private readPages(req: CallOptions): Promise<number> {
+    if (this.paging) return this.paging.pass;
+    // A read that started before the bridge was (re)started says nothing about what this run has read.
+    const run = this.lifecycle;
+    const pass = this.pageEvents(req)
+      .then(
+        (cursor) => {
+          if (run === this.lifecycle) this.ledgerRead = true;
+          return cursor;
+        },
+        (e: unknown) => {
+          // Read part-way: what the pages after it hold is unknown until a read gets through.
+          this.ledgerRead = false;
+          throw e;
+        },
+      )
+      .finally(() => {
+        if (this.paging?.pass === pass) this.paging = null;
+      });
+    this.paging = { pass, abortable: req.signal !== undefined };
+    return pass;
+  }
+
+  private async pageEvents(req: CallOptions): Promise<number> {
     let after = await this.ctx.store.getCursor();
     for (;;) {
-      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, this.features);
+      const page = await this.ctx.client.events(after, LIMITS.eventPageSize, this.features, req);
       for (const ev of page.events) await this.inbox.persist(ev as LedgerEvent);
       await this.ctx.store.advanceCursor();
       if (page.next_after > after) {
@@ -1196,17 +1964,177 @@ export class DecisionsBridge {
       }
       if (!page.has_more) break;
     }
-    const cursor = await this.ctx.store.getCursor();
-    try {
-      await this.ctx.client.deliveriesReceived(cursor);
-    } catch {
-      /* informational */
+    return this.ctx.store.getCursor();
+  }
+
+  /**
+   * One HTTP sync, for a host without a socket: declare this bridge's features to the relay (on its first sync after
+   * each start and every few minutes after, through a socket ticket it never uses, since the relay keeps only a
+   * ticket's declaration and another process of the same device may have replaced it), and read every event after
+   * the stored cursor (`catchUp`) with a deadline on each request and no retries of its own. It records the outcome
+   * in the store (`readHttpSyncStatus`) and emits `sync`, then applies and delivers what it read in the background,
+   * so a sink that takes its time never holds up the next read; `settle` waits for that too (a one-shot run). A device
+   * the relay reports revoked stops the bridge as a revocation through the socket would; a relay that needs a newer
+   * client (`fatal`) stops the polling. Never throws: a failure is the result's `outcome`. A call while a sync runs
+   * joins it.
+   */
+  async sync(opts: { settle?: boolean } = {}): Promise<HttpSyncStatus> {
+    if (!this.syncing) {
+      const pass = this.runSync().finally(() => {
+        if (this.syncing === pass) this.syncing = null;
+      });
+      this.syncing = pass;
     }
-    if (await this.inbox.processPending()) await this.deliverNow();
-    // Without a socket there is no reconnect to read the preference on: read it after each catch-up.
-    if (this.socket.currentState !== 'live')
-      void this.involvement.refresh().catch((e) => this.emitError(e as Error));
-    return cursor;
+    const status = await this.syncing;
+    if (opts.settle) {
+      // Fresh runs of both, after this sync's read: whatever another run already took is done by then too.
+      await this.applier.kick();
+      await this.deliverer.kick();
+    }
+    return status;
+  }
+
+  private async runSync(): Promise<HttpSyncStatus> {
+    const run = this.lifecycle;
+    this.httpSynced = true;
+    const prev = (await readHttpSyncStatus(this.ctx.store).catch(() => null)) ?? NEVER_SYNCED;
+    if (this.revokedSeen) return { ...prev, outcome: 'revoked', reason: 'device_revoked' };
+    const poll = this.poll;
+    const req: CallOptions = {
+      retry: false,
+      timeoutMs: (poll ?? DEFAULT_POLL).requestTimeoutMs,
+      signal: this.httpAbort.signal,
+    };
+    const startedAt = this.ctx.now();
+    let cursor = 0;
+    let failure: { error: unknown } | null = null;
+    try {
+      if (this.declaredRun !== run || startedAt - this.declaredAt >= DECLARE_EVERY_MS) {
+        await this.ctx.client.socketTicket(this.features, req);
+        this.declaredRun = run;
+        this.declaredAt = startedAt;
+      }
+      cursor = await this.readPages(req);
+      await this.reportReceived(cursor, req);
+    } catch (e) {
+      failure = { error: e };
+      if (isDeviceRevoked(e)) this.markRevoked();
+    }
+    // Read afresh: a revocation (the refusal above, or a `device.revoked` event the pass applied) is final, even when
+    // the host stopped the bridge since; any other change of run means the stop cut this sync short.
+    const revoked = this.revokedSeen as boolean;
+    if (!revoked && (run !== this.lifecycle || this.state === 'stopped'))
+      return { ...prev, outcome: 'stopped', next_attempt_at: null };
+    const now = this.ctx.now();
+    let status: HttpSyncStatus;
+    if (revoked) {
+      status = {
+        ...prev,
+        outcome: 'revoked',
+        last_attempt_at: startedAt,
+        reason: 'device_revoked',
+        next_attempt_at: null,
+      };
+    } else if (!failure) {
+      this.syncFailures = 0;
+      this.authRefused = false;
+      status = {
+        v: 1,
+        outcome: 'ok',
+        last_success_at: now,
+        last_success_cursor: cursor,
+        last_attempt_at: startedAt,
+        failures: 0,
+        reason: null,
+        next_attempt_at: poll ? now + poll.intervalMs : null,
+      };
+    } else {
+      this.syncFailures++;
+      this.authRefused =
+        failure.error instanceof RelayError && failure.error.code === 'not_authenticated';
+      const fatal = isFatalSyncError(failure.error);
+      if (fatal) {
+        // Polling ends, but this run stays one that polls: nothing else starts reading the relay instead.
+        this.poll = null;
+        if (this.pollTimer) clearTimeout(this.pollTimer);
+        this.pollTimer = null;
+      }
+      status = {
+        ...prev,
+        outcome: fatal ? 'fatal' : 'degraded',
+        last_attempt_at: startedAt,
+        failures: this.syncFailures,
+        reason: syncFailureReason(failure.error),
+        next_attempt_at:
+          poll && !fatal ? now + retryDelayMs(this.syncFailures, poll, failure.error) : null,
+      };
+    }
+    // Queued, not awaited: a store slow to write must not hold up polling. A revocation was recorded as it happened
+    // (`markRevoked`). Classifying, queueing and announcing run without a pause, so nothing changes in between.
+    if (!revoked) void this.recordStatus(status);
+    if (run === this.lifecycle) {
+      // Whatever was read, a failed sync's earlier pages included, is applied and delivered in the background.
+      void this.applier.kick();
+      // Not after a failed sync: the relay is not answering, or refusing this device, and is asked on its schedule.
+      if (!failure) this.refreshPreference();
+    }
+    for (const l of [...this.listeners.sync]) {
+      try {
+        l(status);
+      } catch (e) {
+        this.emitError(e as Error);
+      }
+    }
+    return status;
+  }
+
+  private recordStatus(status: HttpSyncStatus): Promise<void> {
+    return this.writeStatus(async () => status);
+  }
+
+  /** The device is revoked: what the last sync recorded stays, with that as its outcome. */
+  private recordRevoked(): void {
+    const at = this.ctx.now();
+    void this.writeStatus(async () => ({
+      ...((await readHttpSyncStatus(this.ctx.store)) ?? NEVER_SYNCED),
+      outcome: 'revoked',
+      last_attempt_at: at,
+      reason: 'device_revoked',
+      next_attempt_at: null,
+    }));
+  }
+
+  private writeStatus(make: () => Promise<HttpSyncStatus>): Promise<void> {
+    const write = this.statusWrites
+      .then(async () => this.ctx.store.setMeta(HTTP_SYNC_META_KEY, JSON.stringify(await make())))
+      .catch((e) => {
+        try {
+          this.emitError(e as Error);
+        } catch {
+          /* a listener threw: the queue must still settle */
+        }
+      });
+    this.statusWrites = write;
+    return write;
+  }
+
+  private schedulePoll(delayMs: number): void {
+    if (!this.poll || !this.running()) return;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    // Kept referenced: a host that asked for continuous polling stays up while it polls, until `stop`.
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.pollOnce();
+    }, delayMs);
+  }
+
+  /** One scheduled sync; the next is scheduled only once it finishes, so polls never overlap. */
+  private async pollOnce(): Promise<void> {
+    const run = this.lifecycle;
+    const s = await this.sync();
+    if (run !== this.lifecycle || !this.poll) return;
+    const next = s.next_attempt_at ?? this.ctx.now() + this.poll.intervalMs;
+    this.schedulePoll(Math.max(0, next - this.ctx.now()));
   }
 
   /* ---------------- proxy ---------------- */
@@ -1214,6 +2142,13 @@ export class DecisionsBridge {
   private async maybeRunProxy(questionId: string): Promise<void> {
     const row = await this.ctx.store.getQuestion(questionId);
     if (!row || row.requirement === 'human-required' || !this.o.proxy) return;
+    // A create replayed well after its deadline: the relay has expired it, so a proxy answer could only be refused.
+    // The allowance keeps a round this clock reads as just past due but the relay's may not.
+    if (
+      row.expires_at !== null &&
+      Date.parse(row.expires_at) + LIMITS.requestSkewMs <= this.ctx.now()
+    )
+      return;
     await this.runProxy(questionId);
   }
 
@@ -1350,4 +2285,29 @@ export class DecisionsBridge {
 export function abstainCode(reason: string): string {
   const head = (reason.split(/[:\s]/, 1)[0] ?? '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 60);
   return head || 'abstained';
+}
+
+/**
+ * Where a question stands with the relay (`PublicationState`), from its row, its queued create if any, and whether it
+ * was settled as never published.
+ */
+function publicationOf(
+  row: QuestionRow,
+  create: OutboxItem | undefined,
+  unpublished: boolean,
+): PublicationState {
+  if (row.history_only) return 'unknown';
+  switch (row.local_status) {
+    case 'queued':
+      if (!create) return 'unknown';
+      return (create.payload as CreatePayload).maybePublished ? 'possibly-committed' : 'not-sent';
+    case 'publish-failed':
+      return unpublished ? 'never-published' : 'refused';
+    case 'cancelled':
+      // Withdrawn before its create was ever sent (`enqueueCancel`): no relay event was ever applied to it. A
+      // withdrawal the relay took arrives as an event, which records its seq.
+      return row.remote_event_seq === null ? 'never-published' : 'accepted';
+    default:
+      return 'accepted';
+  }
 }

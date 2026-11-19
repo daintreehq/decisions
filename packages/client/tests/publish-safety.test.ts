@@ -63,6 +63,99 @@ describe('D: cancel accounts for a create that may already be on the relay', () 
     expect((await env.store.listAudit(50)).some((a) => a.result === 'never-published')).toBe(false);
     expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
   });
+
+  it.each([
+    ['answered in time', 'human-answered', 1],
+    ['left to expire', 'expired', 0],
+  ] as const)(
+    'a create whose reply was lost, retried past its deadline after a reconnect, keeps the relay history (%s)',
+    async (how, status, revision) => {
+      let now = Date.now();
+      const env = await setupBridge({ now: () => now });
+      env.relay.createNow = () => now; // a new create past its deadline is refused, as the relay does
+      const deadline = now + 120_000;
+      const r = await env.bridge.registerQuestion({
+        origin: origin(),
+        input: {
+          question: 'q?',
+          options: [{ id: 'a', label: 'A' }],
+          expires_at: new Date(deadline).toISOString(),
+        },
+      });
+      env.relay.dropCreateReply = 1; // the relay commits the question; we never see the answer
+      await env.bridge.pump();
+      expect((await env.store.getQuestion(r.questionId))!.local_status).toBe('queued');
+
+      // While the desktop is offline the question is answered in time, or its deadline passes.
+      if (how === 'answered in time') {
+        await env.relay.answerEvent({ questionId: r.questionId, phone: env.phone, options: ['a'] });
+      }
+      now = deadline + 1_000;
+      if (how === 'left to expire') {
+        env.relay.expiryEvent({ questionId: r.questionId, at: new Date(deadline).toISOString() });
+      }
+      for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+        await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+
+      // Reconnect: the relay's history is applied first, then the outbox retries the create.
+      await env.bridge.catchUp();
+      await env.bridge.pump();
+
+      const creates = env.relay.calls.filter(
+        (c) => c.method === 'POST' && c.path === '/api/v1/questions',
+      );
+      expect(creates).toHaveLength(2);
+      expect(creates[1]!.body).toEqual(creates[0]!.body);
+      const history = env.relay.events.filter((e) => e.question_id === r.questionId);
+      expect(history.filter((e) => e.event_type === 'decision.created')).toHaveLength(1);
+      const row = (await env.store.getQuestion(r.questionId))!;
+      expect(row).toMatchObject({
+        local_status: status,
+        question_revision: revision,
+        remote_event_seq: history.at(-1)!.seq,
+      });
+      expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+      expect((await env.store.listAudit(50)).some((a) => a.result === 'validation_error')).toBe(
+        false,
+      );
+    },
+  );
+
+  it('history that arrives while a replayed receipt is being stored is applied after it, never overwritten', async () => {
+    const env = await setupBridge();
+    const r = await env.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'q?', options: [{ id: 'a', label: 'A' }] },
+    });
+    env.relay.dropCreateReply = 1; // the relay commits the question; we never see the answer
+    await env.bridge.pump();
+    await env.relay.answerEvent({ questionId: r.questionId, phone: env.phone, options: ['a'] });
+    for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
+      await env.store.putOutbox({ ...o, next_attempt_at: 0 });
+
+    // The publisher reads the row after its retry returns; history (as from the socket) arrives right then.
+    const read = env.store.getQuestion.bind(env.store);
+    let history: Promise<unknown> | null = null;
+    env.store.getQuestion = async (id) => {
+      const creates = env.relay.calls.filter((c) => c.path === '/api/v1/questions').length;
+      if (history || creates < 2) return read(id);
+      const row = await read(id);
+      history = env.bridge.catchUp();
+      // Long enough for the inbox to finish, unless it waits for the publisher's lock.
+      await Promise.race([history, new Promise((res) => setTimeout(res, 200))]);
+      return row;
+    };
+    await env.bridge.pump();
+    expect(history).not.toBeNull();
+    await history;
+
+    const last = env.relay.events.filter((e) => e.question_id === r.questionId).at(-1)!;
+    expect(await env.store.getQuestion(r.questionId)).toMatchObject({
+      local_status: 'human-answered',
+      question_revision: 1,
+      remote_event_seq: last.seq,
+    });
+  });
 });
 
 describe('D: ownership and correlation are scoped to the complete trusted origin', () => {

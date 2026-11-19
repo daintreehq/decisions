@@ -1,15 +1,22 @@
 import {
+  ADVISORY_ROUND_REVISION,
   AgentMessageContentV1,
+  CREATE_NEVER_COMMITTED,
+  DecisionContentV1,
   HumanAnswerContentV1,
   HumanMessageContentV1,
   LIMITS,
   MESSAGE_RECORD_TYPE,
+  advisoryRefusal,
   canonicalize,
   knownFeatures,
+  replyModeOf,
   stricter,
+  type AdvisoryRefusal,
   type CommandReceipt,
-  type DecisionContentV1,
   type ProtocolFeature,
+  type ReplyMode,
+  type Requirement,
   type SignedAction,
   type SignedMessage,
   type SignedQuestion,
@@ -29,11 +36,18 @@ import {
 import {
   AskHumanInput,
   BridgeError,
-  resolveExpiry,
+  expiryOutcome,
+  parseExpiresIn,
+  type GatedShape,
   type PostMessageInput,
   shapeForGates,
   validateOptions,
 } from './content.js';
+import {
+  advisoryContentHolds,
+  type AdvisorySupport,
+  type AdvisorySupportSnapshot,
+} from './advisory.js';
 import {
   MemorySpool,
   gateHash,
@@ -42,8 +56,8 @@ import {
   paneRef,
   type BridgeContext,
 } from './context.js';
-import { QUESTION_EXPIRY_LIMIT_MS, answerRuleViolation } from './policy.js';
-import { sameDigests } from './answers.js';
+import { QUESTION_EXPIRY_LIMIT_MS, answerRuleViolation, type WorkflowGate } from './policy.js';
+import { parseAnswers, sameDigests, serializeAnswers } from './answers.js';
 import { openProxyDraft, openQuestionContent, sealProxyDraft } from './at-rest.js';
 import { currentEpochKey } from './identity.js';
 import { RelayError } from './errors.js';
@@ -92,8 +106,18 @@ import {
 import { backoffMs } from './relay.js';
 import type { OutboxItem, QuestionOrigin, QuestionRow } from './types.js';
 
+/**
+ * A queued create. Its publication is durable evidence: without `maybePublished` the question provably never reached
+ * the relay; with it, the relay may hold the question whatever became of the reply; once a receipt or the relay's
+ * history arrives, the row is no longer `queued` and the relay holds it.
+ */
 export interface CreatePayload {
-  /** Set (and persisted) immediately before the create request is sent: the relay may have committed it. */
+  /**
+   * Set and persisted under `ctx.lock` immediately before the create request is sent (`checkpointCreate`): the relay
+   * may have committed it from then on, whatever becomes of the request. A failed request proves nothing (fetch can
+   * retry a request it already sent), so it is cleared only when the relay shows it never took the question
+   * (`withdrawUnpublished`).
+   */
   maybePublished?: boolean;
   signed: SignedQuestion;
   attachments: { attachment_id: string; ciphertext_bytes: number; sha256_ciphertext: string }[];
@@ -146,14 +170,176 @@ const takesOwnerMessages = (set: ReadonlySet<ProtocolFeature>) =>
 /** Items one flush sends at most, and how many due rows it reads to find them. */
 const OUTBOX_BATCH = 20;
 const OUTBOX_SCAN = 1_000;
+/**
+ * How long a spooled image is kept without a create referring to it (`pruneSpool`): a question being registered,
+ * here or by another process on the same store, spools its images before it commits, and a computer can sleep in
+ * between.
+ */
+const SPOOL_GRACE_MS = 24 * 60 * 60_000;
+
+/**
+ * How long a registration that asked to wait for what advice needs (`RegisterOptions.awaitAdvisorySupport`) waits for
+ * that read: the relay's `/info` and the device directory, each with a 10-second deadline of their own.
+ */
+const ADVISORY_SUPPORT_WAIT_MS = 25_000;
+
+/** How long the read of a question whose create the relay refused may take (`relayHolds`). */
+const CREATE_CHECK_TIMEOUT_MS = 15_000;
+
+/** A create's item went while it was being sent (withdrawn or settled): it is not written back, and not sent. */
+class CreateWithdrawn extends Error {}
+/** A create's deadline passed before it was first sent: it goes no further, and is settled as never published. */
+class CreateOverdue extends Error {}
+/**
+ * The relay refused a create that may already be on it, and did not say whether it holds the question (`error`): the
+ * create stays queued, possibly committed, and is sent and the relay asked again.
+ */
+class CreateUnconfirmed extends Error {
+  constructor(readonly error: RelayError) {
+    super(error.message);
+  }
+}
+
+/**
+ * Where trusted policy gave a question something other than what its agent asked for. `requested` is null when the
+ * agent asked for nothing (the deadline then comes from policy); `effective` is null for a deadline that never comes.
+ */
+export interface PolicyAdjustment {
+  field: 'expires_at' | 'requirement' | 'kind';
+  requested: string | null;
+  effective: string | null;
+  /** The host's own policy, or a workflow gate (named by `gateId`). */
+  source: 'host' | 'gate';
+  gateId: string | null;
+}
+
+/** How a host registers a question, beyond what the agent asked (`DecisionsBridge.registerQuestion`). */
+export interface RegisterOptions {
+  /**
+   * When what the relay and the person's devices support for advice is not known yet, read it once and wait for that
+   * read, instead of refusing at once with `support-unknown`. For a short-lived host (the CLI) that asks as soon as it
+   * starts, before any background read could have run. Only an advisory ask that passed every local check waits.
+   */
+  awaitAdvisorySupport?: boolean;
+}
 
 export interface RegisterResult {
   questionId: string;
   alias: number;
   requirement: QuestionRow['requirement'];
   status: 'queued';
-  /** True when `correlation_id` matched an earlier call and the existing question was returned. */
+  /**
+   * True when `correlation_id` and the whole request matched an earlier call from this pane, and that question was
+   * returned with its original deadline (it may have an answer, or have closed, since).
+   */
   duplicate: boolean;
+  /** The deadline the question was signed with, in UTC; null when it never expires. */
+  expiresAt: string | null;
+  /** The deadline the agent asked for, in UTC (`expires_in` converted once on the host clock); null if none. */
+  requestedExpiresAt: string | null;
+  /** `advisory` when the agent asked for advice (`planned_fallback`) and the host signed it so. */
+  replyMode: ReplyMode;
+  plannedFallback: string | null;
+  /** Each change policy made to the request, in the order deadline, requirement, kind. */
+  adjustments: PolicyAdjustment[];
+}
+
+/** What a correlated ask requested, by kind: the host default, a duration from asking, or a fixed time (UTC). */
+type DeadlineRequest =
+  { kind: 'default' } | { kind: 'relative'; ms: number } | { kind: 'absolute'; at: string };
+
+/**
+ * A correlated ask's registration (`reg:<question id>` in the store's meta): what it asked for beyond its signed content,
+ * and the receipt it got, so an exact retry returns that receipt after a restart. No question text: the content
+ * itself is compared, opened in memory (`sameRequest`).
+ */
+interface RegistrationRecord {
+  v: 1;
+  deadline: DeadlineRequest;
+  /** The origin's gate id as the host bound it, registered or not. */
+  originGateId: string | null;
+  /** The governing gate's policy version when it was asked: a changed policy is another question. */
+  policyVersion: number | null;
+  namedGateId: string | null;
+  requestedRequirement: Requirement | null;
+  requestedExpiresAt: string | null;
+  expiresAt: string | null;
+  replyMode: ReplyMode;
+  adjustments: PolicyAdjustment[];
+}
+
+const registrationKey = (questionId: string) => `reg:${questionId}`;
+
+function parseRegistration(v: string | null): RegistrationRecord | null {
+  if (v === null) return null;
+  try {
+    const r = JSON.parse(v) as Partial<RegistrationRecord> | null;
+    return r && r.v === 1 && r.deadline && Array.isArray(r.adjustments)
+      ? (r as RegistrationRecord)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The question a correlation id points at: `q`, the latest one committed, and `p`, one being committed now. A `p`
+ * with a committed row wins (the process stopped before moving `q` on); one without is ignored. Before #154 the
+ * value was the question id alone.
+ */
+function parseCorrelation(v: string | null): { q: string | null; p: string | null } {
+  if (v === null) return { q: null, p: null };
+  if (!v.startsWith('{')) return { q: v, p: null };
+  try {
+    const o = JSON.parse(v) as { q?: unknown; p?: unknown };
+    return {
+      q: typeof o.q === 'string' ? o.q : null,
+      p: typeof o.p === 'string' ? o.p : null,
+    };
+  } catch {
+    return { q: null, p: null };
+  }
+}
+
+const sameDeadline = (a: DeadlineRequest, b: DeadlineRequest) =>
+  a.kind === b.kind &&
+  (a.kind !== 'relative' || a.ms === (b as typeof a).ms) &&
+  (a.kind !== 'absolute' || a.at === (b as typeof a).at);
+
+/** Why an advisory ask was refused, as the agent is told: the error code and what to do. */
+const ADVISORY_REFUSALS: Record<
+  AdvisoryRefusal | 'support-unknown',
+  [BridgeError['code'], string]
+> = {
+  'relay-unsupported': ['not_supported', 'the relay does not support advisory questions yet'],
+  'host-unsupported': ['not_supported', 'this host does not deliver advisory outcomes'],
+  'policy-disallowed': ['forbidden', "the host's policy does not allow advisory questions"],
+  'no-capable-reader': [
+    'not_supported',
+    'no phone or tablet the person uses can show an advisory question yet',
+  ],
+  gated: ['validation_error', 'a question under a workflow gate always waits for a decision'],
+  approval: ['validation_error', 'an approval always waits for a decision'],
+  'no-deadline': [
+    'validation_error',
+    "advice needs a deadline: give expires_in or expires_at, since this host's default never expires",
+  ],
+  'invalid-plan': [
+    'validation_error',
+    `planned_fallback must be 1 to ${LIMITS.plannedFallbackChars} characters and not blank`,
+  ],
+  'support-unknown': [
+    'invalid_state',
+    'whether the relay and the person’s devices support advisory questions is not known yet; try again in a minute',
+  ],
+};
+
+function advisoryError(reason: AdvisoryRefusal | 'support-unknown'): BridgeError {
+  const [code, why] = ADVISORY_REFUSALS[reason];
+  return new BridgeError(
+    code,
+    `${reason}: ${why}. Nothing was asked. To have the person decide instead, ask again without planned_fallback.`,
+  );
 }
 
 export interface PublisherHooks {
@@ -166,6 +352,8 @@ export interface PublisherHooks {
   onOwnerDecline?(result: OwnerDeclineResult): void;
   /** As `onOwnerAnswer`, for the person's follow-up sent from the owner desktop. */
   onOwnerFollowUp?(result: OwnerFollowUpResult): void;
+  /** One of this desktop's questions closed without ever being published. Must return without waiting. */
+  onQuestionClosed?(questionId: string): void;
 }
 
 export class Publisher {
@@ -177,13 +365,22 @@ export class Publisher {
   /** One flush at a time, so an outbox item is never sent by two flushes at once. */
   private readonly flushing = new Mutex();
 
+  /** Registrations under one correlation key, one at a time, so an identical retry sees the first one's question. */
+  private readonly registering = new Map<string, Promise<unknown>>();
+
   constructor(
     private readonly ctx: BridgeContext,
     private readonly hooks: PublisherHooks = {},
+    /** Whether advice may be asked now (protocol section 21); without it every advisory ask is refused. */
+    private readonly advisory?: AdvisorySupport,
   ) {}
 
   /** Commit locally and return. NOTHING here touches the network. */
-  async register(origin: QuestionOrigin, rawInput: unknown): Promise<RegisterResult> {
+  async register(
+    origin: QuestionOrigin,
+    rawInput: unknown,
+    opts: RegisterOptions = {},
+  ): Promise<RegisterResult> {
     const parsed = AskHumanInput.safeParse(rawInput);
     if (!parsed.success) {
       throw new BridgeError(
@@ -199,6 +396,30 @@ export class Publisher {
       if (typeof v !== 'string' || v.length === 0)
         throw new BridgeError('validation_error', `origin.${k} is required (set by the host)`);
     }
+    // Idempotency by correlation id, scoped to the pane so one agent cannot collide with another.
+    const corrKey = input.correlation_id
+      ? `corr:${await originScope(origin)}:${input.correlation_id}`
+      : null;
+    if (!corrKey) return this.registerParsed(origin, input, null, opts);
+    const prev = this.registering.get(corrKey) ?? Promise.resolve();
+    const run = prev
+      .catch(() => undefined)
+      .then(() => this.registerParsed(origin, input, corrKey, opts));
+    const tail = run.catch(() => undefined);
+    this.registering.set(corrKey, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.registering.get(corrKey) === tail) this.registering.delete(corrKey);
+    }
+  }
+
+  private async registerParsed(
+    origin: QuestionOrigin,
+    input: AskHumanInput,
+    corrKey: string | null,
+    opts: RegisterOptions,
+  ): Promise<RegisterResult> {
     const { ctx } = this;
     // The origin's gate is trusted (registered by the host) and is the floor. A gate the agent names can only
     // make the question STRICTER; it can never replace the origin's gate or relax its level.
@@ -223,33 +444,49 @@ export class Publisher {
     const governingId = gate ? gateId : callerGate ? callerGateId : null;
     const governing = gate ?? callerGate;
     const shape = shapeForGates(input, [gate, callerGate], input.attachments?.length ?? 0);
+    const replyMode: ReplyMode = input.planned_fallback !== undefined ? 'advisory' : 'blocking';
+    const deadline: DeadlineRequest =
+      input.expires_in !== undefined
+        ? { kind: 'relative', ms: parseExpiresIn(input.expires_in)! }
+        : input.expires_at !== undefined
+          ? { kind: 'absolute', at: new Date(Date.parse(input.expires_at)).toISOString() }
+          : { kind: 'default' };
 
-    // Idempotency by correlation id, scoped to the pane so one agent cannot collide with another.
-    let questionId = newId(ctx.now());
-    const corrKey = input.correlation_id
-      ? `corr:${await originScope(origin)}:${input.correlation_id}`
-      : null;
+    // An exact retry returns the question it asked, with the deadline it got then, whatever the clock or the host's
+    // default says now. Anything else under the same id is a different question, and an answer to the old one must
+    // never be returned for it, so it is asked afresh and the id moves to it once it is committed.
+    let prior: QuestionRow | null = null;
     if (corrKey) {
-      const existing = await ctx.store.getMeta(corrKey);
-      const row = existing ? await ctx.store.getQuestion(existing) : null;
-      if (row && !(await this.sameBinding(origin, input, row, governingId, requirement))) {
-        // Different images, a different gate or a different level under the same correlation id are a
-        // different question: an answer to the old one must never be returned for the new one. Re-point the
-        // id at a fresh question.
-        await ctx.store.setMeta(corrKey, questionId);
-      } else if (existing) {
-        if (row) {
-          return {
-            questionId: row.question_id,
-            alias: row.alias,
-            requirement: row.requirement,
-            status: 'queued',
-            duplicate: true,
-          };
-        }
-        questionId = existing; // crashed between the meta write and the commit: reuse the id
-      } else {
-        await ctx.store.setMeta(corrKey, questionId);
+      const pointer = parseCorrelation(await ctx.store.getMeta(corrKey));
+      if (pointer.p) prior = await ctx.store.getQuestion(pointer.p);
+      if (!prior && pointer.q) prior = await ctx.store.getQuestion(pointer.q);
+      const reg = prior
+        ? parseRegistration(await ctx.store.getMeta(registrationKey(prior.question_id)))
+        : null;
+      if (
+        prior &&
+        reg &&
+        (await this.sameRequest(origin, input, prior, reg, {
+          governingId,
+          policyVersion: governing?.policyVersion ?? null,
+          requirement,
+          shape,
+          deadline,
+          replyMode,
+        }))
+      ) {
+        return {
+          questionId: prior.question_id,
+          alias: prior.alias,
+          requirement: prior.requirement,
+          status: 'queued',
+          duplicate: true,
+          expiresAt: reg.expiresAt,
+          requestedExpiresAt: reg.requestedExpiresAt,
+          replyMode: reg.replyMode,
+          plannedFallback: input.planned_fallback ?? null,
+          adjustments: reg.adjustments,
+        };
       }
     }
 
@@ -263,17 +500,38 @@ export class Publisher {
       );
     }
 
+    const questionId = newId(ctx.now());
     const epoch = currentEpochKey(ctx.identity);
+    // One reading of the clock: a relative deadline, the policy's caps and the signed times all count from it.
     const now = ctx.now();
+    const requestedExpiresAt =
+      deadline.kind === 'relative'
+        ? new Date(now + deadline.ms).toISOString()
+        : deadline.kind === 'absolute'
+          ? deadline.at
+          : null;
     // An origin gate is the host's policy. A gate the agent picked can only shorten the no-gate expiry. The
     // host's default expiry is read now, so a change to it applies from the next question on.
     const hostDefault = ctx.policy.defaultQuestionExpiryMs;
-    const expiresAt = gate
-      ? resolveExpiry(input.expires_at, gate, now, hostDefault)
-      : earliest(
-          resolveExpiry(input.expires_at, undefined, now, hostDefault),
-          callerGate ? resolveExpiry(input.expires_at, callerGate, now, hostDefault) : null,
-        );
+    const asked = requestedExpiresAt ?? undefined;
+    let expiresAt: string | null;
+    let expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'> = {
+      source: 'host',
+      gateId: null,
+    };
+    if (gate) {
+      expiresAt = expiryOutcome(asked, gate, now, hostDefault).expiresAt;
+      // A gate without an expiry of its own leaves the host's default in place and caps nothing.
+      if (gate.expiryMs !== undefined) expirySource = { source: 'gate', gateId };
+    } else {
+      const host = expiryOutcome(asked, undefined, now, hostDefault).expiresAt;
+      const named = callerGate
+        ? expiryOutcome(asked, callerGate, now, hostDefault).expiresAt
+        : null;
+      expiresAt = earliest(host, named);
+      if (named !== null && (host === null || Date.parse(named) < Date.parse(host)))
+        expirySource = { source: 'gate', gateId: callerGateId };
+    }
     // The relay refuses a finite expiry too far ahead, and a refused question is dropped: say so now instead.
     if (expiresAt !== null && Date.parse(expiresAt) > now + QUESTION_EXPIRY_LIMIT_MS) {
       throw new BridgeError(
@@ -281,6 +539,28 @@ export class Publisher {
         'expires_at is too far ahead: the relay accepts at most 366 days, less two minutes for clock skew',
       );
     }
+    const advisoryAsk = {
+      originGateId: origin.workflow_gate_id,
+      namedGateId: input.workflow_gate_id,
+      kind: shape.kind,
+      expiresAt,
+      plannedFallback: input.planned_fallback,
+    };
+    if (replyMode === 'advisory')
+      await this.admitAdvisory(advisoryAsk, opts.awaitAdvisorySupport === true);
+    const adjustments = policyAdjustments({
+      input,
+      requestedExpiresAt,
+      expiresAt,
+      expirySource,
+      requirement,
+      baseRequirement: base.requirement,
+      shape,
+      gates: [
+        [gate, gateId],
+        [callerGate, callerGateId],
+      ],
+    });
 
     // Attachments: encrypt now (so an offline desktop can publish later) and spool the ciphertext.
     const descriptors: DecisionContentV1['attachments'] = [];
@@ -334,6 +614,17 @@ export class Publisher {
       });
     }
 
+    // Reading the images waited on disk: what allowed advice may have changed meanwhile (the policy, a revoked reader,
+    // a stopped bridge), so it is decided again where nothing waits before the signature.
+    if (replyMode === 'advisory' && descriptors.length > 0) {
+      try {
+        await this.admitAdvisory(advisoryAsk);
+      } catch (e) {
+        for (const d of descriptors) await ctx.spool.delete(d.attachment_id).catch(() => undefined);
+        throw e;
+      }
+    }
+
     const content: DecisionContentV1 = {
       content_version: 1,
       question: input.question,
@@ -346,6 +637,7 @@ export class Publisher {
       machine_label: (origin.machine_label?.trim() || origin.host_id).slice(0, 200),
       origin_summary: `${origin.agent_kind} · ${origin.worktree_id}`.slice(0, 500),
       ...(input.preparation ? { preparation: input.preparation } : {}),
+      ...(replyMode === 'advisory' ? { planned_fallback: input.planned_fallback } : {}),
     };
     const envelope = await encryptEnvelope({
       epochKey: epoch,
@@ -357,6 +649,7 @@ export class Publisher {
       senderDeviceId: ctx.identity.config.deviceId,
       purpose: 'question-content',
       plaintext: content,
+      ...(replyMode === 'advisory' ? { replyMode: 'advisory' as const } : {}),
     });
     const signed = await buildSignedQuestion({
       installationId: ctx.identity.config.installationId,
@@ -408,7 +701,31 @@ export class Publisher {
       created_at: now,
       last_error: null,
     };
+    if (corrKey) {
+      const reg: RegistrationRecord = {
+        v: 1,
+        deadline,
+        originGateId: origin.workflow_gate_id ?? null,
+        policyVersion: governing?.policyVersion ?? null,
+        namedGateId: input.workflow_gate_id ?? null,
+        requestedRequirement: input.requested_requirement ?? null,
+        requestedExpiresAt,
+        expiresAt,
+        replyMode,
+        adjustments,
+      };
+      await ctx.store.setMeta(registrationKey(questionId), JSON.stringify(reg));
+      // Staged beside the question it replaces, which stays in force unless this commit lands; a process that stops
+      // after the commit finds the staged one committed and takes it.
+      await ctx.store.setMeta(
+        corrKey,
+        JSON.stringify({ q: prior?.question_id ?? null, p: questionId }),
+      );
+    }
     await ctx.store.commitNewQuestion(row, item);
+    // The staged id already names this question now that it is committed, so this only tidies the pointer.
+    if (corrKey)
+      await ctx.store.setMeta(corrKey, JSON.stringify({ q: questionId })).catch(() => undefined);
     await ctx.audit.log({
       event: 'question.queued',
       question_id: questionId,
@@ -416,7 +733,72 @@ export class Publisher {
       result: 'local-commit',
       content: input.question,
     });
-    return { questionId, alias, requirement, status: 'queued', duplicate: false };
+    return {
+      questionId,
+      alias,
+      requirement,
+      status: 'queued',
+      duplicate: false,
+      expiresAt,
+      requestedExpiresAt,
+      replyMode,
+      plannedFallback: input.planned_fallback ?? null,
+      adjustments,
+    };
+  }
+
+  /**
+   * Refuses an advisory ask the host may not sign (protocol section 21, `advisoryRefusal`). The host's own rules are
+   * checked first; then what the relay and the person's devices support, as last read in the background. Unknown
+   * support refuses too, and starts a read, so a retry a moment later can be decided; with `awaitSupport`, that read is
+   * waited for once first.
+   */
+  private async admitAdvisory(
+    q: Pick<
+      Parameters<typeof advisoryRefusal>[0],
+      'originGateId' | 'namedGateId' | 'kind' | 'expiresAt' | 'plannedFallback'
+    >,
+    awaitSupport = false,
+  ): Promise<void> {
+    // The host's own rules, read now: again after any wait below, since the host may change them meanwhile.
+    const localFacts = () => ({
+      ...q,
+      hostSupport: this.advisory?.hostSupport === true,
+      policyAllows: this.ctx.policy.advisoryQuestions,
+    });
+    let facts = localFacts();
+    const local = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
+    if (local) throw advisoryError(local);
+    const unknown = (k: AdvisorySupportSnapshot) =>
+      k.relay === null || (k.relay && k.reader === null);
+    let known = await this.advisory!.known();
+    if (awaitSupport && unknown(known)) {
+      // One read, bounded here whatever the fetch does with its abort signal.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.advisory!.refreshIfDue(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, ADVISORY_SUPPORT_WAIT_MS);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+      facts = localFacts();
+      const again = advisoryRefusal({ ...facts, relaySupport: true, readerSupport: true });
+      if (again) throw advisoryError(again);
+      known = await this.advisory!.known();
+    }
+    if (known.relay === null || unknown(known)) {
+      // A caller that waited for a read is not handed a second one: it asks again when it chooses.
+      if (!awaitSupport) void this.advisory!.refreshIfDue();
+      throw advisoryError('support-unknown');
+    }
+    const remote = advisoryRefusal({
+      ...facts,
+      relaySupport: known.relay,
+      readerSupport: known.reader === true,
+    });
+    if (remote) throw advisoryError(remote);
   }
 
   private async resolveAttachment(origin: QuestionOrigin, id: string): Promise<Uint8Array> {
@@ -428,24 +810,77 @@ export class Publisher {
   }
 
   /**
-   * Whether a repeat call is bound like the question it would return: the same governing gate, the same
-   * enforced level and the same images (by plaintext digest).
+   * Whether a repeat call asks exactly what `row` asked: the same governing gate, enforced level, named gate and
+   * requested level, the same deadline request and reply mode, and the same content the person would see (question,
+   * context, kind, options, text rule, preparation, plan, and the images in order with their roles and captions,
+   * by plaintext digest). The stored content is opened in memory with the keys this identity holds; content it
+   * cannot open is never taken as the same.
    */
-  private async sameBinding(
+  private async sameRequest(
     origin: QuestionOrigin,
     input: AskHumanInput,
     row: QuestionRow,
-    gateId: string | null,
-    requirement: QuestionRow['requirement'],
+    reg: RegistrationRecord,
+    asked: {
+      governingId: string | null;
+      policyVersion: number | null;
+      requirement: QuestionRow['requirement'];
+      shape: GatedShape;
+      deadline: DeadlineRequest;
+      replyMode: ReplyMode;
+    },
   ): Promise<boolean> {
-    if (row.origin.workflow_gate_id !== gateId || row.requirement !== requirement) return false;
-    const asked = input.attachments ?? [];
-    if (asked.length !== row.attachment_digests.length) return false;
-    if (asked.length === 0) return true;
+    if (row.origin.workflow_gate_id !== asked.governingId || row.requirement !== asked.requirement)
+      return false;
+    if (
+      // Raw ids, registered or not: a gate bound since, even one the policy does not know, makes it another question.
+      reg.originGateId !== (origin.workflow_gate_id ?? null) ||
+      reg.policyVersion !== asked.policyVersion ||
+      reg.namedGateId !== (input.workflow_gate_id ?? null) ||
+      reg.requestedRequirement !== (input.requested_requirement ?? null) ||
+      reg.replyMode !== asked.replyMode ||
+      !sameDeadline(reg.deadline, asked.deadline)
+    )
+      return false;
+    const images = input.attachments ?? [];
+    if (images.length !== row.attachment_digests.length) return false;
     const digests: string[] = [];
-    for (const a of asked)
+    for (const a of images)
       digests.push(await sha256Hex(await this.resolveAttachment(origin, a.local_resource_id)));
-    return sameDigests(digests, row.attachment_digests);
+    if (!sameDigests(digests, row.attachment_digests)) return false;
+    let stored: DecisionContentV1 | null;
+    try {
+      // The identity alone: deciding whether a retry is the same must never fetch keys from the relay.
+      stored = await openQuestionContent({ identity: this.ctx.identity }, row);
+    } catch {
+      return false;
+    }
+    if (!stored) return false;
+    try {
+      return (
+        canonicalize(requestOf(stored)) ===
+        canonicalize(
+          requestOf({
+            question: input.question,
+            ...(input.context ? { context: input.context } : {}),
+            kind: asked.shape.kind,
+            options: asked.shape.options,
+            allow_text: asked.shape.allowText,
+            ...(input.preparation ? { preparation: input.preparation } : {}),
+            ...(input.planned_fallback !== undefined
+              ? { planned_fallback: input.planned_fallback }
+              : {}),
+            attachments: images.map((a, i) => ({
+              sha256: digests[i]!,
+              role: a.role ?? 'other',
+              ...(a.alt ? { alt: a.alt } : {}),
+            })),
+          }),
+        )
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -467,11 +902,13 @@ export class Publisher {
       this.inflight.has(questionId) ||
       (pendingCreate?.payload as CreatePayload | undefined)?.maybePublished === true;
     if (pendingCreate && row.local_status === 'queued' && !maybeOnRelay) {
-      // Provably never sent: drop it entirely instead of publishing then cancelling.
+      // Provably never sent: drop it entirely instead of publishing then cancelling. The row closes first, so a
+      // crash before the create goes leaves one the next flush drops (`closeCreate`), never one it sends. A create
+      // being uploaded right now finds its item gone and stops (`checkpointCreate`).
+      await ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });
+      await this.dropMessages(questionId, 'never-published');
       await ctx.store.deleteOutbox(pendingCreate.id);
       await this.dropSpool(pendingCreate.payload as CreatePayload);
-      await this.dropMessages(questionId, 'never-published');
-      await ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });
       await ctx.audit.log({
         event: 'question.cancelled',
         question_id: questionId,
@@ -1209,7 +1646,14 @@ export class Publisher {
     };
     // Read well past the batch: items that must wait their turn are skipped without counting, so a long thread
     // queued behind a backed-off create never crowds other questions out of the batch.
+    const due: OutboxItem[] = [];
     for (const item of await ctx.store.dueOutbox(ctx.now(), OUTBOX_SCAN)) {
+      // Local work first, whatever the network does: a create no send could change is settled or dropped here,
+      // never left behind a transient failure that stops this flush.
+      if (item.kind === 'create' && (await this.closeCreate(item))) continue;
+      due.push(item);
+    }
+    for (const item of due) {
       if (only !== undefined && item.id !== only) continue;
       if (attempted >= OUTBOX_BATCH) break;
       if (item.kind !== 'create') {
@@ -1228,6 +1672,19 @@ export class Publisher {
           continue;
         if (person && pending.some((o) => isPersonItem(o) && personSeq(o) < personSeq(item)))
           continue;
+      }
+      if (
+        (item.kind === 'cancel' || item.kind === 'proxy-answer' || item.kind === 'proxy-abstain') &&
+        (await this.unpublishedQuestion(item.question_id))
+      ) {
+        // Left by a crash after its question closed unpublished: there is nothing on the relay to act on.
+        await remove(item);
+        await ctx.audit.log({
+          event: `outbox.${item.kind}.dropped`,
+          question_id: item.question_id,
+          result: 'never-published',
+        });
+        continue;
       }
       attempted++;
       if (item.kind === 'message') {
@@ -1276,12 +1733,16 @@ export class Publisher {
           continue;
         }
       }
+      // The person's item on one of this desktop's questions that never reached the relay: nothing there can take it,
+      // so it closes here, with no network, once any outcome it already had is kept.
+      const unpublished = isPersonItem(item) && (await this.unpublishedQuestion(item.question_id));
       if (item.kind === 'owner-decline') {
         const step = await this.flushOwnerDecline(
           item,
           () => (features ??= this.relayFeatures()),
           remove,
           proceed,
+          unpublished,
         );
         if (step === 'declined') sent++;
         else failed++;
@@ -1296,6 +1757,11 @@ export class Publisher {
         );
         if (stored?.result) {
           await finish(item, stored.result);
+          continue;
+        }
+        if (unpublished) {
+          failed++;
+          await settle(item, { status: 'closed', reason: 'not-found' });
           continue;
         }
         // A relay that does not advertise owner-desktop answers would refuse the role: it is never sent one.
@@ -1327,6 +1793,11 @@ export class Publisher {
           await finishMessage(item, stored.result);
           continue;
         }
+        if (unpublished) {
+          failed++;
+          await settleMessage(item, { status: 'closed', reason: 'not-found' });
+          continue;
+        }
         // A relay that does not advertise threads and the owner desktop's follow-ups would refuse it: never sent one.
         let set: ReadonlySet<ProtocolFeature>;
         try {
@@ -1352,10 +1823,17 @@ export class Publisher {
         if (item.kind === 'create') {
           const receipt = await this.sendCreate(item);
           created.push(item.question_id);
-          await ctx.store.updateQuestion(item.question_id, {
-            local_status: 'open',
-            remote_event_seq: receipt.event_seq,
-            error_code: null,
+          // A retry after a lost reply replays the original receipt, which can be older than the history already
+          // applied (an answer, an expiry): only a question still queued takes it. Under the lock, like the inbox. A
+          // question the relay holds without a receipt takes its creation's seq from its history.
+          await ctx.lock.run(async () => {
+            const row = await ctx.store.getQuestion(item.question_id);
+            if (row?.local_status !== 'queued') return;
+            await ctx.store.updateQuestion(item.question_id, {
+              local_status: 'open',
+              ...(receipt ? { remote_event_seq: receipt.event_seq } : {}),
+              error_code: null,
+            });
           });
         } else if (item.kind === 'message') {
           await this.sendMessage(item);
@@ -1375,16 +1853,36 @@ export class Publisher {
         await remove(item);
         sent++;
       } catch (e) {
+        if (e instanceof CreateWithdrawn) {
+          pendingByQuestion.delete(item.question_id);
+          continue;
+        }
         failed++;
+        if (e instanceof CreateOverdue) {
+          await this.settleUnpublished(item.question_id, true);
+          pendingByQuestion.delete(item.question_id);
+          continue;
+        }
+        // A refused create whose question the relay could not be asked about yet is retried as a transient failure.
+        const unconfirmed = e instanceof CreateUnconfirmed;
         const err =
-          e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
-        if (err.retryable) {
-          await ctx.store.recordOutboxFailure(
-            item.id,
-            err.code,
+          e instanceof CreateUnconfirmed
+            ? e.error
+            : e instanceof RelayError
+              ? e
+              : new RelayError('network_error', (e as Error).message, 0);
+        if (err.retryable || unconfirmed) {
+          let next =
             ctx.now() +
-              Math.max(err.retryAfterMs ?? 0, backoffMs(item.attempts + 1, 2000, 300_000)),
-          );
+            Math.max(err.retryAfterMs ?? 0, backoffMs(item.attempts + 1, 2000, 300_000));
+          // A create still provably unsent is due again by its deadline at the latest, where it is settled with no
+          // network at all (`closeCreate`): backing off never moves the outcome past the deadline.
+          const p = item.payload as CreatePayload;
+          const deadline = item.kind === 'create' ? deadlineOf(p) : null;
+          if (deadline !== null && !p.maybePublished) next = Math.min(next, deadline);
+          await ctx.store.recordOutboxFailure(item.id, err.code, next);
+          // A relay that cannot be reached takes nothing else either; one that will not say holds up only this item.
+          if (!err.retryable) continue;
           break;
         }
         if (item.kind === 'owner-answer') {
@@ -1411,18 +1909,34 @@ export class Publisher {
           continue;
         }
         // Permanent rejection: surface on the question and stop retrying it.
-        await remove(item);
         if (item.kind === 'create') {
-          await this.dropSpool(item.payload as CreatePayload);
-          // Under the lock, so a message being committed for this question sees `publish-failed` or is dropped.
-          await ctx.lock.run(async () => {
-            await ctx.store.updateQuestion(item.question_id, {
-              local_status: 'publish-failed',
-              error_code: err.code,
+          const p = item.payload as CreatePayload;
+          // The relay shows it never took a question by this id, past the deadline (protocol section 6).
+          const never = err.status === 400 && err.details?.reason === CREATE_NEVER_COMMITTED;
+          if (!(never && (await this.settleUnpublished(item.question_id, false)))) {
+            // Under the lock, so a message being committed for this question sees `publish-failed` or is dropped.
+            // The row closes before the create goes, so a crash in between is finished by `closeCreate`. A row the
+            // relay's history has already moved on (a receipt lost, then its answer or expiry applied) keeps that
+            // outcome: only the leftover create goes.
+            const refused = await ctx.lock.run(async () => {
+              const row = await ctx.store.getQuestion(item.question_id);
+              const queued = row?.local_status === 'queued';
+              if (queued) {
+                await ctx.store.updateQuestion(item.question_id, {
+                  local_status: 'publish-failed',
+                  error_code: err.code,
+                });
+                await this.dropMessages(item.question_id, 'never-published');
+              }
+              await ctx.store.deleteOutbox(item.id);
+              return queued;
             });
-            await this.dropMessages(item.question_id, 'never-published');
-          });
+            await this.dropSpool(p);
+            if (refused) this.closed(item.question_id);
+          }
           pendingByQuestion.delete(item.question_id);
+        } else {
+          await remove(item);
         }
         // A relay that advertised threads but has no route for them: read `/info` again next time.
         if (item.kind === 'message' && (err.status === 404 || err.status === 405)) {
@@ -1438,11 +1952,19 @@ export class Publisher {
     return { sent, failed, created };
   }
 
-  private async sendCreate(item: OutboxItem): Promise<CommandReceipt> {
+  /**
+   * Upload a create's images, then send it. Each step is checked against the item as stored, under `ctx.lock`: a
+   * create withdrawn or settled meanwhile is never written back or sent (`CreateWithdrawn`), and one whose deadline
+   * passed before it was first sent goes no further, with no stale image uploaded (`CreateOverdue`). Once claimed
+   * (`maybePublished`), the relay may hold the question whatever becomes of the reply, or of a refusal: null when it
+   * refused the create yet holds the question (`relayHolds`).
+   */
+  private async sendCreate(item: OutboxItem): Promise<CommandReceipt | null> {
     const { ctx } = this;
     const p = item.payload as CreatePayload;
     for (const a of p.attachments) {
       if (p.uploaded.includes(a.attachment_id)) continue;
+      if (!p.maybePublished && this.overdue(p)) throw new CreateOverdue();
       const bytes = await ctx.spool.get(a.attachment_id);
       if (!bytes) throw new RelayError('validation_error', 'spooled attachment missing', 400);
       const reservation = await ctx.client.reserveAttachment({
@@ -1459,18 +1981,40 @@ export class Publisher {
           400,
         );
       }
-      await ctx.client.uploadAttachment(reservation.upload_path, bytes, a.sha256_ciphertext);
+      // The reservation may have answered after the deadline: no image goes up once it has passed.
+      if (!p.maybePublished && this.overdue(p)) throw new CreateOverdue();
+      try {
+        await ctx.client.uploadAttachment(reservation.upload_path, bytes, a.sha256_ciphertext);
+      } catch (e) {
+        // Uploaded before a crash kept it from being recorded: the relay takes no second upload, and completing it
+        // (idempotent once it is available) answers for it.
+        if (!(e instanceof RelayError && e.code === 'invalid_state')) throw e;
+      }
       await ctx.client.completeAttachment(a.attachment_id);
       p.uploaded.push(a.attachment_id);
-      await ctx.store.putOutbox({ ...item, payload: p });
+      await this.checkpointCreate(item, p, false);
     }
     // From here on the relay may have committed the question even if we never see the reply.
-    p.maybePublished = true;
-    await ctx.store.putOutbox({ ...item, payload: p });
+    await this.checkpointCreate(item, p, true);
     this.inflight.add(item.question_id);
-    let receipt;
+    let receipt: CommandReceipt | null;
     try {
-      receipt = await ctx.client.createQuestion(item.id, p.signed);
+      receipt = await ctx.client.createQuestion(item.id, p.signed).catch(async (e: unknown) => {
+        if (!(e instanceof RelayError) || e.retryable) throw e;
+        if (e.status === 400 && e.details?.reason === CREATE_NEVER_COMMITTED) throw e;
+        // A question whose history this desktop applied, before the read or during it, needs no word from the relay:
+        // the leftover create goes.
+        const applied = async () =>
+          (await ctx.store.getQuestion(item.question_id))?.local_status !== 'queued';
+        if (await applied()) throw e;
+        try {
+          await this.relayHolds(item.question_id, e, p.signed.record.signature);
+        } catch (u) {
+          if (u instanceof CreateUnconfirmed && (await applied())) throw e;
+          throw u;
+        }
+        return null;
+      });
     } finally {
       this.inflight.delete(item.question_id);
     }
@@ -1478,9 +2022,273 @@ export class Publisher {
     await ctx.audit.log({
       event: 'question.published',
       question_id: item.question_id,
-      result: 'ok',
+      result: receipt ? 'ok' : 'held',
     });
     return receipt;
+  }
+
+  /**
+   * After the relay refused a create that may already be on it: returns when the relay holds this very question (its
+   * record carries this create's signature), so only the receipt was lost; a relay that checks the deadline before the
+   * receipt, as 0.8.0 does, refuses the retry of a question it took. The refusal stands (`refusal` is thrown) only on
+   * the relay's own word: it holds no such question (`not_found`), or another one under this id. Anything else (the
+   * relay unreachable, the read refused, a reply that shows neither) throws `CreateUnconfirmed`, for the create to be
+   * sent and the relay asked again.
+   */
+  private async relayHolds(
+    questionId: string,
+    refusal: RelayError,
+    signature: string,
+  ): Promise<void> {
+    let detail: unknown;
+    try {
+      detail = await this.ctx.client.getQuestion(questionId, {
+        retry: false,
+        timeoutMs: CREATE_CHECK_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const err =
+        e instanceof RelayError ? e : new RelayError('network_error', (e as Error).message, 0);
+      if (err.status === 404 && err.code === 'not_found') throw refusal;
+      throw new CreateUnconfirmed(err);
+    }
+    const record = (
+      detail as { question?: { record?: { question_id?: unknown; signature?: unknown } } } | null
+    )?.question?.record;
+    if (
+      record?.question_id === questionId &&
+      typeof record.signature === 'string' &&
+      record.signature
+    ) {
+      if (record.signature === signature) return;
+      throw refusal;
+    }
+    throw new CreateUnconfirmed(
+      new RelayError('unknown_error', 'the relay did not show the question it holds', 0),
+    );
+  }
+
+  /**
+   * Store a create's progress, or with `claim` mark it possibly published, against the item as stored now, under
+   * `ctx.lock` (as `enqueueCancel` reads it). An item gone meanwhile is never written back. A claim of a create never
+   * sent before is refused once its deadline has passed. A claim already stored, by an earlier send or another
+   * sender, stands.
+   */
+  private checkpointCreate(item: OutboxItem, p: CreatePayload, claim: boolean): Promise<void> {
+    return this.ctx.lock.run(async () => {
+      const live = (await this.ctx.store.outboxFor(item.question_id)).find((o) => o.id === item.id);
+      if (!live) throw new CreateWithdrawn();
+      const stored = live.payload as CreatePayload;
+      if (claim && !stored.maybePublished && this.overdue(p)) throw new CreateOverdue();
+      if (claim || stored.maybePublished) p.maybePublished = true;
+      await this.ctx.store.putOutbox({ ...live, payload: p });
+    });
+  }
+
+  /**
+   * Under `ctx.lock`: close a question withdrawn before it was ever published, as `enqueueCancel` does for a create it
+   * finds unsent, or one the relay has shown it never took. The row closes first; then its queued work goes, the person's own items aside (they close on their
+   * next turn, `unpublishedQuestion`). The caller drops the spooled images.
+   */
+  private async withdrawUnpublished(questionId: string, items: OutboxItem[]): Promise<void> {
+    // Its creates are unsent first, so a crash before they go leaves ones the next flush drops (`closeCreate`), never
+    // ones it sends.
+    for (const o of items) {
+      const p = o.payload as CreatePayload;
+      if (o.kind !== 'create' || !p.maybePublished) continue;
+      const { maybePublished: _claimed, ...unsent } = p;
+      await this.ctx.store.putOutbox({ ...o, payload: unsent });
+    }
+    await this.ctx.store.updateQuestion(questionId, { local_status: 'cancelled' });
+    await this.dropMessages(questionId, 'never-published');
+    for (const o of items)
+      if (o.kind !== 'message' && !isPersonItem(o)) await this.ctx.store.deleteOutbox(o.id);
+    await this.ctx.audit.log({
+      event: 'question.cancelled',
+      question_id: questionId,
+      result: 'never-published',
+    });
+  }
+
+  /** The create's signed deadline has passed on this computer's clock. */
+  private overdue(p: CreatePayload): boolean {
+    const deadline = deadlineOf(p);
+    return deadline !== null && deadline <= this.ctx.now();
+  }
+
+  /**
+   * Settle or drop a create no send could change, with no network. True when its item is gone. A create whose row
+   * already closed is what a crash left of a settlement, refusal or withdrawal: it goes with its images. One never
+   * sent whose deadline has passed is settled as never published (`settleUnpublished`). A create that may have
+   * reached the relay is never concluded here: only the relay's answer to its retry settles it. Every decision reads
+   * the row and the item again under `ctx.lock`, so a claim another process has made since is seen.
+   */
+  private async closeCreate(item: OutboxItem): Promise<boolean> {
+    if (!this.overdue(item.payload as CreatePayload)) {
+      const row = await this.ctx.store.getQuestion(item.question_id);
+      if (row && row.local_status !== 'publish-failed' && row.local_status !== 'cancelled')
+        return false;
+    }
+    const dropped = await this.ctx.lock.run(async () => {
+      const row = await this.ctx.store.getQuestion(item.question_id);
+      const live = (await this.ctx.store.outboxFor(item.question_id)).find((o) => o.id === item.id);
+      if (!live) return 'gone' as const;
+      const p = live.payload as CreatePayload;
+      if (
+        !row ||
+        row.local_status === 'publish-failed' ||
+        (row.local_status === 'cancelled' && !p.maybePublished)
+      ) {
+        await this.ctx.store.deleteOutbox(item.id);
+        return p;
+      }
+      return row.local_status === 'queued' && !p.maybePublished && this.overdue(p)
+        ? ('overdue' as const)
+        : null;
+    });
+    if (dropped === null) return false;
+    if (dropped === 'overdue') return this.settleUnpublished(item.question_id, true);
+    if (dropped !== 'gone') await this.dropSpool(dropped);
+    return true;
+  }
+
+  /**
+   * Close a question whose deadline passed before it reached the relay: `publish-failed`, with an `unpublished`
+   * system entry that tells its agent no answer could be recorded. The row closes in one write before any of its items
+   * go, so a crash in between is finished by the next flush (`closeCreate`, `unpublishedQuestion`). What waited for the
+   * create goes with it: agent messages, proxy work, the spooled images; the person's own items from the owner desktop
+   * close on their next turn. A withdrawal queued for it wins: the question closes as withdrawn, with no notice. The
+   * original deadline is kept. With `unsent`, it settles only a question whose create is still provably unsent when
+   * read again under `ctx.lock`; without, the relay has just shown it never took the create. True when the question
+   * is closed (or already was).
+   */
+  private async settleUnpublished(questionId: string, unsent: boolean): Promise<boolean> {
+    const { ctx } = this;
+    let creates: OutboxItem[] = [];
+    let fallbackDue = false;
+    const settled = await ctx.lock.run(async () => {
+      const row = await ctx.store.getQuestion(questionId);
+      // A question the relay's history has reached meanwhile is the relay's to settle: nothing of it is touched.
+      if (row && row.local_status !== 'queued' && row.local_status !== 'publish-failed')
+        return false;
+      const items = await ctx.store.outboxFor(questionId);
+      creates = items.filter((o) => o.kind === 'create');
+      // Claimed since it was read (another process sending it): it may be on the relay now.
+      if (unsent && creates.some((o) => (o.payload as CreatePayload).maybePublished)) return false;
+      if (row?.local_status !== 'queued') {
+        await this.dropMessages(questionId, 'never-published');
+        for (const o of items)
+          if (o.kind !== 'message' && !isPersonItem(o)) await ctx.store.deleteOutbox(o.id);
+        return 'cleaned' as const;
+      }
+      if (items.some((o) => o.kind === 'cancel')) {
+        await this.withdrawUnpublished(questionId, items);
+        return 'withdrawn' as const;
+      }
+      // The host's policy is read as the question closes, as the relay judges an expiry at its deadline.
+      fallbackDue = creates[0] ? await this.advisoryFallbackDue(row, creates[0]) : false;
+      const entries = parseAnswers(row.answers_json);
+      entries.push({
+        entry_id: `unpublished-${questionId}`,
+        kind: 'unpublished',
+        action: 'expire',
+        revision: row.question_revision,
+        source: 'system',
+        ...(fallbackDue ? { fallback_due: true } : {}),
+        correction: false,
+        created_at: nowIso(ctx.now()),
+        deliver: true,
+        delivered: false,
+        sealed: null,
+      });
+      await ctx.store.updateQuestion(questionId, {
+        local_status: 'publish-failed',
+        delivery_status: 'desktop-received',
+        error_code: 'never_published',
+        answers_json: serializeAnswers(entries),
+      });
+      await this.dropMessages(questionId, 'never-published');
+      for (const o of items)
+        if (o.kind !== 'message' && !isPersonItem(o)) await ctx.store.deleteOutbox(o.id);
+      return 'settled' as const;
+    });
+    if (!settled) return false;
+    for (const o of creates) await this.dropSpool(o.payload as CreatePayload);
+    if (settled === 'settled') {
+      await ctx.audit.log({
+        event: 'question.unpublished',
+        question_id: questionId,
+        result: fallbackDue ? 'deadline-passed:fallback-due' : 'deadline-passed',
+      });
+    }
+    if (settled !== 'cleaned') this.closed(questionId);
+    return true;
+  }
+
+  /**
+   * One of this desktop's own questions that never reached the relay: settled so at its deadline
+   * (`settleUnpublished`), or withdrawn before it was ever sent (`cancelled`, with no relay event ever applied).
+   */
+  private async unpublishedQuestion(questionId: string): Promise<boolean> {
+    const row = await this.ctx.store.getQuestion(questionId);
+    if (!row || row.history_only) return false;
+    if (row.local_status === 'cancelled') return row.remote_event_seq === null;
+    return (
+      row.local_status === 'publish-failed' &&
+      parseAnswers(row.answers_json).some((e) => e.kind === 'unpublished')
+    );
+  }
+
+  /**
+   * Whether an advisory question that never reached the relay may still tell its agent its plan is due (protocol
+   * section 21). Read from the create as it was signed: advisory content at round 0 under no gate, whose decrypted
+   * content parses with a valid plan, and a host that both delivers advisory outcomes and, by its trusted policy now,
+   * allows advisory questions. A blocking question, and every advisory one the policy does not allow, authorises
+   * nothing.
+   */
+  private async advisoryFallbackDue(row: QuestionRow, create: OutboxItem): Promise<boolean> {
+    if (!this.advisory?.hostSupport || !this.ctx.policy.advisoryQuestions) return false;
+    const { signed } = create.payload as CreatePayload;
+    const envelope = signed.envelope;
+    if (
+      replyModeOf(envelope) !== 'advisory' ||
+      envelope.aad.revision !== ADVISORY_ROUND_REVISION ||
+      row.question_revision !== ADVISORY_ROUND_REVISION ||
+      signed.record.workflow_gate_id_hash !== null ||
+      row.origin.workflow_gate_id !== null ||
+      signed.record.expires_at === null
+    )
+      return false;
+    const holds = await advisoryContentHolds(this.ctx, row.question_id, JSON.stringify(envelope));
+    // The policy is read again once the content is open: a host that turned advice off meanwhile authorises nothing.
+    return holds && this.advisory?.hostSupport === true && this.ctx.policy.advisoryQuestions;
+  }
+
+  private closed(questionId: string): void {
+    try {
+      this.hooks.onQuestionClosed?.(questionId);
+    } catch {
+      /* the host's listener */
+    }
+  }
+
+  /**
+   * Delete spooled images no queued create needs (`AttachmentSpool.prune`): what a crash left between spooling an
+   * image and committing its question, or between dropping a create and its images. An image spooled in the last
+   * `SPOOL_GRACE_MS` is kept, for a question still being registered. Returns how many were deleted.
+   */
+  async pruneSpool(): Promise<number> {
+    const { spool, store } = this.ctx;
+    if (!spool.prune) return 0;
+    const keep = new Set<string>();
+    for (const o of await store.dueOutbox(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)) {
+      if (o.kind !== 'create') continue;
+      for (const a of (o.payload as CreatePayload).attachments) keep.add(a.attachment_id);
+    }
+    // File times are wall-clock time, whatever clock the bridge was given.
+    const n = await spool.prune(keep, Date.now() - SPOOL_GRACE_MS);
+    if (n > 0) await this.ctx.audit.log({ event: 'spool.pruned', result: String(n) });
+    return n;
   }
 
   /** Post one agent message. A message never moves the revision, so there is nothing to re-sign on a retry. */
@@ -1507,6 +2315,8 @@ export class Publisher {
     features: () => Promise<ReadonlySet<ProtocolFeature>>,
     remove: (it: OutboxItem) => Promise<void>,
     proceed?: () => boolean,
+    /** Its question is one of this desktop's that never reached the relay: it closes with no network. */
+    unpublished = false,
   ): Promise<'declined' | 'settled' | 'retry' | 'stop'> {
     const { ctx } = this;
     const payload = item.payload as OwnerDeclinePayload;
@@ -1572,6 +2382,7 @@ export class Publisher {
       tell(stored.result);
       return stored.result.status === 'declined' ? 'declined' : 'settled';
     }
+    if (unpublished) return settle({ status: 'closed', reason: 'not-found' });
 
     // Set when the relay no longer takes declines but this one was sent before and may have been taken then (its answer
     // lost): only the question can say, and anything but finding it there is `unsupported`.
@@ -1786,6 +2597,97 @@ export class Publisher {
 }
 
 /** The earlier of two expiry times; null means never. */
+/** The parts of a question's content its agent chose, for comparing a retry with the question it may repeat. */
+function requestOf(c: {
+  question: string;
+  context?: string | undefined;
+  kind: string;
+  options: readonly { id: string; label: string; description?: string | undefined }[];
+  allow_text?: boolean | undefined;
+  preparation?: unknown;
+  planned_fallback?: string | undefined;
+  attachments: readonly { sha256: string; role: string; alt?: string | undefined }[];
+}): unknown {
+  return {
+    question: c.question,
+    context: c.context ?? null,
+    kind: c.kind,
+    options: c.options.map((o) => ({
+      id: o.id,
+      label: o.label,
+      description: o.description ?? null,
+    })),
+    allow_text: c.allow_text !== false,
+    preparation: c.preparation ?? null,
+    planned_fallback: c.planned_fallback ?? null,
+    attachments: c.attachments.map((a) => ({ sha256: a.sha256, role: a.role, alt: a.alt ?? null })),
+  };
+}
+
+/**
+ * What trusted policy changed in a request: a deadline it capped or chose, a level it raised, a kind its gates set.
+ * Each change names the policy that made it: an origin gate, a gate the agent named, or the host's own.
+ */
+function policyAdjustments(a: {
+  input: AskHumanInput;
+  requestedExpiresAt: string | null;
+  expiresAt: string | null;
+  expirySource: Pick<PolicyAdjustment, 'source' | 'gateId'>;
+  requirement: Requirement;
+  /** The level the origin's gate, or the host, gave before any gate the agent named. */
+  baseRequirement: Requirement;
+  shape: GatedShape;
+  gates: [WorkflowGate | undefined, string | null][];
+}): PolicyAdjustment[] {
+  const out: PolicyAdjustment[] = [];
+  const host = { source: 'host', gateId: null } as const;
+  const gate = (id: string | null) => ({ source: 'gate', gateId: id }) as const;
+  if (a.expiresAt !== a.requestedExpiresAt)
+    out.push({
+      field: 'expires_at',
+      requested: a.requestedExpiresAt,
+      effective: a.expiresAt,
+      ...a.expirySource,
+    });
+  const asked = a.input.requested_requirement;
+  if (asked && asked !== a.requirement) {
+    const [origin, originId] = a.gates[0]!;
+    const [, namedId] = a.gates[1]!;
+    // Named for the level that applies: the named gate when it raised the level further, else the origin's gate (or
+    // the host, with none).
+    out.push({
+      field: 'requirement',
+      requested: asked,
+      effective: a.requirement,
+      ...(a.requirement !== a.baseRequirement ? gate(namedId) : origin ? gate(originId) : host),
+    });
+  }
+  const kind = a.input.kind;
+  if (kind && kind !== a.shape.kind) {
+    // The rule that set the kind: images bound to the answer make it an approval, a gate that takes no text makes it
+    // a choice, and a gate's choices turn a text question into one with options.
+    const by =
+      a.shape.kind === 'approval'
+        ? a.gates.find(([g]) => g?.bindArtifacts)
+        : a.shape.kind === 'choice'
+          ? a.gates.find(([g]) => g && (g.allowText ?? !g.choices) === false)
+          : a.gates.find(([g]) => g?.choices);
+    out.push({
+      field: 'kind',
+      requested: kind,
+      effective: a.shape.kind,
+      ...(by ? gate(by[1]) : host),
+    });
+  }
+  return out;
+}
+
+/** A create's signed deadline in ms, or null for a question that never expires. */
+function deadlineOf(p: CreatePayload): number | null {
+  const at = p.signed.record.expires_at;
+  return at ? Date.parse(at) : null;
+}
+
 function earliest(a: string | null, b: string | null): string | null {
   if (a === null) return b;
   if (b === null) return a;

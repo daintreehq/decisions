@@ -1,4 +1,5 @@
 import {
+  AgentStoppedPushBody,
   ApiError,
   CREATOR_MISSING_FEATURE,
   EventData,
@@ -137,12 +138,20 @@ export class FakeRelay {
   dropAfterReceive = 0;
   /** Number of upcoming question creates the relay COMMITS but whose reply is lost. */
   dropCreateReply = 0;
+  /**
+   * The relay's clock for a create's deadline. When set, a new question already past its signed `expires_at` is
+   * refused (saying it was never committed when no event names it), while a retry of one already taken replays its
+   * receipt, as the relay does. Unset, no deadline is checked.
+   */
+  createNow: (() => number) | null = null;
   uploads: { path: string; bytes: number; sha: string | null }[] = [];
   /** The relay's current key epoch and every device's sealed grants (`GET /devices/{id}/key-grants`). */
   epoch = 1;
   grants = new Map<string, EpochGrant[]>();
   /** Number of upcoming key-grant fetches that fail with a network error. */
   failGrants = 0;
+  /** While set, key-grant fetches get this status and body in place of the grants (a refusal or a broken reply). */
+  grantsReply: { status: number; body: Record<string, unknown> } | null = null;
   /** Phone image ciphertext served by `GET /attachments/{id}/content`, and the ids each download asked for. */
   blobs = new Map<string, Uint8Array>();
   downloads: string[] = [];
@@ -150,6 +159,8 @@ export class FakeRelay {
   features: string[] | undefined = ['thread-messages-v1'];
   /** Number of upcoming `GET /info` reads that fail with a network error. */
   failInfo = 0;
+  /** While set, `GET /info` waits for it before answering (a slow relay). */
+  holdInfo: Promise<void> | null = null;
   /** Thread messages the relay committed, in commit order. */
   messages: { idem: string; message: SignedMessage }[] = [];
   /** The status, code and details every upcoming message POST is refused with, until cleared. */
@@ -203,6 +214,12 @@ export class FakeRelay {
   onInvolvementPut: (() => void | Promise<void>) | null = null;
   /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
   holdDevices: Promise<void> | null = null;
+  /** While true, `GET /devices` fails as an unreachable relay would. */
+  devicesFail = false;
+  /** While set, `GET /devices` gets this status and body in place of the directory (a refusal or a broken reply). */
+  devicesReply: { status: number; body: Record<string, unknown> } | null = null;
+  /** Called once the relay has committed a new question, before its receipt is sent (a slow reply). */
+  onCreated: ((questionId: string) => void | Promise<void>) | null = null;
   /**
    * Whether `PUT /presence` exists; false makes it unknown (404), like a relay from before `presence-v1`. Advertising
    * the feature is `features`' job, so a test can make the two disagree.
@@ -218,6 +235,21 @@ export class FakeRelay {
   holdPresence: Promise<void> | null = null;
   /** Number of upcoming presence PUTs the relay COMMITS but whose reply is lost. */
   dropPresenceReply = 0;
+  /**
+   * Whether `POST /push/agent-stopped` exists; false makes it unknown (404), like a relay from before
+   * `agent-stopped-push-v1`. Advertising the feature is `features`' job, so a test can make the two disagree.
+   */
+  agentStoppedRoute = true;
+  /**
+   * Replies for upcoming agent-stopped POSTs, in order, each with any headers (a string body is sent as given), or
+   * `reset` for a connection lost before the reply; when empty the relay answers `sent`.
+   */
+  agentStoppedReplies: (
+    | { status: number; body: Record<string, unknown> | string; headers?: Record<string, string> }
+    | 'reset'
+  )[] = [];
+  /** The features each device declared on its latest socket ticket, as `GET /devices` lists them, by device id. */
+  deviceFeatures = new Map<string, string[]>();
   /** Each device's `revoked_at` in `GET /devices`, by device id. */
   revokedAt = new Map<string, string>();
   /** Every `POST /questions/{id}/answer` body, retries included, in order. */
@@ -249,6 +281,10 @@ export class FakeRelay {
   dropDeclineReply = 0;
   /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
   failDetail = 0;
+  /** The status and code every upcoming `GET /questions/{id}` is refused with, until cleared. */
+  rejectDetail: { status: number; code: string } | null = null;
+  /** Run as each `GET /questions/{id}` arrives, before the relay looks at it. */
+  onDetail: (() => Promise<void>) | null = null;
   /** The signature each committed answer or decline carried, by action id. */
   committedSignatures = new Map<string, string>();
   /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
@@ -297,6 +333,7 @@ export class FakeRelay {
     }
 
     if (method === 'GET' && p === '/api/v1/info') {
+      if (this.holdInfo) await this.holdInfo;
       if (this.failInfo > 0) {
         this.failInfo--;
         throw new TypeError('fetch failed');
@@ -417,6 +454,19 @@ export class FakeRelay {
       const prior = this.receipts.get(b.idempotency_key);
       if (prior) return json(201, prior);
       const q = b.question;
+      if (
+        this.createNow &&
+        q.record.expires_at &&
+        Date.parse(q.record.expires_at) <= this.createNow()
+      ) {
+        // As the relay does: it says the question was never committed when nothing of it ever reached it.
+        const never = !this.events.some((e) => e.question_id === q.record.question_id);
+        return json(400, {
+          code: 'validation_error',
+          message: 'expires_at must be in the future',
+          ...(never ? { details: { reason: 'never-committed' } } : {}),
+        });
+      }
       this.questions.set(q.record.question_id, { signed: q, idem: b.idempotency_key });
       const ev = this.push('decision.created', q.record.question_id, 0, {
         record: q.record,
@@ -432,6 +482,7 @@ export class FakeRelay {
         event_seq: ev.seq,
       };
       this.receipts.set(b.idempotency_key, receipt);
+      await this.onCreated?.(q.record.question_id);
       if (this.dropCreateReply > 0) {
         this.dropCreateReply--;
         throw new TypeError('connection reset after the relay committed the question');
@@ -518,10 +569,16 @@ export class FakeRelay {
       return this.decline(m[1]!, body as { idempotency_key: string; action: SignedAction });
     }
     if (method === 'GET' && (m = p.match(/^\/api\/v1\/questions\/([^/]+)$/))) {
+      await this.onDetail?.();
       if (this.failDetail > 0) {
         this.failDetail--;
         throw new TypeError('fetch failed');
       }
+      if (this.rejectDetail)
+        return json(this.rejectDetail.status, {
+          code: this.rejectDetail.code,
+          message: 'refused',
+        });
       const q = this.questions.get(m[1]!);
       if (!q) return json(404, { code: 'not_found', message: 'no such question' });
       const state = this.answerState.get(m[1]!) ?? { status: 'open' as const, revision: 0 };
@@ -529,6 +586,7 @@ export class FakeRelay {
         question_id: m[1],
         status: state.status,
         revision: state.revision,
+        question: q.signed,
         actions: this.cancelLog.get(m[1]!) ?? [],
       });
     }
@@ -554,6 +612,8 @@ export class FakeRelay {
     }
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;
+      if (this.devicesFail) throw new TypeError('fetch failed');
+      if (this.devicesReply) return json(this.devicesReply.status, this.devicesReply.body);
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,
@@ -568,6 +628,9 @@ export class FakeRelay {
           last_ack_seq: 0,
           cert,
           push_enabled: false,
+          ...(this.deviceFeatures.has(cert.device_id)
+            ? { features: this.deviceFeatures.get(cert.device_id) }
+            : {}),
         })),
       });
     }
@@ -576,6 +639,7 @@ export class FakeRelay {
         this.failGrants--;
         throw new TypeError('fetch failed');
       }
+      if (this.grantsReply) return json(this.grantsReply.status, this.grantsReply.body);
       return json(200, { current_epoch: this.epoch, grants: this.grants.get(m[1]!) ?? [] });
     }
     if (method === 'GET' && p === '/api/v1/events') {
@@ -650,6 +714,21 @@ export class FakeRelay {
         present,
         until: present ? new Date(this.presenceUntil!).toISOString() : null,
       });
+    }
+    if (method === 'POST' && p === '/api/v1/push/agent-stopped' && this.agentStoppedRoute) {
+      // The body is strict, as the relay's is: anything but the version is refused.
+      if (!AgentStoppedPushBody.safeParse(body).success)
+        return json(400, { code: 'validation_error', message: 'invalid body' });
+      const reply = this.agentStoppedReplies.shift();
+      if (reply === 'reset') throw new TypeError('connection reset');
+      if (reply)
+        return typeof reply.body === 'string'
+          ? new Response(reply.body, {
+              status: reply.status,
+              headers: { 'content-type': 'application/json', ...reply.headers },
+            })
+          : json(reply.status, reply.body, reply.headers);
+      return json(200, { outcome: 'sent' });
     }
     if (method === 'GET' && p === '/api/v1/involvement' && this.involvement) {
       const served = this.involvement;
@@ -1005,6 +1084,29 @@ export class FakeRelay {
     });
   }
 
+  /**
+   * The relay expiring a question's round as `expireQuestionNow` does: at `at` (by default the deadline the question
+   * was published with), naming the question's signed host, at the round's revision (by default 0).
+   */
+  expiryEvent(opts: {
+    questionId: string;
+    revision?: number | null;
+    at?: string;
+    occurredAt?: string;
+    targetHostId?: string;
+  }): LedgerEvent {
+    const q = this.questions.get(opts.questionId)!;
+    const at = opts.at ?? q.signed.record.expires_at ?? new Date().toISOString();
+    const ev = this.push(
+      'decision.expired',
+      opts.questionId,
+      opts.revision === undefined ? 0 : opts.revision,
+      { expired_at: at, target_host_id: opts.targetHostId ?? q.signed.record.target_host_id },
+    );
+    ev.occurred_at = opts.occurredAt ?? at;
+    return ev;
+  }
+
   /** A signed envelope-less action (cancel / reopen / proxy-abstain) as the relay would emit it. */
   async plainActionEvent(opts: {
     questionId: string;
@@ -1017,6 +1119,8 @@ export class FakeRelay {
     provenance?: 'human' | 'proxy' | null;
     /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
     decline?: true;
+    /** A reopen's signed new deadline (null: never expires). */
+    expiresAt?: string | null;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -1028,6 +1132,7 @@ export class FakeRelay {
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
       ...(opts.decline ? { decline: true as const } : {}),
+      ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

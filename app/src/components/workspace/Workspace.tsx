@@ -14,7 +14,14 @@ import { photoCount, PHOTOS_PER_MESSAGE, PHOTOS_PER_QUESTION } from '../../data/
 import { useApp, useNow, useQuestions } from '../../app/hooks.js';
 import { backTarget, cameFromApp, openQuestion } from '../../app/listState.js';
 import { useWide } from '../../app/media.js';
-import { DeclineUnsupportedError, StaleQuestionError } from '../../domain/answer.js';
+import { StaleQuestionError } from '../../domain/answer.js';
+import {
+  DeclineBlockedError,
+  declineActive,
+  declineOutcomeText,
+  declineProgressText,
+  declineStanding,
+} from '../../domain/decline.js';
 import {
   composeShape,
   verdict as computeVerdict,
@@ -25,10 +32,13 @@ import type { ActionView, QuestionView } from '../../domain/model.js';
 import { choiceLine } from '../../domain/lists.js';
 import { ThreadClosedError } from '../../domain/message.js';
 import {
+  advisoryRound,
   agentName,
   answerBy,
   canOverrule,
   currentAnswer,
+  deadlinePhase,
+  deadlineWords,
   DELIVERY_LABELS,
   deliveryProgress,
   effectiveStatus,
@@ -36,6 +46,7 @@ import {
   lastProxyAction,
   messageProgress,
   originParts,
+  pastExpiryTitle,
   pendingAsk,
   PHONE_FOLLOW_UP,
   proxyNeedsReview,
@@ -47,7 +58,7 @@ import { dictation, MESSAGES, useDictation, type Binding } from '../../features/
 import { announce } from '../../lib/announce.js';
 import { useCamera } from '../../lib/camera.js';
 import { previewText } from '../../lib/safe-text.js';
-import { absoluteLabel, dueLabel, momentLabel } from '../../lib/time.js';
+import { absoluteLabel, momentLabel, untilLabel } from '../../lib/time.js';
 import {
   AttachmentGallery,
   NO_REVIEW,
@@ -83,6 +94,7 @@ import {
   MessageContext,
   ModelMessage,
   OutgoingMessage,
+  PlanNote,
   StaticChoices,
   SystemLine,
   Thread,
@@ -119,9 +131,10 @@ const GROUP_WITHIN_MS = 5 * 60_000;
 
 export function Workspace({ id }: { id: string }) {
   const snap = useApp();
-  const now = useNow();
   void snap.rev;
   const view = app.store?.get(id);
+  // An open question's deadline is read the moment it passes, not up to a tick later.
+  const now = useNow(30_000, view?.status === 'open' ? view.expiresAt : null);
   if (!view || !app.outbox) return <WorkspaceOpening />;
   return <QuestionWorkspace view={view} now={now} />;
 }
@@ -166,11 +179,38 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const status = effectiveStatus(view, now);
   const verified = view.verification.ok;
   const content = view.content;
+  // The round's deadline: still ahead, passed by this phone's clock only, or passed by the relay. An advisory round
+  // goes ahead without the person at its deadline, with the plan its agent stated (docs/protocol.md section 21).
+  const phase = deadlinePhase(view, now);
+  const advisory = advisoryRound(view);
+  // Passed here while the relay still says open: ask it now, and on every tick until it says how the round ended. A
+  // question this phone can't read, with something recorded on it that might have ended the round, is left to sync.
+  const askRelay =
+    phase === 'passed-here' &&
+    (verified || view.actions.every((a) => a.action === 'proxy-abstain'));
+  useEffect(() => {
+    if (askRelay) app.checkDeadline();
+  }, [askRelay, now]);
   const entries = app.outbox!.forQuestion(id);
   const isRefused = (e: (typeof entries)[number]) =>
     e.state === 'conflicted' || e.state === 'rejected' || e.state === 'expired';
-  // The person's answer (or confirmation) on its way, and the follow-ups queued behind it: separate lanes.
-  const actionEntries = entries.filter((e) => e.kind !== 'message');
+  // The person's answer (or confirmation) on its way, the follow-ups queued behind it, and a dismissal: separate lanes.
+  const actionEntries = entries.filter((e) => e.kind !== 'message' && e.kind !== 'decline');
+  // This device's latest dismissal of the question, and where it stands. While it is on its way it holds the question:
+  // nothing else is sent on it, and it is shown as saved here until the relay has it.
+  const declineEntry = entries.filter((e) => e.kind === 'decline').at(-1);
+  const decline = declineEntry
+    ? declineStanding(declineEntry, view, app.getSnapshot().config?.deviceId ?? '')
+    : null;
+  const dismissing = !!decline && declineActive(decline);
+  // How it settled is said once, when it settles while the person is here: the note may be out of view.
+  if (declineEntry && decline) {
+    if (dismissing) declinesSeenActive.add(declineEntry.id);
+    else if (declinesSeenActive.delete(declineEntry.id) && decline.kind === 'settled') {
+      const text = declineOutcomeText(decline.outcome);
+      queueMicrotask(() => announce(text));
+    }
+  }
   // An answer the relay has committed is the thread's own from then on, even while its local copy is being let go.
   const committed = new Set(view.actions.map((a) => a.actionId));
   const onItsWay = (e: OutboxEntry) =>
@@ -205,7 +245,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   // Only a model answer can be replaced, by overruling it; the person's own answer is final, and anything more they
   // want to say is a follow-up.
   const canCorrect =
-    verified && !!content && kind === 'override' && canOverrule(view, now) && !pendingEntry;
+    verified &&
+    !!content &&
+    kind === 'override' &&
+    canOverrule(view, now) &&
+    !pendingEntry &&
+    !dismissing;
   const ask = pendingAsk(view, now);
   const followUps = app.followUpsFor(view);
   // Follow-ups open once the decision is made (sent or on its way), while the thread takes messages. A model answer
@@ -215,7 +260,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     (status === 'proxy-answered' && (!modelReview || !!ask)) ||
     (status === 'open' && !!pendingEntry);
   const canFollowUp =
-    verified && !!content && followUps === 'yes' && failed.length === 0 && decided;
+    verified && !!content && followUps === 'yes' && failed.length === 0 && decided && !dismissing;
 
   const answerDraft = useDraft(id, 'answer', view.revision);
   const correctionDraft = useDraft(id, 'correction', view.revision);
@@ -227,6 +272,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const composing =
     verified &&
     !!content &&
+    !dismissing &&
     (following || (!pendingEntry && failed.length === 0 && (status === 'open' || inCorrection)));
   const shape = content ? composeShape(content, mode) : null;
   // Photos go with an answer, a correction or a follow-up, when the desktop that asked takes them.
@@ -641,8 +687,17 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   });
   if (content) menu.push({ label: 'View activity', onSelect: () => setActivityOpen(true) });
   // Declining is deliberate and final, so it lives here behind a confirmation, never in the composer.
-  // Only where the desktop that asked can file a decline; an older one would leave the question open.
-  if (status === 'open' && verified && !pendingEntry && app.declinesFor(view))
+  // Only where the desktop that asked can file a decline; an older one would leave the question open. Never while
+  // something from this device is still on its way on the question, a dismissal included.
+  if (
+    status === 'open' &&
+    verified &&
+    !pendingEntry &&
+    pendingMessages.length === 0 &&
+    !dismissing &&
+    !busy &&
+    app.declinesFor(view)
+  )
     menu.push({
       label: 'Dismiss question…',
       onSelect: () => {
@@ -683,6 +738,19 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         No more questions need you
       </span>
     );
+  const advice = unreadableAdvice(view, now);
+  // The Dismiss sheet was opened for this round while it was open; once that is no longer so, nothing is left for it
+  // to dismiss, and the sheet says why.
+  const sheetClosed =
+    declineAt === null || (status === 'open' && view.revision === declineAt)
+      ? null
+      : status === 'expired' && view.revision === declineAt
+        ? phase === 'passed'
+          ? advisory
+            ? 'Your relay confirmed no answer arrived in time, so your agent may go ahead with its plan. There’s nothing left to dismiss.'
+            : 'Your relay confirmed it expired without an answer. There’s nothing left to dismiss.'
+          : 'The deadline passed on this phone, so there’s nothing left to dismiss.'
+        : 'This question changed while this was open, so there’s nothing to dismiss here.';
   let dock: ReactNode;
   if (!verified || !content) {
     dock = (
@@ -692,11 +760,21 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             ? 'This device can’t read this question, so it can’t be answered here.'
             : 'This question could not be verified, so it can’t be answered.'}
         </p>
+        {advice && (
+          <p className="dock-line">
+            {/* Said again only when the round moves on; the time left is read, never announced. */}
+            <span role="status">{advice.text}</span>
+            {advice.left && <span> ({advice.left})</span>}
+          </p>
+        )}
         {next && moveOn()}
       </AnswerDock>
     );
   } else if (pendingEntry && !following) {
     // The reply and its receipt are in the thread; the dock offers what comes next.
+    dock = <AnswerDock>{moveOn()}</AnswerDock>;
+  } else if (dismissing) {
+    // The dismissal and where it stands are in the thread; the dock offers what comes next.
     dock = <AnswerDock>{moveOn()}</AnswerDock>;
   } else if (failed.length > 0) {
     dock = (
@@ -906,17 +984,27 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
   const waitingOnPerson = status === 'open' && !pendingEntry;
   const soon =
     waitingOnPerson && !!view.expiresAt && Date.parse(view.expiresAt) - now < 24 * 3_600_000;
+  // The deadline in this phone's local time, and how long is left: read, never announced, as it counts down.
   const due =
     waitingOnPerson && view.expiresAt ? (
       <span className={soon ? 'due soon' : 'due'}>
         <ClockIcon size={13} />
-        {dueLabel(view.expiresAt, now)}
+        <span>
+          Reply by{' '}
+          <time dateTime={view.expiresAt} title={absoluteLabel(view.expiresAt)}>
+            {momentLabel(view.expiresAt, now)}
+          </time>
+          <span aria-hidden="true"> · </span>
+          <span className="sr-only">, </span>
+          {untilLabel(view.expiresAt, now, true)}
+        </span>
       </span>
     ) : null;
   // The gate matters while the question is open: no model will step in, so it waits for a person. It is one more
-  // fact on the status line under the question (guide 4.1), not a block of its own.
+  // fact on the status line under the question (guide 4.1), not a block of its own. An advisory round never waits
+  // for anyone, whatever its requirement: its plan says what happens without an answer instead.
   const gate =
-    waitingOnPerson && view.requirement === 'human-required' ? (
+    waitingOnPerson && view.requirement === 'human-required' && !advisory ? (
       <span className="gate">
         <PersonIcon size={13} />
         Human decision required
@@ -935,6 +1023,21 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         {gate}
       </>
     ) : null;
+  // An approval that runs out of time approves nothing: the step it asked about stays blocked.
+  const deadlineNote =
+    waitingOnPerson && view.expiresAt && !advisory && content?.kind === 'approval'
+      ? 'If no one decides by then, nothing is approved and the step stays blocked.'
+      : null;
+  // The plan stays in view while it can still become due or has become due; an answer or a dismissal ends that, as
+  // does this phone's own answer once the relay has accepted it (it refuses a late one).
+  const plan =
+    advisory &&
+    view.expiresAt &&
+    content?.planned_fallback &&
+    pendingEntry?.state !== 'committed' &&
+    (view.status === 'open' || view.status === 'expired') ? (
+      <PlanNote plan={content.planned_fallback} deadline={view.expiresAt} now={now} />
+    ) : undefined;
   const inForce =
     (answer?.content as { selected_option_ids?: string[] } | null)?.selected_option_ids ?? [];
   const closed = status === 'expired' || status === 'cancelled';
@@ -984,7 +1087,9 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             />
           )
         }
+        plan={plan}
         meta={statusLine}
+        note={deadlineNote}
       />,
     );
     if (view.integrityIssues.length > 0)
@@ -1009,10 +1114,13 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     const timeline: (
       | { seq: number; a: (typeof view.actions)[number] }
       | { seq: number; m: (typeof view.messages)[number] }
+      | { seq: number; e: (typeof view.expiries)[number] }
     )[] = [
       ...view.actions.map((a) => ({ seq: a.seq, a })),
       ...view.messages.map((m) => ({ seq: m.seq, m })),
+      ...view.expiries.map((e) => ({ seq: e.seq, e })),
     ].sort((x, y) => x.seq - y.seq);
+    const lastExpiry = view.expiries.at(-1);
     /** The answer each new one replaces, as the loop walks the ledger. */
     let replaced: (typeof view.actions)[number] | null = null;
     let lastAnswer: (typeof view.actions)[number] | null = null;
@@ -1021,6 +1129,24 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
     for (const t of timeline) {
       const prevNote = lastNote;
       lastNote = null;
+      if ('e' in t) {
+        // A round the relay expired. Only the one still in force says what it means now; an earlier one (the question
+        // was reopened since) says only what happened then.
+        const words =
+          t.e === lastExpiry && view.status === 'expired' ? deadlineWords(view, now) : null;
+        items.push(
+          <SystemLine
+            key={`expiry:${t.e.seq}`}
+            now={now}
+            at={t.e.at}
+            icon={<ClockIcon size={14} />}
+            detail={words?.detail}
+          >
+            {words?.title ?? pastExpiryTitle(view, t.e)}
+          </SystemLine>,
+        );
+        continue;
+      }
       if ('a' in t && t.a.verified && ['answer', 'override', 'proxy-answer'].includes(t.a.action)) {
         replaced = lastAnswer;
         lastAnswer = t.a;
@@ -1107,7 +1233,12 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             // While this device's own answer is in conflict with it, the conflict card owns what happens next
             // (Use as correction, or Confirm model answer).
             review={
-              modelReview && a === proxy && !confirmed && !pendingEntry && failed.length === 0
+              modelReview &&
+              a === proxy &&
+              !confirmed &&
+              !pendingEntry &&
+              failed.length === 0 &&
+              !dismissing
             }
             busy={busy}
             error={confirmError}
@@ -1142,18 +1273,23 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
         );
       }
     }
-    if (status === 'expired' && view.expiresAt)
+    // Passed by this phone's clock while the relay still says open: not an outcome. An answer that reached the relay
+    // in time still wins, this phone's own on its way included; the relay's expiry, when it comes, replaces this line.
+    // One the relay has already accepted was in time (it refuses a late one), so nothing is said about it.
+    const passedHere =
+      status === 'expired' && phase === 'passed-here' && pendingEntry?.state !== 'committed'
+        ? deadlineWords(view, now, !!pendingEntry)
+        : null;
+    if (passedHere && view.expiresAt)
       items.push(
         <SystemLine
-          key="expired"
+          key="deadline:here"
           now={now}
           at={view.expiresAt}
           icon={<ClockIcon size={14} />}
-          detail={`${
-            content.kind === 'approval' ? 'Nothing was approved.' : 'No answer was sent.'
-          } To decide now, ask your agent again from your computer.`}
+          detail={passedHere.detail}
         >
-          Expired without an answer
+          {passedHere.title}
         </SystemLine>,
       );
     if (pendingEntry) {
@@ -1248,12 +1384,8 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             </span>
           </div>
           <div className="row">
-            {!closedThread && e.errorCode !== 'payload_too_large' && (
-              <button
-                type="button"
-                className="btn small"
-                onClick={() => void app.outbox?.retry(e.id)}
-              >
+            {!closedThread && e.errorCode !== 'payload_too_large' && !dismissing && (
+              <button type="button" className="btn small" onClick={() => void app.retry(e.id)}>
                 Try again
               </button>
             )}
@@ -1295,7 +1427,7 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             }
             dismissDiscards={status !== 'open'}
             onKeepCurrent={
-              modelReview && answer === proxy && !confirmed && !pendingEntry
+              modelReview && answer === proxy && !confirmed && !pendingEntry && !dismissing
                 ? () => void confirmModel()
                 : undefined
             }
@@ -1313,13 +1445,48 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             }}
             note={handOverNote}
             onRetry={
-              e.refusedAt === 'image' && e.errorCode === 'image_lost'
-                ? () => void app.outbox?.retry(e.id)
+              e.refusedAt === 'image' && e.errorCode === 'image_lost' && !dismissing
+                ? () => void app.retry(e.id)
                 : undefined
             }
           />
         </div>,
       );
+    if (declineEntry && decline) {
+      const line = declineProgressText(decline, navigator.onLine);
+      if (line)
+        items.push(
+          <SystemLine
+            key={`decline-${declineEntry.id}`}
+            now={now}
+            at={new Date(declineEntry.createdAt).toISOString()}
+            icon={<ClockIcon size={14} />}
+            detail={line.note}
+          >
+            <span role="status">{line.text}</span>
+          </SystemLine>,
+        );
+      else if (decline.kind === 'settled')
+        items.push(
+          <SystemLine
+            key={`decline-${declineEntry.id}`}
+            now={now}
+            tone="warn"
+            icon={<WarningIcon size={14} />}
+            detail={
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => void app.outbox?.discard(declineEntry.id)}
+              >
+                OK
+              </button>
+            }
+          >
+            {declineOutcomeText(decline.outcome)}
+          </SystemLine>,
+        );
+    }
     if (composing && mode === 'answer' && stale)
       items.push(
         <SystemLine
@@ -1705,24 +1872,36 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
             <button
               type="button"
               className="btn danger"
-              disabled={declining}
+              disabled={declining || !!sheetClosed}
               onClick={() => {
-                if (declineAt === null || declining) return;
+                if (declineAt === null || declining || sheetClosed) return;
                 const at = declineAt;
+                // The device list may have changed since the sheet opened: the asking desktop must still take one.
+                if (!app.declinesFor(view)) {
+                  setDeclineError(
+                    'The computer that asked this can’t take a dismissal until its Daintree is updated. The question stays open until it expires.',
+                  );
+                  return;
+                }
                 setDeclining(true);
                 setDeclineError(null);
                 if (dictation.isActive()) void dictation.stop();
+                // Resolves once the dismissal is sealed on this device; the thread shows it from there to settled.
                 app
                   .declineQuestion(view, at)
                   .then(() => {
                     setDeclineAt(null);
-                    announce('Question dismissed.');
+                    announce(
+                      navigator.onLine
+                        ? 'Dismissal saved on this device and sending.'
+                        : 'Dismissal saved on this device. It sends when you’re back online.',
+                    );
                   })
                   .catch((e: unknown) => {
                     setDeclineError(
-                      e instanceof StaleQuestionError || e instanceof DeclineUnsupportedError
+                      e instanceof StaleQuestionError || e instanceof DeclineBlockedError
                         ? e.message
-                        : 'Could not dismiss it. Check your connection and try again.',
+                        : 'Could not save the dismissal on this device. Try again.',
                     );
                     setDeclineAt(at);
                   })
@@ -1734,9 +1913,38 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
           </>
         }
       >
-        <p>
-          You won’t answer it. It leaves Needs you on all your devices and stops reminders. If your
-          agent is still waiting, it is told you declined, and nothing is approved.
+        {advisory && content?.planned_fallback && view.expiresAt ? (
+          <>
+            <p>
+              You won’t answer it. If your relay accepts your dismissal before{' '}
+              <time dateTime={view.expiresAt} title={absoluteLabel(view.expiresAt)}>
+                {momentLabel(view.expiresAt, now)}
+              </time>
+              {phase === 'before' && ` (${untilLabel(view.expiresAt, now, true)})`}, the question
+              closes on all your devices and reminders stop. If your agent is still waiting, it is
+              told you declined. Nothing is approved, and the deadline no longer applies.
+            </p>
+            <p>
+              If it isn’t accepted in time and no one answers, your agent may go ahead with its
+              plan:
+            </p>
+            <div className="msg-prep msg-plan">
+              <SafeText text={content.planned_fallback} />
+            </div>
+          </>
+        ) : (
+          <p>
+            You won’t answer it. It leaves Needs you on all your devices and stops reminders. If
+            your agent is still waiting, it is told you declined, and nothing is approved
+            {content?.kind === 'approval' ? ', so the step stays blocked.' : '.'}
+          </p>
+        )}
+        <p className="muted">
+          It is saved on this device first, and sent as soon as your relay can be reached.
+        </p>
+        {/* Always here while the sheet is open, so the deadline passing behind it is said when it happens. */}
+        <p className="status" role="status">
+          {sheetClosed ?? ''}
         </p>
         {declineError && (
           <p className="status error" role="alert">
@@ -1776,6 +1984,54 @@ function QuestionWorkspace({ view, now }: { view: QuestionView; now: number }) {
 
 /** Entries whose photos have been announced as uploaded. */
 const uploadedAnnounced = new Set<string>();
+/**
+ * What a phone that can't read an advisory question can still say from its signed record (docs/protocol.md section
+ * 21): when it wants an answer by, and that its agent may go ahead without one, never what it plans. Only while
+ * nothing has been recorded on it but a model abstaining (which leaves the deadline armed): an answer, a dismissal or
+ * a reopen this phone can't verify might have ended the round, and then it says nothing.
+ */
+function unreadableAdvice(
+  view: QuestionView,
+  now: number,
+): { text: string; left: string | null } | null {
+  if (!unreadableHere(view) || view.replyMode !== 'advisory' || !view.expiresAt) return null;
+  if (!view.actions.every((a) => a.action === 'proxy-abstain')) return null;
+  const at = momentLabel(view.expiresAt, now);
+  const phase = deadlinePhase(view, now);
+  if (phase === 'before')
+    return {
+      text: `It asks for advice by ${at}. If no answer reaches your relay by then, its agent may go ahead with a plan this phone can’t read.`,
+      left: untilLabel(view.expiresAt, now, true),
+    };
+  if (phase === 'passed-here')
+    return {
+      text: `Its deadline, ${at}, has passed on this phone. If no answer reached your relay in time, its agent may go ahead with a plan this phone can’t read.`,
+      left: null,
+    };
+  if (phase === 'passed' && view.expiries.at(-1)?.advisory)
+    return {
+      text: `No answer reached your relay by ${at}, so its agent may go ahead with a plan this phone can’t read.`,
+      left: null,
+    };
+  return null;
+}
+
+/** Who decides, in Question details: an advisory round says what its deadline means, and how it ended. */
+function decisionLine(view: QuestionView): string {
+  if (advisoryRound(view)) {
+    if (view.status === 'open')
+      return 'Advice: your agent may go ahead without an answer after the deadline';
+    if (view.status === 'expired')
+      return 'Advice: no answer by the deadline, so its plan became due';
+    return 'Advice: closed before the deadline, so its plan never became due';
+  }
+  return view.requirement === 'human-required'
+    ? 'A person must decide'
+    : 'The decision model may answer';
+}
+
+/** Dismissals seen on their way, so how one settled is announced once, when it does. */
+const declinesSeenActive = new Set<string>();
 
 function hasWords(d: { text: string; reason: string; selected: string[]; photos?: unknown[] }) {
   return !!(d.text.trim() || d.reason.trim() || d.selected.length || d.photos?.length);
@@ -1986,16 +2242,16 @@ function QuestionDetails({ view }: { view: QuestionView }) {
       <dd>{absoluteLabel(view.createdAt)}</dd>
       {view.expiresAt && (
         <>
-          <dt>{Date.parse(view.expiresAt) > Date.now() ? 'Expires' : 'Expired'}</dt>
+          <dt>
+            {view.status === 'open' && Date.parse(view.expiresAt) > Date.now()
+              ? 'Expires'
+              : 'Deadline'}
+          </dt>
           <dd>{absoluteLabel(view.expiresAt)}</dd>
         </>
       )}
       <dt>Decision</dt>
-      <dd>
-        {view.requirement === 'human-required'
-          ? 'A person must decide'
-          : 'The decision model may answer'}
-      </dd>
+      <dd>{decisionLine(view)}</dd>
       <dt>Last activity</dt>
       <dd>{momentLabel(view.lastEventAt)}</dd>
       <dt>Question ID</dt>

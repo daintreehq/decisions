@@ -6,6 +6,7 @@ export * from './devices.js';
 export * from './host-enrollment.js';
 export * from './socket.js';
 export * from './store.js';
+export * from './store-format.js';
 export * from './store-memory.js';
 // SqliteLocalStore is the separate `@daintreehq/decisions-client/sqlite` entry point, so importing
 // this root never loads `node:sqlite`.
@@ -31,6 +32,8 @@ export * from './delivery.js';
 export * from './snapshots.js';
 export * from './involvement.js';
 export * from './presence.js';
+export * from './agent-stopped.js';
+export * from './http-sync.js';
 export * from './bridge.js';
 export * from './mcp.js';
 export * from './export.js';

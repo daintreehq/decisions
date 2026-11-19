@@ -15,11 +15,22 @@ export interface ShapedNotification {
 
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
 
+/**
+ * The push kinds this build of the service worker can show beyond the questions every build shows, as protocol
+ * feature tokens. The page asks the active worker for them before declaring a push subscription able to show one
+ * (docs/protocol.md section 11), since the worker that receives a push can be an older build than the page.
+ */
+export const SW_FEATURES: readonly string[] = ['agent-stopped-push-v1'];
+
+/** The message a page posts to a service worker, with a reply port, to ask what it can show. */
+export const FEATURES_REQUEST = 'FEATURES';
+
 const BODY: Record<string, string> = {
   'decision-new': 'A question needs your input',
   'decision-reminder': 'A question is still waiting',
   'decision-proxy': 'A proxy answer needs your review',
   'decision-reply': 'A question needs your reply',
+  'agent-stopped': 'An agent stopped',
   test: 'Notifications are working',
 };
 
@@ -35,11 +46,14 @@ export function shapePush(raw: unknown): ShapedNotification {
     if (typeof o.type === 'string' && Object.hasOwn(BODY, o.type)) type = o.type;
     if (typeof o.question_id === 'string' && ID.test(o.question_id)) qid = o.question_id;
   }
+  // An agent-stopped push names no question: it opens the question list, and a newer one replaces the one still
+  // showing rather than stacking beside it.
+  if (type === 'agent-stopped') qid = null;
   return {
     title: 'Daintree Decisions',
     options: {
       body: BODY[type]!,
-      tag: qid ?? 'decisions',
+      tag: type === 'agent-stopped' ? 'agent-stopped' : (qid ?? 'decisions'),
       icon: '/icons/icon-192.png',
       // Android draws only the badge's alpha channel, tinted: it must be a silhouette, never the coloured tile.
       badge: '/icons/badge-96.png',

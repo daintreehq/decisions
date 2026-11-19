@@ -24,6 +24,31 @@ import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
 const store = new SqliteLocalStore('/path/to/decisions.db');
 ```
 
+A custom store that a 0.8.0 bridge wrote to needs `processedEventsOfType(eventType)`, optional in the interface:
+every processed inbound event of that type, applied or rejected, in `seq` order with its original `json`. A 0.8.0
+bridge kept the earlier round's deadline when a question was reopened, and 0.9.0 repairs those rows from the stored
+reopens it can verify. Without the method nothing is repaired, and such a question can miss its expiry (asked with no
+deadline and reopened with one, it never expires) or be closed at the earlier round's deadline. Such a bridge looks
+once, as it starts or first applies events, and while any reopened question is open reports a `not_supported` error on
+`bridge.on("error")`, before `start()` returns; register the listener before the first `start()`, `catchUp()` or
+`sync()`.
+Once the method is implemented, a new bridge over the same store repairs the rows in the background from the stored
+events, as long as they are kept. An expiry refused before then stays refused, and a question closed before then stays
+closed. Both bundled stores implement it.
+
+`bridge.start()` keeps a live socket to the relay. A host that cannot keep one starts with `{ socket: false, poll: true }`
+(or `poll: { intervalMs, retryBaseMs, retryCapMs, requestTimeoutMs }`) and the bridge syncs over HTTP until `stop()`:
+every 15 s, with equal-jitter backoff up to a minute while the relay is unreachable, one sync at a time, resuming from
+the stored cursor. Each sync emits `sync` and records its outcome in the store (`readHttpSyncStatus`); a revoked device
+stops the bridge, and a relay that needs a newer client stops the polling (`fatal`). `bridge.sync()` runs a single sync for a host that schedules its own, and `RelayClient.close()`
+aborts every request in flight when the process shuts down.
+
+The MCP tools tell agents to attach screenshots when a decision is visual, and describe an attachment's
+`local_resource_id` as Daintree resolves it: an image path relative to the folder the agent's terminal started in.
+A host whose `AttachmentResolver` takes something else says so with `attachmentIdDescription` (on
+`createDecisionsMcpHandler` and `startDecisionsMcpServer`); it changes only what agents are told, never what
+the resolver accepts.
+
 The `decisions` command ([`@daintreehq/decisions-cli`](https://www.npmjs.com/package/@daintreehq/decisions-cli))
 is a complete host built on this package; [docs/architecture.md](https://github.com/daintreehq/decisions/blob/main/docs/architecture.md)
 and the [Daintree integration spec](https://github.com/daintreehq/decisions/blob/main/docs/daintree-integration-spec.md)

@@ -9,6 +9,7 @@ import {
 } from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
 import { NO_EPOCH_KEY, verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
+import { ADVISORY_QUESTION_FIXTURE } from '@daintreehq/decisions-protocol/fixtures';
 import {
   actionEvent,
   makeWorld,
@@ -35,6 +36,92 @@ describe('question verification', () => {
       expect(r.value.content.question).toBe('Use the compact sidebar?');
       expect(r.value.content.options).toHaveLength(2);
     }
+  });
+
+  it('reads a genuine advisory question with its plan and mode, beside a blocking one', async () => {
+    const w = await makeWorld();
+    const deadline = new Date(Date.now() + 15 * 60_000).toISOString();
+    const advisory = await questionEvent(w, {
+      replyMode: 'advisory',
+      expiresAt: deadline,
+      content: { ...ADVISORY_QUESTION_FIXTURE.content },
+    });
+    const r = await verifyQuestionEvent(advisory.data, NOW, ctx(w), advisory.question_id!);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.replyMode).toBe('advisory');
+      expect(r.value.record.expires_at).toBe(deadline);
+      expect(r.value.content.planned_fallback).toBe(
+        ADVISORY_QUESTION_FIXTURE.content.planned_fallback,
+      );
+    }
+    const blocking = await questionEvent(w);
+    const b = await verifyQuestionEvent(blocking.data, NOW, ctx(w), blocking.question_id!);
+    expect(b.ok && b.value.replyMode).toBe('blocking');
+  });
+
+  it('refuses advisory content that is an approval or states no plan, whoever signed it', async () => {
+    const w = await makeWorld();
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    const { planned_fallback: _plan, ...noPlan } = ADVISORY_QUESTION_FIXTURE.content;
+    for (const content of [
+      { ...ADVISORY_QUESTION_FIXTURE.content, kind: 'approval' },
+      noPlan,
+      // Blank: the content parse drops it, which leaves no plan to show.
+      { ...ADVISORY_QUESTION_FIXTURE.content, planned_fallback: '   ' },
+    ]) {
+      const e = await questionEvent(w, { replyMode: 'advisory', expiresAt, content });
+      expect(await verifyQuestionEvent(e.data, NOW, ctx(w), e.question_id!)).toEqual({
+        ok: false,
+        reason: 'question content is malformed',
+      });
+    }
+    // A blocking question may carry a plan without meaning: it reads as before.
+    const blocking = await questionEvent(w, {
+      content: { ...ADVISORY_QUESTION_FIXTURE.content, kind: 'approval' },
+    });
+    expect((await verifyQuestionEvent(blocking.data, NOW, ctx(w), blocking.question_id!)).ok).toBe(
+      true,
+    );
+  });
+
+  it('keeps the signed deadline and mode of an advisory question it holds no key for', async () => {
+    const w = await makeWorld();
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    const e = await questionEvent(w, {
+      replyMode: 'advisory',
+      expiresAt,
+      content: { ...ADVISORY_QUESTION_FIXTURE.content },
+    });
+    const r = await verifyQuestionEvent(
+      e.data,
+      NOW,
+      { ...ctx(w), epochKeys: new Map() },
+      e.question_id!,
+    );
+    expect(r).toMatchObject({
+      ok: false,
+      reason: NO_EPOCH_KEY,
+      signed: { replyMode: 'advisory', record: { expires_at: expiresAt } },
+    });
+    // A tampered one never gets that far.
+    const bad = await questionEvent(w, {
+      replyMode: 'advisory',
+      expiresAt,
+      content: { ...ADVISORY_QUESTION_FIXTURE.content },
+      tamper: (env) => {
+        env.ciphertext =
+          env.ciphertext.slice(0, -2) + (env.ciphertext.endsWith('AA') ? 'BB' : 'AA');
+      },
+    });
+    const t = await verifyQuestionEvent(
+      bad.data,
+      NOW,
+      { ...ctx(w), epochKeys: new Map() },
+      bad.question_id!,
+    );
+    expect(t).toMatchObject({ ok: false });
+    expect((t as { signed?: unknown }).signed).toBeUndefined();
   });
 
   it('rejects tampered ciphertext (relay swapped bytes)', async () => {
@@ -103,9 +190,12 @@ describe('question verification', () => {
     const w = await makeWorld();
     const noKeys = { ...ctx(w), epochKeys: new Map() };
     const genuine = await questionEvent(w);
-    expect(await verifyQuestionEvent(genuine.data, NOW, noKeys, genuine.question_id!)).toEqual({
+    expect(
+      await verifyQuestionEvent(genuine.data, NOW, noKeys, genuine.question_id!),
+    ).toMatchObject({
       ok: false,
       reason: NO_EPOCH_KEY,
+      signed: { replyMode: 'blocking' },
     });
     // altered in transit: still a verification failure, never "just a missing key"
     const forged = await questionEvent(w, {

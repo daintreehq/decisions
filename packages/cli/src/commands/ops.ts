@@ -12,9 +12,12 @@ import {
   exportRecoveryKit,
   importDecisions,
   importRecoveryKit,
+  readHttpSyncStatus,
   verifiedDevices,
   verifyRecoveryKit,
   loadIdentity,
+  type HttpSyncStatus,
+  type WebSocketLike,
 } from '@daintreehq/decisions-client';
 import {
   encryptAttachment,
@@ -32,6 +35,14 @@ import {
   type Ctx,
   type GlobalOptions,
 } from '../runtime.js';
+import { ReceiverLock } from '../receiver.js';
+
+const STATUS_PROBE_MS = 5_000;
+/**
+ * How long each of doctor's requests may take while it holds the receiver lock for its socket check. With one attempt
+ * each and the handshake's 8 s, the lock is held for well under the 30 s a plain `ask` gives itself to publish.
+ */
+const DOCTOR_REQUEST_MS = 5_000;
 
 export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   const rt = await openRuntime(ctx, g);
@@ -41,7 +52,8 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
     const outbox = await rt.store.dueOutbox(Number.MAX_SAFE_INTEGER, 1000);
     let relay: { reachable: boolean; info?: InfoResponse; error?: string } = { reachable: false };
     try {
-      relay = { reachable: true, info: await rt.client.info() };
+      // A deadline, so an unreachable relay still lets the local state (the last HTTP sync above all) be shown.
+      relay = { reachable: true, info: await rt.client.info(STATUS_PROBE_MS) };
     } catch (e) {
       relay = { reachable: false, error: (e as Error).message };
     }
@@ -75,6 +87,7 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
           error: q.error_code,
         })),
       unsent: outbox.length,
+      last_http_sync: await readHttpSyncStatus(rt.store),
     };
     print(
       ctx,
@@ -85,6 +98,7 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
         `Event cursor   ${data.cursor}`,
         `Questions      ${data.questions.total} total · ${data.questions.queued} queued · ${data.questions.open} open · ${data.questions.proxy_answered} proxy-answered · ${data.questions.answered} answered`,
         `Unsent         ${data.unsent} item(s) waiting to publish`,
+        `Last HTTP sync ${describeHttpSync(data.last_http_sync)}`,
         ...data.needs_attention.map(
           (n) =>
             `! q-${n.alias} ${n.status} (${n.error ?? 'unknown'}): answer saved but not typed into the agent`,
@@ -95,6 +109,25 @@ export async function status(ctx: Ctx, g: GlobalOptions): Promise<void> {
   } finally {
     await rt.store.close();
   }
+}
+
+/**
+ * What the last HTTP sync (`decisions listen --no-socket` or `--once`, `decisions mcp --no-socket`) recorded. It is a
+ * record, not a liveness check: a listener that stopped leaves its last result behind.
+ */
+export function describeHttpSync(s: HttpSyncStatus | null): string {
+  if (!s || s.last_attempt_at === null)
+    return 'never (only a listener without a live socket records one)';
+  const at = (ms: number) => new Date(ms).toISOString();
+  const success =
+    s.last_success_at === null
+      ? 'no successful sync yet'
+      : `last success ${at(s.last_success_at)} at event ${s.last_success_cursor}`;
+  if (s.outcome === 'ok') return success;
+  if (s.outcome === 'revoked') return `stopped: this device was revoked (${success})`;
+  if (s.outcome === 'fatal')
+    return `stopped: the relay refuses this client (${s.reason ?? 'unknown'}) (${success})`;
+  return `failing: ${s.reason ?? 'unknown'}, ${s.failures} in a row, last tried ${at(s.last_attempt_at)} (${success})`;
 }
 
 interface Check {
@@ -168,58 +201,96 @@ export async function doctor(ctx: Ctx, g: GlobalOptions, o: { url?: string }): P
 
   if (identity && info?.claimed && identity.config.relayOrigin === origin) {
     const client = new RelayClient({ identity, fetch: ctx.fetch, maxRetries: 1 });
-    // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
-    // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
-    // declared, so running doctor never switches them off. Unknown (the list failed, or lacks this device), the
-    // socket check is skipped rather than declaring nothing.
-    let declared: ProtocolFeature[] | null = null;
+    // The relay closes this device's other sockets when the test socket opens (`replaced`), so the check never runs
+    // beside a process receiving for this state directory, and it holds the receiver lock from reading the declaration
+    // to the end of the handshake: a receiver starting meanwhile waits for it (or, as a listener, refuses) rather than
+    // lose its socket, or its declaration, to this check.
+    const lock = ReceiverLock.forHome(ctx.home);
+    let free: boolean | Error;
     try {
-      const list = await verifiedDevices(client);
-      add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
-      const me = identity.config.deviceId;
-      const self = list.find((d) => d.device_id === me);
-      if (self) declared = [...knownFeatures(self.features)];
+      free = lock.tryAcquire();
     } catch (e) {
-      add(
-        'signed request',
-        false,
-        e instanceof RelayError ? `${e.code}: ${e.message}` : (e as Error).message,
-      );
+      free = e as Error;
     }
-    if (declared === null) {
-      add('websocket', false, "skipped: this device's declared features could not be read", true);
-    } else {
+    try {
+      // A socket ticket's declaration replaces the device's (protocol section 19), and the relay gates owner-desktop
+      // answers, human follow-ups and snapshot refreshes on it: the test ticket re-declares what this device last
+      // declared, so running doctor never switches them off. Unknown (the list failed, or lacks this device), the
+      // socket check is skipped rather than declaring nothing.
+      let declared: ProtocolFeature[] | null = null;
       try {
-        const t = await client.socketTicket(declared);
-        const url =
-          origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
-        const ok = await new Promise<boolean>((resolve) => {
-          const WS = ctx.webSocket
-            ? null
-            : (globalThis as { WebSocket?: new (u: string) => WebSocket }).WebSocket;
-          const ws = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
-          const timer = setTimeout(() => (ws.close(), resolve(false)), 8000);
-          (ws as WebSocket).onmessage = (ev: MessageEvent) => {
-            try {
-              if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') {
-                clearTimeout(timer);
-                ws.close(1000);
-                resolve(true);
-              }
-            } catch {
-              /* ignore non-JSON frames */
-            }
-          };
-          (ws as WebSocket).onerror = () => (clearTimeout(timer), resolve(false));
+        const list = await verifiedDevices(client, {
+          timeoutMs: DOCTOR_REQUEST_MS,
+          retry: false,
         });
+        add('signed request', true, `${list.filter((d) => !d.revoked_at).length} active device(s)`);
+        const me = identity.config.deviceId;
+        const self = list.find((d) => d.device_id === me);
+        if (self) declared = [...knownFeatures(self.features)];
+      } catch (e) {
+        add(
+          'signed request',
+          false,
+          e instanceof RelayError ? `${e.code}: ${e.message}` : (e as Error).message,
+        );
+      }
+      if (free instanceof Error) {
+        add('websocket', false, `could not read the receiver lock: ${free.message}`);
+      } else if (!free) {
         add(
           'websocket',
-          ok,
-          ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
+          false,
+          'skipped: another decisions process receives for this state directory, and a test socket would replace its own',
+          true,
         );
-      } catch (e) {
-        add('websocket', false, (e as Error).message);
+      } else if (declared === null) {
+        add('websocket', false, "skipped: this device's declared features could not be read", true);
+      } else {
+        try {
+          const t = await client.socketTicket(declared, { timeoutMs: DOCTOR_REQUEST_MS });
+          const url =
+            origin.replace(/^http/, 'ws') + `${t.ws_path}?ticket=${encodeURIComponent(t.ticket)}`;
+          const ok = await new Promise<boolean>((resolve) => {
+            const WS = ctx.webSocket
+              ? null
+              : (globalThis as { WebSocket?: new (u: string) => WebSocketLike }).WebSocket;
+            const ws: WebSocketLike = ctx.webSocket ? ctx.webSocket(url) : new WS!(url);
+            // One way out, whichever comes first: hello, an error, a close, or the timeout.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const finish = (hello: boolean) => {
+              if (timer === undefined) return;
+              clearTimeout(timer);
+              timer = undefined;
+              ws.onmessage = ws.onerror = ws.onclose = null;
+              try {
+                ws.close(1000);
+              } catch {
+                /* already closed */
+              }
+              resolve(hello);
+            };
+            timer = setTimeout(() => finish(false), 8000);
+            ws.onmessage = (ev) => {
+              try {
+                if ((JSON.parse(String(ev.data)) as { t?: string }).t === 'hello') finish(true);
+              } catch {
+                /* ignore non-JSON frames */
+              }
+            };
+            ws.onerror = () => finish(false);
+            ws.onclose = () => finish(false);
+          });
+          add(
+            'websocket',
+            ok,
+            ok ? 'upgrade + hello received' : 'could not open the hibernatable socket',
+          );
+        } catch (e) {
+          add('websocket', false, (e as Error).message);
+        }
       }
+    } finally {
+      lock.release();
     }
     try {
       const epoch = await importEpochKey(generateEpochKeyBytes(), 1, false);

@@ -62,7 +62,7 @@ import {
   type KeyStore,
   type StoredIdentity,
 } from './identity.js';
-import { Mutex } from './mutex.js';
+import { Mutex, TransientError } from './mutex.js';
 import { RelayClient } from './relay.js';
 
 /** Serializes read-merge-write commits to one key store within this process. */
@@ -625,20 +625,26 @@ export async function acceptHostEnrollment(o: AcceptHostEnrollmentOptions): Prom
 }
 
 /**
- * Host side, after a `device.key_rotated` event: fetch this Host's sealed grants, verify each against the
- * pinned owner, store the opened epoch keys, and swap the refreshed identity into the client.
+ * Host side, after a `device.key_rotated` event: fetch this Host's sealed grants (or take the ones the caller already
+ * read with `client.keyGrants()`), verify each against the pinned owner, store the opened epoch keys, and swap the
+ * refreshed identity into the client.
  */
 export async function refreshHostGrants(
   client: RelayClient,
   keyStore: KeyStore,
+  fetched?: EpochGrant[],
 ): Promise<Identity> {
   const id = client.identity;
   if (id.role !== 'desktop-host') throw new Error('only an enrolled Host refreshes its grants');
-  const { grants } = await client.keyGrants();
+  const grants = fetched ?? (await client.keyGrants()).grants;
+  // A key store that cannot be read or written (a locked keychain, a file mid-write) says nothing about the grants.
+  const unavailable = (e: unknown): never => {
+    throw new TransientError(`key store unavailable: ${(e as Error).message}`);
+  };
   // Merge into what is stored NOW, not into the snapshot taken before the fetch: overlapping refreshes must
   // never drop an epoch another one saved, nor move the current epoch backwards.
   return lockFor(keyStore).run(async () => {
-    const latest = await keyStore.load();
+    const latest = await keyStore.load().catch(unavailable);
     if (
       !latest ||
       latest.role !== 'desktop-host' ||
@@ -658,7 +664,7 @@ export async function refreshHostGrants(
         id.owner.signingKey,
         fresh,
       );
-      await keyStore.save(stored);
+      await keyStore.save(stored).catch(unavailable);
     }
     const next = await importIdentity(stored);
     client.identity = next;

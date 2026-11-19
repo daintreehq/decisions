@@ -349,6 +349,25 @@ describe('push payloads', () => {
       ).toBe(false);
     }
   });
+
+  it('carry nothing but the type when an agent stopped', () => {
+    expect(PushPayload.safeParse({ type: 'agent-stopped' }).success).toBe(true);
+    for (const extra of [
+      { question_id: 'q_aaaaaaaa' },
+      { agent: 'claude' },
+      { pane_id: 'pane_1' },
+      { project: 'site' },
+      { count: 2 },
+      { stopped_at: '2026-11-19T00:00:00Z' },
+    ]) {
+      expect(
+        PushPayload.safeParse({ type: 'agent-stopped', ...extra }).success,
+        Object.keys(extra)[0],
+      ).toBe(false);
+    }
+    // A question's push still needs its question id.
+    expect(PushPayload.safeParse({ type: 'decision-new' }).success).toBe(false);
+  });
 });
 
 describe('thread state rules', () => {

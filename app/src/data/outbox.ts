@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION, type PhoneImageReference } from '@daintreehq/decisions-protocol';
 import type { HumanActionKind } from '../domain/answer.js';
+import type { DeclineOutcome } from '../domain/decline.js';
 import type { Db } from './db.js';
 import { open, openBytes, seal, sealBytes } from './seal.js';
 import { RelayError } from './relay.js';
@@ -12,8 +13,11 @@ import type { PhotoMime } from './photos.js';
 export type OutboxState =
   'queued' | 'sending' | 'committed' | 'conflicted' | 'rejected' | 'expired';
 
-/** What an entry sends: one of the person's actions on the question, or a follow-up message in its thread. */
-export type OutboxKind = HumanActionKind | 'message';
+/**
+ * What an entry sends: one of the person's actions on the question, a follow-up message in its thread, or the person's
+ * decline (a `cancel` signed by this phone or tablet, docs/protocol.md section 6.1).
+ */
+export type OutboxKind = HumanActionKind | 'message' | 'decline';
 
 /**
  * One photo going with an answer or follow-up (docs/protocol.md section 17). It is encrypted on this device when the
@@ -70,8 +74,17 @@ export interface OutboxEntry {
   attempts: number;
   /** Revision the relay reported when it refused (conflict). */
   latestRevision?: number;
+  /** The question's status the relay reported when it refused (a revision conflict names it). */
+  latestStatus?: string;
   /** The relay's error code when it refused for good. */
   errorCode?: string;
+  /** Why, when the relay named a reason with its refusal (`creator-missing-feature`). */
+  refusalReason?: string;
+  /**
+   * A decline's settlement when something else settled the question's round first (or the relay refused it): kept,
+   * as a note the person lets go, and never worked out again from a thread that has moved on since.
+   */
+  outcome?: DeclineOutcome;
 }
 
 export interface Poster {
@@ -102,6 +115,13 @@ export interface OutboxHooks {
    */
   settle?: (e: OutboxEntry) => Promise<unknown> | undefined;
   onChange?: () => void;
+  /** The relay refused an entry for good; it is stored with the refusal before this is called. */
+  onRefused?: (e: OutboxEntry) => void;
+  /**
+   * How a decline has settled, read from the thread (`declineSettlement`): `accepted` once the thread holds it, an
+   * outcome to keep, or null while the thread can't yet say. Without it, a decline settles as any other entry does.
+   */
+  declineSettlement?: (e: OutboxEntry) => 'accepted' | DeclineOutcome | null;
   /**
    * The relay lost an entry's photo reservation (its upload window or orphan deadline passed) or refused the record's
    * photos: sign the same answer or follow-up again with the photos encrypted under fresh ids. Null when it can't be.
@@ -128,6 +148,8 @@ export type PhotoState =
   | { kind: 'interrupted' };
 
 const label = (id: string) => `outbox:${id}`;
+/** How long one send of a decline may take, as the owner desktop's decline (`OWNER_DECLINE_TIMEOUT_MS`). */
+export const DECLINE_TIMEOUT_MS = 15_000;
 const blobLabel = (entryId: string, attachmentId: string) =>
   `outbox-image:${entryId}:${attachmentId}`;
 const blobId = blobLabel;
@@ -180,6 +202,11 @@ export class Outbox {
     private readonly hooks: OutboxHooks = {},
     /** How long an entry with photos waits before trying again after the relay was unreachable mid-upload. */
     private readonly retryDelays: readonly number[] = [3_000, 10_000, 30_000],
+    /**
+     * How long one send of a decline may go unanswered before it counts as a dropped connection (and is sent again,
+     * the same request): a hung request never holds the queue, and everything in it, behind a dismissal.
+     */
+    private readonly declineTimeoutMs = DECLINE_TIMEOUT_MS,
   ) {}
 
   subscribe = (l: () => void) => {
@@ -214,6 +241,18 @@ export class Outbox {
   }
   forQuestion(questionId: string): OutboxEntry[] {
     return this.list().filter((e) => e.questionId === questionId);
+  }
+  /**
+   * The person's decline of the question from this device while it is still on its way: queued here, being sent, on
+   * the relay and not yet read back into the thread, or refused and waiting for the thread to say what settled its
+   * round. At most one is ever in flight per question.
+   */
+  declineInFlight(questionId: string): OutboxEntry | undefined {
+    return this.forQuestion(questionId).find(
+      // Every decline is either let go once the thread holds it or keeps how it settled: until then it is on its way,
+      // a refusal still being read back included.
+      (e) => e.kind === 'decline' && !e.outcome,
+    );
   }
   pendingState(questionId: string): 'queued' | 'sending' | undefined {
     const e = this.forQuestion(questionId).find(
@@ -284,12 +323,18 @@ export class Outbox {
   async retry(id: string): Promise<void> {
     const e = this.entries.get(id);
     if (!e || e.state === 'queued' || e.state === 'sending') return;
+    // A decline is never sent again once it has settled: dismissing again signs a new one for the round in view.
+    if (e.kind === 'decline') return;
+    // Nothing else goes on a question while this device's dismissal of it is on its way.
+    if (this.declineInFlight(e.questionId)) return;
     e.state = 'queued';
     delete e.error;
     // Asked for again by the person: photos the relay lost may be encrypted afresh once more.
     if (e.errorCode === 'image_lost') e.rebuilt = 0;
     delete e.errorCode;
     delete e.refusedAt;
+    delete e.latestStatus;
+    delete e.refusalReason;
     await this.persist(e);
     this.changed();
     void this.flush();
@@ -303,12 +348,34 @@ export class Outbox {
     return this.flush();
   }
 
-  private async persist(e: OutboxEntry): Promise<void> {
-    await this.db.putOutbox({
+  /** Each entry's writes in turn, so a slower seal of an earlier state never lands over a later one. */
+  private writes = new Map<string, Promise<void>>();
+
+  private persist(e: OutboxEntry): Promise<void> {
+    const next = (this.writes.get(e.id) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        // Sealed as it stands when its turn comes: the last write holds the latest state.
+        const sealed = await seal(this.cacheKey, e, label(e.id));
+        // Let go meanwhile (settled from the thread): it is never written back.
+        if (this.entries.get(e.id) !== e) return;
+        await this.write(e, sealed);
+      });
+    this.writes.set(e.id, next);
+    next
+      .finally(() => {
+        if (this.writes.get(e.id) === next) this.writes.delete(e.id);
+      })
+      .catch(() => undefined);
+    return next;
+  }
+
+  private write(e: OutboxEntry, sealed: Awaited<ReturnType<typeof seal>>): Promise<unknown> {
+    return this.db.putOutbox({
       id: e.id,
       createdAt: e.createdAt,
       questionId: e.questionId,
-      sealed: await seal(this.cacheKey, e, label(e.id)),
+      sealed,
     });
   }
 
@@ -327,7 +394,7 @@ export class Outbox {
       attempts: 0,
     };
     if (ciphertexts?.size) await this.storeCiphertexts(entry.id, ciphertexts);
-    await this.persist(entry);
+    await this.write(entry, await seal(this.cacheKey, entry, label(entry.id)));
     this.entries.set(entry.id, entry);
     this.changed();
     return entry;
@@ -489,6 +556,26 @@ export class Outbox {
     return true;
   }
 
+  /** A request that has not answered within `ms` counts as a dropped connection; a late answer is ignored. */
+  private async withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new RelayError('network', 0, 'Your relay did not answer in time')),
+            ms,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      // Its answer, whenever it comes, is the relay's receipt for the same request: the next send gets it again.
+      p.catch(() => undefined);
+    }
+  }
+
   private scheduleRetry() {
     if (this.retryTimer || this.retryDelays.length === 0) return;
     const ms = this.retryDelays[Math.min(this.retryStep, this.retryDelays.length - 1)]!;
@@ -501,13 +588,35 @@ export class Outbox {
 
   private async pass(): Promise<void> {
     for (const e of this.list()) {
-      if (e.state === 'committed') {
+      // Let go since this pass began (a decline the thread already holds): never sent, never written back.
+      if (this.entries.get(e.id) !== e) continue;
+      // Committed, or a decline refused and not yet settled from the thread: read back (again).
+      if (e.state === 'committed' || (e.kind === 'decline' && !e.outcome && e.state !== 'queued')) {
         await this.settled(e);
         continue;
       }
       if (e.state !== 'queued') continue;
+      // A decline whose earlier send was taken (its answer lost on the way back) is already in the thread.
+      if (e.kind === 'decline' && this.hooks.declineSettlement?.(e) === 'accepted') {
+        await this.discard(e.id);
+        continue;
+      }
       e.state = 'sending';
       e.attempts++;
+      // A decline remembers that it went out before it goes: after a restart mid-send it is shown as unconfirmed,
+      // since the relay may have taken it, never as one that was not sent.
+      if (e.kind === 'decline') {
+        try {
+          await this.persist(e);
+        } catch {
+          // Not written, so not sent: it waits as it was, and is tried again on its own.
+          e.state = 'queued';
+          e.attempts--;
+          this.changed();
+          if (typeof navigator === 'undefined' || navigator.onLine !== false) this.scheduleRetry();
+          return;
+        }
+      }
       this.changed();
       let photoPhase = false;
       try {
@@ -517,7 +626,8 @@ export class Outbox {
           photoPhase = false;
         }
         try {
-          await this.poster().jsonRaw('POST', e.path, e.bodyText);
+          const sent = this.poster().jsonRaw('POST', e.path, e.bodyText);
+          await (e.kind === 'decline' ? this.withDeadline(sent, this.declineTimeoutMs) : sent);
         } catch (err) {
           // The record's photos did not bind (one passed its orphan deadline): they go again under fresh ids.
           if (e.images?.length && definite(err) && err.code === 'validation_error')
@@ -559,19 +669,40 @@ export class Outbox {
           e.errorCode = err.code;
           const latest = err.details?.latest_revision;
           if (typeof latest === 'number') e.latestRevision = latest;
+          const status = err.details?.status;
+          if (typeof status === 'string') e.latestStatus = status;
+          const reason = err.details?.reason;
+          if (typeof reason === 'string') e.refusalReason = reason;
           await this.persist(e);
           this.changed();
+          this.hooks.onRefused?.(e);
+          if (e.kind === 'decline') await this.settleDecline(e);
           continue;
         }
         // Network trouble or relay hiccup: keep it queued and stop, order matters. Photos part-way up say so, and
         // try again on their own while the device thinks it is online.
         e.state = 'queued';
-        if (e.images?.length) {
-          const online = typeof navigator === 'undefined' || navigator.onLine !== false;
-          // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.
-          if (photoPhase && online) this.trouble.add(e.id);
-          if (online) this.scheduleRetry();
+        if (e.kind === 'decline') {
+          // The thread already holds the decline this send was for (it arrived while the answer was lost): settled.
+          if (this.hooks.declineSettlement?.(e) === 'accepted') {
+            await this.discard(e.id);
+            continue;
+          }
+          // The relay may have taken it all the same (an answer that came too late, or never came): read the thread,
+          // which settles it if so, off the send path.
+          void Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
         }
+        const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+        // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.
+        if (e.images?.length && photoPhase && online) this.trouble.add(e.id);
+        // A dismissal the person confirmed (this one, or one waiting behind it) is tried again on its own too, never
+        // left for a trigger that may not come.
+        if (
+          online &&
+          (e.images?.length ||
+            this.list().some((x) => x.kind === 'decline' && x.state === 'queued'))
+        )
+          this.scheduleRetry();
         await this.persist(e);
         this.changed();
         return;
@@ -581,15 +712,55 @@ export class Outbox {
 
   /** Read a committed entry back; let its local copy go only once the thread holds what it committed. */
   private async settled(e: OutboxEntry): Promise<void> {
+    if (e.kind === 'decline' && this.hooks.declineSettlement) {
+      // Read back off the send path: a slow read never holds the queue behind a dismissal, and the thread settles it
+      // whenever what it needs arrives (`reconcile`).
+      void Promise.resolve(this.hooks.settle?.(e))
+        .catch(() => undefined)
+        .then(() => this.settleDecline(e))
+        .catch(() => undefined);
+      return;
+    }
     await Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
     if (!this.hooks.inThread || this.hooks.inThread(e)) await this.discard(e.id);
   }
 
+  /**
+   * Settle a decline from the thread: it goes once the thread holds it, and when something else settled its round
+   * first (or the relay refused it), that outcome is kept with it until the person lets it go. Nothing yet: it waits.
+   */
+  private async settleDecline(e: OutboxEntry): Promise<void> {
+    if (this.entries.get(e.id) !== e) return;
+    const s = this.hooks.declineSettlement?.(e);
+    if (!s) {
+      // The relay has answered but the thread can't say yet (a read that failed, or came back short): read it again
+      // later, on its own, rather than leave the question held until something else happens.
+      const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+      if (e.state !== 'queued' && e.state !== 'sending' && online) this.scheduleRetry();
+      return;
+    }
+    if (s === 'accepted') return this.discard(e.id);
+    if (e.outcome) return;
+    e.outcome = s;
+    // Committed but settled by something else: no longer on its way.
+    if (e.state === 'committed') e.state = 'conflicted';
+    await this.persist(e);
+    this.changed();
+  }
+
   /** The thread changed: committed entries it now holds (or never will) can go. Synchronous check, async removal. */
   reconcile(): void {
-    if (!this.hooks.inThread) return;
-    for (const e of this.entries.values())
-      if (e.state === 'committed' && this.hooks.inThread(e)) void this.discard(e.id);
+    for (const e of this.entries.values()) {
+      if (e.kind === 'decline' && this.hooks.declineSettlement) {
+        // Settled from the thread as soon as it can say, whatever the send got back; never while being sent.
+        if (e.state !== 'sending' && !e.outcome) {
+          const s = this.hooks.declineSettlement(e);
+          if (s === 'accepted' || (s && e.state !== 'queued')) void this.settleDecline(e);
+        }
+        continue;
+      }
+      if (e.state === 'committed' && this.hooks.inThread?.(e)) void this.discard(e.id);
+    }
   }
 
   /** Stop any scheduled retry (unpair, revocation). */

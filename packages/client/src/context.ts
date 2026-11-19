@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sha256Hex } from '@daintreehq/decisions-crypto';
 import type { AuditLog } from './audit.js';
@@ -43,20 +43,40 @@ export interface AttachmentSpool {
   put(id: string, bytes: Uint8Array): Promise<void>;
   get(id: string): Promise<Uint8Array | null>;
   delete(id: string): Promise<void>;
+  /**
+   * Delete every item not in `keep` that was last written before `before` (wall-clock ms, as `Date.now()`), and
+   * anything a write interrupted by a crash left behind. Returns how many items it deleted. The bridge calls it at
+   * start with the attachments its queued creates still need, so a crash between spooling an image and committing its
+   * question, or between dropping a create and its images, leaves nothing behind for long. The age bound keeps an
+   * image another process has just spooled for a question it has not committed yet. Optional: a spool without it
+   * collects its own strays.
+   */
+  prune?(keep: ReadonlySet<string>, before: number): Promise<number>;
 }
 
 export class MemorySpool implements AttachmentSpool {
-  private m = new Map<string, Uint8Array>();
+  private m = new Map<string, { bytes: Uint8Array; at: number }>();
   async put(id: string, b: Uint8Array) {
-    this.m.set(id, b);
+    this.m.set(id, { bytes: b, at: Date.now() });
   }
   async get(id: string) {
-    return this.m.get(id) ?? null;
+    return this.m.get(id)?.bytes ?? null;
   }
   async delete(id: string) {
     this.m.delete(id);
   }
+  async prune(keep: ReadonlySet<string>, before: number): Promise<number> {
+    let n = 0;
+    for (const [id, v] of this.m) {
+      if (keep.has(id) || v.at >= before) continue;
+      this.m.delete(id);
+      n++;
+    }
+    return n;
+  }
 }
+
+const SPOOL_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
 /**
  * Durable spool for encrypted attachment ciphertext awaiting upload: files (0600) in a private directory (0700),
@@ -65,7 +85,7 @@ export class MemorySpool implements AttachmentSpool {
 export class FileSpool implements AttachmentSpool {
   constructor(private readonly dir: string) {}
   private path(id: string): string {
-    if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error('invalid spool id');
+    if (!SPOOL_ID.test(id)) throw new Error('invalid spool id');
     return join(this.dir, id);
   }
   async put(id: string, bytes: Uint8Array): Promise<void> {
@@ -92,6 +112,31 @@ export class FileSpool implements AttachmentSpool {
   }
   async delete(id: string): Promise<void> {
     await rm(this.path(id), { force: true });
+  }
+  async prune(keep: ReadonlySet<string>, before: number): Promise<number> {
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw e;
+    }
+    let n = 0;
+    for (const name of names) {
+      // Only names this spool writes: an id, or an id's `.tmp` from a write a crash interrupted.
+      const tmp = name.endsWith('.tmp');
+      const id = tmp ? name.slice(0, -4) : name;
+      if (!SPOOL_ID.test(id) || (!tmp && keep.has(id))) continue;
+      const file = join(this.dir, name);
+      try {
+        if ((await stat(file)).mtimeMs >= before) continue;
+        await rm(file, { force: true });
+        n++;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      }
+    }
+    return n;
   }
 }
 

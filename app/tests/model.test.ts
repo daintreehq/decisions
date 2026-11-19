@@ -333,10 +333,12 @@ describe('question store', () => {
     expect(effectiveStatus(s.get(q.question_id!)!)).toBe('expired'); // from the signed deadline alone
     expect(submitKind(s.get(q.question_id!)!)).toBeNull();
     await s.ingest(
-      plainEvent('decision.expired', q.question_id, {
-        expired_at: new Date().toISOString(),
-        target_host_id: 'host_aaaaaaaa',
-      }),
+      plainEvent(
+        'decision.expired',
+        q.question_id,
+        { expired_at: new Date().toISOString(), target_host_id: 'host_aaaaaaaa' },
+        { question_revision: 0 },
+      ),
     );
     expect(s.get(q.question_id!)!.status).toBe('expired');
 
@@ -346,16 +348,90 @@ describe('question store', () => {
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
     await s.ingestAll([never, future]);
-    for (const e of [never, future]) {
+    for (const [e, why] of [
+      [never, /no deadline/],
+      [future, /before the signed deadline/],
+    ] as const) {
       await s.ingest(
-        plainEvent('decision.expired', e.question_id, {
-          expired_at: new Date().toISOString(),
-          target_host_id: 'host_aaaaaaaa',
-        }),
+        plainEvent(
+          'decision.expired',
+          e.question_id,
+          { expired_at: new Date().toISOString(), target_host_id: 'host_aaaaaaaa' },
+          { question_revision: 0 },
+        ),
       );
       expect(s.get(e.question_id!)!.status).toBe('open');
-      expect(s.get(e.question_id!)!.integrityIssues.join()).toMatch(/before the signed deadline/);
+      expect(s.get(e.question_id!)!.integrityIssues.join()).toMatch(why);
     }
+  });
+
+  it('takes each reopen’s signed deadline, and believes an expiry only for the round in force and its host', async () => {
+    const w = await makeWorld();
+    const s = store(w);
+    const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+    const first = iso(3_600_000);
+    const later = iso(7_200_000);
+    const q = await questionEvent(w, { expiresAt: first });
+    const id = q.question_id!;
+    const expiry = (revision: number | null, at: string, host = 'host_aaaaaaaa') =>
+      plainEvent(
+        'decision.expired',
+        id,
+        { expired_at: at, target_host_id: host },
+        { question_revision: revision, occurred_at: at },
+      );
+    await s.ingest(q);
+    await s.ingest(await actionEvent(w, { questionId: id, action: 'cancel' }));
+    await s.ingest(
+      await actionEvent(w, { questionId: id, action: 'reopen', status: 'open', expiresAt: later }),
+    );
+    expect(s.get(id)).toMatchObject({ status: 'open', revision: 1, expiresAt: later });
+
+    // Between the two deadlines, a claim for the reopened round is early, by either relay clock.
+    const between = iso(5_400_000);
+    await s.ingestAll([
+      plainEvent(
+        'decision.expired',
+        id,
+        { expired_at: later, target_host_id: 'host_aaaaaaaa' },
+        { question_revision: 1, occurred_at: between },
+      ),
+      plainEvent(
+        'decision.expired',
+        id,
+        { expired_at: between, target_host_id: 'host_aaaaaaaa' },
+        { question_revision: 1, occurred_at: later },
+      ),
+      plainEvent('decision.expired', id, { reason: 'expired' }, { question_revision: 1 }),
+    ]);
+    expect(s.get(id)!.status).toBe('open');
+    expect(s.get(id)!.integrityIssues.join()).toMatch(
+      /before the signed deadline.*before the signed deadline.*malformed/,
+    );
+
+    // After both deadlines: the first round's claim, a claim for no round and one for another host change nothing.
+    const after = iso(7_260_000);
+    await s.ingestAll([expiry(0, after), expiry(null, after), expiry(1, after, 'host_bbbbbbbb')]);
+    expect(s.get(id)!.status).toBe('open');
+    expect(s.get(id)!.integrityIssues.join()).toMatch(/another round.*another round.*another host/);
+
+    await s.ingest(expiry(1, after));
+    expect(s.get(id)!.status).toBe('expired');
+
+    // Reopened to never: no claim can close the round.
+    await s.ingest(
+      await actionEvent(w, {
+        questionId: id,
+        action: 'reopen',
+        expectedRevision: 1,
+        status: 'open',
+        expiresAt: null,
+      }),
+    );
+    expect(s.get(id)).toMatchObject({ status: 'open', revision: 2, expiresAt: null });
+    await s.ingest(expiry(2, iso(8_000_000)));
+    expect(s.get(id)!.status).toBe('open');
+    expect(s.get(id)!.integrityIssues.join()).toMatch(/no deadline/);
   });
 
   it('removes deleted questions and tracks cancellation', async () => {

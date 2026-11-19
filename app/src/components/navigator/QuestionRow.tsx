@@ -17,11 +17,11 @@ import { ClockIcon, SendIcon, WarningIcon } from '../Icons.js';
 import { StatusGlyph } from './StatusGlyph.js';
 
 /**
- * Something from this device still in its outbox: an answer (what was chosen) or a follow-up message, and whether it
- * is queued or in flight.
+ * Something from this device still in its outbox: an answer (what was chosen), a follow-up message or a dismissal, and
+ * whether it is queued or in flight.
  */
 export interface PendingAnswer {
-  kind: 'answer' | 'message';
+  kind: 'answer' | 'message' | 'decline';
   state: 'queued' | 'sending';
   selected: string[];
   text: string;
@@ -100,7 +100,11 @@ export const QuestionRow = memo(function QuestionRow({
         onClick={(e) => onOpen(e, v.id)}
       >
         <span className="qrow-glyph">
-          <StatusGlyph status={status} />
+          {/* Past its deadline by this device's clock only: not an outcome, so never said as "Expired". */}
+          <StatusGlyph
+            status={status}
+            spoken={status === 'expired' && v.status === 'open' ? 'Deadline passed' : undefined}
+          />
         </span>
         <span className="qrow-line">
           <span className="qrow-q">
@@ -143,13 +147,17 @@ export const QuestionRow = memo(function QuestionRow({
           {pending && (
             <span className="badge">
               <SendIcon size={12} />
-              {pending.kind === 'message'
+              {pending.kind === 'decline'
                 ? pending.state === 'queued'
-                  ? 'Follow-up queued'
-                  : 'Sending follow-up…'
-                : pending.state === 'queued'
-                  ? 'Queued on this device'
-                  : 'Sending…'}
+                  ? 'Dismissal saved on this device'
+                  : 'Dismissing…'
+                : pending.kind === 'message'
+                  ? pending.state === 'queued'
+                    ? 'Follow-up queued'
+                    : 'Sending follow-up…'
+                  : pending.state === 'queued'
+                    ? 'Queued on this device'
+                    : 'Sending…'}
             </span>
           )}
           {extras.refused ? (

@@ -275,6 +275,9 @@ export interface AskOpts {
   attachmentIds?: string[];
   content?: Record<string, unknown>;
   idempotencyKey?: string;
+  /** Mark the question advisory in its envelope's AAD (docs/protocol.md section 21). */
+  replyMode?: 'advisory';
+  workflowGateIdHash?: string | null;
 }
 
 export async function ask(w: World, o: AskOpts = {}) {
@@ -288,6 +291,7 @@ export async function ask(w: World, o: AskOpts = {}) {
     revision: 0,
     senderDeviceId: w.owner.id,
     purpose: 'question-content',
+    ...(o.replyMode ? { replyMode: o.replyMode } : {}),
     plaintext: o.content ?? {
       content_version: 1,
       question: 'Use the compact sidebar?',
@@ -308,6 +312,7 @@ export async function ask(w: World, o: AskOpts = {}) {
     targetHostId: o.host ?? 'host_aaaaaaaa',
     originRef: o.originRef ?? 'pane_aaaaaaaa',
     requirement: o.requirement ?? 'human-required',
+    workflowGateIdHash: o.workflowGateIdHash ?? null,
     expiresAt:
       o.expiresAt === undefined ? new Date(Date.now() + 7 * 86400_000).toISOString() : o.expiresAt,
     attachmentIds: o.attachmentIds ?? [],

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testEnv as env } from './env.js';
 import { runDurableObjectAlarm } from 'cloudflare:test';
 import {
+  AgentStoppedPushResponse,
   LIMITS,
   PresenceResponse,
   PushPayload,
@@ -11,6 +12,8 @@ import {
 import { newId } from '@daintreehq/decisions-crypto';
 import { PRESENCE_META, presenceHold } from '../src/room/presence.js';
 import { PROXY_GRACE_MS } from '../src/routes/questions.js';
+import { AGENT_STOPPED_RATE_KEY } from '../src/routes/push.js';
+import { pushTtlSeconds, sendNotification } from '../src/jobs/notify.js';
 import type { Room } from '../src/room/types.js';
 import {
   act,
@@ -518,19 +521,26 @@ async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, bytes: 
   );
 }
 
-/** A push subscriber that keeps its private key, so a test can read exactly what the relay sent. */
-async function subscriber(phone: Actor) {
+/**
+ * A push subscriber that keeps its private key, so a test can read exactly what the relay sent. `features` is the
+ * subscription's declaration of what its service worker can show; `resubscribe` sends the same endpoint again.
+ */
+async function subscriber(phone: Actor, features?: string[]) {
   const kp = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, [
     'deriveBits',
   ])) as CryptoKeyPair;
   const pub = new Uint8Array((await crypto.subtle.exportKey('raw', kp.publicKey)) as ArrayBuffer);
   const auth = crypto.getRandomValues(new Uint8Array(16));
-  const r = await phone.call('POST', '/api/v1/push/subscriptions', {
-    protocol_version: 1,
-    endpoint: `https://fcm.googleapis.com/fcm/send/${newId()}`,
-    p256dh: bytesToBase64Url(pub),
-    auth: bytesToBase64Url(auth),
-  });
+  const endpoint = `https://fcm.googleapis.com/fcm/send/${newId()}`;
+  const resubscribe = (declared?: string[]) =>
+    phone.call('POST', '/api/v1/push/subscriptions', {
+      protocol_version: 1,
+      endpoint,
+      p256dh: bytesToBase64Url(pub),
+      auth: bytesToBase64Url(auth),
+      ...(declared ? { features: declared } : {}),
+    });
+  const r = await resubscribe(features);
   expect(r.status).toBe(201);
   /** RFC 8291 / RFC 8188 (aes128gcm, one record), the way a browser's push service client opens it. */
   const open = async (body: Uint8Array): Promise<unknown> => {
@@ -563,7 +573,7 @@ async function subscriber(phone: Actor) {
     expect(plain[end]).toBe(2); // last-record delimiter
     return JSON.parse(new TextDecoder().decode(plain.slice(0, end)));
   };
-  return { open };
+  return { open, endpoint, resubscribe, id: r.json.subscription_id as string, created: r.json };
 }
 
 describe('reply pushes', () => {
@@ -942,8 +952,9 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
     const answered = (await ask(w)).questionId;
     const declined = (await ask(w)).questionId;
     const withdrawn = (await ask(w)).questionId;
-    const expired = (await ask(w, { expiresAt: new Date(Date.now() + 60_000).toISOString() }))
+    const expired = (await ask(w, { expiresAt: new Date(Date.now() + 90_000).toISOString() }))
       .questionId;
+    expect((await newPushes(expired)).map((j) => j.status)).toEqual(['pending']);
     expect((await act(w, w.owner, 'answer', answered, 0)).res.status).toBe(201);
     expect((await act(w, phone, 'cancel', declined, 0)).res.status).toBe(201);
     expect((await act(w, w.owner, 'cancel', withdrawn, 0)).res.status).toBe(201);
@@ -1107,5 +1118,699 @@ describe("presence holds a new question's push (docs/protocol.md section 11)", (
     expect(await lease()).toBeTruthy();
     expect((await wipe('everything')).status).toBe(200);
     expect(await lease()).toBeUndefined();
+  });
+});
+
+describe('agent-stopped pushes (docs/protocol.md section 11)', () => {
+  let w: World;
+  let phone: Actor;
+  const calls: { url: string; init: RequestInit }[] = [];
+  /** Endpoints whose push service refuses a send. */
+  const refusing = new Set<string>();
+  // Holds every push send while true. A flag rather than a promise: the send runs in the Durable Object's context.
+  let held = false;
+  const CAN = ['agent-stopped-push-v1'];
+
+  beforeEach(async () => {
+    calls.length = 0;
+    refusing.clear();
+    held = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      while (held) await new Promise((r) => setTimeout(r, 5));
+      return new Response(null, { status: refusing.has(String(url)) ? 500 : 201 });
+    }) as never);
+    w = await claimRelay();
+    phone = await pairDevice(w);
+  });
+  afterEach(() => {
+    held = false;
+    vi.restoreAllMocks();
+  });
+
+  const stopped = (a: Actor = w.owner, body: unknown = { protocol_version: 1 }) =>
+    a.call('POST', '/api/v1/push/agent-stopped', body);
+  const outcome = async (a?: Actor) => {
+    const r = await stopped(a);
+    expect(r.status).toBe(200);
+    return AgentStoppedPushResponse.parse(r.json).outcome;
+  };
+  /** Moves the current window's start `ms` into the past, as if that long had passed. */
+  const windowAges = (ms: number) =>
+    inRoom((room) =>
+      room.run(
+        `UPDATE rate_limits SET window_start = window_start - ? WHERE key = ?`,
+        ms,
+        AGENT_STOPPED_RATE_KEY,
+      ),
+    );
+  const window = () =>
+    inRoom((room) =>
+      room.q1<{ window_start: number }>(
+        `SELECT window_start FROM rate_limits WHERE key = ?`,
+        AGENT_STOPPED_RATE_KEY,
+      ),
+    );
+  /** Quiet hours around now (`around`), or a window that ends hours before now, whatever the time of day. */
+  const quiet = (enabled: boolean, around = true) => {
+    const h = new Date().getUTCHours();
+    const at = (n: number) => `${String((n + 24) % 24).padStart(2, '0')}:00`;
+    return phone.call('PUT', '/api/v1/settings', {
+      protocol_version: 1,
+      quiet_hours: around
+        ? { enabled, start: at(h - 2), end: at(h + 3), time_zone: 'UTC' }
+        : { enabled, start: at(h - 6), end: at(h - 3), time_zone: 'UTC' },
+    });
+  };
+  const header = (c: { init: RequestInit }, name: string) =>
+    (c.init.headers as Record<string, string>)[name];
+  const sentTo = (endpoint: string) => calls.find((c) => c.url === endpoint)!;
+  const body = (c: { init: RequestInit }) => new Uint8Array(c.init.body as ArrayBuffer);
+  /** Sends with the first push held until `during` has run, then lets it finish. */
+  async function whileSending<T>(during: () => Promise<T>) {
+    held = true;
+    const asked = stopped();
+    try {
+      await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 });
+      return { during: await during(), first: calls[0]! };
+    } finally {
+      held = false;
+      await asked;
+    }
+  }
+
+  it('takes the request from the owner desktop only, and nothing but its protocol version', async () => {
+    await subscriber(phone, CAN);
+    const { host } = await enrollHost(w);
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    for (const a of [phone, tablet, host]) expect((await stopped(a)).status).toBe(403);
+    for (const b of [
+      {},
+      { protocol_version: 2 },
+      { protocol_version: '1' },
+      { protocol_version: 1, project: 'site' },
+      { protocol_version: 1, count: 2 },
+    ]) {
+      expect((await stopped(w.owner, b)).status, JSON.stringify(b)).toBe(400);
+    }
+    // Nothing refused above sent a push or took the window.
+    expect(calls).toEqual([]);
+    expect(await window()).toBeUndefined();
+    expect(await outcome()).toBe('sent');
+  });
+
+  it('pushes only a type, briefly and replaceably, to the endpoints that said they can show it', async () => {
+    const can = await subscriber(phone, CAN);
+    expect(can.created.features).toEqual(CAN);
+    const cannot = await subscriber(phone);
+    expect(cannot.created.features).toEqual([]);
+    // Unknown tokens and other features are ignored; the declaration may sit anywhere in the list.
+    const unknown = await subscriber(phone, ['some-future-v9']);
+    const otherFeature = await subscriber(phone, ['presence-v1']);
+    const tablet = await pairDevice(w, 'tablet', 'Test iPad');
+    const tabletCan = await subscriber(tablet, ['presence-v1', ...CAN]);
+    expect(tabletCan.created.features).toEqual(CAN);
+    // A socket-ticket declaration speaks for the device, never for an endpoint.
+    await declare(phone, CAN);
+
+    const jobs = await pending();
+    expect(await outcome()).toBe('sent');
+    expect(calls.map((c) => c.url).sort()).toEqual([can.endpoint, tabletCan.endpoint].sort());
+    for (const c of calls) {
+      expect(header(c, 'TTL')).toBe('600');
+      expect(header(c, 'Urgency')).toBe('high');
+      expect(header(c, 'Topic')).toBe('agent-stopped');
+    }
+    for (const s of [can, tabletCan]) {
+      expect(await s.open(body(sentTo(s.endpoint)))).toEqual({ type: 'agent-stopped' });
+    }
+    // No job comes of it.
+    expect(await pending()).toEqual(jobs);
+
+    const listed = await phone.call('GET', '/api/v1/push/subscriptions');
+    const byId = Object.fromEntries(
+      (listed.json.subscriptions as { subscription_id: string; features: string[] }[]).map((s) => [
+        s.subscription_id,
+        s.features,
+      ]),
+    );
+    expect(byId).toEqual({
+      [can.id]: CAN,
+      [cannot.id]: [],
+      [unknown.id]: [],
+      [otherFeature.id]: [],
+    });
+  });
+
+  it('sends nothing the strict payload refuses, whoever calls the sender', async () => {
+    await subscriber(phone, CAN);
+    const err = await inRoom((room) =>
+      sendNotification(room, { type: 'agent-stopped', project: 'site' } as never).then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    );
+    expect(err).toBeTruthy();
+    expect(calls).toEqual([]);
+  });
+
+  it('forgets an endpoint’s declaration when an older app subscribes it again', async () => {
+    const s = await subscriber(phone, CAN);
+    const again = await s.resubscribe();
+    expect(again.status).toBe(201);
+    expect(again.json.subscription_id).toBe(s.id);
+    expect(again.json.features).toEqual([]);
+    expect(await outcome()).toBe('no-subscription');
+    expect(calls).toEqual([]);
+    // Nowhere to send takes no window: once the endpoint says so again, the next request goes out.
+    expect(await window()).toBeUndefined();
+    expect((await s.resubscribe(CAN)).json.features).toEqual(CAN);
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps one declaration per endpoint when a browser pairs again without revoking its old device', async () => {
+    const s = await subscriber(phone, CAN);
+    // The same browser, paired again as a new device, subscribes the same endpoint from an app that declares
+    // nothing: the old device's row must not keep sending to it.
+    const repaired = await pairDevice(w);
+    const sub = await inRoom((room) =>
+      room.q1<{ p256dh: string; auth: string }>(
+        `SELECT p256dh, auth FROM push_subscriptions WHERE subscription_id = ?`,
+        s.id,
+      ),
+    );
+    const plain = {
+      protocol_version: 1,
+      endpoint: s.endpoint,
+      p256dh: sub!.p256dh,
+      auth: sub!.auth,
+    };
+    expect((await repaired.call('POST', '/api/v1/push/subscriptions', plain)).status).toBe(201);
+    expect(await outcome()).toBe('no-subscription');
+    expect(calls).toEqual([]);
+    // And the other way round: declaring under the new device covers the old row too, and both rows send.
+    const declared = await repaired.call('POST', '/api/v1/push/subscriptions', {
+      ...plain,
+      features: CAN,
+    });
+    expect(declared.json.features).toEqual(CAN);
+    const listed = await phone.call('GET', '/api/v1/push/subscriptions');
+    expect(listed.json.subscriptions[0].features).toEqual(CAN);
+    // A registration of the same endpoint with other keys is another subscription: it changes no other row.
+    const other = await pairDevice(w, 'tablet', 'Test iPad');
+    const otherKeys = await subscription();
+    const foreign = await other.call('POST', '/api/v1/push/subscriptions', {
+      ...plain,
+      p256dh: otherKeys.p256dh,
+      auth: otherKeys.auth,
+    });
+    expect(foreign.json.features).toEqual([]);
+    const after = await phone.call('GET', '/api/v1/push/subscriptions');
+    expect(after.json.subscriptions[0].features).toEqual(CAN);
+  });
+
+  it('skips an endpoint whose declaration is withdrawn while the push is going out', async () => {
+    const first = await subscriber(phone, CAN);
+    const second = await subscriber(phone, CAN);
+    let waiting = second;
+    const { first: sent } = await whileSending(async () => {
+      waiting = calls[0]!.url === first.endpoint ? second : first;
+      expect((await waiting.resubscribe()).status).toBe(201);
+    });
+    expect(calls).toHaveLength(1);
+    expect(sent.url).not.toBe(waiting.endpoint);
+  });
+
+  it('still reaches an endpoint removed and subscribed again while the push is going out', async () => {
+    const first = await subscriber(phone, CAN);
+    const second = await subscriber(phone, CAN);
+    let waiting = second;
+    await whileSending(async () => {
+      waiting = calls[0]!.url === first.endpoint ? second : first;
+      const gone = await phone.call('DELETE', `/api/v1/push/subscriptions/${waiting.id}`);
+      expect(gone.status).toBe(200);
+      const back = await waiting.resubscribe(CAN);
+      expect(back.json.subscription_id).not.toBe(waiting.id);
+    });
+    expect(calls.map((c) => c.url).sort()).toEqual([first.endpoint, second.endpoint].sort());
+  });
+
+  it('drops a request in quiet hours rather than deferring it, presence or not', async () => {
+    await subscriber(phone, CAN);
+    expect((await quiet(true)).status).toBe(200);
+    const jobs = await pending();
+    expect(await outcome()).toBe('quiet-hours');
+    // The person at the computer changes nothing: quiet hours still drop it.
+    const lease = await w.owner.call('PUT', '/api/v1/presence', {
+      protocol_version: 1,
+      present: true,
+    });
+    expect(lease.status).toBe(200);
+    expect(await outcome()).toBe('quiet-hours');
+    expect(calls).toEqual([]);
+    expect(await pending()).toEqual(jobs);
+    expect(await window()).toBeUndefined();
+    // Nothing waits for quiet hours to end, and a dropped request took no window.
+    expect((await quiet(false)).status).toBe(200);
+    await runDurableObjectAlarm(stub());
+    expect(calls).toEqual([]);
+    // Quiet hours that are on but not now drop nothing, and the presence hold is for questions only.
+    expect((await quiet(true, false)).status).toBe(200);
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('accepts one per window, whether or not it was delivered', async () => {
+    const s = await subscriber(phone, CAN);
+    refusing.add(s.endpoint);
+    expect(await outcome()).toBe('failed');
+    refusing.clear();
+    expect(await outcome()).toBe('rate-limited');
+    expect(calls).toHaveLength(1);
+    // A refusal is final, not a "try again later".
+    const refused = await stopped();
+    expect(refused.status).toBe(200);
+    expect(refused.headers.get('Retry-After')).toBeNull();
+    // The window is 60 s from the accepted request.
+    await windowAges(59_000);
+    expect(await outcome()).toBe('rate-limited');
+    await windowAges(1_000);
+    expect(await outcome()).toBe('sent');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('takes the window before sending, so requests during a send are dropped, not queued', async () => {
+    await subscriber(phone, CAN);
+    const { during } = await whileSending(() => Promise.all([stopped(), stopped()]));
+    expect(during.map((r) => r.json.outcome)).toEqual(['rate-limited', 'rate-limited']);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('says sent when one endpoint took it and another refused', async () => {
+    const ok = await subscriber(phone, CAN);
+    const bad = await subscriber(phone, CAN);
+    refusing.add(bad.endpoint);
+    expect(await outcome()).toBe('sent');
+    expect(calls.map((c) => c.url).sort()).toEqual([ok.endpoint, bad.endpoint].sort());
+  });
+
+  it('forgets the window with everything else', async () => {
+    await subscriber(phone, CAN);
+    expect(await outcome()).toBe('sent');
+    const wipe = (scope: string) =>
+      w.owner.call('POST', '/api/v1/admin/delete-data', {
+        protocol_version: 1,
+        confirm: 'DELETE',
+        scope,
+      });
+    expect((await wipe('questions')).status).toBe(200);
+    expect(await window()).toBeTruthy();
+    expect((await wipe('everything')).status).toBe(200);
+    expect(await window()).toBeUndefined();
+  });
+});
+
+/* ---------- push lifetime (docs/protocol.md section 11) ---------- */
+
+describe("a question's push lives only while the person can answer it (docs/protocol.md section 11)", () => {
+  let w: World;
+  let phone: Actor;
+  const calls: { url: string; init: RequestInit }[] = [];
+  /** Endpoints whose push service is down. */
+  const refusing = new Set<string>();
+  // Holds the first send while true, stalling the alarm run that makes it. A flag rather than a promise: the send
+  // runs in the Durable Object's context, and a promise settled across contexts crashes workerd.
+  let holdFirst = false;
+
+  beforeEach(async () => {
+    calls.length = 0;
+    refusing.clear();
+    holdFirst = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (calls.length === 1) while (holdFirst) await new Promise((r) => setTimeout(r, 5));
+      return new Response(null, { status: refusing.has(String(url)) ? 503 : 201 });
+    }) as never);
+    w = await claimRelay();
+    phone = await pairDevice(w);
+  });
+  afterEach(() => {
+    holdFirst = false;
+    vi.restoreAllMocks();
+  });
+
+  /** The TTL header a push service received, in seconds. */
+  const ttl = (c: { init: RequestInit }) => Number((c.init.headers as Record<string, string>).TTL);
+  const topic = (c: { init: RequestInit }) => (c.init.headers as Record<string, string>).Topic;
+  /** What each push said, and how long it was given, read the way the phone would. */
+  const sent = (s: { open: (body: Uint8Array) => Promise<unknown> }) =>
+    Promise.all(
+      calls.map(async (c) => [
+        ((await s.open(c.init.body as Uint8Array)) as { type: string }).type,
+        ttl(c),
+      ]),
+    );
+  const inMs = (ms: number) => new Date(Date.now() + ms).toISOString();
+  /** Waits in real time until `at`. */
+  const until = async (at: number) => {
+    while (Date.now() < at) await new Promise((r) => setTimeout(r, 20));
+  };
+  /** Moves a question's deadline to `ms` from now, as if relay time had moved on. */
+  const deadlineIn = (questionId: string, ms: number) =>
+    inRoom((room) =>
+      room.run(
+        `UPDATE questions SET expires_at = ? WHERE question_id = ?`,
+        Date.now() + ms,
+        questionId,
+      ),
+    );
+  const questionStatus = (questionId: string) =>
+    inRoom(
+      (room) =>
+        room.q1<{ status: string }>(
+          `SELECT status FROM questions WHERE question_id = ?`,
+          questionId,
+        )?.status,
+    );
+  /** Quiet hours from two hours ago until two to three hours from now, whatever the time of day. */
+  const quiet = async (enabled: boolean) => {
+    const h = new Date().getUTCHours();
+    const at = (n: number) => `${String((n + 24) % 24).padStart(2, '0')}:00`;
+    const r = await phone.call('PUT', '/api/v1/settings', {
+      protocol_version: 1,
+      quiet_hours: { enabled, start: at(h - 2), end: at(h + 3), time_zone: 'UTC' },
+    });
+    expect(r.status).toBe(200);
+  };
+  const reminders = async (first_ms: number, interval_ms: number) => {
+    const r = await phone.call('PUT', '/api/v1/settings', {
+      protocol_version: 1,
+      reminders: { enabled: true, first_ms, interval_ms, max: 3 },
+    });
+    expect(r.status).toBe(200);
+  };
+  const present = async () =>
+    expect(
+      (await w.owner.call('PUT', '/api/v1/presence', { protocol_version: 1, present: true }))
+        .status,
+    ).toBe(200);
+  /** Sets when the presence lease ends, as if the desktop had renewed it. */
+  const leaseEnds = (at: number) => inRoom((room) => room.setMeta(PRESENCE_META, String(at)));
+  const jobs = async (kind: string, questionId?: string) =>
+    (await pending(kind)).filter((j) => !questionId || j.question_id === questionId);
+  const statuses = async (kind: string, questionId?: string) =>
+    (await jobs(kind, questionId)).map((j) => j.status);
+  const proxyAnswer = (questionId: string) =>
+    act(w, w.owner, 'proxy-answer', questionId, 0, {
+      content: {
+        selected_option_ids: ['approve'],
+        model_id: 'm',
+        prompt_template_version: '1',
+        confidence: 0.9,
+      },
+    });
+
+  it('gives a push the whole seconds left, at most a day, and nothing with under a second', () => {
+    const t = 1_700_000_000_000;
+    expect(pushTtlSeconds(t, null)).toBe(86_400);
+    expect(pushTtlSeconds(t, undefined, 600)).toBe(600);
+    expect(pushTtlSeconds(t, t - 1)).toBeNull();
+    expect(pushTtlSeconds(t, t)).toBeNull();
+    expect(pushTtlSeconds(t, t + 999)).toBeNull();
+    expect(pushTtlSeconds(t, t + 1_000)).toBe(1);
+    expect(pushTtlSeconds(t, t + 1_999)).toBe(1);
+    expect(pushTtlSeconds(t, t + 900_000)).toBe(900);
+    expect(pushTtlSeconds(t, t + 2 * 86_400_000)).toBe(86_400);
+    expect(pushTtlSeconds(t, t + 2 * 86_400_000, 600)).toBe(600);
+  });
+
+  it("caps a new question's push TTL at the time left to answer it", async () => {
+    await subscribe(phone);
+    await ask(w, { expiresAt: inMs(15 * 60_000) });
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+    expect(ttl(calls[0]!)).toBeLessThanOrEqual(900);
+    expect(ttl(calls[0]!)).toBeGreaterThan(870);
+  });
+
+  it('keeps a day for a question without a deadline, a proxy answer and a test push', async () => {
+    const s = await subscriber(phone);
+    await ask(w, { expiresAt: null });
+    await runDue('notify_new');
+    // A proxy answer ends the deadline (it cancels the expiry), so its notice and its review reminder keep a day.
+    const { questionId } = await ask(w, { requirement: 'proxy-ok', expiresAt: inMs(15 * 60_000) });
+    expect((await proxyAnswer(questionId)).res.status).toBe(201);
+    await runDue('notify_new');
+    await runDue('proxy_review');
+    expect((await phone.call('POST', '/api/v1/push/test', {})).json.delivered).toBe(1);
+    expect(await sent(s)).toEqual([
+      ['decision-new', 86_400],
+      ['decision-proxy', 86_400],
+      ['decision-proxy', 86_400],
+      ['test', 86_400],
+    ]);
+  });
+
+  it('caps a reminder, and a reply push while the question is open, but not one after it was answered', async () => {
+    await declare(w.owner);
+    const s = await subscriber(phone);
+    await reminders(60_000, 86_400_000);
+    const { questionId } = await ask(w, { expiresAt: inMs(10 * 60_000) });
+    await runDue('notify_new');
+    calls.length = 0;
+    await runDue('remind');
+    // The next reminder would be due after the deadline, so none is lined up.
+    expect(await statuses('remind')).toEqual(['done']);
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    const capped = await sent(s);
+    expect(capped.map(([type]) => type)).toEqual(['decision-reminder', 'decision-reply']);
+    for (const [, seconds] of capped) {
+      expect(seconds).toBeLessThanOrEqual(600);
+      expect(seconds).toBeGreaterThan(570);
+    }
+    // Once answered, the deadline no longer applies: the agent's next question in the thread keeps a day.
+    expect((await act(w, phone, 'answer', questionId, 0)).res.status).toBe(201);
+    calls.length = 0;
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    expect(await sent(s)).toEqual([['decision-reply', 86_400]]);
+  });
+
+  it('sends nothing at the deadline, nor with less than a second left', async () => {
+    await subscribe(phone);
+    // A proxy-first question's push waits out the grace, so nothing sends it before the test moves the deadline.
+    const at = (await ask(w, { requirement: 'proxy-first', expiresAt: inMs(15 * 60_000) }))
+      .questionId;
+    const under = (await ask(w, { requirement: 'proxy-first', expiresAt: inMs(15 * 60_000) }))
+      .questionId;
+    await deadlineIn(at, 0);
+    await deadlineIn(under, 500);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    expect(await statuses('notify_new')).toEqual(['done', 'done']);
+  });
+
+  it('works the TTL out again for a retry that quiet hours deferred, and sends it only where it failed', async () => {
+    const up = await subscribe(phone);
+    const down = await subscribe(phone);
+    refusing.add(down.endpoint);
+    const { questionId } = await ask(w, { expiresAt: inMs(6 * 3_600_000) });
+    // The notify_new is due at once, so the room's own alarm makes the first attempt.
+    await vi.waitFor(
+      async () => expect((await pending('notify_new'))[0]?.attempt_count).toBeGreaterThan(0),
+      { timeout: 5000, interval: 20 },
+    );
+    for (const c of calls) expect(ttl(c)).toBeGreaterThan(6 * 3_600 - 30);
+    // Quiet hours begin before the retry: it waits, keeping its attempts and what was delivered.
+    await quiet(true);
+    await runDue('notify_new');
+    expect(calls.filter((c) => c.url === up.endpoint)).toHaveLength(1);
+    const [held] = await pending('notify_new');
+    expect(held).toMatchObject({ status: 'pending' });
+    expect(held!.attempt_count).toBeGreaterThan(0);
+    expect(held!.run_at).toBeGreaterThan(Date.now() + 3_600_000);
+    expect(JSON.parse(held!.payload).done).toEqual([up.id]);
+    // Quiet hours end with 30 seconds left, and the push service is back.
+    await deadlineIn(questionId, 30_000);
+    await quiet(false);
+    refusing.clear();
+    calls.length = 0;
+    await runDue('notify_new');
+    expect(calls.map((c) => c.url)).toEqual([down.endpoint]);
+    expect(ttl(calls[0]!)).toBeLessThanOrEqual(30);
+    expect(ttl(calls[0]!)).toBeGreaterThan(20);
+    expect(await statuses('notify_new')).toEqual(['done']);
+  });
+
+  it('works the TTL out again for a push that quiet hours deferred', async () => {
+    await subscribe(phone);
+    await quiet(true);
+    const { questionId } = await ask(w, { expiresAt: inMs(6 * 3_600_000) });
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    expect(await statuses('notify_new')).toEqual(['pending']);
+    // Quiet hours end with 40 seconds left.
+    await deadlineIn(questionId, 40_000);
+    await quiet(false);
+    await runDue('notify_new');
+    expect(calls).toHaveLength(1);
+    expect(ttl(calls[0]!)).toBeLessThanOrEqual(40);
+    expect(ttl(calls[0]!)).toBeGreaterThan(30);
+  });
+
+  it('drops a new question push and a reminder that quiet hours would hold past the deadline', async () => {
+    await declare(w.owner);
+    await subscribe(phone);
+    await quiet(true);
+    // Reminders fall due every twenty minutes, inside the deadline but inside quiet hours too.
+    await reminders(600_000, 1_200_000);
+    const { questionId } = await ask(w, { expiresAt: inMs(3_600_000) });
+    expect(await statuses('remind')).toEqual(['pending']);
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_new');
+    await runDue('notify_reply');
+    await runDue('remind');
+    expect(calls).toEqual([]);
+    // Nothing is deferred, and no later reminder is lined up.
+    expect(await statuses('notify_new')).toEqual(['done']);
+    expect(await statuses('remind')).toEqual(['done']);
+    // A reply push still waits for quiet hours to end; the question's expiry takes it along.
+    expect(await statuses('notify_reply')).toEqual(['pending']);
+    await deadlineIn(questionId, -1);
+    await runDue('expire');
+    expect(await statuses('notify_reply')).toEqual(['cancelled']);
+    // Quiet hours still hold a push for a question that outlasts them.
+    const later = (await ask(w, { expiresAt: inMs(6 * 3_600_000) })).questionId;
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    expect(await statuses('notify_new', later)).toEqual(['pending']);
+  });
+
+  it('keeps a reply push held past the deadline by quiet hours, since a proxy answer ends the deadline', async () => {
+    await declare(w.owner);
+    const s = await subscriber(phone);
+    await quiet(true);
+    const { questionId } = await ask(w, { requirement: 'proxy-ok', expiresAt: inMs(3_600_000) });
+    await say(w, w.owner, questionId, { expectsReply: true });
+    await runDue('notify_reply');
+    expect(await statuses('notify_reply')).toEqual(['pending']);
+    // The model answers for the person: the deadline ends, and the agent's message still waits on them.
+    expect((await proxyAnswer(questionId)).res.status).toBe(201);
+    // Its notice is due at once: run it into its quiet-hour deferral, so it cannot go once quiet hours end.
+    await runDue('notify_new');
+    expect(await statuses('notify_new', questionId)).toEqual(['cancelled', 'pending']);
+    await quiet(false);
+    await runDue('notify_reply');
+    expect(await sent(s)).toEqual([['decision-reply', 86_400]]);
+  });
+
+  it('drops a held new question push once the hold would last until the deadline', async () => {
+    await subscribe(phone);
+    await present();
+    const lease = Number(await inRoom((room) => room.getMeta(PRESENCE_META)));
+    // The lease lapses well before the deadline, so the push is held until then.
+    const { questionId } = await ask(w, { expiresAt: inMs(LIMITS.presenceHoldMs - 20_000) });
+    const [row] = await jobs('notify_new', questionId);
+    expect(row).toMatchObject({ status: 'pending', run_at: lease });
+    // The desktop renews its lease past the question: the hold now ends with the round's bound, after the deadline.
+    await leaseEnds(Date.now() + 10 * 60_000);
+    await runDue('notify_new');
+    expect(calls).toEqual([]);
+    expect(await statuses('notify_new', questionId)).toEqual(['done']);
+  });
+
+  it('queues no push or reminder that could only be due after the deadline', async () => {
+    await subscribe(phone);
+    // The first reminder is due in four hours: a question that closes sooner lines none up.
+    const short = (await ask(w, { expiresAt: inMs(3_600_000) })).questionId;
+    const long = (await ask(w, { expiresAt: inMs(6 * 3_600_000) })).questionId;
+    expect(await statuses('remind', short)).toEqual([]);
+    expect(await statuses('remind', long)).toEqual(['pending']);
+    // Nor does a reopen with such a deadline.
+    expect((await act(w, w.owner, 'cancel', long, 0)).res.status).toBe(201);
+    expect(
+      (await act(w, w.owner, 'reopen', long, 0, { expiresAt: inMs(3_600_000) })).res.status,
+    ).toBe(201);
+    expect(await statuses('remind', long)).toEqual(['cancelled']);
+    // A proxy's grace that ends after the deadline lines up no push.
+    const graced = (
+      await ask(w, { requirement: 'proxy-first', expiresAt: inMs(PROXY_GRACE_MS - 30_000) })
+    ).questionId;
+    expect(await statuses('notify_new', graced)).toEqual([]);
+    // Nor does a proxy abstaining while the person is at the computer, when the hold outlasts the question.
+    await present();
+    await leaseEnds(Date.now() + 10 * 60_000);
+    const held = (
+      await ask(w, { requirement: 'proxy-first', expiresAt: inMs(LIMITS.presenceHoldMs - 20_000) })
+    ).questionId;
+    expect((await act(w, w.owner, 'proxy-abstain', held, 0, { content: null })).res.status).toBe(
+      201,
+    );
+    expect(await statuses('notify_new', held)).toEqual([]);
+  });
+
+  it('works the TTL out again for each subscription it sends to', async () => {
+    await subscribe(phone);
+    await subscribe(phone);
+    holdFirst = true;
+    await ask(w, { expiresAt: inMs(15 * 60_000) });
+    await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5000, interval: 20 });
+    await until(Date.now() + 1_100);
+    holdFirst = false;
+    await vi.waitFor(() => expect(calls).toHaveLength(2), { timeout: 5000, interval: 20 });
+    expect(ttl(calls[1]!)).toBeLessThan(ttl(calls[0]!));
+    await expectAlarmAtEarliestJob();
+  });
+
+  it('sends to no further subscription once the question is answered during a send', async () => {
+    await subscribe(phone);
+    await subscribe(phone);
+    holdFirst = true;
+    const { questionId } = await ask(w);
+    await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5000, interval: 20 });
+    const answered = topic(calls[0]!);
+    expect((await act(w, phone, 'answer', questionId, 0)).res.status).toBe(201);
+    holdFirst = false;
+    // Another question's push goes out only once that alarm run is over.
+    await ask(w);
+    await vi.waitFor(() => expect(calls.filter((c) => topic(c) !== answered)).toHaveLength(2), {
+      timeout: 10_000,
+      interval: 20,
+    });
+    expect(calls.filter((c) => topic(c) === answered)).toHaveLength(1);
+    await expectAlarmAtEarliestJob();
+  });
+
+  /** Asks a question due in five seconds, and holds its first send until the deadline has passed. */
+  async function sendOutlastingDeadline() {
+    holdFirst = true;
+    const deadline = Date.now() + 5_000;
+    const { questionId } = await ask(w, { expiresAt: new Date(deadline).toISOString() });
+    await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5000, interval: 20 });
+    await until(deadline + 50);
+    holdFirst = false;
+    await vi.waitFor(async () => expect(await questionStatus(questionId)).toBe('expired'), {
+      timeout: 10_000,
+      interval: 20,
+    });
+    await expectAlarmAtEarliestJob();
+  }
+
+  it('sends to no further subscription once the deadline passes during a send', async () => {
+    await subscribe(phone);
+    await subscribe(phone);
+    await sendOutlastingDeadline();
+    expect(calls).toHaveLength(1);
+    expect((await pending('notify_new'))[0]).toMatchObject({ status: 'done', attempt_count: 0 });
+  });
+
+  it('lines no retry up when the deadline passes during a failed send', async () => {
+    const down = await subscribe(phone);
+    refusing.add(down.endpoint);
+    await sendOutlastingDeadline();
+    expect(calls).toHaveLength(1);
+    expect((await pending('notify_new'))[0]).toMatchObject({ status: 'done', attempt_count: 0 });
   });
 });

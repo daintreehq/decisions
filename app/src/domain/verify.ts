@@ -9,13 +9,16 @@ import {
   MessageContentV1,
   ProxyAnswerContentV1,
   QuestionRecord,
+  advisoryContentIssue,
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForSigner,
+  replyModeOf,
   roleMaySign,
   type ActionRecord,
   type MessageRecord,
   type Provenance,
+  type ReplyMode,
   type Role,
 } from '@daintreehq/decisions-protocol';
 import {
@@ -46,7 +49,18 @@ const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, re
 export interface VerifiedQuestion {
   record: QuestionRecord;
   content: DecisionContentV1;
+  /** How it waits for its answer, from the signed create envelope (docs/protocol.md section 21). */
+  replyMode: ReplyMode;
 }
+
+/**
+ * What a question verification found: the question, or why it can't be shown. A correctly signed question this phone
+ * holds no key for (`NO_EPOCH_KEY`) still carries its signed record and reply mode in `signed`, so an advisory one
+ * can show its deadline and say its agent may go ahead after it (docs/protocol.md section 21), without its content.
+ */
+export type QuestionVerification =
+  | { ok: true; value: VerifiedQuestion }
+  | { ok: false; reason: string; signed?: { record: QuestionRecord; replyMode: ReplyMode } };
 
 export async function verifyQuestionEvent(
   data: unknown,
@@ -54,7 +68,7 @@ export async function verifyQuestionEvent(
   ctx: VerifyCtx,
   /** The ledger event's own (unsigned) question id; it must be the one the signer actually signed. */
   eventQuestionId: string | null,
-): Promise<Verified<VerifiedQuestion>> {
+): Promise<QuestionVerification> {
   const parsed = EventData.created.safeParse(data);
   if (!parsed.success) return fail('malformed question event');
   const { record, envelope } = parsed.data;
@@ -80,10 +94,15 @@ export async function verifyQuestionEvent(
   if (
     envelope.aad.installation_id !== ctx.installationId ||
     envelope.aad.sender_device_id !== record.signer_device_id ||
-    envelope.purpose !== 'question-content'
+    envelope.purpose !== 'question-content' ||
+    envelope.aad.revision !== 0 ||
+    envelope.key_epoch !== record.key_epoch
   )
     return fail('envelope binding mismatch');
-  if (!ctx.epochKeys.has(envelope.key_epoch)) return fail(NO_EPOCH_KEY);
+  const replyMode = replyModeOf(envelope);
+  // Genuine, but sealed under a key this phone was never given: what is signed is still true.
+  if (!ctx.epochKeys.has(envelope.key_epoch))
+    return { ok: false, reason: NO_EPOCH_KEY, signed: { record, replyMode } };
   let plain: unknown;
   try {
     plain = await decryptEnvelope(envelope, ctx.epochKeys, {
@@ -97,7 +116,11 @@ export async function verifyQuestionEvent(
   }
   const content = DecisionContentV1.safeParse(plain);
   if (!content.success) return fail('question content is malformed');
-  return { ok: true, value: { record, content: content.data } };
+  // An advisory approval, or an advisory question whose plan is missing or was dropped as invalid, is never shown as
+  // optional nor without the plan it stated (docs/protocol.md section 21): it is malformed.
+  if (advisoryContentIssue({ envelope }, content.data))
+    return fail('question content is malformed');
+  return { ok: true, value: { record, content: content.data, replyMode } };
 }
 
 export interface VerifiedMessage {

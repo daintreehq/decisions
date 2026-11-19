@@ -18,6 +18,15 @@ export const ERROR_STATUS = {
 
 export type ErrorCode = keyof typeof ERROR_STATUS;
 
+/**
+ * `details.reason` of a create's `400 validation_error` for a deadline that has passed, when the relay can also show
+ * that no question with that id was ever committed: it holds no receipt for the request, no question, no
+ * `decision.*` event for the id (a deletion leaves its `decision.deleted` tombstone), and its questions have not been
+ * wiped since the record was made. Without it, an overdue refusal proves nothing about an earlier attempt
+ * (docs/protocol.md section 6).
+ */
+export const CREATE_NEVER_COMMITTED = 'never-committed';
+
 export interface ApiErrorBody {
   code: ErrorCode;
   message: string;

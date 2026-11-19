@@ -331,10 +331,13 @@ export function threadAwaitsHuman(i: {
 /**
  * Every push payload the relay may send: an attention signal (type and question id) and nothing else. No
  * question, answer, message or snapshot field fits, which is the rule. `decision-reply` is an agent message that
- * expects a reply.
+ * expects a reply. `agent-stopped` (`agent-stopped-push-v1`, docs/protocol.md section 11) says only that some agent
+ * on the owner computer stopped: no question, agent, pane, project or count, and it goes only to a subscription
+ * that declared it can show one.
  */
 export const PushPayload = z.union([
   z.strictObject({ type: z.literal('test') }),
+  z.strictObject({ type: z.literal('agent-stopped') }),
   z.strictObject({
     type: z.enum(['decision-new', 'decision-reminder', 'decision-proxy', 'decision-reply']),
     question_id: Id,

@@ -221,6 +221,10 @@
           "sender_device_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{8,64}$"
+          },
+          "reply_mode": {
+            "type": "string",
+            "const": "advisory"
           }
         },
         "required": [
@@ -669,6 +673,11 @@
           "outcome"
         ],
         "additionalProperties": false
+      },
+      "planned_fallback": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
       }
     },
     "required": [
@@ -1332,7 +1341,9 @@
       "person-declines-v1",
       "owner-desktop-messages-v1",
       "owner-desktop-declines-v1",
-      "presence-v1"
+      "presence-v1",
+      "agent-stopped-push-v1",
+      "advisory-deadlines-v1"
     ]
   },
   "PhoneImageReference": {
@@ -1783,6 +1794,10 @@
                   "sender_device_id": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                  },
+                  "reply_mode": {
+                    "type": "string",
+                    "const": "advisory"
                   }
                 },
                 "required": [
@@ -2024,6 +2039,10 @@
                     "sender_device_id": {
                       "type": "string",
                       "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                    },
+                    "reply_mode": {
+                      "type": "string",
+                      "const": "advisory"
                     }
                   },
                   "required": [
@@ -2344,6 +2363,19 @@
         "properties": {
           "type": {
             "type": "string",
+            "const": "agent-stopped"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
             "enum": [
               "decision-new",
               "decision-reminder",
@@ -2650,6 +2682,10 @@
                       "sender_device_id": {
                         "type": "string",
                         "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                      },
+                      "reply_mode": {
+                        "type": "string",
+                        "const": "advisory"
                       }
                     },
                     "required": [
@@ -2869,6 +2905,10 @@
                           "sender_device_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{8,64}$"
+                          },
+                          "reply_mode": {
+                            "type": "string",
+                            "const": "advisory"
                           }
                         },
                         "required": [

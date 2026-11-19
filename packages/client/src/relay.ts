@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   formatFeatures,
   type ActionKind,
+  type AgentStoppedPushBody,
   type ClaimResponse,
   type CommandReceipt,
   type DeviceCert,
@@ -49,7 +50,8 @@ export interface RelayClientOptions {
   identity: Identity;
   fetch?: typeof fetch;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+  /** Waits between retries; `signal` fires when the request is aborted, and the wait may end early then. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Retries for transient failures (network, 429, 5xx). 4xx are never retried. Default 3. */
   maxRetries?: number;
 }
@@ -65,11 +67,61 @@ export interface RequestOptions {
   /** `raw` only: refuse a body larger than this many bytes (`payload_too_large`) without reading the rest. */
   maxBytes?: number;
   retry?: boolean;
+  /**
+   * Send at most once: no retry, no resend after a clock-skew refusal, and no redirect followed (a redirect is a
+   * network error). The skew such a refusal shows is still learned, so the next request is signed right. For a
+   * request whose repeat would do harm.
+   */
+  once?: boolean;
   /** Abort an attempt that has not answered within this long (a network error). */
   timeoutMs?: number;
+  /** Abort the request, and any retry still to come, when this fires (a network error). */
+  signal?: AbortSignal;
 }
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** What a caller may set on one of the routes that take per-call options. */
+export type CallOptions = Pick<RequestOptions, 'retry' | 'timeoutMs' | 'signal'>;
+
+/** A retry wait whose timer is cleared on abort, so a closed client leaves nothing keeping the process up. */
+const defaultSleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', cancel);
+      resolve();
+    }, ms);
+    const cancel = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+  });
+
+/**
+ * The signal for one attempt: it fires when any source fires or `timeoutMs` passes. `done()` unhooks it from the
+ * sources, which outlive the attempt (a client's close signal lives as long as the client).
+ */
+function attemptSignal(
+  sources: readonly (AbortSignal | undefined)[],
+  timeoutMs: number | undefined,
+): { signal: AbortSignal; done: () => void } {
+  const ac = new AbortController();
+  const abort = () => ac.abort();
+  const live = sources.filter((s): s is AbortSignal => s !== undefined);
+  for (const s of live) {
+    if (s.aborted) ac.abort();
+    else s.addEventListener('abort', abort, { once: true });
+  }
+  const timer = timeoutMs ? setTimeout(abort, timeoutMs) : null;
+  (timer as { unref?: () => void } | null)?.unref?.();
+  return {
+    signal: ac.signal,
+    done: () => {
+      if (timer) clearTimeout(timer);
+      for (const s of live) s.removeEventListener('abort', abort);
+    },
+  };
+}
 
 /** A raw response body, read only as far as `max` allows: a relay cannot make the client buffer more. */
 async function readRaw(res: Response, max: number | undefined): Promise<Uint8Array> {
@@ -123,10 +175,12 @@ export class RelayClient {
   identity: Identity;
   private readonly f: typeof fetch;
   private readonly nowFn: () => number;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly maxRetries: number;
   /** Server time minus local time, learned from a Date header after a skew rejection. */
   private skewMs = 0;
+  /** Fired by `close()`: every request in flight and every later one fails as a network error. */
+  private readonly closed = new AbortController();
 
   constructor(opts: RelayClientOptions) {
     this.identity = opts.identity;
@@ -138,6 +192,32 @@ export class RelayClient {
 
   get origin(): string {
     return this.identity.config.relayOrigin;
+  }
+
+  /**
+   * Abort every signed request in flight, and any retry wait, and refuse new ones (`network_error`). For a process
+   * shutting down: a request the relay never finishes answering cannot hold it open.
+   */
+  close(): void {
+    this.closed.abort();
+  }
+
+  /** Waits out a retry delay, cut short when the request is aborted (the next attempt then fails at once). */
+  private async pause(ms: number, caller: AbortSignal | undefined): Promise<void> {
+    const { signal, done } = attemptSignal([caller, this.closed.signal], undefined);
+    try {
+      if (signal.aborted) return;
+      let cancel!: () => void;
+      const aborted = new Promise<void>((resolve) => (cancel = resolve));
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        await Promise.race([this.sleep(ms, signal), aborted]);
+      } finally {
+        signal.removeEventListener('abort', cancel);
+      }
+    } finally {
+      done();
+    }
   }
 
   /**
@@ -185,9 +265,11 @@ export class RelayClient {
         ? undefined
         : JSON.stringify(opts.body);
     const bodyBytes = opts.rawBody ?? bodyText;
+    const aborted = () => opts.signal?.aborted === true || this.closed.signal.aborted;
     let skewRetried = false;
     let attempt = 0;
     for (;;) {
+      if (aborted()) throw new RelayError('network_error', 'request aborted', 0);
       const { authorization } = await signRequest({
         method,
         path,
@@ -198,6 +280,7 @@ export class RelayClient {
         signingKey: this.identity.keys.signing.privateKey,
         now: this.nowFn() + this.skewMs,
       });
+      const link = attemptSignal([opts.signal, this.closed.signal], opts.timeoutMs);
       let res: Response;
       try {
         res = await this.f(`${this.origin}${path}${query ? `?${query}` : ''}`, {
@@ -210,12 +293,15 @@ export class RelayClient {
             ...(opts.rawBody ? { 'content-type': 'application/octet-stream' } : {}),
           },
           body: (opts.rawBody as unknown as BodyInit | undefined) ?? bodyText,
-          ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+          signal: link.signal,
+          // A 307 or 308 would have fetch send the body again, elsewhere.
+          ...(opts.once ? { redirect: 'error' as const } : {}),
         });
       } catch (e) {
+        link.done();
         const err = new RelayError('network_error', (e as Error).message || 'network error', 0);
-        if (opts.retry === false || attempt >= this.maxRetries) throw err;
-        await this.sleep(backoffMs(attempt++));
+        if (opts.retry === false || opts.once || attempt >= this.maxRetries || aborted()) throw err;
+        await this.pause(backoffMs(attempt++), opts.signal);
         continue;
       }
       let text: string;
@@ -224,8 +310,10 @@ export class RelayClient {
         text = await res.text();
       } catch (e) {
         if (e instanceof RelayError) throw e;
-        // The body broke off (a reset, or `timeoutMs` running out after the headers): a network error.
+        // The body broke off (a reset, an abort, or `timeoutMs` running out after the headers): a network error.
         throw new RelayError('network_error', (e as Error).message || 'network error', 0);
+      } finally {
+        link.done();
       }
       if (res.ok) return (text ? JSON.parse(text) : {}) as T;
       const err = RelayError.fromBody(res.status, text);
@@ -236,13 +324,15 @@ export class RelayClient {
           const skew = server - this.nowFn();
           if (Math.abs(skew - this.skewMs) > 1000) {
             this.skewMs = skew;
+            if (opts.once) throw err;
             skewRetried = true;
             continue;
           }
         }
       }
-      if (!err.retryable || opts.retry === false || attempt >= this.maxRetries) throw err;
-      await this.sleep(err.retryAfterMs ?? backoffMs(attempt));
+      if (!err.retryable || opts.retry === false || opts.once || attempt >= this.maxRetries)
+        throw err;
+      await this.pause(err.retryAfterMs ?? backoffMs(attempt), opts.signal);
       attempt++;
     }
   }
@@ -357,15 +447,20 @@ export class RelayClient {
     after: number,
     limit = 100,
     features: readonly ProtocolFeature[] = [],
+    opts: CallOptions = {},
   ): Promise<EventsPage> {
     const declared = formatFeatures(features);
     const raw = await this.request<unknown>('GET', `${API_PREFIX}/events`, {
       query: { after, limit, ...(declared ? { [FEATURES_QUERY_PARAM]: declared } : {}) },
+      ...opts,
     });
     return EventsPage.parse(raw);
   }
-  /** A socket ticket. `features` declares what the socket may be sent, as for `events`. */
-  socketTicket(features: readonly ProtocolFeature[] = []) {
+  /**
+   * A socket ticket. `features` declares what the socket may be sent, as for `events`; the relay records it as the
+   * device's latest declaration, so a client that only polls asks for one too and never opens the socket.
+   */
+  socketTicket(features: readonly ProtocolFeature[] = [], opts: CallOptions = {}) {
     const declared = [...new Set(features)].sort();
     return this.request<{ ticket: string; expires_at: string; ws_path: string }>(
       'POST',
@@ -376,6 +471,7 @@ export class RelayClient {
           ...(declared.length ? { features: declared } : {}),
         },
         retry: false,
+        ...opts,
       },
     );
   }
@@ -441,6 +537,22 @@ export class RelayClient {
     );
   }
 
+  /* ---- agent-stopped push (section 11) ---- */
+  /**
+   * Owner only: ask the relay to tell the person's phone that some agent stopped (`agent-stopped-push-v1`). The body
+   * carries the protocol version alone. Sent once, whatever the outcome, not even again after a clock-skew refusal: a
+   * retry would turn a dropped stop into a late alert (protocol section 11). Unparsed.
+   */
+  postAgentStoppedPush(timeoutMs?: number): Promise<unknown> {
+    return this.ownerOnly('asking for an agent-stopped push', () =>
+      this.request('POST', `${API_PREFIX}/push/agent-stopped`, {
+        body: { protocol_version: PROTOCOL_VERSION } satisfies AgentStoppedPushBody,
+        once: true,
+        ...(timeoutMs ? { timeoutMs } : {}),
+      }),
+    );
+  }
+
   /* ---- pairing ---- */
   createInvitation(body: {
     pairing_id: string;
@@ -475,8 +587,9 @@ export class RelayClient {
   }
 
   /* ---- devices ---- */
-  devices(): Promise<DevicesResponse> {
-    return this.request('GET', `${API_PREFIX}/devices`);
+  /** The device directory. `opts` makes a background read give up early instead of retrying. */
+  devices(opts: CallOptions = {}): Promise<DevicesResponse> {
+    return this.request('GET', `${API_PREFIX}/devices`, opts);
   }
   revokeDevice(deviceId: string, newKeyEpoch: number, grants: EpochGrant[]) {
     return this.ownerOnly('revoking a device', () =>
@@ -544,9 +657,10 @@ export class RelayClient {
   }
 
   /* ---- deliveries ---- */
-  deliveriesReceived(seq: number) {
+  deliveriesReceived(seq: number, opts: CallOptions = {}) {
     return this.request('POST', `${API_PREFIX}/deliveries/received`, {
       body: { protocol_version: PROTOCOL_VERSION, seq },
+      ...opts,
     });
   }
   deliveriesTerminal(body: {

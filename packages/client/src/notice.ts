@@ -5,6 +5,7 @@
  * preface tells the agent that the block is not a command.
  */
 
+import { unsupportedEntry, type AdvisoryDisposition } from './answers.js';
 import type { ResolvedPhoneImage } from './phone-images.js';
 
 export const BLOCK_START = '[DAINTREE DECISION ANSWER]';
@@ -24,6 +25,16 @@ export const FOLLOWUP_NOTE_ANSWERED =
 /** The note of a follow-up sent before the question had an answer. */
 export const FOLLOWUP_NOTE_UNANSWERED =
   'note: This is a follow-up from the reviewer about a question not answered yet. It is not an answer or an approval: it authorises no gated step.';
+
+/** The first note of an advisory notice: the deadline passed unanswered, and that decided nothing. */
+export const ADVISORY_NOTE_UNANSWERED =
+  'note: No answer was committed by the deadline. Nothing was decided or approved.';
+/** The last note of an advisory notice whose stated plan may go ahead (`disposition: fallback-due`). */
+export const ADVISORY_NOTE_FALLBACK_DUE =
+  'note: You asked for advice, so you may carry out the plan you stated, at your own discretion. The person did not choose it.';
+/** The last note of an advisory notice whose host does not let the plan go ahead (`disposition: fallback-withheld`). */
+export const ADVISORY_NOTE_FALLBACK_WITHHELD =
+  'note: This host does not allow the plan you stated to go ahead on its own: you are NOT authorised to carry it out. Ask again if you still need a decision, or stop and report.';
 
 export const MAX_COMMENT_CHARS = 4000;
 export const MAX_REASON_CHARS = 1000;
@@ -96,12 +107,25 @@ function oneLine(s: string, max = 200): string {
 }
 
 export interface AnswerNoticeInput {
-  kind: 'answer' | 'expired' | 'declined';
+  kind: 'answer' | 'expired' | 'declined' | 'unpublished';
+  /** `unpublished` only: the advisory question's stated plan may go ahead (`AnswerEntry.fallback_due`). */
+  fallbackDue?: boolean;
+  /**
+   * `expired` only: the expiry closed an advisory round (`AnswerEntry.advisory_disposition`), so the block is the
+   * advisory notice, with `deadline`, instead of the blocking expiry.
+   */
+  disposition?: AdvisoryDisposition;
+  /** With `disposition`: the round's signed deadline that elapsed (ISO 8601). */
+  deadline?: string;
   questionId: string;
   alias?: number;
   revision: number;
   /** The question as it was asked, quoted so the agent knows what the answer is to. */
   question?: string;
+  /**
+   * Who the answer is from. A notice prints its own fixed source instead. Checked at runtime too: an answer from
+   * anyone else, or a decline from anyone but the person, throws rather than being typed as theirs.
+   */
   source: 'human' | 'proxy';
   /** Human only: true when the person gave the answer on their computer (the owner desktop), not a phone. */
   onComputer?: boolean;
@@ -121,7 +145,16 @@ export interface AnswerNoticeInput {
   injectionId?: string;
 }
 
+/**
+ * The block typed for an answer or a closure notice. A kind it does not know (a newer client's), or an answer from
+ * a source other than the person or the proxy, throws: never typed as an answer from the person.
+ */
 export function formatAnswerNotice(n: AnswerNoticeInput): string {
+  const unsupported = unsupportedEntry(n);
+  if (unsupported)
+    throw new Error(
+      `cannot format an answer notice (${unsupported}): kind ${JSON.stringify(n.kind)}, source ${JSON.stringify(n.source)}`,
+    );
   const comment = n.kind === 'answer' && n.comment ? sanitizeText(n.comment) : '';
   const fullReason =
     n.kind === 'answer' && n.correction && n.reason ? sanitizeText(n.reason, MAX_REASON_CHARS) : '';
@@ -139,12 +172,35 @@ export function formatAnswerNotice(n: AnswerNoticeInput): string {
     lines.push(`revision: ${Math.max(0, Math.trunc(n.revision))}`);
     if (n.injectionId) lines.push(`injection_id: ${oneLine(n.injectionId, 80)}`);
     if (question) field('question', question);
-    if (n.kind === 'expired') {
+    // The advisory notice always names its deadline: without one, the ordinary expiry block (it authorises nothing).
+    if (n.kind === 'expired' && n.disposition && n.deadline) {
+      // Only `fallback-due` lets the plan go ahead; anything else reads as withheld.
+      const due = n.disposition === 'fallback-due';
+      lines.push('source: system');
+      lines.push('status: advisory-unanswered');
+      lines.push(`deadline: ${oneLine(n.deadline, 40)}`);
+      lines.push(`disposition: ${due ? 'fallback-due' : 'fallback-withheld'}`);
+      lines.push('authorised: no');
+      lines.push(ADVISORY_NOTE_UNANSWERED);
+      lines.push(due ? ADVISORY_NOTE_FALLBACK_DUE : ADVISORY_NOTE_FALLBACK_WITHHELD);
+    } else if (n.kind === 'expired') {
       lines.push('source: system');
       lines.push('status: expired');
       lines.push('authorised: no');
       lines.push(
         'note: The question expired without an answer. You are NOT authorised to continue the gated step; re-ask or stop and report.',
+      );
+    } else if (n.kind === 'unpublished') {
+      lines.push('source: system');
+      lines.push('status: never-published');
+      lines.push('authorised: no');
+      lines.push(
+        "note: This question never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer to it was recorded. Nothing was decided or approved.",
+      );
+      lines.push(
+        n.fallbackDue
+          ? 'note: It was an advisory question. You may carry out the plan you stated, at your own discretion; the person did not choose it.'
+          : 'note: You are NOT authorised to continue the gated step; ask again if you still need an answer, or stop and report.',
       );
     } else if (n.kind === 'declined') {
       lines.push('source: human');

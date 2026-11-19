@@ -2,9 +2,11 @@ import { DeleteDataBody, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol
 import { z } from 'zod';
 import { WORKER_VERSION } from '../env.js';
 import type { Handler, Room } from '../room/types.js';
-import { iso, isoOrNull, json } from '../util.js';
+import { iso, isoOrNull, json, nowMs } from '../util.js';
 import { INVOLVEMENT_META } from './involvement.js';
 import { PRESENCE_META } from '../room/presence.js';
+import { AGENT_STOPPED_RATE_KEY } from './push.js';
+import { QUESTIONS_WIPED_META } from './questions.js';
 import type { DecisionRoom } from '../decision-room.js';
 
 export const diagnostics: Handler = async (room) => {
@@ -79,6 +81,12 @@ export const deleteData: Handler = async (room, c) => {
       'command_receipts',
     ])
       room.run(`DELETE FROM ${t}`);
+    // Without events or receipts a later overdue create can no longer be shown never to have been committed.
+    room.run(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      QUESTIONS_WIPED_META,
+      String(nowMs()),
+    );
     // Maintenance (purge) survives a questions wipe; a full reset removes every job.
     room.run(
       b.scope === 'everything'
@@ -107,6 +115,7 @@ export const deleteData: Handler = async (room, c) => {
         PRESENCE_META,
       ])
         room.run(`DELETE FROM meta WHERE key = ?`, k);
+      room.run(`DELETE FROM rate_limits WHERE key = ?`, AGENT_STOPPED_RATE_KEY);
     }
   });
   if (b.scope === 'everything') await room.resetRuntime();

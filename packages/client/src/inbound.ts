@@ -33,7 +33,8 @@ import {
   verifyRecordAndEnvelope,
 } from '@daintreehq/decisions-crypto';
 import type { BridgeContext } from './context.js';
-import { TransientError } from './mutex.js';
+import { isDeviceRevoked } from './errors.js';
+import { KeyUnavailableError, TransientError } from './mutex.js';
 
 interface DirEntry {
   cert: DeviceCert;
@@ -85,6 +86,8 @@ export interface VerifiedMessage {
 
 export const revokedKey = (deviceId: string): string => `revoked:${deviceId}`;
 
+const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null;
+
 /**
  * Device directory pinned to the owner identity: this device itself on the owner desktop, the owner pinned at
  * enrollment on a `desktop-host`. Every certificate must be issued by that owner and verify against its key, so
@@ -120,32 +123,46 @@ export class EventVerifier {
     try {
       list = await ctx.client.devices();
     } catch (e) {
+      // The relay saying this device is revoked is no outage: the inbox stops the bridge on it.
+      if (isDeviceRevoked(e)) throw e;
       throw new TransientError(`device directory unavailable: ${(e as Error).message}`);
     }
+    // A reply that is not a list of certified entries is no directory at all: it says nothing about the event, so it
+    // waits like an unreachable relay rather than failing the event it was read for.
+    const entries: unknown = list?.devices;
+    if (
+      !Array.isArray(entries) ||
+      !entries.every((d) => isObject(d) && isObject((d as { cert?: unknown }).cert))
+    )
+      throw new TransientError('device directory unavailable: malformed reply');
     const { identity } = ctx;
     const pin = identity.owner;
     const next = new Map<string, DirEntry>();
     for (const d of list.devices) {
       const c = d.cert;
-      if (c.issuer_device_id !== pin.deviceId) continue;
-      if (c.installation_id !== identity.config.installationId) continue;
-      if (c.device_id !== d.device_id) continue;
-      if (!(await verifyDeviceCert(c, pin.signingKey))) continue;
-      // The owner entry must be the pinned owner key, and no other device may claim to be an owner.
-      const isOwner = c.device_id === pin.deviceId;
-      if (isOwner !== (c.role === 'owner-desktop')) continue;
-      if (isOwner && c.signing_pub !== pin.signingPub) continue;
-      // Our own entry must carry our own key and role.
-      if (
-        c.device_id === identity.config.deviceId &&
-        (c.signing_pub !== identity.signingPub || c.role !== identity.role)
-      )
-        continue;
-      next.set(c.device_id, {
-        cert: c,
-        pub: await importSigningPublicKey(c.signing_pub),
-        revokedAt: d.revoked_at ? Date.parse(d.revoked_at) : null,
-      });
+      try {
+        if (c.issuer_device_id !== pin.deviceId) continue;
+        if (c.installation_id !== identity.config.installationId) continue;
+        if (c.device_id !== d.device_id) continue;
+        if (!(await verifyDeviceCert(c, pin.signingKey))) continue;
+        // The owner entry must be the pinned owner key, and no other device may claim to be an owner.
+        const isOwner = c.device_id === pin.deviceId;
+        if (isOwner !== (c.role === 'owner-desktop')) continue;
+        if (isOwner && c.signing_pub !== pin.signingPub) continue;
+        // Our own entry must carry our own key and role.
+        if (
+          c.device_id === identity.config.deviceId &&
+          (c.signing_pub !== identity.signingPub || c.role !== identity.role)
+        )
+          continue;
+        next.set(c.device_id, {
+          cert: c,
+          pub: await importSigningPublicKey(c.signing_pub),
+          revokedAt: d.revoked_at ? Date.parse(d.revoked_at) : null,
+        });
+      } catch {
+        // An entry that cannot even be checked is not trusted, like one that fails the checks.
+      }
     }
     this.dir = next;
     this.loadedAt = ctx.now();
@@ -183,7 +200,10 @@ export class EventVerifier {
 
   /**
    * Decrypt an inbound envelope under its exact binding. A key epoch this identity does not hold yet is reloaded
-   * once (rotated by another process) and otherwise throws `TransientError`, so the event is retried in order.
+   * once (rotated by another process); a reload that fails throws its `TransientError`, and a key still missing after
+   * one throws `KeyUnavailableError`, so the event is retried in order for a while. On a Host, an epoch older than the
+   * first one it holds is rejected instead: a grant is only ever sealed for the epoch current when it is made, so the
+   * key of an epoch before its enrollment never reaches it.
    */
   private async decrypt(
     envelope: CryptoEnvelope,
@@ -205,8 +225,16 @@ export class EventVerifier {
     }
     // Rotated by another process: reload epoch material, then try once more.
     await ctx.refreshIdentity?.();
-    if (!ctx.identity.epochs.has(envelope.key_epoch))
-      throw new TransientError(`missing epoch key ${envelope.key_epoch}`);
+    if (!ctx.identity.epochs.has(envelope.key_epoch)) {
+      const held = [...ctx.identity.epochs.keys()];
+      if (
+        ctx.identity.role === 'desktop-host' &&
+        held.length > 0 &&
+        envelope.key_epoch < Math.min(...held)
+      )
+        return { ok: false, reason: 'key-epoch-not-granted' };
+      throw new KeyUnavailableError(`missing epoch key ${envelope.key_epoch}`);
+    }
     try {
       return { raw: await decryptEnvelope<unknown>(envelope, ctx.identity.epochs, binding) };
     } catch {

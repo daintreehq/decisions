@@ -60,6 +60,11 @@ export interface EncryptEnvelopeInput {
   senderDeviceId: string;
   purpose: EnvelopePurpose;
   plaintext: unknown;
+  /**
+   * A question create's content only: mark the question advisory (`EnvelopeAad.reply_mode`, protocol section 21).
+   * Left out of the AAD otherwise, so every other envelope encrypts exactly as before.
+   */
+  replyMode?: 'advisory';
   /** Test vectors only. Production code must never pass a nonce. */
   _testNonce?: Uint8Array;
 }
@@ -77,6 +82,7 @@ export async function encryptEnvelope(i: EncryptEnvelopeInput): Promise<CryptoEn
       record_type: i.recordType,
       revision: i.revision,
       sender_device_id: i.senderDeviceId,
+      ...(i.replyMode === 'advisory' ? { reply_mode: 'advisory' as const } : {}),
     },
   } as const;
   const aesKey = await deriveAesKey(i.epochKey.key, envelopeKeyInfo(base), ['encrypt']);

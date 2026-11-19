@@ -1,11 +1,12 @@
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildSignedInvolvement, decryptEnvelope } from '@daintreehq/decisions-crypto';
 import { AgentMessageContentV1, type SignedMessage } from '@daintreehq/decisions-protocol';
 import {
   MCP_BRIDGE_METHODS,
   PolicyRegistry,
+  DEFAULT_ATTACHMENT_ID_DESCRIPTION,
   SERVER_INSTRUCTIONS,
   TOOLS,
   TokenMapAuthenticator,
@@ -31,6 +32,7 @@ async function boot(
     rate?: number;
     maxBody?: number;
     path?: string;
+    attachmentIdDescription?: string;
     bridge?: Parameters<typeof setupBridge>[0];
     /** Serve this instead of the bridge itself (a host's forwarder). */
     wrap?: (b: Awaited<ReturnType<typeof setupBridge>>['bridge']) => DecisionsMcpBridge;
@@ -46,6 +48,9 @@ async function boot(
     ...(opts.rate ? { rateLimitPerMinute: opts.rate } : {}),
     ...(opts.maxBody ? { maxBodyBytes: opts.maxBody } : {}),
     ...(opts.path ? { path: opts.path } : {}),
+    ...(opts.attachmentIdDescription
+      ? { attachmentIdDescription: opts.attachmentIdDescription }
+      : {}),
   });
   return { ...env, mcp: running };
 }
@@ -144,6 +149,42 @@ describe('HTTP MCP: protocol', () => {
     ]);
     for (const t of TOOLS) expect(new TextEncoder().encode(t.description).length).toBeLessThan(400);
     expect(r.result.tools[0].inputSchema.required).toEqual(['question']);
+  });
+  it('tools/list: agents are told to attach screenshots when the decision is visual, and how', async () => {
+    // An agent that cannot tell what an attachment id is asks in words about something the person
+    // has to see, so every layer says when to attach and the id is described as a path it can write.
+    const { mcp } = await boot();
+    const init = JSON.parse((await raw(mcp, { body: rpc('initialize') })).body);
+    const instructions: string = init.result.instructions;
+    expect(instructions).toMatch(/see something to decide .* attach screenshots to ask_human/);
+    expect(instructions).toMatch(/roles before and after/);
+    expect(instructions).toMatch(/approval covers only the images it was given/);
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    const ask = r.result.tools.find((t: { name: string }) => t.name === 'ask_human');
+    expect(ask).toBeDefined();
+    expect(ask.description).toMatch(/see something to decide, attach screenshots/);
+    expect(ask.inputSchema.properties.attachments.description).toMatch(/screenshots/i);
+    expect(ask.inputSchema.properties.attachments.description).toMatch(/visual/);
+    const id: string =
+      ask.inputSchema.properties.attachments.items.properties.local_resource_id.description;
+    expect(id).toMatch(/PNG, JPEG or WebP/);
+    expect(id).toMatch(/path relative to the folder this terminal started in/);
+    expect(id).not.toMatch(/registered/);
+  });
+  it('tools/list: a host replaces the attachment id description without touching TOOLS', async () => {
+    const before = structuredClone(TOOLS);
+    const { mcp } = await boot({ attachmentIdDescription: 'A file name in your pane folder.' });
+    const r = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body);
+    // Exactly one field differs from the defaults; every sibling and every other tool is served as is.
+    const expected = structuredClone(before) as unknown as Array<Record<string, any>>;
+    const ask = expected.find((t) => t.name === 'ask_human')!;
+    ask.inputSchema.properties.attachments.items.properties.local_resource_id.description =
+      'A file name in your pane folder.';
+    expect(r.result.tools).toEqual(JSON.parse(JSON.stringify(expected)));
+    expect(TOOLS).toEqual(before);
+    expect(
+      before[0].inputSchema.properties.attachments.items.properties.local_resource_id.description,
+    ).toBe(DEFAULT_ATTACHMENT_ID_DESCRIPTION);
   });
   it('tools/list: annotations let approval-gating clients run ask_human and get_decision unprompted', async () => {
     // MCP defaults an unannotated tool to destructive and open-world. Codex then asks for approval of
@@ -293,6 +334,30 @@ describe('HTTP MCP: protocol', () => {
       ),
     ).toEqual([]);
   });
+  it("a pane's bearer token cannot ask for an agent-stopped push, as a tool or as a method", async () => {
+    const { mcp, relay, bridge } = await boot();
+    relay.features = ['thread-messages-v1', 'agent-stopped-push-v1'];
+    await bridge.start({ socket: false });
+    const asked = vi.spyOn(bridge, 'requestAgentStoppedPush');
+    const names = [
+      'request_agent_stopped_push',
+      'requestAgentStoppedPush',
+      'agent_stopped',
+      'agent_stopped_push',
+    ];
+    for (const name of names) {
+      const r = await raw(mcp, { body: rpc('tools/call', { name, arguments: {} }) });
+      expect(JSON.parse(r.body).error.code).toBe(-32602);
+    }
+    for (const method of names) {
+      expect(JSON.parse((await raw(mcp, { body: rpc(method, {}) })).body).error.code).toBe(-32601);
+    }
+    expect(asked).not.toHaveBeenCalled();
+    // A host's forwarder forwards only these, so it never reaches the bridge through a pane.
+    expect([...MCP_BRIDGE_METHODS]).not.toContain('requestAgentStoppedPush');
+    expect(relay.calls.filter((c) => c.path === '/api/v1/push/agent-stopped')).toEqual([]);
+    await bridge.stop();
+  });
   it('GET/DELETE/OPTIONS are 405 without CORS headers', async () => {
     const { mcp } = await boot();
     for (const method of ['GET', 'DELETE', 'OPTIONS']) {
@@ -311,14 +376,25 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
       options: [{ id: 'red', label: 'Red' }],
     });
     expect(res.isError).toBeUndefined();
-    expect(res.content[0].text).toBe(askedInstruction(1));
+    const id = res.structuredContent.question_id as string;
+    const expires = res.structuredContent.expires_at as string;
+    expect(res.content[0].text).toBe(
+      `${askedInstruction(1)} It waits for a decision until ${expires} (UTC); unanswered by then, it expires, and expiry authorises nothing. Policy: the deadline is the host's default. To check on it later, or if you lose track of it, call get_decision with question_id ${id}.`,
+    );
     expect(res.content[0].text).toMatch(
       /^Asked as q-1\. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn\. The answer arrives as a new message in this terminal, with your question quoted\. /,
     );
-    expect(res.structuredContent.instruction).toBe(askedInstruction(1));
+    expect(res.structuredContent.instruction).toBe(res.content[0].text);
     expect(res.structuredContent).toMatchObject({
       status: 'queued',
+      duplicate: false,
       enforced_requirement: 'human-required',
+      reply_mode: 'blocking',
+      requested_expires_at: null,
+      planned_fallback: null,
+      policy_adjustments: [
+        { field: 'expires_at', requested: null, effective: expires, source: 'host', gate_id: null },
+      ],
     });
     expect(await store.listQuestions()).toHaveLength(1);
   });
@@ -375,6 +451,45 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     });
     expect(r.content[0].text).toContain('the person chose not to answer');
     expect(r.content[0].text).toContain('Nothing was approved');
+  });
+  it('get_decision reports the revision and deadline each signed reopen set, down to none at all', async () => {
+    const { mcp, bridge, relay, identity } = await boot();
+    const tools = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body).result.tools as {
+      name: string;
+      outputSchema: { properties: Record<string, { type: unknown }> };
+    }[];
+    const schema = tools.find((t) => t.name === 'get_decision')!.outputSchema.properties;
+    expect(schema.revision!.type).toBe('integer');
+    expect(schema.expires_at!.type).toEqual(['string', 'null']);
+    const owner = { deviceId: identity.config.deviceId, keys: identity.keys };
+    const ask = await call(mcp, 'ask_human', { question: 'Ship it?' });
+    const id = ask.structuredContent.question_id as string;
+    await bridge.pump();
+    const first = (await call(mcp, 'get_decision', { question_id: id })).structuredContent;
+    expect(first).toMatchObject({ status: 'open', revision: 0 });
+    const later = new Date(Date.parse(first.expires_at as string) + 86_400_000).toISOString();
+    for (const [round, expiresAt] of [
+      [1, later],
+      [2, null],
+    ] as const) {
+      await relay.plainActionEvent({
+        questionId: id,
+        signer: owner,
+        action: 'cancel',
+        expectedRevision: round - 1,
+      });
+      await relay.plainActionEvent({
+        questionId: id,
+        signer: owner,
+        action: 'reopen',
+        expectedRevision: round - 1,
+        expiresAt,
+      });
+      await bridge.catchUp();
+      expect(
+        (await call(mcp, 'get_decision', { question_id: id })).structuredContent,
+      ).toMatchObject({ status: 'open', revision: round, expires_at: expiresAt });
+    }
   });
   it("get_decision reports the owner desktop's answer as the person's, made on their computer", async () => {
     const { mcp, bridge, relay, phone, identity } = await boot();

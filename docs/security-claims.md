@@ -4,12 +4,12 @@ This page says what Decisions protects, and just as importantly what it does not
 
 ## What is protected
 
-| Data                                                              | Cloudflare sees                                     | Why                                                                          |
-| ----------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Question text, context, option labels, project and machine labels | ciphertext only                                     | AES-256-GCM with a key Cloudflare never holds                                |
-| Answers (choice and text), proxy answers and their reasoning      | ciphertext only                                     | same                                                                         |
-| Screenshots                                                       | ciphertext only, random object names, no file names | encrypted per file before upload                                             |
-| Push notification content                                         | nothing useful                                      | payload is a type and an opaque id; the lock-screen text is fixed by the app |
+| Data                                                              | Cloudflare sees                                     | Why                                                                                          |
+| ----------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Question text, context, option labels, project and machine labels | ciphertext only                                     | AES-256-GCM with a key Cloudflare never holds                                                |
+| Answers (choice and text), proxy answers and their reasoning      | ciphertext only                                     | same                                                                                         |
+| Screenshots                                                       | ciphertext only, random object names, no file names | encrypted per file before upload                                                             |
+| Push notification content                                         | nothing useful                                      | payload is a type, and for a question an opaque id; the lock-screen text is fixed by the app |
 
 ## What Cloudflare can see (metadata)
 
@@ -18,6 +18,8 @@ Ids, timestamps, requirement level (needed to enforce policy), question status, 
 Your notification settings (quiet hours and reminders) and your involvement preference are stored in plaintext: the relay sees whether you want agents to involve you early or bring you a recommendation, how many agents they should consult, and when a temporary setting ends. The involvement preference is signed by the phone, tablet or computer you set it on, so the relay cannot change it or attribute it to another device. An agent's report of how it prepared a question travels inside the encrypted question.
 
 When your desktop reports that you are at the computer (presence), the relay learns that you are, and when: it sees each report and renewal, so it can tell roughly when you sat at the computer and when you left it or it went to sleep. It keeps only when the current report lapses, never a history, and a report carries nothing about questions, panes or content. While a report is current, the relay holds a new question's phone notification for up to two minutes.
+
+When your desktop asks the relay to tell your phone that an agent stopped while you were away, the relay learns that some agent on that computer stopped, and when, and so that you were probably away from it: not which agent, pane or project, why, or how many stopped, since the request and the notification carry none of it. It learns this from every request, including ones it drops in quiet hours or because it accepted one in the last minute. It keeps only when it last accepted one, to allow one a minute, until its daily cleanup once that is a day old, or a full reset; the notification is the type alone, and goes only to a phone or tablet whose app said it can show it.
 
 ## What is authenticated
 

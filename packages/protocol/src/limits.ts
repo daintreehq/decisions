@@ -89,6 +89,13 @@ export const LIMITS = {
   /** The agent's own account of how it prepared a question, in characters. */
   preparationSummaryChars: 2_000,
 
+  /* ---- advisory questions (section 21) ---- */
+  /**
+   * An advisory question's plan (`DecisionContentV1.planned_fallback`), in UTF-16 code units as JavaScript counts a
+   * string's length. A JSON Schema validator counts code points, so check a plan with this package before signing it.
+   */
+  plannedFallbackChars: 1_000,
+
   /* ---- presence (section 11) ---- */
   /** A presence lease lasts this long after the relay accepts the owner desktop's report, unless renewed. */
   presenceLeaseMs: 60_000,
@@ -97,6 +104,12 @@ export const LIMITS = {
    * accepted the question or its latest reopen. Renewing the lease never extends it.
    */
   presenceHoldMs: 120_000,
+
+  /* ---- agent-stopped push (section 11) ---- */
+  /** The relay accepts at most one `agent-stopped` push per this window, whoever asks. */
+  agentStoppedPushWindowMs: 60_000,
+  /** A push service drops an `agent-stopped` push it could not deliver within this long (the push's TTL). */
+  agentStoppedPushTtlSeconds: 600,
 
   /* ---- feature negotiation (section 19) ---- */
   /** Feature tokens one declaration may carry; unknown tokens count toward it and are ignored. */

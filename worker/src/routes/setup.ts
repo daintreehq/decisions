@@ -16,6 +16,8 @@ import { iso, json, nowMs } from '../util.js';
 
 /** The extensions this relay implements (docs/protocol.md section 19), advertised in `GET /info`. */
 export const RELAY_FEATURES: readonly ProtocolFeature[] = [
+  'advisory-deadlines-v1',
+  'agent-stopped-push-v1',
   'involvement-v1',
   'owner-desktop-answers-v1',
   'owner-desktop-declines-v1',

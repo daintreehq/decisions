@@ -1,6 +1,7 @@
 import {
   ActionBody,
   ApiError,
+  CREATE_NEVER_COMMITTED,
   CREATOR_MISSING_FEATURE,
   CreateQuestionBody,
   DEFAULTS,
@@ -18,6 +19,7 @@ import {
   type Requirement,
 } from '@daintreehq/decisions-protocol';
 import { sha256Hex, verifyObject } from '@daintreehq/decisions-crypto';
+import { NEVER_COMMITTED_FROM_META } from '../db/schema.js';
 import { deviceHasFeature } from '../room/features.js';
 import { bindPhoneImages } from '../room/phone-images.js';
 import type { Handler, Room } from '../room/types.js';
@@ -25,6 +27,7 @@ import { errorResponse, iso, isoOrNull, json, nowMs, type ApiResponse } from '..
 import { nextAllowed } from '../push/quiet-hours.js';
 import { clearSnapshot, deleteSnapshotState } from '../room/snapshots.js';
 import { presenceHold } from '../room/presence.js';
+import { pushTtlSeconds } from '../jobs/notify.js';
 
 /** How long `proxy-ok` / `proxy-first` questions wait for the decision model before the human is notified. */
 export const PROXY_GRACE_MS = 90_000;
@@ -161,40 +164,73 @@ function assertQuota(room: Room, originRef: string): void {
 /**
  * Schedules a question's `decision-new` push for `earliest`, or later while the person is at the computer: a
  * current presence lease holds it until the lease lapses or the round's bounded hold ends (section 11). The job
- * checks again when it runs, so this only saves an early wake-up.
+ * checks again when it runs, so this only saves an early wake-up. A push that would only be due once less than a
+ * second is left before the deadline is not scheduled at all.
  */
 function scheduleNewPush(
   room: Room,
   questionId: string,
   createdAt: number,
   earliest: number,
+  expiresAt: number | null,
 ): void {
   const hold = presenceHold(room, { question_id: questionId, created_at: createdAt }, nowMs());
-  room.schedule({
-    kind: 'notify_new',
-    runAt: hold === null ? earliest : Math.max(earliest, hold),
-    questionId,
-  });
+  const runAt = hold === null ? earliest : Math.max(earliest, hold);
+  if (pushTtlSeconds(runAt, expiresAt) === null) return;
+  room.schedule({ kind: 'notify_new', runAt, questionId });
 }
 
-function scheduleReminders(room: Room, questionId: string, from: number, n = 1): void {
+/** Schedules a question's first reminder, unless it would only be due at or after the deadline. */
+function scheduleReminders(
+  room: Room,
+  questionId: string,
+  from: number,
+  expiresAt: number | null,
+): void {
   const s = room.settings().reminders;
-  if (!s?.enabled || n > s.max) return;
-  room.schedule({
-    kind: 'remind',
-    runAt: from + (n === 1 ? s.first_ms : s.interval_ms),
-    questionId,
-    payload: { n },
-  });
+  if (!s?.enabled || s.max < 1) return;
+  const runAt = from + s.first_ms;
+  if (pushTtlSeconds(runAt, expiresAt) === null) return;
+  room.schedule({ kind: 'remind', runAt, questionId, payload: { n: 1 } });
 }
 
 /* ---------------- create ---------------- */
+
+/** When the owner last wiped every question (`POST /admin/delete-data`), in ms; absent if never. */
+export const QUESTIONS_WIPED_META = 'questions_wiped_at';
+/** A wipe this long before a record's (desktop-clock) `created_at` still counts as after it. */
+const WIPE_CLOCK_MARGIN_MS = 7 * 86_400_000;
+
+/**
+ * Sync, inside `room.tx`, after the receipt and the question were looked up and not found: whether this relay can show
+ * no question with this id was ever committed. A committed question always has a `decision.*` event, and a deletion
+ * leaves its `decision.deleted` tombstone; only a wipe of every question removes them, so a wipe since the record was
+ * made (with room for the desktop's clock), or history from before this relay kept the record (`migrate`), leaves it
+ * unknown.
+ */
+function neverCommitted(room: Room, questionId: string, createdAt: string): boolean {
+  if (
+    room.q1(
+      `SELECT 1 FROM events WHERE question_id = ? AND event_type LIKE 'decision.%' LIMIT 1`,
+      questionId,
+    )
+  )
+    return false;
+  const meta = (key: string) =>
+    room.q1<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key)?.value;
+  // History is whole only since the later of the last wipe and when this relay began keeping it (`migrate`).
+  const since = Math.max(
+    Number(meta(QUESTIONS_WIPED_META) ?? 0),
+    Number(meta(NEVER_COMMITTED_FROM_META) ?? Number.POSITIVE_INFINITY),
+  );
+  const made = Date.parse(createdAt);
+  return Number.isFinite(made) && since < made - WIPE_CLOCK_MARGIN_MS;
+}
 
 export const createQuestion: Handler = async (room, c) => {
   const auth = c.auth!;
   const body = c.body(CreateQuestionBody);
   const { record, envelope } = body.question;
-  const t = nowMs();
   const bad = (m: string) => new ApiError('validation_error', m);
 
   if (
@@ -223,9 +259,6 @@ export const createQuestion: Handler = async (room, c) => {
   if (!(await verifyObject(await room.devicePublicKey(signer), record)))
     throw bad('record signature invalid');
   const expiresAt = record.expires_at ? Date.parse(record.expires_at) : null;
-  if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
-    throw bad('expires_at must be in the future and within a year (use null for no expiry)');
-  }
   if (new Set(record.attachment_ids).size !== record.attachment_ids.length)
     throw bad('duplicate attachment id');
   const digest = await c.bodyDigest();
@@ -234,6 +267,8 @@ export const createQuestion: Handler = async (room, c) => {
 
   return room.tx((): ApiResponse => {
     room.assertActive(auth.deviceId);
+    // Read the clock in the final synchronous section: everything above awaited.
+    const t = nowMs();
     const receipt = room.q1<{ request_digest: string; status: number; response_json: string }>(
       `SELECT request_digest, status, response_json FROM command_receipts WHERE device_id = ? AND idempotency_key = ?`,
       auth.deviceId,
@@ -258,13 +293,29 @@ export const createQuestion: Handler = async (room, c) => {
           'question id already exists with different content',
         );
       }
+      // A deadline may have passed since the sweep: expire it now, as an action would, so the reply is current.
+      const q = expireQuestionNow(room, existing)
+        ? room.q1<QuestionRow>(`SELECT * FROM questions WHERE question_id = ?`, record.question_id)!
+        : existing;
       return json(200, {
-        question_id: existing.question_id,
-        revision: existing.revision,
-        status: existing.status,
-        event_seq: existing.last_event_seq,
-        created_at: iso(existing.created_at),
+        question_id: q.question_id,
+        revision: q.revision,
+        status: q.status,
+        event_seq: q.last_event_seq,
+        created_at: iso(q.created_at),
       });
+    }
+    // Only a new question must still be due. A retry of one already taken, answered above, may arrive after its
+    // deadline when the reply was lost on the way back (section 6).
+    if (expiresAt !== null && (expiresAt <= t || expiresAt > t + LIMITS.maxQuestionExpiryMs)) {
+      // Past its deadline, say whether this relay can show the question was never committed, so a desktop that lost
+      // the reply to an earlier attempt can tell the person never had it.
+      const never = expiresAt <= t && neverCommitted(room, record.question_id, record.created_at);
+      throw new ApiError(
+        'validation_error',
+        'expires_at must be in the future and within a year (use null for no expiry)',
+        never ? { details: { reason: CREATE_NEVER_COMMITTED } } : {},
+      );
     }
     assertQuota(room, record.origin_ref);
 
@@ -331,8 +382,8 @@ export const createQuestion: Handler = async (room, c) => {
     );
 
     const grace = record.requirement === 'human-required' ? 0 : PROXY_GRACE_MS;
-    scheduleNewPush(room, record.question_id, createdAt, t + grace);
-    scheduleReminders(room, record.question_id, t);
+    scheduleNewPush(room, record.question_id, createdAt, t + grace, expiresAt);
+    scheduleReminders(room, record.question_id, t, expiresAt);
     if (expiresAt !== null)
       room.schedule({ kind: 'expire', runAt: expiresAt, questionId: record.question_id });
 
@@ -670,15 +721,15 @@ function scheduleAfterAction(
     case 'proxy-abstain':
       // The person is told now, unless they are at the computer within the round's hold (section 11).
       room.cancelJobs({ questionId: id, kinds: ['notify_new'] });
-      scheduleNewPush(room, id, q.created_at, t);
+      scheduleNewPush(room, id, q.created_at, t, expiresAt);
       break;
     case 'reopen':
       // A reopened question starts with no snapshot and no outstanding refresh.
       clearSnapshot(room, id);
       room.cancelJobs({ questionId: id, kinds: ['delete_attachments'] });
       // A reopen starts a new round, and with it a new bounded hold (section 11).
-      scheduleNewPush(room, id, q.created_at, t);
-      scheduleReminders(room, id, t);
+      scheduleNewPush(room, id, q.created_at, t, expiresAt);
+      scheduleReminders(room, id, t, expiresAt);
       if (expiresAt !== null) room.schedule({ kind: 'expire', runAt: expiresAt, questionId: id });
       break;
   }

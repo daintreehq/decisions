@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -11,6 +11,9 @@ import {
   startDecisionsMcpServer,
   validateMcpPath,
   type AttachmentResolver,
+  type HttpPollOptions,
+  type DeliveredKind,
+  type HttpSyncStatus,
   type InjectResult,
   type LocateResult,
   type QuestionOrigin,
@@ -26,7 +29,8 @@ import {
   type GlobalOptions,
   type Runtime,
 } from '../runtime.js';
-import { PaneDirectoryResolver, humanFileResolver, noAttachmentsResolver } from '../resolvers.js';
+import { RECEIVER_BUSY, ReceiverLock, socketReplaced } from '../receiver.js';
+import { PaneDirectoryResolver, noAttachmentsResolver } from '../resolvers.js';
 
 /**
  * The origin the CLI uses for everything it asks itself. Each named demo "pane" lives as long as the
@@ -56,11 +60,14 @@ export function parseSink(spec: string | undefined): SinkSpec {
   if (!spec || spec === 'stdout') return { kind: 'stdout' };
   if (spec.startsWith('file:') && spec.length > 5) return { kind: 'file', path: spec.slice(5) };
   if (spec.startsWith('exec:') && spec.length > 5) return { kind: 'exec', cmd: spec.slice(5) };
-  throw new CliError('--sink must be stdout, file:<path> or exec:<command>');
+  throw new CliError('--sink must be stdout, file:<path> or exec:<command>', 2);
 }
 
 /** Exit status an exec sink command uses to say "nothing done, try again later" (sysexits EX_TEMPFAIL). */
 export const EXEC_SINK_TEMPFAIL = 75;
+
+/** How long an `exec:` command has to exit after SIGTERM before it is killed. */
+const EXEC_KILL_GRACE_MS = 2_000;
 
 /**
  * Demo sink so the whole loop works without Daintree: prints, appends to a file, or pipes the notice to a
@@ -79,10 +86,19 @@ export const EXEC_SINK_TEMPFAIL = 75;
  *   started is unavailable.
  */
 export class DemoSink implements TerminalSink {
+  /** `exec:` commands still running, so shutdown can end them instead of waiting on them. */
+  private readonly running = new Set<ChildProcess>();
+  /** Shutting down: nothing more is written, and what was not written is held for the next receiver. */
+  private closed = false;
   constructor(
     private readonly spec: SinkSpec,
     /** Writes one line; when it returns a promise, the line counts as written only once that resolves. */
     private readonly out: (line: string) => void | Promise<void>,
+    /**
+     * `json`: standard output carries one JSON record per line (`ask --json`, `wait --json`), so the stdout sink writes
+     * each notice as a `{"record":"notice"}` line and an `exec:` command's own output goes to standard error.
+     */
+    private readonly opts: { json?: boolean } = {},
   ) {}
   async locate(o: QuestionOrigin): Promise<LocateResult> {
     if (o.host_id !== 'cli') return { state: 'gone' };
@@ -102,11 +118,16 @@ export class DemoSink implements TerminalSink {
   async isIdle(): Promise<boolean> {
     return true;
   }
-  async inject(_t: TerminalTarget, text: string, _injectionId?: string): Promise<InjectResult> {
+  async inject(_t: TerminalTarget, text: string, injectionId?: string): Promise<InjectResult> {
+    if (this.closed) return { outcome: 'held', reason: 'sink_closed' };
     switch (this.spec.kind) {
       case 'stdout':
         try {
-          await this.out('\n' + text + '\n');
+          await this.out(
+            this.opts.json
+              ? JSON.stringify({ record: 'notice', injection_id: injectionId ?? null, text })
+              : '\n' + text + '\n',
+          );
           return { outcome: 'delivered', proof: 'stdout' };
         } catch {
           return { outcome: 'ambiguous', reason: 'stdout_write_failed' };
@@ -143,7 +164,13 @@ export class DemoSink implements TerminalSink {
     return new Promise<InjectResult>((resolve) => {
       let spawned = false;
       let inputWritten = false;
-      const p = spawn(cmd, { shell: true, stdio: ['pipe', 'inherit', 'inherit'] });
+      // Under --json, standard output belongs to the records: the command's own output goes to standard error.
+      const p = spawn(cmd, {
+        shell: true,
+        stdio: ['pipe', this.opts.json ? 2 : 'inherit', 'inherit'],
+      });
+      this.running.add(p);
+      p.on('exit', () => this.running.delete(p));
       p.on('spawn', () => (spawned = true));
       p.on('error', () =>
         resolve(
@@ -160,10 +187,27 @@ export class DemoSink implements TerminalSink {
         else resolve({ outcome: 'delivered', proof: 'exec:exit-0' });
       });
       // A command that exits before reading its input raises EPIPE on stdin; the exit decides the outcome.
-      p.stdin.on('error', () => undefined);
-      p.stdin.end(data, (err?: Error | null) => (inputWritten = !err));
+      const stdin = p.stdin!; // piped: never null
+      stdin.on('error', () => undefined);
+      stdin.end(data, (err?: Error | null) => (inputWritten = !err));
     });
   }
+  /**
+   * Shutting down: end every `exec:` command still running (SIGTERM), so a command that never exits cannot keep the
+   * process up. One that may already have acted settles as ambiguous, never retried.
+   */
+  close(): void {
+    this.closed = true;
+    const ending = [...this.running];
+    for (const p of ending) p.kill('SIGTERM');
+    if (ending.length === 0) return;
+    // A command that ignores SIGTERM is killed, so it can neither keep the process up nor settle after the store closed.
+    const timer = setTimeout(() => {
+      for (const p of ending) if (this.running.has(p)) p.kill('SIGKILL');
+    }, EXEC_KILL_GRACE_MS);
+    timer.unref();
+  }
+
   async hasMarker(_t: TerminalTarget, injectionId: string): Promise<boolean> {
     if (this.spec.kind !== 'file') return false;
     try {
@@ -174,10 +218,13 @@ export class DemoSink implements TerminalSink {
   }
 }
 
+/** How often a CLI receiver sends what is queued, retries and delivers, beside its socket or polling. */
+const CLI_PUMP_MS = 5_000;
+
 export function buildBridge(
   rt: Runtime,
   sink: TerminalSink,
-  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver } = {},
+  extra: { policy?: PolicyRegistry; resolver?: AttachmentResolver; pumpIntervalMs?: number } = {},
 ): DecisionsBridge {
   return new DecisionsBridge({
     identity: rt.identity,
@@ -189,10 +236,15 @@ export function buildBridge(
     spool: new FileSpool(join(rt.ctx.home, 'spool')),
     // Default: no attachments. Callers choose between the human's unrestricted --attach and a pane folder.
     resolver: extra.resolver ?? noAttachmentsResolver,
-    // The CLI's sinks type the library's text as given, follow-up blocks included.
+    // The CLI's sinks type the library's text as given, follow-up blocks and advisory notices included.
     followUps: true,
+    advisoryDeadlines: true,
     auditPath: rt.auditPath,
-    policy: extra.policy ?? new PolicyRegistry(),
+    // A question is advisory only when its asker states a plan (`--planned-fallback`, `planned_fallback`), and never
+    // under a gate or for an approval; the relay and a phone or tablet must support it as well.
+    policy: extra.policy ?? new PolicyRegistry({ advisoryQuestions: true }),
+    // Only the receiver publishes: a question another `decisions` process asked meanwhile goes out within seconds.
+    pumpIntervalMs: extra.pumpIntervalMs ?? CLI_PUMP_MS,
     ...(rt.ctx.webSocket ? { webSocket: rt.ctx.webSocket } : {}),
     now: rt.ctx.now,
   });
@@ -246,7 +298,16 @@ export function mcpAddLines(
 
 export interface DaemonOptions {
   sink?: string;
+  /** `false`: no live socket; sync over HTTP continuously instead (`--no-socket`). */
   socket?: boolean;
+  /** Sync over HTTP once, deliver what that brings, and return (`listen --once`; implies no socket). */
+  once?: boolean;
+  /** The HTTP polling cadence without a socket (tests); default `DEFAULT_POLL`. */
+  poll?: HttpPollOptions;
+  /** How long `once` may take before it stops (tests); default two minutes. */
+  onceDeadlineMs?: number;
+  /** How often the bridge sends what is queued and delivers (tests); default `CLI_PUMP_MS`. */
+  pumpIntervalMs?: number;
   mcp?: {
     port?: number;
     /** Path the MCP answers on, exactly (default `/mcp`). */
@@ -260,10 +321,98 @@ export interface DaemonOptions {
     /** Print the literal bearer token. Off by default so logs never capture it. */
     showToken?: boolean;
   };
-  /** Resolve when this promise settles (tests); default waits for SIGINT/SIGTERM. */
+  /** Stop when this promise settles (tests); default stops on SIGINT/SIGTERM. A revocation stops it either way. */
   until?: Promise<void>;
   onReady?: (h: { bridge: DecisionsBridge; mcp: RunningMcp | null; token: string | null }) => void;
 }
+
+/** How long `listen --once` may take, start to end, before it gives up (a relay or sink that never answers). */
+const ONCE_DEADLINE_MS = 120_000;
+const ONCE_TIMED_OUT = 'listen --once did not finish within two minutes; stopped';
+
+export const REVOKED =
+  'This device was revoked from the relay. Stopped; re-pair or restore from a recovery kit.';
+
+/**
+ * How long stopping waits for the bridge's work in flight to be recorded. Longer than `EXEC_KILL_GRACE_MS`, so a
+ * command that ignores SIGTERM has been killed, and its outcome recorded, by then.
+ */
+const DRAIN_WAIT_MS = 5_000;
+
+/**
+ * Ends a bridge's run without closing its store: the sink stops writing and its commands are ended, the relay requests
+ * are aborted, the bridge stops, and then this waits for what the bridge had in flight (a pump, applying events, a
+ * delivery) to record what happened (an `exec:` command that answers SIGTERM with exit 75 is held, not left for a
+ * restart to call uncertain), or for `DRAIN_WAIT_MS`. `also` is other work on the store to wait for the same way.
+ */
+export async function quiesceBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  sink.close();
+  rt.client.close();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The bound covers stopping too: a stop waits for a sync whose requests may not honour their abort.
+  await Promise.race([
+    (async () => {
+      await bridge.stop();
+      await Promise.all([bridge.idle(), ...also.map((p) => p.catch(() => undefined))]);
+    })(),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DRAIN_WAIT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/** `quiesceBridge`, then the store closes. */
+export async function closeBridge(
+  rt: Runtime,
+  bridge: DecisionsBridge,
+  sink: DemoSink,
+  also: Promise<unknown>[] = [],
+): Promise<void> {
+  await quiesceBridge(rt, bridge, sink, also);
+  await rt.store.close();
+}
+
+/** Seconds until `at`, for a status line. */
+const secondsUntil = (at: number, now: number) => Math.max(0, Math.round((at - now) / 1000));
+
+/**
+ * Reports a polling listener's HTTP syncs on stderr: the first success, each failure with its retry, and the
+ * recovery. Only codes, cursors and times: nothing of any question.
+ */
+export function reportSyncs(ctx: Ctx, bridge: DecisionsBridge): void {
+  let last: HttpSyncStatus['outcome'] | null = null;
+  bridge.on('sync', (s) => {
+    if (s.outcome === 'ok' && last !== 'ok')
+      ctx.err(
+        `[relay] HTTP sync ${last === 'degraded' ? 'recovered' : 'ok'} (event ${s.last_success_cursor}); polling every ${secondsUntil(s.next_attempt_at ?? ctx.now(), ctx.now())}s`,
+      );
+    if (s.outcome === 'degraded')
+      ctx.err(
+        `[relay] HTTP sync failed (${s.reason}, ${s.failures} in a row)${s.next_attempt_at !== null ? `; retrying in ${secondsUntil(s.next_attempt_at, ctx.now())}s` : ''}`,
+      );
+    if (s.outcome === 'fatal') ctx.err(`[relay] HTTP sync failed (${s.reason}); stopping`);
+    last = s.outcome;
+  });
+}
+
+/** The listener's line for one settled delivery, naming what it carried. */
+export const deliveredLine = (id: string, what: DeliveredKind): string =>
+  `✓ delivered ${DELIVERED_LABEL[what]} for ${id}`;
+
+const DELIVERED_LABEL: Record<DeliveredKind, string> = {
+  answer: 'answer',
+  decline: 'decline',
+  expiry: 'expiry notice',
+  'advisory-timeout': 'advisory timeout notice',
+  notice: 'notice',
+};
 
 export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Promise<void> {
   // A bad mount path fails before the runtime opens or a token file is created.
@@ -274,25 +423,74 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
       throw new CliError(`--path: ${(e as Error).message}`);
     }
   }
+  const sinkSpec = parseSink(o.sink);
   const rt = await openRuntime(ctx, g);
-  const sink = new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out);
+  // One receiver per state directory: a second would deliver beside this one and take its writes for crashed ones.
+  const lock = ReceiverLock.forHome(ctx.home);
+  try {
+    if (!lock.tryAcquire()) throw new CliError(RECEIVER_BUSY);
+  } catch (e) {
+    await rt.store.close();
+    throw e;
+  }
+  const sink = new DemoSink(sinkSpec, ctx.outAcked ?? ctx.out);
   // Agents reach files only through a folder the human designated (per pane), never by naming a path.
   const bridge = buildBridge(rt, sink, {
     resolver: o.mcp?.attachmentsDir
       ? new PaneDirectoryResolver(o.mcp.attachmentsDir)
       : noAttachmentsResolver,
+    ...(o.pumpIntervalMs !== undefined ? { pumpIntervalMs: o.pumpIntervalMs } : {}),
   });
+  const http = o.once === true || o.socket === false;
+  // One way to stop, whatever asks: a signal, the caller's `until`, a revocation or a sync no retry can fix. It
+  // stops the bridge, so a sync it cuts short records nothing, and aborts every relay request still in flight, so a
+  // relay that never answers cannot keep the process up.
+  let stopping = false;
+  /** Why the listener ended on its own, latched before stopping the bridge resets its state. */
+  const ended: {
+    revoked: boolean;
+    fatal: HttpSyncStatus | null;
+    timedOut: boolean;
+    replaced: boolean;
+  } = {
+    revoked: false,
+    fatal: null,
+    timedOut: false,
+    replaced: false,
+  };
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let release!: () => void;
+  const stopped = new Promise<void>((r) => (release = r));
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    void bridge.stop();
+    rt.client.close();
+    sink.close();
+    release();
+  };
+  if (o.until) void o.until.then(stop, stop);
+  else {
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  }
   let mcp: RunningMcp | null = null;
   let token: string | null = null;
   try {
-    bridge.on('delivered', (id) => ctx.out(`✓ delivered answer for ${id}`));
-    bridge.on('error', (e) => ctx.err(`warning: ${e.message}`));
+    bridge.on('delivered', (id, what) => ctx.out(deliveredLine(id, what)));
+    bridge.on('error', (e) => !stopping && ctx.err(`warning: ${e.message}`));
     bridge.on('socket', (s, d) => ctx.err(`[relay] ${s}${d ? ` (${d})` : ''}`));
     bridge.on('state', (s) => {
-      if (s === 'revoked')
-        ctx.err(
-          'This device was revoked from the relay. Stopping; re-pair or restore from a recovery kit.',
-        );
+      if (s !== 'revoked') return;
+      ended.revoked = true;
+      stop();
+    });
+    // Another connection took this device's socket: this listener reads nothing more, so it ends, and with it its hold
+    // on the state directory, rather than look alive while deaf.
+    bridge.on('replaced', () => {
+      if (stopping) return;
+      ended.replaced = true;
+      stop();
     });
     if (o.mcp) {
       const tokenFile = o.mcp.tokenFile ?? join(ctx.home, 'mcp-token');
@@ -311,6 +509,12 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         authenticator: auth,
         ...(o.mcp.port !== undefined ? { port: o.mcp.port } : {}),
         ...(o.mcp.path !== undefined ? { path: o.mcp.path } : {}),
+        // Its sink is this process's terminal, a file or a command, never the agent's own terminal: agents check back.
+        answerArrival: 'poll',
+        // This host resolves an id inside the pane's human-designated folder, not the agent's worktree, so it says so.
+        attachmentIdDescription: o.mcp.attachmentsDir
+          ? 'The relative path the human gave you of an image in the attachments folder set up for this terminal; nothing else can be attached.'
+          : 'This host accepts no attachments; leave attachments out.',
       });
       ctx.out(`Decisions MCP listening on ${mcp.url} (loopback only)\n`);
       for (const l of mcpAddLines(mcp.url, token, {
@@ -320,89 +524,63 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
         ctx.out(l);
       ctx.out('');
     }
-    await bridge.start({ socket: o.socket !== false });
-    if (o.socket === false)
-      await bridge.catchUp().catch((e) => ctx.err(`warning: ${(e as Error).message}`));
-    ctx.out(
-      `Listening for answers${o.socket === false ? ' (no live socket)' : ''}. Press Ctrl-C to stop.`,
-    );
-    o.onReady?.({ bridge, mcp, token });
-    await (o.until ??
-      new Promise<void>((resolve) => {
-        process.once('SIGINT', () => resolve());
-        process.once('SIGTERM', () => resolve());
-      }));
-  } finally {
-    await mcp?.close();
-    await bridge.stop();
-    await rt.store.close();
-  }
-}
-
-export async function ask(
-  ctx: Ctx,
-  g: GlobalOptions,
-  o: {
-    question: string;
-    context?: string;
-    option?: string[];
-    require?: string;
-    attach?: string[];
-    wait?: boolean;
-    sink?: string;
-    until?: Promise<void>;
-  },
-): Promise<void> {
-  const rt = await openRuntime(ctx, g);
-  const bridge = buildBridge(rt, new DemoSink(parseSink(o.sink), ctx.outAcked ?? ctx.out), {
-    resolver: humanFileResolver,
-  });
-  try {
-    const options = (o.option ?? []).map((s) => {
-      const i = s.indexOf('=');
-      if (i < 1) throw new CliError(`--option must look like id=Label, got "${s}"`);
-      return { id: s.slice(0, i), label: s.slice(i + 1) };
-    });
-    const r = await bridge.registerQuestion({
-      origin: cliOrigin(),
-      input: {
-        question: o.question,
-        ...(o.context ? { context: o.context } : {}),
-        ...(options.length ? { options } : {}),
-        ...(o.require ? { requested_requirement: o.require } : {}),
-        ...(o.attach?.length
-          ? { attachments: o.attach.map((p) => ({ local_resource_id: p })) }
-          : {}),
-      },
-    });
-    await bridge.pump();
-    ctx.out(
-      ctx.json
-        ? JSON.stringify({
-            question_id: r.questionId,
-            alias: r.alias,
-            enforced_requirement: r.requirement,
-          })
-        : `Asked as q-${r.alias} (${r.questionId}), requirement: ${r.requirement}.`,
-    );
-    if (!o.wait) {
-      ctx.out(
-        ctx.json
-          ? ''
-          : 'The answer is delivered by a running `decisions listen`. Use --wait to wait here.',
-      );
+    if (o.once) {
+      // One pass: what the relay holds is fetched and delivered, then the command ends. An answer that arrives later
+      // waits for the next run (or a listener that stays up). A signal, or the deadline, ends the wait even if the
+      // relay or a sink never answers.
+      deadline = setTimeout(() => {
+        ended.timedOut = true;
+        stop();
+      }, o.onceDeadlineMs ?? ONCE_DEADLINE_MS);
+      await bridge.start({ socket: false });
+      const s = await Promise.race([bridge.sync({ settle: true }), stopped.then(() => null)]);
+      if (ended.revoked || s?.outcome === 'revoked') throw new CliError(REVOKED);
+      if (ended.timedOut) throw new CliError(ONCE_TIMED_OUT);
+      if (!s || stopping) return;
+      // What was already waiting here is delivered too, even when the relay could not be read.
+      await Promise.race([bridge.pump(), stopped]);
+      if (ended.revoked) throw new CliError(REVOKED);
+      if (ended.timedOut) throw new CliError(ONCE_TIMED_OUT);
+      if (stopping) return;
+      if (s.outcome !== 'ok')
+        throw new CliError(`could not sync with the relay over HTTP (${s.reason ?? 'unknown'})`);
+      ctx.err(`[relay] HTTP sync ok (event ${s.last_success_cursor}); done.`);
       return;
     }
-    await bridge.start();
-    const done = new Promise<void>((resolve) => {
-      bridge.on('delivered', (id) => id === r.questionId && resolve());
-    });
-    await Promise.race([
-      done,
-      o.until ?? new Promise<void>((resolve) => process.once('SIGINT', () => resolve())),
-    ]);
+    if (http) {
+      reportSyncs(ctx, bridge);
+      bridge.on('sync', (s) => {
+        if (s.outcome !== 'fatal') return;
+        ended.fatal = s;
+        stop();
+      });
+    }
+    await bridge.start(http ? { socket: false, poll: o.poll ?? true } : {});
+    ctx.out(
+      `Listening for answers${http ? ' over HTTP (no live socket)' : ''}. Press Ctrl-C to stop.`,
+    );
+    o.onReady?.({ bridge, mcp, token });
+    await stopped;
+    if (ended.revoked) throw new CliError(REVOKED);
+    if (ended.replaced) throw new CliError(socketReplaced('listening'));
+    if (ended.fatal)
+      throw new CliError(
+        `stopped listening: the relay refuses this client (${ended.fatal.reason}); update decisions`,
+      );
   } finally {
-    await bridge.stop();
-    await rt.store.close();
+    clearTimeout(deadline);
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+    stopping = true;
+    sink.close();
+    try {
+      await mcp?.close();
+    } finally {
+      try {
+        await closeBridge(rt, bridge, sink);
+      } finally {
+        lock.release();
+      }
+    }
   }
 }

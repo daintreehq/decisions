@@ -1,12 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
 import type { InvolvementView } from './involvement.js';
+import type { PolicyAdjustment, RegisterResult } from './publisher.js';
 import type { QuestionOrigin } from './types.js';
 
-const SERVER_VERSION = '0.8.0';
+const SERVER_VERSION = '0.9.0';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 /**
@@ -40,22 +42,37 @@ export class TokenMapAuthenticator implements PaneAuthenticator {
 }
 
 /** The `get_decision` structured result: the decision fields first, in the MCP surface's snake_case. */
-function decisionResult(v: DecisionView) {
+export function decisionResult(v: DecisionView) {
   return {
     question_id: v.questionId,
     alias: v.alias,
     status: v.status,
+    publication: v.publication,
     requirement: v.requirement,
     workflow_gate_id: v.workflowGateId,
     provenance: v.provenance,
     answered_on: v.answeredOn,
     closed_reason: v.closedReason,
+    fallback_due: v.fallbackDue,
+    advisory_timeout: v.advisoryTimeout
+      ? {
+          revision: v.advisoryTimeout.revision,
+          deadline: v.advisoryTimeout.deadline,
+          disposition: v.advisoryTimeout.disposition,
+          notice: v.advisoryTimeout.notice,
+          injection_id: v.advisoryTimeout.injectionId,
+          agent_action: v.advisoryTimeout.agentAction,
+        }
+      : null,
     choice: v.choice,
     text: v.text,
     reviewed_digests_match: v.reviewedDigestsMatch,
     delivery_status: v.deliveryStatus,
     revision: v.revision,
     expires_at: v.expiresAt,
+    reply_mode: v.replyMode,
+    planned_fallback: v.plannedFallback,
+    error_code: v.errorCode,
     answers: v.answers.map((a) => ({
       revision: a.revision,
       source: a.source,
@@ -107,6 +124,39 @@ function decisionResult(v: DecisionView) {
           },
     ),
   };
+}
+
+/**
+ * The `get_decision` result text: where the question stands, in words, and how many follow-ups its thread holds. The
+ * CLI's `decisions get` and `decisions ask --wait` print the same words.
+ */
+export function decisionText(v: DecisionView): string {
+  const summary = v.provenance
+    ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
+    : v.status === 'expired'
+      ? v.fallbackDue
+        ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
+        : v.advisoryTimeout?.revision === v.revision &&
+            v.advisoryTimeout.disposition === 'fallback-due'
+          ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This computer is still catching up with the relay, so whether the plan you stated may go ahead is not settled yet: do not carry it out until a notice arrives here or get_decision says fallback_due is true.`
+          : v.advisoryTimeout?.revision === v.revision
+            ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. This host does not allow the plan you stated to go ahead on its own: you are not authorised to carry it out. Ask again if you still need a decision.`
+            : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
+      : v.closedReason === 'never-published'
+        ? `q-${v.alias} never reached the relay: its deadline passed before this computer could publish it, so it never reached the person's phone and no answer was recorded. Nothing was decided or approved. ${v.fallbackDue ? 'It was advisory: you may carry out the plan you stated, at your own discretion.' : 'You are not authorised to continue the gated step.'}`
+        : v.publication === 'possibly-committed'
+          ? `q-${v.alias} may have reached the relay, but this computer has not been able to confirm it; its outcome stays unknown until the relay can be reached. No answer in force.`
+          : v.publication === 'never-published' && v.closedReason === 'withdrawn'
+            ? `q-${v.alias} was withdrawn before it was published; no answer in force.`
+            : v.status === 'publish-failed'
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: nothing was decided. Ask again if you still need it.`
+              : v.closedReason === 'declined'
+                ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
+                : `q-${v.alias} is ${v.status}; no answer in force.`;
+  const messages = v.thread.filter((t) => t.kind === 'message').length;
+  return messages > 0
+    ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
+    : summary;
 }
 
 /** The `get_involvement` structured result: every field present, null where it does not apply. */
@@ -165,25 +215,152 @@ export type DecisionsMcpBridge = Pick<DecisionsBridge, (typeof MCP_BRIDGE_METHOD
  * `initialize`, so it points at the tool rather than carrying the preference.
  */
 export const SERVER_INSTRUCTIONS =
-  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
+  'Use ask_human for decisions that belong to the human. It does not wait: carry on with work that does not depend on the answer, and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal. When the person would have to see something to decide (a UI, a design, a layout, a chart, an error on screen), attach screenshots to ask_human as its attachments field describes, instead of describing it in words, with roles before and after for a change. If the images change after an approval, ask again: an approval covers only the images it was given. A human answer is final, but the conversation goes on: the person may send follow-up messages, also after answering, which arrive in this terminal marked as follow-ups and never change the answer, so a reconsidered decision arrives as a follow-up. To clarify a question, reply to a follow-up or ask one of your own, use send_followup on the same question instead of asking a new one; a reply arrives the same way. ' +
   "Before preparing a question, call get_involvement to read how involved the person wants to be right now, and call it again just before ask_human: they may change it while you work, and a temporary setting ends without a new revision. involve-early: ask while you explore the options. recommend: consult consult_count other agents with your own tools, try to agree, then ask with the recommendation and its reasoning, or with the disagreement and the alternatives. Say what happened in ask_human's preparation, with outcome not-run when you could not consult; never claim a consultation that did not happen. When it is unavailable or stale, use your normal behaviour. It never changes what you may do or what needs approval: a question that needs the person still goes to them without delay, and agreement among agents is a recommendation, not an answer.";
 
-/** The `ask_human` result text. */
-export const askedInstruction = (alias: number) =>
-  `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`;
+/**
+ * Where an agent finds what the person said: `terminal` when the host types answers and follow-ups into the agent's
+ * own terminal, which wakes it (Daintree); `poll` when they go somewhere the agent may never see, such as the terminal,
+ * file or command of a standalone `decisions mcp`, so the agent checks with `get_decision` instead.
+ */
+export type AnswerArrival = 'terminal' | 'poll';
+
+const TERMINAL_ARRIVAL =
+  ', and end your turn when you cannot go further without it. The answer arrives as a new message in this terminal.';
+const POLL_ARRIVAL =
+  '. This host does not type answers into your terminal: when you cannot go further without the answer, call get_decision with its question_id, and check again later if it has none yet.';
+const TERMINAL_FOLLOWUPS = 'which arrive in this terminal marked as follow-ups';
+const POLL_FOLLOWUPS = "which appear in get_decision's thread";
+
+/** `SERVER_INSTRUCTIONS` for a host whose agents check for answers with `get_decision` (`AnswerArrival`). */
+export function serverInstructions(arrival: AnswerArrival = 'terminal'): string {
+  return arrival === 'terminal'
+    ? SERVER_INSTRUCTIONS
+    : SERVER_INSTRUCTIONS.replace(TERMINAL_ARRIVAL, POLL_ARRIVAL)
+        .replace(TERMINAL_FOLLOWUPS, POLL_FOLLOWUPS)
+        .replace('a reply arrives the same way', 'a reply appears the same way');
+}
+
+/** How the `ask_human` result text begins: where the answer arrives, and what to do meanwhile. */
+export const askedInstruction = (alias: number, arrival: AnswerArrival = 'terminal') =>
+  arrival === 'terminal'
+    ? `Asked as q-${alias}. Carry on with anything that does not depend on the answer; once you cannot go further without it, end your turn. The answer arrives as a new message in this terminal, with your question quoted. The answer is final: the person may still send follow-ups, even after answering, which arrive here marked as follow-ups without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies arrive the same way.`
+    : `Asked as q-${alias}. Carry on with anything that does not depend on the answer. This host does not type the answer into your terminal: once you cannot go further without it, call get_decision with this question_id to see whether it has been answered, and check again later if not. The answer is final: the person may still send follow-ups, even after answering, which appear in get_decision's thread without changing it, so a reconsidered decision arrives as a follow-up. To clarify, reply or ask a follow-up, call send_followup with this question_id instead of asking a new question; replies appear the same way.`;
+
+const policyName = (a: Pick<PolicyAdjustment, 'source' | 'gateId'>) =>
+  a.source === 'gate' ? `the workflow gate ${a.gateId}` : 'the host';
+
+/** One change policy made, in words. */
+export function adjustmentText(a: PolicyAdjustment): string {
+  const by = policyName(a);
+  if (a.field === 'expires_at')
+    return a.requested === null
+      ? `the deadline is ${by}'s default`
+      : `${by} moved the deadline you asked for (${a.requested}) to ${a.effective ?? 'never'}`;
+  if (a.field === 'requirement')
+    return `${by} raised the requirement from ${a.requested} to ${a.effective}`;
+  return `${by} made it ${a.effective} instead of ${a.requested}`;
+}
+
+/**
+ * What `registerQuestion` returned. A host that forwards it from an older library version may return only the first
+ * fields; the result then says nothing about the deadline rather than guess one.
+ */
+export type AskedReceipt = Pick<
+  RegisterResult,
+  'questionId' | 'alias' | 'requirement' | 'status' | 'duplicate'
+> &
+  Partial<RegisterResult>;
+
+/** The deadline and mode as they apply from now on. */
+function planText(r: RegisterResult, arrival: AnswerArrival = 'terminal'): string {
+  if (r.replyMode === 'advisory')
+    return arrival === 'terminal'
+      ? `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is typed here as usual. If none is, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`
+      : `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is the answer, as usual. If none is, get_decision says fallback_due once this host has seen the deadline pass unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`;
+  return r.expiresAt
+    ? `It waits for a decision until ${r.expiresAt} (UTC); unanswered by then, it expires, and expiry authorises nothing.`
+    : 'It has no deadline: it waits for a decision until it is answered, declined or cancelled.';
+}
+
+/** How a repeated question was asked; what happened since is for `get_decision` to say. */
+function askedAsText(r: RegisterResult): string {
+  const deadline = r.expiresAt ? `a deadline of ${r.expiresAt} (UTC)` : 'no deadline';
+  return r.replyMode === 'advisory'
+    ? `It was asked for advice, with ${deadline} and the plan in planned_fallback.`
+    : `It was asked for a decision, with ${deadline}.`;
+}
+
+/**
+ * The `ask_human` result text: where the answer arrives, the deadline and mode that apply, what policy changed, and
+ * how to find the question again. A repeated question is described as it was asked, and pointed at `get_decision`.
+ */
+export function askedText(r: AskedReceipt, arrival: AnswerArrival = 'terminal'): string {
+  const q = `q-${r.alias}`;
+  const recover = `call get_decision with question_id ${r.questionId}`;
+  const full = r.expiresAt !== undefined ? (r as RegisterResult) : null;
+  const adjustments = r.adjustments ?? [];
+  const policy = adjustments.length
+    ? ` Policy: ${adjustments.map(adjustmentText).join('; ')}.`
+    : '';
+  if (r.duplicate)
+    return `Already asked as ${q}: this correlation_id and request match it, so this is that question, not a new one.${full ? ` ${askedAsText(full)}` : ''}${policy} It may have been answered, closed or reopened since: ${recover} to see where it stands before you act on it.`;
+  return `${askedInstruction(r.alias, arrival)}${full ? ` ${planText(full, arrival)}` : ''}${policy} To check on it later, or if you lose track of it, ${recover}.`;
+}
+
+/** The `ask_human` structured result: the question and the plan that applies to it, in the MCP surface's snake_case. */
+export function askedResult(r: AskedReceipt, instruction: string) {
+  return {
+    question_id: r.questionId,
+    status: r.status,
+    duplicate: r.duplicate,
+    enforced_requirement: r.requirement,
+    ...(r.expiresAt !== undefined
+      ? {
+          reply_mode: r.replyMode ?? 'blocking',
+          expires_at: r.expiresAt,
+          requested_expires_at: r.requestedExpiresAt ?? null,
+          planned_fallback: r.plannedFallback ?? null,
+          policy_adjustments: (r.adjustments ?? []).map((a) => ({
+            field: a.field,
+            requested: a.requested,
+            effective: a.effective,
+            source: a.source,
+            gate_id: a.gateId,
+          })),
+        }
+      : {}),
+    instruction,
+  };
+}
 
 /** The `send_followup` result text. */
-export const followupInstruction = (alias: number, expectsReply: boolean) =>
-  expectsReply
-    ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
-    : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
+export const followupInstruction = (
+  alias: number,
+  expectsReply: boolean,
+  arrival: AnswerArrival = 'terminal',
+) =>
+  arrival === 'poll'
+    ? expectsReply
+      ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply. This host does not type it into your terminal: the reply appears in get_decision's thread for this question, and it does not change the answer.`
+      : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups appear in get_decision's thread for this question, and they do not change the answer.`
+    : expectsReply
+      ? `Queued in q-${alias}'s thread and sent in the background. Carry on with anything that does not depend on the reply; once you cannot go further without it, end your turn. The reply arrives in this terminal as a marked follow-up, and it does not change the answer.`
+      : `Queued in q-${alias}'s thread and sent in the background. The person's follow-ups arrive in this terminal marked as follow-ups, and they do not change the answer.`;
+
+/**
+ * How an agent names an image to attach, as Daintree resolves it: a path inside the agent's working directory.
+ * A host that resolves ids differently says so through `McpHandlerOptions.attachmentIdDescription`.
+ */
+export const DEFAULT_ATTACHMENT_ID_DESCRIPTION =
+  'A PNG, JPEG or WebP image (up to 20 MiB) you saved, named by its path relative to the folder this terminal started in, such as .tmp/after.png.';
 
 /** Tool definitions. Descriptions stay under 400 bytes (Daintree's CI budget for tool lists). */
 export const TOOLS = [
   {
     name: 'ask_human',
     description:
-      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). Returns at once, never waiting: keep doing work that does not depend on the answer, and end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
+      'Ask the human owner a question you must not decide yourself (product choice, ambiguous requirement, approval of a design). If they must see something to decide, attach screenshots. Returns at once: keep doing work that does not depend on the answer; end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -224,6 +401,8 @@ export const TOOLS = [
         attachments: {
           type: 'array',
           maxItems: 8,
+          description:
+            'Screenshots or other images the person should look at to decide: the UI, design or result in question, before and after a change. Attach them whenever the question is about something visual.',
           items: {
             type: 'object',
             additionalProperties: false,
@@ -231,7 +410,7 @@ export const TOOLS = [
             properties: {
               local_resource_id: {
                 type: 'string',
-                description: 'Id of an image Daintree has registered for you.',
+                description: DEFAULT_ATTACHMENT_ID_DESCRIPTION,
               },
               role: { type: 'string', enum: ['before', 'after', 'reference', 'other'] },
               alt: { type: 'string', maxLength: 500 },
@@ -250,12 +429,27 @@ export const TOOLS = [
         },
         expires_at: {
           type: 'string',
-          description: 'ISO time; bounded by host and workflow policy. Omit for the host default.',
+          description:
+            'A fixed deadline, as an ISO 8601 time. Policy may shorten it; the result gives the deadline that applies, in UTC. Not with expires_in. Omit both for the host default.',
+        },
+        expires_in: {
+          type: 'string',
+          pattern: '^[1-9][0-9]{0,8}[smhd]$',
+          description:
+            'A reply window from now: a whole number and one unit, s, m, h or d (24 hours), from 61s to 365d, such as 15m or 2h. Worked out once on the host clock; the result gives the UTC deadline that applies. Not with expires_at.',
+        },
+        planned_fallback: {
+          type: 'string',
+          minLength: 1,
+          maxLength: LIMITS.plannedFallbackChars,
+          description:
+            'Ask for advice, not a decision: what you will do if no answer arrives by the deadline (expires_in, expires_at or the host default), such as "I\'ll use the in-memory fixture." If none arrives, you are told, and may carry it out at your discretion. Never for an approval, a workflow gate or anything that needs permission. Refused where the host or the person\'s devices cannot show it; ask again without it for a decision.',
         },
         correlation_id: {
           type: 'string',
           maxLength: 64,
-          description: 'Repeat calls with the same id return the same question.',
+          description:
+            'Makes retries safe: a repeat call from this terminal with the same id and the same request returns the original question and deadline. A changed question, options, deadline or plan under the same id asks a new question.',
         },
         preparation: {
           type: 'object',
@@ -305,7 +499,7 @@ export const TOOLS = [
   {
     name: 'get_decision',
     description:
-      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason and the thread with follow-ups. Only status human-answered with provenance human is a human decision; a follow-up never is; expired never authorises anything.',
+      'Check a question you asked with ask_human from this terminal, by question_id. Returns status, provenance, answered_on, choice, text, reviewed_digests_match (true only if the human reviewed exactly the attached images), closed_reason, publication and the thread. Only status human-answered with provenance human is a human decision; a follow-up never is; an expiry approves nothing.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -328,6 +522,19 @@ export const TOOLS = [
             'publish-failed',
           ],
         },
+        publication: {
+          type: 'string',
+          enum: [
+            'not-sent',
+            'possibly-committed',
+            'accepted',
+            'never-published',
+            'refused',
+            'unknown',
+          ],
+          description:
+            'Whether the question reached the relay: not-sent (queued on this computer), possibly-committed (it may have reached the relay but this computer could not confirm it; the outcome is unknown until the relay is reachable), accepted, never-published (it never reached the phone and no answer was recorded), refused, or unknown (imported history). Accepted does not mean the person has seen it.',
+        },
         requirement: { type: 'string', enum: ['human-required', 'proxy-ok', 'proxy-first'] },
         workflow_gate_id: { type: ['string', 'null'] },
         provenance: { type: ['string', 'null'], enum: ['human', 'proxy', null] },
@@ -339,14 +546,57 @@ export const TOOLS = [
         },
         closed_reason: {
           type: ['string', 'null'],
-          enum: ['declined', 'withdrawn', 'expired', null],
+          enum: ['declined', 'withdrawn', 'expired', 'never-published', null],
           description:
-            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop) or expired. None authorises anything.',
+            'Why a closed question has no answer: declined (the person chose not to answer), withdrawn (cancelled from the desktop), expired, or never-published (its deadline passed before it reached the relay, so no answer was recorded). None authorises anything.',
+        },
+        fallback_due: {
+          type: 'boolean',
+          description:
+            'True only when you may carry out the plan your advisory question stated, at your own discretion: its deadline passed unanswered (or it never reached the relay) and this host allows it. It is never an answer or an approval.',
+        },
+        advisory_timeout: {
+          type: ['object', 'null'],
+          description:
+            "What happened when your advisory question's deadline passed unanswered; null otherwise. Three separate facts: the deadline elapsed (deadline); this host told you, or will (disposition: fallback-due lets your stated plan go ahead, fallback-withheld does not; notice: how that notice's delivery to your terminal stands); and what you then did, which is never observed (agent_action). Kept after a reopen.",
+          properties: {
+            revision: { type: 'integer' },
+            deadline: { type: 'string' },
+            disposition: { type: 'string', enum: ['fallback-due', 'fallback-withheld'] },
+            notice: {
+              type: 'string',
+              enum: ['pending', 'delivered', 'uncertain', 'needs-attention', 'superseded'],
+              description:
+                'pending: waiting to be typed; delivered: typed into your terminal (not proof that you acted on it); uncertain: it may or may not have been typed, and is never typed again on its own; needs-attention: it could not be typed and a person has to decide; superseded: the round was reopened or deleted before it was typed.',
+            },
+            injection_id: { type: ['string', 'null'] },
+            agent_action: { type: 'string', enum: ['unobserved'] },
+          },
         },
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
         reviewed_digests_match: { type: 'boolean' },
-        expires_at: { type: ['string', 'null'] },
+        revision: {
+          type: 'integer',
+          description:
+            'The revision the question is at. A reopen starts a new round at a higher revision, with its own deadline.',
+        },
+        expires_at: {
+          type: ['string', 'null'],
+          description:
+            "The current round's deadline: the one the question was published with, or the one signed when it was last reopened. Null: no deadline.",
+        },
+        reply_mode: {
+          type: 'string',
+          enum: ['blocking', 'advisory'],
+          description:
+            "The current round's mode. advisory: you asked for advice in this round; whether the plan you stated (planned_fallback) is yours to carry out once it expires unanswered is fallback_due. blocking: it waits for a decision, a reopened question included; expiry authorises nothing.",
+        },
+        planned_fallback: { type: ['string', 'null'] },
+        error_code: {
+          type: ['string', 'null'],
+          description: 'Why the relay refused the question, when status is publish-failed.',
+        },
         thread: {
           type: 'array',
           description:
@@ -490,6 +740,17 @@ export const TOOLS = [
 ] as const;
 
 export interface McpHandlerOptions {
+  /**
+   * Replaces `DEFAULT_ATTACHMENT_ID_DESCRIPTION` in the `tools/list` schema of `ask_human`'s
+   * `attachments[].local_resource_id`, for a host whose `AttachmentResolver` takes something other than a path
+   * relative to the agent's working directory. Agents attach only what this tells them they can name.
+   */
+  attachmentIdDescription?: string;
+  /**
+   * Where agents find what the person said (`AnswerArrival`); default `terminal`. A host whose sink does not type
+   * into the agent's own terminal passes `poll`, so its instructions and receipts send the agent to `get_decision`.
+   */
+  answerArrival?: AnswerArrival;
   /** Exact `Host` header values accepted. Defaults to the loopback names on `port`. */
   allowedHosts?: () => string[];
   /**
@@ -576,6 +837,58 @@ function bearer(req: IncomingMessage): string | null {
   return h.replace(/^Bearer\s+/i, '');
 }
 
+/** `TOOLS` as served, with the host's own words for an attachment id. Leaves `TOOLS` itself untouched. */
+/** The sentences of `ask_human` and `send_followup` that say answers are typed into the agent's terminal. */
+const TERMINAL_TOOL_TEXT: Record<string, [string, string]> = {
+  ask_human: [
+    ' end your turn when you cannot go on without it. The answer is typed into this terminal later as a new message quoting your question.',
+    ' this host does not type the answer into your terminal, so call get_decision with its question_id when you cannot go on without it.',
+  ],
+  send_followup: ['arrive here marked as follow-ups.', "appear in get_decision's thread."],
+};
+
+/**
+ * The tool list as a host advertises it: `ask_human`'s attachment ids described as the host resolves them, and, for a
+ * host whose agents check for answers (`AnswerArrival` `poll`), no promise that answers are typed into the terminal.
+ */
+export function toolsFor(o: { attachmentIdDescription?: string; answerArrival?: AnswerArrival }) {
+  const tools = toolsWithAttachmentIdDescription(
+    o.attachmentIdDescription ?? DEFAULT_ATTACHMENT_ID_DESCRIPTION,
+  );
+  if (o.answerArrival !== 'poll') return tools;
+  return tools.map((t) => {
+    const swap = TERMINAL_TOOL_TEXT[t.name];
+    return swap ? { ...t, description: t.description.replace(swap[0], swap[1]) } : t;
+  });
+}
+
+export function toolsWithAttachmentIdDescription(description: string) {
+  return TOOLS.map((t) => {
+    if (t.name !== 'ask_human') return t;
+    const attachments = t.inputSchema.properties.attachments;
+    const id = attachments.items.properties.local_resource_id;
+    return {
+      ...t,
+      inputSchema: {
+        ...t.inputSchema,
+        properties: {
+          ...t.inputSchema.properties,
+          attachments: {
+            ...attachments,
+            items: {
+              ...attachments.items,
+              properties: {
+                ...attachments.items.properties,
+                local_resource_id: { ...id, description },
+              },
+            },
+          },
+        },
+      },
+    };
+  });
+}
+
 export function createDecisionsMcpHandler(
   bridge: DecisionsMcpBridge,
   authenticator: PaneAuthenticator,
@@ -586,6 +899,13 @@ export function createDecisionsMcpHandler(
   const limit = opts.rateLimitPerMinute ?? 60;
   const now = opts.now ?? Date.now;
   const hits = new Map<string, number[]>();
+  const arrival = opts.answerArrival ?? 'terminal';
+  const tools = toolsFor({
+    ...(opts.attachmentIdDescription !== undefined
+      ? { attachmentIdDescription: opts.attachmentIdDescription }
+      : {}),
+    answerArrival: arrival,
+  });
 
   const limited = (key: string): boolean => {
     const t = now();
@@ -605,32 +925,20 @@ export function createDecisionsMcpHandler(
     try {
       if (name === 'ask_human') {
         const r = await bridge.registerQuestion({ origin, input: args });
-        const instruction = askedInstruction(r.alias);
-        return text(instruction, {
-          question_id: r.questionId,
-          status: r.status,
-          enforced_requirement: r.requirement,
-          instruction,
-        });
+        // An older bridge drops fields it does not know, and its receipt cannot say what it did with them.
+        const unconfirmed =
+          r.expiresAt === undefined &&
+          (args.expires_in !== undefined || args.planned_fallback !== undefined);
+        const instruction = unconfirmed
+          ? `${askedText(r, arrival)} This host could not confirm expires_in or planned_fallback and may have ignored them: treat it as a question that waits for a decision, with its default deadline.`
+          : askedText(r, arrival);
+        return text(instruction, askedResult(r, instruction));
       }
       if (name === 'get_decision') {
         if (typeof args.question_id !== 'string')
           throw new BridgeError('validation_error', 'question_id is required');
         const v = await bridge.getDecision(args.question_id, pane);
-        const summary = v.provenance
-          ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
-          : v.status === 'expired'
-            ? `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
-            : v.closedReason === 'declined'
-              ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
-              : `q-${v.alias} is ${v.status}; no answer in force.`;
-        const messages = v.thread.filter((t) => t.kind === 'message').length;
-        return text(
-          messages > 0
-            ? `${summary} ${messages} follow-up message${messages === 1 ? '' : 's'} in the thread; none changes the answer.`
-            : summary,
-          decisionResult(v),
-        );
+        return text(decisionText(v), decisionResult(v));
       }
       if (name === 'cancel_question') {
         if (typeof args.question_id !== 'string')
@@ -647,7 +955,7 @@ export function createDecisionsMcpHandler(
       }
       if (name === 'send_followup') {
         const r = await bridge.postMessage(args, pane);
-        const instruction = followupInstruction(r.alias, r.expectsReply);
+        const instruction = followupInstruction(r.alias, r.expectsReply, arrival);
         return text(instruction, {
           question_id: r.questionId,
           message_id: r.messageId,
@@ -678,7 +986,7 @@ export function createDecisionsMcpHandler(
           protocolVersion: SUPPORTED_VERSIONS.includes(asked) ? asked : SUPPORTED_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'daintree-decisions', version: SERVER_VERSION },
-          instructions: SERVER_INSTRUCTIONS,
+          instructions: serverInstructions(arrival),
         });
       }
       case 'notifications/initialized':
@@ -687,7 +995,7 @@ export function createDecisionsMcpHandler(
       case 'ping':
         return isNotification ? null : rpcOk(m.id, {});
       case 'tools/list':
-        return rpcOk(m.id, { tools: TOOLS });
+        return rpcOk(m.id, { tools });
       case 'tools/call': {
         const name = m.params?.name;
         const args = (m.params?.arguments ?? {}) as Record<string, unknown>;

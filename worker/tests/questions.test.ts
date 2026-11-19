@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { CREATOR_MISSING_FEATURE, LIMITS, PROTOCOL_VERSION } from '@daintreehq/decisions-protocol';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  CREATE_NEVER_COMMITTED,
+  CREATOR_MISSING_FEATURE,
+  LIMITS,
+  PROTOCOL_VERSION,
+} from '@daintreehq/decisions-protocol';
 import { buildSignedAction, newId } from '@daintreehq/decisions-crypto';
 import {
   act,
@@ -10,6 +15,9 @@ import {
   events,
   inRoom,
   pairDevice,
+  PNG,
+  settle,
+  uploadImage,
   type World,
 } from './helpers.js';
 
@@ -65,6 +73,226 @@ describe('question creation', () => {
     });
     expect(retry.status).toBe(200);
     expect((await events(w.owner)).length).toBe(1);
+  });
+
+  it('a retry after the deadline replays the accepted create, answered or not, and changes nothing', async () => {
+    const w = await claimRelay();
+    const phone = await pairDevice(w);
+    const deadline = Date.now() + 60_000;
+    const expiresAt = new Date(deadline).toISOString();
+    const post = (question: unknown, idempotencyKey: string) =>
+      w.owner.call('POST', '/api/v1/questions', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        question,
+      });
+
+    // One question with an image, left open until it expires; another answered in time.
+    const openId = newId();
+    const up = await uploadImage(w, openId, PNG);
+    const openKey = newId();
+    const open = await ask(w, {
+      questionId: openId,
+      idempotencyKey: openKey,
+      expiresAt,
+      attachmentIds: [up.attachmentId],
+    });
+    expect(open.res.status).toBe(201);
+    const answeredKey = newId();
+    const answered = await ask(w, { idempotencyKey: answeredKey, expiresAt });
+    expect(answered.res.status).toBe(201);
+    expect((await act(w, phone, 'answer', answered.questionId, 0)).res.status).toBe(201);
+    await settle();
+
+    // From here on the relay and the signed requests read a clock past the deadline.
+    const real = Date.now.bind(Date);
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => real() + 61_000);
+    try {
+      // A read commits the lazy expiry, so the ledger below holds still for the retries.
+      expect((await w.owner.call('GET', `/api/v1/questions/${openId}`)).json.status).toBe(
+        'expired',
+      );
+      const ledger = () =>
+        inRoom((room) => ({
+          events: room.q(`SELECT seq, event_type, question_id FROM events ORDER BY seq`),
+          jobs: room.q(
+            `SELECT job_id, kind, question_id, run_at, status FROM scheduled_jobs
+             WHERE question_id IN (?, ?) ORDER BY job_id`,
+            openId,
+            answered.questionId,
+          ),
+          attachments: room.q(`SELECT attachment_id, question_id, state, bound FROM attachments`),
+          questions: room.q(
+            `SELECT question_id, status, revision, last_event_seq FROM questions ORDER BY question_id`,
+          ),
+          receipts: room.q(
+            `SELECT device_id, idempotency_key, request_digest, status FROM command_receipts
+             ORDER BY device_id, idempotency_key`,
+          ),
+        }));
+      const before = await ledger();
+
+      // The same command (key and body) replays its original receipt.
+      const replayOpen = await post(open.question, openKey);
+      expect(replayOpen.status).toBe(201);
+      expect(replayOpen.json).toEqual(open.res.json);
+      const replayAnswered = await post(answered.question, answeredKey);
+      expect(replayAnswered.status).toBe(201);
+      expect(replayAnswered.json).toEqual(answered.res.json);
+
+      // The same signed question under a fresh key reconciles to the question as it stands now.
+      const reconcileOpen = await post(open.question, newId());
+      expect(reconcileOpen.status).toBe(200);
+      expect(reconcileOpen.json).toMatchObject({ question_id: openId, status: 'expired' });
+      const reconcileAnswered = await post(answered.question, newId());
+      expect(reconcileAnswered.status).toBe(200);
+      expect(reconcileAnswered.json).toMatchObject({
+        question_id: answered.questionId,
+        status: 'human-answered',
+        revision: 1,
+      });
+
+      // Collisions stay collisions after the deadline: a reused key, or a reused question id.
+      const past = new Date(Date.now() - 1_000).toISOString();
+      const reusedKey = await ask(w, { idempotencyKey: openKey, expiresAt: past });
+      expect(reusedKey.res.status).toBe(409);
+      expect(reusedKey.res.json.code).toBe('idempotency_collision');
+      const reusedId = await ask(w, { questionId: openId, expiresAt: past });
+      expect(reusedId.res.status).toBe(409);
+      expect(reusedId.res.json.code).toBe('idempotency_collision');
+
+      // A new question that is already overdue is still refused.
+      const overdue = await ask(w, { expiresAt: past });
+      expect(overdue.res.status).toBe(400);
+      expect(overdue.res.json.code).toBe('validation_error');
+
+      // No second creation, push, job, receipt or attachment binding came of any of it.
+      expect(await ledger()).toEqual(before);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('says an overdue create was never committed only when nothing of the question ever reached it', async () => {
+    const w = await claimRelay();
+    const deadline = Date.now() + 60_000;
+    const expiresAt = new Date(deadline).toISOString();
+    const post = (question: unknown, idempotencyKey: string) =>
+      w.owner.call('POST', '/api/v1/questions', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: idempotencyKey,
+        question,
+      });
+    // One question taken and then deleted (its tombstone stays), one taken before every question was wiped.
+    const deleted = await ask(w, { expiresAt });
+    expect(deleted.res.status).toBe(201);
+    expect((await w.owner.call('DELETE', `/api/v1/questions/${deleted.questionId}`)).status).toBe(
+      200,
+    );
+    const wipedKey = newId();
+    const wiped = await ask(w, { idempotencyKey: wipedKey, expiresAt });
+    expect(wiped.res.status).toBe(201);
+    await settle();
+
+    const real = Date.now.bind(Date);
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => real() + 61_000);
+    try {
+      // A question never seen here: refused, and the relay says it never took it.
+      const fresh = await ask(w, { expiresAt });
+      expect(fresh.res.status).toBe(400);
+      expect(fresh.res.json.details).toEqual({ reason: CREATE_NEVER_COMMITTED });
+
+      // A deleted question sent again under a fresh key: its tombstone shows it was taken.
+      const again = await post(deleted.question, newId());
+      expect(again.status).toBe(400);
+      expect(again.json.details).toBeUndefined();
+
+      // After a wipe of every question, its own retry is refused, but nothing can show it was never taken.
+      const wipe = await w.owner.call('POST', '/api/v1/admin/delete-data', {
+        protocol_version: PROTOCOL_VERSION,
+        confirm: 'DELETE',
+        scope: 'questions',
+      });
+      expect(wipe.status).toBe(200);
+      const retry = await post(wiped.question, wipedKey);
+      expect(retry.status).toBe(400);
+      expect(retry.json.details).toBeUndefined();
+      const later = await ask(w, { expiresAt });
+      expect(later.res.status).toBe(400);
+      expect(later.res.json.details).toBeUndefined();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('says nothing about a create made before the relay began keeping a record of every question', async () => {
+    const w = await claimRelay();
+    // A relay upgraded from before the rule: it may have wiped questions with no record of it.
+    await inRoom((room) =>
+      room.run(`UPDATE meta SET value = ? WHERE key = 'never_committed_from'`, String(Date.now())),
+    );
+    const overdue = await ask(w, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
+    expect(overdue.res.status).toBe(400);
+    expect(overdue.res.json.details).toBeUndefined();
+  });
+
+  it('checks the deadline when the create commits, not when it arrives', async () => {
+    const w = await claimRelay();
+    const deadline = Date.now() + 60_000;
+    const expiresAt = new Date(deadline).toISOString();
+    const taken = await ask(w, { expiresAt });
+    expect(taken.res.status).toBe(201);
+    await settle();
+    let clock = deadline - 1;
+    let opened = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      // The deadline arrives as the create's transaction opens, after the sweep and signature checks have awaited.
+      await inRoom((room) => {
+        const tx = room.tx.bind(room);
+        room.tx = ((fn) => {
+          opened++;
+          clock = deadline;
+          return tx(fn);
+        }) as typeof room.tx;
+      });
+
+      // A new question is refused and leaves nothing behind.
+      const key = newId();
+      const late = await ask(w, { idempotencyKey: key, expiresAt });
+      expect(opened).toBe(1);
+      expect(late.res.status).toBe(400);
+      expect(late.res.json.code).toBe('validation_error');
+      expect(late.res.json.message).toMatch(/must be in the future/);
+      const left = await inRoom((room) => ({
+        questions: room.q(`SELECT 1 FROM questions WHERE question_id = ?`, late.questionId).length,
+        receipts: room.q(`SELECT 1 FROM command_receipts WHERE idempotency_key = ?`, key).length,
+        events: room.q(`SELECT 1 FROM events WHERE question_id = ?`, late.questionId).length,
+        jobs: room.q(`SELECT 1 FROM scheduled_jobs WHERE question_id = ?`, late.questionId).length,
+      }));
+      expect(left).toEqual({ questions: 0, receipts: 0, events: 0, jobs: 0 });
+
+      // The question already taken, sent again under a fresh key, is reported expired, as an action would find it.
+      clock = deadline - 1;
+      const again = await w.owner.call('POST', '/api/v1/questions', {
+        protocol_version: PROTOCOL_VERSION,
+        idempotency_key: newId(),
+        question: taken.question,
+      });
+      expect(opened).toBe(2);
+      expect(again.status).toBe(200);
+      expect(again.json).toMatchObject({ question_id: taken.questionId, status: 'expired' });
+      const expired = (await events(w.owner)).filter(
+        (e) => e.question_id === taken.questionId && e.event_type === 'decision.expired',
+      );
+      expect(expired).toHaveLength(1);
+      expect(again.json.event_seq).toBe(expired[0].seq);
+    } finally {
+      now.mockRestore();
+      await inRoom((room) => {
+        delete (room as { tx?: unknown }).tx;
+      });
+    }
   });
 
   it('rejects tampered records: signature, digest, binding and expiry', async () => {

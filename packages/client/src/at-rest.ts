@@ -17,13 +17,14 @@ import {
   legacyContent,
   parseAnswers,
   serializeAnswers,
+  unsupportedEntry,
   type AnswerContent,
   type AnswerEntry,
   type OpenAnswerEntry,
 } from './answers.js';
 import { currentEpochKey, type Identity } from './identity.js';
 import type { MessageContent, StoredMessage } from './messages.js';
-import { TransientError, type Mutex } from './mutex.js';
+import { KeyUnavailableError, type Mutex } from './mutex.js';
 import type { LocalStore } from './store.js';
 import type { OutboxItem, QuestionRow } from './types.js';
 
@@ -127,7 +128,7 @@ async function open<T>(
     // Rotated by another process: reload the key material once before giving up.
     await ctx.refreshIdentity?.();
     if (!ctx.identity.epochs.has(env.key_epoch))
-      throw new TransientError(`missing epoch key ${env.key_epoch}`);
+      throw new KeyUnavailableError(`missing epoch key ${env.key_epoch}`);
   }
   try {
     return await decryptEnvelope<T>(env, ctx.identity.epochs, binding);
@@ -396,7 +397,8 @@ export async function sealStoredContent(
       // flag) is kept rather than overwritten by the stale snapshot.
       const seals = new Map<string, string | null>();
       for (const e of parseAnswers(snapshot.answers_json)) {
-        if (!hasLegacyContent(e)) continue;
+        // An entry this client does not understand (a newer client's) is left exactly as it is.
+        if (!hasLegacyContent(e) || unsupportedEntry(e)) continue;
         seals.set(
           e.entry_id,
           e.sealed ??

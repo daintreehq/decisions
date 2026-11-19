@@ -31,8 +31,16 @@ export function refusedFollowUps(): Set<string> {
 export function useActionCount(now: number, except?: (v: QuestionView) => boolean): number {
   const all = useQuestions();
   const refused = refusedFollowUps();
-  // A question the person declined holds nothing for them, whatever its refused follow-ups.
-  return all.filter((v) => !except?.(v) && countsForAction(v, now, refused)).length;
+  // A question the person declined holds nothing for them, whatever its refused follow-ups; nor does one they have
+  // dismissed on this device, while that dismissal is on its way.
+  const dismissing = new Set(
+    (app.outbox?.list() ?? [])
+      .filter((e) => e.kind === 'decline' && !e.outcome)
+      .map((e) => e.questionId),
+  );
+  return all.filter(
+    (v) => !except?.(v) && !dismissing.has(v.id) && countsForAction(v, now, refused),
+  ).length;
 }
 
 const noSubscribe = () => () => undefined;
@@ -108,11 +116,37 @@ export function useInteracting(idleMs = 400): boolean {
   return on;
 }
 
-export function useNow(intervalMs = 30_000): number {
+/**
+ * The wall-clock time, read again every `intervalMs` and whenever the page comes back (shown again, focused, or
+ * restored from the back-forward cache), since timers stall while it is hidden. With a `deadline`, it is also read
+ * just after that moment, so what depends on it changes when it passes, not up to an interval later. That wake is
+ * armed again whenever the time is read: a clock set back makes it fire early, and it simply waits again.
+ */
+export function useNow(intervalMs = 30_000, deadline: string | null = null): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(t);
+    const read = () => setNow(Date.now());
+    const visible = () => {
+      if (document.visibilityState === 'visible') read();
+    };
+    const t = setInterval(read, intervalMs);
+    document.addEventListener('visibilitychange', visible);
+    window.addEventListener('focus', read);
+    window.addEventListener('pageshow', read);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', visible);
+      window.removeEventListener('focus', read);
+      window.removeEventListener('pageshow', read);
+    };
   }, [intervalMs]);
+  const at = deadline ? Date.parse(deadline) : Number.NaN;
+  useEffect(() => {
+    if (!Number.isFinite(at) || now >= at) return;
+    // setTimeout holds at most ~24.8 days; a later deadline is reached by the ticks in between.
+    const wait = Math.min(Math.max(0, at - Date.now()) + 50, 2_000_000_000);
+    const t = setTimeout(() => setNow(Date.now()), wait);
+    return () => clearTimeout(t);
+  }, [at, now]);
   return now;
 }

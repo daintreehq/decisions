@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listWorkspace } from '../release/workspace.mjs';
+import { buildPackages, installConsumer, packPackage } from './pack.mjs';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const args = new Set(process.argv.slice(2));
@@ -359,7 +360,7 @@ const work = mkdtempSync(join(tmpdir(), 'decisions-pack-check-'));
 try {
   if (build) {
     step('Building the libraries and the CLI');
-    run('pnpm', ['-r', '--filter', './packages/*', 'build'], { cwd: ROOT });
+    buildPackages(ROOT);
   }
 
   step(`Packing into ${work}`);
@@ -373,37 +374,19 @@ try {
   );
   const packed = [];
   for (const spec of PACKAGES) {
-    const out = run('pnpm', ['pack', '--json', '--pack-destination', tarballDir], {
-      cwd: join(ROOT, spec.dir),
-      capture: true,
-    });
-    const { filename } = JSON.parse(out.slice(out.indexOf('{')));
+    const filename = packPackage(spec.dir, tarballDir, ROOT);
     packed.push({ spec, tarball: filename, pkg: checkTarball(spec, filename, ownVersions) });
   }
 
   step('Installing the tarballs into a scratch project outside the workspace');
   const app = join(work, 'consumer');
-  mkdirSync(app);
   const deps = Object.fromEntries(packed.map(({ pkg, tarball }) => [pkg.name, `file:${tarball}`]));
   const typesNode = JSON.parse(readFileSync(join(ROOT, 'packages/client/package.json'), 'utf8'))
     .devDependencies['@types/node'];
-  writeFileSync(
-    join(app, 'package.json'),
-    JSON.stringify(
-      {
-        name: 'decisions-pack-check-consumer',
-        private: true,
-        type: 'module',
-        dependencies: deps,
-        devDependencies: { '@types/node': typesNode },
-        // Inter-package dependencies name real versions that are not on the registry yet.
-        overrides: Object.fromEntries(Object.keys(deps).map((n) => [n, `$${n}`])),
-      },
-      null,
-      2,
-    ),
-  );
-  run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: app });
+  installConsumer(app, deps, {
+    devDependencies: { '@types/node': typesNode },
+    name: 'decisions-pack-check-consumer',
+  });
 
   step('Importing each entry point alone: no node:sqlite at a root, no timers, sockets or files');
   writeFileSync(join(app, 'no-sqlite-hook.mjs'), NO_SQLITE_HOOK);

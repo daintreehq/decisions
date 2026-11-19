@@ -27,6 +27,7 @@ import {
   Drafts,
   Outbox,
   type OutboxEntry,
+  type OutboxHooks,
   type OutboxImage,
   type Rebuilt,
 } from '../data/outbox.js';
@@ -43,10 +44,10 @@ import { SyncEngine, type Connection } from '../data/sync.js';
 import {
   buildAnswerRequest,
   buildDeclineRequest,
-  DeclineUnsupportedError,
   highestEpoch,
   type HumanActionKind,
 } from '../domain/answer.js';
+import { DeclineBlockedError, DeclineInFlightError, declineSettlement } from '../domain/decline.js';
 import { buildMessageRequest } from '../domain/message.js';
 import {
   buildInvolvementRecord,
@@ -58,6 +59,11 @@ import { verifySnapshotResponse } from '../domain/snapshot.js';
 import { TrustStore } from '../domain/trust.js';
 import { applyTheme, DEFAULT_PREFS, type LocalPrefs } from './prefs.js';
 import { checkInvite } from '../data/pairing.js';
+import {
+  AGENT_STOPPED_PUSH,
+  declareAgentStoppedPush,
+  type PushFeatureGate,
+} from '../features/push.js';
 import type { PairingInvitePayload, ProtocolFeature } from '@daintreehq/decisions-protocol';
 
 /** The extension this app understands: pane snapshots, read for each question's observed agent state. */
@@ -76,6 +82,11 @@ const PHOTO_FEATURE: ProtocolFeature = 'phone-images-v1';
 const DECLINE_FEATURE: ProtocolFeature = 'person-declines-v1';
 /** The involvement preference: how involved the person wants agents to make them (docs/protocol.md section 20). */
 const INVOLVEMENT_FEATURE: ProtocolFeature = 'involvement-v1';
+/**
+ * Advisory questions: this app shows an advisory question's deadline and its agent's plan (docs/protocol.md section
+ * 21), so a host may ask one when this device is among the person's active ones.
+ */
+const ADVISORY_FEATURE: ProtocolFeature = 'advisory-deadlines-v1';
 
 /** A photo the composer hands over at Send: scaled, stripped and hashed, still plaintext. */
 export type OutgoingPhoto = PreparedPhoto;
@@ -126,6 +137,12 @@ export class AppController {
     revokeUrl: (u) => URL.revokeObjectURL(u),
   });
   private swReg: ServiceWorkerRegistration | null = null;
+  /** A declaration of the agent-stopped push is on its way; `pushDeclarationAgain` asks for one more pass after it. */
+  private pushDeclaring = false;
+  private pushDeclarationAgain = false;
+  /** Reads of the device list started, and the latest of them whose list is shown (`refreshDevices`). */
+  private devicesRead = 0;
+  private devicesShown = 0;
   private bound = false;
 
   constructor(private readonly origin: string = globalThis.location?.origin ?? '') {
@@ -190,6 +207,7 @@ export class AppController {
       .then((info) => {
         const before = this.declaredFeatures().join(',');
         this.patch({ info });
+        this.declarePushFeatures();
         // Info can arrive after sync has started: declare the features now and read what was missed.
         if (this.declaredFeatures().join(',') !== before && this.sync?.running) {
           this.sync.redeclare();
@@ -236,6 +254,55 @@ export class AppController {
     return this.snap.info?.features?.includes(INVOLVEMENT_FEATURE) ?? false;
   }
 
+  /** Whether the relay validates advisory questions; until it does, this device never says it shows them. */
+  private advisoryServed(): boolean {
+    return this.snap.info?.features?.includes(ADVISORY_FEATURE) ?? false;
+  }
+
+  /** Whether the relay sends the agent-stopped push; until it does, no push subscription declares it. */
+  agentStoppedPushServed(): boolean {
+    return this.snap.info?.features?.includes(AGENT_STOPPED_PUSH) ?? false;
+  }
+
+  /** What a push subscription sent now may declare, for as long as the pairing it was started under lasts. */
+  pushFeatureGate(): PushFeatureGate {
+    const relay = this.relay;
+    return {
+      served: () => this.agentStoppedPushServed(),
+      current: () => relay !== null && this.relay === relay && this.snap.phase === 'ready',
+    };
+  }
+
+  /**
+   * Declare the agent-stopped push on this browser's existing push subscription once the relay serves it and the active
+   * service worker can show it, so an app updated in place says so without the person turning notifications on again.
+   * It needs a ready pairing, `GET /info` and the worker registration, which arrive in any order, so each of them asks,
+   * as does a worker taking over this page; only one pass runs at a time, and a request during it gets one more.
+   */
+  declarePushFeatures(): void {
+    if (this.pushDeclaring) {
+      this.pushDeclarationAgain = true;
+      return;
+    }
+    const relay = this.relay;
+    const reg = this.swReg;
+    if (!relay || !reg || this.snap.phase !== 'ready' || !this.agentStoppedPushServed()) return;
+    this.pushDeclaring = true;
+    // A revoked or wiped pairing keeps nothing it started: the relay it was declaring to is no longer this one.
+    const gate = this.pushFeatureGate();
+    void declareAgentStoppedPush(relay, reg, {
+      ...gate,
+      current: () => gate.current!() && this.swReg === reg,
+    })
+      .catch(() => undefined)
+      .finally(() => {
+        this.pushDeclaring = false;
+        if (!this.pushDeclarationAgain) return;
+        this.pushDeclarationAgain = false;
+        this.declarePushFeatures();
+      });
+  }
+
   /**
    * What this app declares to the relay: only features the relay advertises (docs/protocol.md section 19). Phone
    * images are declared with thread messages, so a photo sent from this or another phone is never hidden from it.
@@ -246,6 +313,7 @@ export class AppController {
       ...(this.threadsServed() ? [THREAD_FEATURE] : []),
       ...(this.photosServed() ? [PHOTO_FEATURE] : []),
       ...(this.involvementServed() ? [INVOLVEMENT_FEATURE] : []),
+      ...(this.advisoryServed() ? [ADVISORY_FEATURE] : []),
     ];
   }
 
@@ -280,6 +348,36 @@ export class AppController {
     if (!devices) return false;
     const d = devices.find((x) => x.device_id === view.originatingDeviceId);
     return !d || d.revoked_at !== null || !!d.features?.includes(DECLINE_FEATURE);
+  }
+
+  /** What the sync engine read: into the thread, then to what else watches the ledger. */
+  private async ingestEvents(events: LedgerEvent[]): Promise<void> {
+    const store = this.store!;
+    // The questions this batch brings that the thread did not hold before it.
+    const arrived = events.flatMap((e) =>
+      e.event_type === 'decision.created' && e.question_id && !store.get(e.question_id)
+        ? [e.question_id]
+        : [],
+    );
+    await store.ingestAll(events);
+    this.recheckDeclines(arrived);
+    if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
+    if (this.involvementServed()) this.involvement?.noteEvents(events);
+  }
+
+  /**
+   * A question just arrived open from a desktop the device list says files no declines, or before the list was read: read
+   * it again, at most once per batch. That desktop may have declared them just before it asked (a first `decisions ask`
+   * on a computer that never ran a receiver), and Dismiss would otherwise stay hidden until the app comes back.
+   */
+  private recheckDeclines(questionIds: readonly string[]): void {
+    const store = this.store;
+    if (!this.relay || !store) return;
+    const stale = questionIds.some((id) => {
+      const view = store.get(id);
+      return view?.status === 'open' && !this.declinesFor(view);
+    });
+    if (stale) void this.refreshDevices().catch(() => undefined);
   }
 
   /**
@@ -405,41 +503,26 @@ export class AppController {
     });
     this.involvement.subscribe(() => this.emitInvolvement());
 
-    this.outbox = new Outbox(db, cacheKey, () => this.relay!, {
-      onChange: () => this.patch({}),
-      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
-      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
-      settle: () => this.sync?.catchUp(),
-      onCommitted: () =>
-        void this.sync
-          ?.catchUp()
-          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
-      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
-      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
-      inThread: (e) => {
-        const v = this.store?.get(e.questionId);
-        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
-        const id = e.recordId ?? e.messageId;
-        if (!id) return true;
-        return e.kind === 'message'
-          ? v.messages.some((m) => m.messageId === id)
-          : v.actions.some((a) => a.actionId === id);
-      },
-    });
+    this.outbox = new Outbox(db, cacheKey, () => this.relay!, this.outboxHooks(config.deviceId));
     // Whatever the thread reads (a socket event, a catch-up, a backfill) may be what a committed entry waited for.
     this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
     await this.outbox.load();
+    // A dismissal of a question since deleted has nothing left to settle against or show it in. Only a deletion this
+    // device has read counts: a question merely missing may be a thread still being rebuilt.
+    const deleted = new Set(
+      cached.filter((e) => e.event_type === 'decision.deleted').map((e) => e.question_id),
+    );
+    for (const e of this.outbox.list())
+      if (e.kind === 'decline' && deleted.has(e.questionId)) await this.outbox.discard(e.id);
+    // A dismissal whose settlement was read before the app closed, but not yet written, settles from the thread now.
+    this.outbox.reconcile();
 
     const sync = (this.sync = new SyncEngine({
       relay: this.relay,
       db,
       origin: config.relayOrigin,
-      ingest: async (events) => {
-        await this.store!.ingestAll(events);
-        if (this.snapshotsServed()) this.snapshots?.noteEvents(events, true);
-        if (this.involvementServed()) this.involvement?.noteEvents(events);
-      },
+      ingest: (events) => this.ingestEvents(events),
       features: () => this.declaredFeatures(),
       onServerTime: (iso) => this.snapshots?.setServerTime(iso),
       onConnection: (connection) => {
@@ -462,6 +545,7 @@ export class AppController {
     }));
     this.patch({ phase: 'ready', config, syncing: true });
     this.bindPageEvents();
+    this.declarePushFeatures();
     // The socket's ticket declares the features the relay advertises, so give `GET /info` a moment first; if it
     // answers later, the sync engine redeclares on a new socket.
     await Promise.race([this.infoLoaded, new Promise((r) => setTimeout(r, 1500))]);
@@ -472,6 +556,55 @@ export class AppController {
       void this.backfillThreads();
     });
     void this.refreshDevices().catch(() => undefined);
+  }
+
+  /** What the outbox asks of the app: reading a commit back, photo rebuilds, and when an entry has settled. */
+  private outboxHooks(deviceId?: string): OutboxHooks {
+    return {
+      onChange: () => this.patch({}),
+      // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
+      // out of the thread (the thread hides the local copy once the committed one is in), and its photos stay put.
+      settle: () => this.sync?.catchUp(),
+      onCommitted: () =>
+        void this.sync
+          ?.catchUp()
+          .catch((e) => this.patch({ lastError: e instanceof Error ? e.message : String(e) })),
+      decrypt: (e, img, ciphertext) => this.decryptQueued(e, img, ciphertext),
+      rebuild: (e, plaintexts) => this.rebuildEntry(e, plaintexts),
+      inThread: (e) => {
+        const v = this.store?.get(e.questionId);
+        if (!v) return true; // deleted: nothing will ever show it, and the relay has it
+        const id = e.recordId ?? e.messageId;
+        if (!id) return true;
+        return e.kind === 'message'
+          ? v.messages.some((m) => m.messageId === id)
+          : v.actions.some((a) => a.actionId === id);
+      },
+      // A decline is settled only by the very cancel this device signed, verified in the thread (a relay answers a
+      // cancel another cancel beat with a receipt like a committed one), or by what settled its round instead.
+      declineSettlement: (e) => {
+        // Known from boot, before the snapshot carries the config.
+        const self = deviceId ?? this.snap.config?.deviceId;
+        return self ? declineSettlement(e, this.store?.get(e.questionId), self) : null;
+      },
+      onRefused: (e) => {
+        // A refusal means the relay knows more than this thread (an answer that won, a withdrawal, a reopen, the expiry
+        // it committed): read it now, so nothing here is offered against the round that is gone.
+        void this.sync?.catchUp().catch(() => undefined);
+        // The asking desktop stopped taking declines since the device list was read: read it again, so Dismiss agrees.
+        if (e.kind === 'decline' && e.refusalReason === CREATOR_MISSING_FEATURE)
+          void this.refreshDevices().catch(() => undefined);
+      },
+    };
+  }
+
+  /**
+   * A question's deadline passed by this device's clock while its thread still says open: read the relay now. It
+   * expires a due question whenever it is read, so how the round ended (the expiry, or an answer that beat it) arrives
+   * here rather than waiting for the next sync.
+   */
+  checkDeadline(): void {
+    void this.sync?.catchUp().catch(() => undefined);
   }
 
   /** This device was revoked: nothing decrypted stays alive behind the lock screen, and late downloads are dropped. */
@@ -526,7 +659,8 @@ export class AppController {
     return {
       questions: this.store?.list().length ?? 0,
       // An entry already on the relay, only waiting to be read back here, is not unsent.
-      unsent: this.outbox?.list().filter((e) => e.state !== 'committed').length ?? 0,
+      // Nor is a note about how a dismissal settled.
+      unsent: this.outbox?.list().filter((e) => e.state !== 'committed' && !e.outcome).length ?? 0,
       drafts,
     };
   }
@@ -586,6 +720,7 @@ export class AppController {
 
   async refreshDevices(): Promise<void> {
     if (!this.relay || !this.trust || !this.db) return;
+    const read = ++this.devicesRead;
     const res = DevicesResponse.parse(await this.relay.json('GET', '/devices'));
     for (const d of res.devices) {
       const ok = await this.trust.addCert(d.cert, d.revoked_at);
@@ -595,7 +730,12 @@ export class AppController {
         // A certificate the pinned owner key did not sign: ignored, never trusted.
       }
     }
-    this.patch({ devices: res });
+    // Reads overlap (the app coming back, a question that just arrived): one that started earlier and answers later may
+    // predate a desktop's declaration, so its list never replaces a later read's.
+    if (read > this.devicesShown) {
+      this.devicesShown = read;
+      this.patch({ devices: res });
+    }
     // The current epoch may be newer than what we hold (rotation while we were away).
     if (res.key_epoch > Math.max(0, ...this.epochKeys.keys())) await this.refreshGrants();
   }
@@ -765,52 +905,124 @@ export class AppController {
     /** Photos going with the answer (answer and override only). */
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
-    const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
-    const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
-    const req = await buildAnswerRequest({
-      installationId: this.snap.config.installationId,
-      deviceId: this.snap.config.deviceId,
-      signingKey: this.keys.signingPrivate,
-      epochKey: highestEpoch(this.epochKeys),
-      view: args.view,
-      kind: args.kind,
-      expectedRevision: args.expectedRevision,
-      selected: args.selected,
-      text: args.text,
-      reason: args.reason,
-      reviewedDigests: args.reviewedDigests,
-      explicitApproval: args.view.content?.kind === 'approval' ? true : undefined,
-      ...(sealed ? { images: sealed.refs } : {}),
-    });
-    await this.outbox.enqueue(
-      {
-        id: newId(),
-        questionId: args.view.id,
-        kind: req.kind,
-        recordId: req.actionId,
-        path: req.path,
-        bodyText: req.bodyText,
-        idempotencyKey: req.idempotencyKey,
-        expectedRevision: req.expectedRevision,
+    await this.admit(args.view.id, async () => {
+      if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+      // Nothing else goes on a question while this device's dismissal of it is on its way.
+      if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
+      const photos = args.kind === 'confirm-proxy' ? [] : (args.photos ?? []);
+      const sealed = photos.length ? await this.sealPhotos(args.view, photos) : null;
+      const req = await buildAnswerRequest({
+        installationId: this.snap.config.installationId,
+        deviceId: this.snap.config.deviceId,
+        signingKey: this.keys.signingPrivate,
+        epochKey: highestEpoch(this.epochKeys),
+        view: args.view,
+        kind: args.kind,
+        expectedRevision: args.expectedRevision,
         selected: args.selected,
         text: args.text,
-        reason: args.reason ?? '',
-        ...(sealed ? { images: sealed.images, reviewedDigests: args.reviewedDigests } : {}),
-      },
-      sealed?.ciphertexts,
-    );
+        reason: args.reason,
+        reviewedDigests: args.reviewedDigests,
+        explicitApproval: args.view.content?.kind === 'approval' ? true : undefined,
+        ...(sealed ? { images: sealed.refs } : {}),
+      });
+      await this.outbox.enqueue(
+        {
+          id: newId(),
+          questionId: args.view.id,
+          kind: req.kind,
+          recordId: req.actionId,
+          path: req.path,
+          bodyText: req.bodyText,
+          idempotencyKey: req.idempotencyKey,
+          expectedRevision: req.expectedRevision,
+          selected: args.selected,
+          text: args.text,
+          reason: args.reason ?? '',
+          ...(sealed ? { images: sealed.images, reviewedDigests: args.reviewedDigests } : {}),
+        },
+        sealed?.ciphertexts,
+      );
+    });
+    // Stored, so admitted: the draft goes only now, outside the admission, which holds nothing it need not.
     await this.drafts?.delete(args.view.id);
-    void this.outbox.flush();
+    void this.outbox?.flush();
+  }
+
+  /** By question, the admission to the outbox under way: each waits for the one before it. */
+  private admitting = new Map<string, Promise<unknown>>();
+
+  /**
+   * Admits one answer, follow-up or dismissal to the outbox at a time per question, from its checks to its stored
+   * entry: a dismissal confirmed while an answer's photos are still being sealed (or the other way round) sees the
+   * other one stored and is refused, rather than both going out.
+   */
+  private admit<T>(questionId: string, run: () => Promise<T>): Promise<T> {
+    const next = (this.admitting.get(questionId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(run);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.admitting.set(questionId, settled);
+    void settled.then(() => {
+      if (this.admitting.get(questionId) === settled) this.admitting.delete(questionId);
+    });
+    return next;
   }
 
   /**
-   * The person declines to answer an open question: a signed `cancel` from this device, sent now rather than queued,
-   * so the confirmation that asked for it can say whether it took. The relay stops its pushes and every paired device
-   * files it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
+   * The person declines to answer an open question: a `cancel` signed once by this device against the revision they
+   * saw, sealed into the outbox before anything is sent, and sent from there exactly as signed (after a reload too)
+   * until the relay commits or refuses it. It is never signed again, so a question that moved on refuses it rather
+   * than taking it for a round the person never saw. Resolves once it is stored, with the entry; a decline already on
+   * its way for the question is returned instead of a second. The relay stops its pushes and every paired device files
+   * it as declined once it syncs; a desktop still listening tells its agent. Drafts are left as they are.
    */
-  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.relay) throw new Error('not paired');
+  async declineQuestion(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    // A second tap waits for the first, then finds it stored.
+    const entry = await this.admit(view.id, async () => {
+      const existing = this.outbox?.declineInFlight(view.id);
+      return existing ?? this.storeDecline(view, expectedRevision);
+    });
+    const outbox = this.outbox;
+    if (outbox) {
+      // An earlier decline of this question that settled is only a note about how: this one replaces it.
+      for (const e of outbox.forQuestion(view.id))
+        if (e.kind === 'decline' && e.id !== entry.id && e.outcome) await outbox.discard(e.id);
+      void outbox.flush();
+    }
+    return entry;
+  }
+
+  /**
+   * Sends a refused entry again, as it was, through the same admission as everything else on its question: never
+   * while this device's dismissal of it is on its way, or being stored.
+   */
+  retry(id: string): Promise<void> {
+    const e = this.outbox?.list().find((x) => x.id === id);
+    if (!e) return Promise.resolve();
+    return this.admit(e.questionId, async () => {
+      if (this.outbox?.declineInFlight(e.questionId)) return;
+      await this.outbox?.retry(id);
+    });
+  }
+
+  private async storeDecline(view: QuestionView, expectedRevision: number): Promise<OutboxEntry> {
+    const outbox = this.outbox;
+    if (!this.keys || !this.snap.config || !outbox) throw new Error('not paired');
+    // An answer or follow-up from this device still on its way goes first: a decline behind it would only be refused.
+    if (
+      outbox
+        .forQuestion(view.id)
+        .some(
+          (e) =>
+            e.kind !== 'decline' &&
+            (e.state === 'queued' || e.state === 'sending' || e.state === 'committed'),
+        )
+    )
+      throw new DeclineBlockedError();
     const req = await buildDeclineRequest({
       installationId: this.snap.config.installationId,
       deviceId: this.snap.config.deviceId,
@@ -818,17 +1030,19 @@ export class AppController {
       view,
       expectedRevision,
     });
-    try {
-      await this.relay.jsonRaw('POST', req.path, req.bodyText);
-    } catch (e) {
-      if (e instanceof RelayError && e.details?.reason === CREATOR_MISSING_FEATURE) {
-        // The asking desktop stopped taking declines since the device list was read: read it again, so the menu agrees.
-        void this.refreshDevices().catch(() => undefined);
-        throw new DeclineUnsupportedError();
-      }
-      throw e;
-    }
-    await this.sync?.catchUp().catch(() => undefined);
+    return outbox.enqueue({
+      id: newId(),
+      questionId: view.id,
+      kind: 'decline',
+      recordId: req.actionId,
+      path: req.path,
+      bodyText: req.bodyText,
+      idempotencyKey: req.idempotencyKey,
+      expectedRevision,
+      selected: [],
+      text: '',
+      reason: '',
+    });
   }
 
   /** A follow-up in the question's thread: sealed and queued durably, then sent. It never changes the answer in force. */
@@ -837,36 +1051,39 @@ export class AppController {
     text: string;
     photos?: readonly OutgoingPhoto[];
   }): Promise<void> {
-    if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
-    const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
-    const req = await buildMessageRequest({
-      installationId: this.snap.config.installationId,
-      deviceId: this.snap.config.deviceId,
-      signingKey: this.keys.signingPrivate,
-      epochKey: highestEpoch(this.epochKeys),
-      view: args.view,
-      text: args.text,
-      ...(sealed ? { images: sealed.refs } : {}),
-    });
-    await this.outbox.enqueue(
-      {
-        id: newId(),
-        questionId: args.view.id,
-        kind: 'message',
-        messageId: req.messageId,
-        recordId: req.messageId,
-        path: req.path,
-        bodyText: req.bodyText,
-        idempotencyKey: req.idempotencyKey,
-        expectedRevision: args.view.revision,
-        selected: [],
+    return this.admit(args.view.id, async () => {
+      if (!this.keys || !this.snap.config || !this.outbox) throw new Error('not paired');
+      if (this.outbox.declineInFlight(args.view.id)) throw new DeclineInFlightError();
+      const sealed = args.photos?.length ? await this.sealPhotos(args.view, args.photos) : null;
+      const req = await buildMessageRequest({
+        installationId: this.snap.config.installationId,
+        deviceId: this.snap.config.deviceId,
+        signingKey: this.keys.signingPrivate,
+        epochKey: highestEpoch(this.epochKeys),
+        view: args.view,
         text: args.text,
-        reason: '',
-        ...(sealed ? { images: sealed.images } : {}),
-      },
-      sealed?.ciphertexts,
-    );
-    void this.outbox.flush();
+        ...(sealed ? { images: sealed.refs } : {}),
+      });
+      await this.outbox.enqueue(
+        {
+          id: newId(),
+          questionId: args.view.id,
+          kind: 'message',
+          messageId: req.messageId,
+          recordId: req.messageId,
+          path: req.path,
+          bodyText: req.bodyText,
+          idempotencyKey: req.idempotencyKey,
+          expectedRevision: args.view.revision,
+          selected: [],
+          text: args.text,
+          reason: '',
+          ...(sealed ? { images: sealed.images } : {}),
+        },
+        sealed?.ciphertexts,
+      );
+      void this.outbox.flush();
+    });
   }
 
   /**
@@ -939,7 +1156,7 @@ export class AppController {
         ciphertexts: sealed.ciphertexts,
       };
     }
-    if (e.kind === 'confirm-proxy') return null;
+    if (e.kind === 'confirm-proxy' || e.kind === 'decline') return null;
     const req = await buildAnswerRequest({
       ...base,
       kind: e.kind,
@@ -1036,7 +1253,12 @@ export class AppController {
     reg.addEventListener('updatefound', () => {
       reg.installing?.addEventListener('statechange', check);
     });
+    // A newer worker taking over (another tab applied the update) may be one this page's subscription can declare.
+    navigator.serviceWorker.addEventListener('controllerchange', this.onControllerChange);
+    this.declarePushFeatures();
   }
+
+  private readonly onControllerChange = () => this.declarePushFeatures();
 
   /** Ask the browser to look for a newer app now. A found update raises `updateAvailable` once it has installed. */
   async checkForUpdate(): Promise<void> {

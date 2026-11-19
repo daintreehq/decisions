@@ -3,7 +3,7 @@
  * runs inside the object's implicit transaction, and old columns are never dropped (rolling deploys must
  * keep working). Timestamps are epoch milliseconds (INTEGER); ISO strings are produced at the edge.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 7;
 
 const V1 = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -278,6 +278,17 @@ const V5 = [
   `CREATE INDEX IF NOT EXISTS actions_question_idx ON actions(question_id, event_seq)`,
 ];
 
+/**
+ * `agent-stopped` pushes (docs/protocol.md section 11) go only to an endpoint whose latest subscription declared
+ * `agent-stopped-push-v1`. Every row from before is an endpoint that never said so.
+ */
+const V6 = [
+  `ALTER TABLE push_subscriptions ADD COLUMN agent_stopped_capable INTEGER NOT NULL DEFAULT 0`,
+];
+
+/** Since when (ms) this relay has kept a record of every question it committed (`neverCommitted`). */
+export const NEVER_COMMITTED_FROM_META = 'never_committed_from';
+
 export function migrate(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
   const row = sql.exec(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0] as
@@ -291,6 +302,16 @@ export function migrate(sql: SqlStorage): void {
   if (current < 3) for (const stmt of V3) sql.exec(stmt);
   if (current < 4) for (const stmt of V4) sql.exec(stmt);
   if (current < 5) for (const stmt of V5) sql.exec(stmt);
+  if (current < 6) for (const stmt of V6) sql.exec(stmt);
+  // V7: an overdue create is shown never committed (routes/questions.ts) only for history this relay kept whole. One
+  // upgraded from before that rule may have wiped its questions with no record of it, so it counts from now; the
+  // version bump keeps an older Worker, which wipes without that record, from running on this storage again.
+  if (current < 7)
+    sql.exec(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
+      NEVER_COMMITTED_FROM_META,
+      String(current >= 1 ? Date.now() : 0),
+    );
   sql.exec(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     String(SCHEMA_VERSION),

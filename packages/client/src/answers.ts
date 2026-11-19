@@ -1,4 +1,5 @@
 import type { PhoneImageReference, Role } from '@daintreehq/decisions-protocol';
+import type { QuestionRow } from './types.js';
 
 /**
  * One locally stored answer for a question: delivery bookkeeping in clear, content sealed.
@@ -11,9 +12,11 @@ export interface AnswerEntry {
   entry_id: string;
   /**
    * `declined`: the person dismissed the question, from a phone or tablet (a human-signed cancel) or on the owner
-   * desktop (its cancel with the signed `decline` flag); no content.
+   * desktop (its cancel with the signed `decline` flag); no content. `unpublished`: the question's deadline passed
+   * before it ever reached the relay, so no answer to it was recorded; written by this desktop (`source: system`), no
+   * content.
    */
-  kind: 'answer' | 'expired' | 'declined';
+  kind: 'answer' | 'expired' | 'declined' | 'unpublished';
   action: 'answer' | 'override' | 'proxy-answer' | 'confirm-proxy' | 'expire' | 'cancel';
   revision: number;
   /**
@@ -29,6 +32,34 @@ export interface AnswerEntry {
    */
   signer_device_id?: string;
   signer_role?: Role;
+  /**
+   * `unpublished` only: the question was advisory (protocol section 21) and the host's policy allowed its stated plan
+   * to go ahead at the deadline, so the agent is told it may carry the plan out. Nothing was decided or approved.
+   * Delivery drops it before the notice is typed once the host no longer allows advice (`unpublishedPlanDue`), never
+   * the other way.
+   */
+  fallback_due?: boolean;
+  /**
+   * `expired` only: the expiry closed the advisory round of an advisory question (protocol section 21) on a host that
+   * delivers advisory outcomes, so the agent is told in its own notice, never the blocking expiry block.
+   * `fallback-due`: the host's policy lets the stated plan go ahead; `fallback-withheld`: it does not. Absent on an
+   * ordinary expiry. Delivery may only ever turn `fallback-due` into `fallback-withheld` before the notice is typed
+   * (the policy no longer allows advice, or the host no longer delivers advisory outcomes and types the ordinary
+   * expiry block instead), never the other way. Nothing was decided or approved either way.
+   */
+  advisory_disposition?: AdvisoryDisposition;
+  /**
+   * An advisory notice only: the attempt whose write may or may not have reached the terminal (an ambiguous sink
+   * answer, or a crash recovery that found no marker). Kept with the entry so `get_decision` still says so once a
+   * reopen has replaced the round; the notice is never typed again on its own.
+   */
+  uncertain_injection_id?: string;
+  /**
+   * An advisory notice only: its sink refused a write this host had admitted (the ledger had settled for its round, as
+   * for a write that lands), so nothing was typed and a person has to decide. Kept with the entry so a process that
+   * does not receive can tell the plan was settled; a retry clears it.
+   */
+  write_refused?: boolean;
   /** Replaces an earlier answer. */
   correction: boolean;
   created_at: string;
@@ -49,6 +80,52 @@ export interface AnswerEntry {
    * bookkeeping in clear, like the rest of the entry: no alt text or digest, only the host's path.
    */
   stored_images?: { attachment_id: string; path: string }[];
+}
+
+/** What an advisory question's unanswered deadline lets the asking agent do (`AnswerEntry.advisory_disposition`). */
+export type AdvisoryDisposition = 'fallback-due' | 'fallback-withheld';
+
+/**
+ * The disposition an advisory expiry notice not yet typed may still carry, as the host stands now: `fallback-due`
+ * becomes `fallback-withheld` once its policy no longer allows advice, or once it no longer delivers advisory outcomes
+ * (it then types the ordinary expiry block, which says the same). Never upgraded.
+ */
+export function currentDisposition(
+  d: AdvisoryDisposition | undefined,
+  host: { outcomes: boolean; allowed: boolean },
+): AdvisoryDisposition | undefined {
+  if (d === undefined) return undefined;
+  return d === 'fallback-due' && !(host.outcomes && host.allowed) ? 'fallback-withheld' : d;
+}
+
+/**
+ * Whether a never-published advisory question's stated plan may still go ahead (`AnswerEntry.fallback_due`), as the
+ * host stands now. Its notice, not yet typed, follows the host as a published advisory expiry does
+ * (`currentDisposition`): only a host that still delivers advisory outcomes and whose policy still allows advice lets
+ * it go ahead. A notice typed, or that may have been (`maybeTyped`), keeps what it said. Never upgraded.
+ */
+export function unpublishedPlanDue(
+  e: Pick<AnswerEntry, 'fallback_due' | 'delivered'>,
+  maybeTyped: boolean,
+  host: { outcomes: boolean; allowed: boolean },
+): boolean {
+  if (e.fallback_due !== true) return false;
+  return e.delivered || maybeTyped || (host.outcomes && host.allowed);
+}
+
+/** An entry whose stated plan is due: an advisory expiry's `fallback-due`, or a never-published `fallback_due`. */
+export const planDue = (e: Pick<AnswerEntry, 'advisory_disposition' | 'fallback_due'>): boolean =>
+  e.advisory_disposition === 'fallback-due' || e.fallback_due === true;
+
+/**
+ * The entry with its stated plan withheld, as delivery records it before typing once the host no longer allows it:
+ * an advisory expiry becomes `fallback-withheld`, a never-published notice loses `fallback_due`.
+ */
+export function withholdPlan(e: AnswerEntry): AnswerEntry {
+  if (e.advisory_disposition === 'fallback-due')
+    return { ...e, advisory_disposition: 'fallback-withheld' };
+  const { fallback_due: _due, ...rest } = e;
+  return rest;
 }
 
 /** The content of an answer. Held in memory only; at rest it is sealed into `AnswerEntry.sealed`. */
@@ -121,6 +198,62 @@ export function parseAnswers(json: string): AnswerEntry[] {
   }
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
+
+const KNOWN_KINDS: ReadonlySet<string> = new Set<AnswerEntry['kind']>([
+  'answer',
+  'expired',
+  'declined',
+  'unpublished',
+]);
+
+/**
+ * Why this client cannot type `e`, or null when it can. A newer client may store an entry of a kind this one does not
+ * know (`answer_unknown_kind`), or one from a source this client does not expect for its kind
+ * (`answer_unknown_source`): an answer from anyone but the person or the proxy, or a decline from anyone but the
+ * person. Typed, either would read as the person's answer or decision. Delivery holds such an entry and reports its
+ * question instead. An expiry's notice says who closed the question itself, so its stored source is not checked.
+ */
+export function unsupportedEntry(
+  e: Pick<AnswerEntry, 'kind' | 'source'>,
+): 'answer_unknown_kind' | 'answer_unknown_source' | null {
+  if (!KNOWN_KINDS.has(e.kind)) return 'answer_unknown_kind';
+  if (e.kind === 'answer' && e.source !== 'human' && e.source !== 'proxy')
+    return 'answer_unknown_source';
+  if (e.kind === 'declined' && e.source !== 'human') return 'answer_unknown_source';
+  return null;
+}
+
+/** An expiry notice of an advisory round, typed as the advisory notice (`advisory_disposition`). */
+export const isAdvisoryNotice = (e: Pick<AnswerEntry, 'kind' | 'advisory_disposition'>): boolean =>
+  e.kind === 'expired' && e.advisory_disposition !== undefined;
+
+/** A content-free notice that closed a round without an answer: an expiry, or the person's decline. */
+export const isClosure = (e: Pick<AnswerEntry, 'kind'>): boolean =>
+  e.kind === 'expired' || e.kind === 'declined';
+
+/**
+ * True while a closure notice still describes its question: it closed the current round, and the question is
+ * still closed that way. A reopen moves the round on, so an earlier round's notice is never typed after it.
+ */
+export function closureInForce(
+  e: Pick<AnswerEntry, 'kind' | 'revision'>,
+  q: Pick<QuestionRow, 'local_status' | 'question_revision'>,
+): boolean {
+  if (e.revision !== q.question_revision) return false;
+  return e.kind === 'expired' ? q.local_status === 'expired' : q.local_status === 'cancelled';
+}
+
+/**
+ * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced: every
+ * entry at that revision, typed or not, is such a notice. An answer at the same revision keeps the intent its own.
+ */
+export function supersededClosure(
+  q: Pick<QuestionRow, 'answers_json' | 'local_status' | 'question_revision'>,
+  revision: number,
+): boolean {
+  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision);
+  return at.length > 0 && at.every((e) => isClosure(e) && !closureInForce(e, q));
+}
 
 /**
  * Where the person gave a human answer: `computer` when the owner desktop signed it (the person's own answer, made
