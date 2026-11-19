@@ -28,7 +28,7 @@ import {
   type GlobalOptions,
   type Runtime,
 } from '../runtime.js';
-import { RECEIVER_BUSY, ReceiverLock } from '../receiver.js';
+import { RECEIVER_BUSY, ReceiverLock, socketReplaced } from '../receiver.js';
 import { PaneDirectoryResolver, noAttachmentsResolver } from '../resolvers.js';
 
 /**
@@ -434,10 +434,16 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
   // relay that never answers cannot keep the process up.
   let stopping = false;
   /** Why the listener ended on its own, latched before stopping the bridge resets its state. */
-  const ended: { revoked: boolean; fatal: HttpSyncStatus | null; timedOut: boolean } = {
+  const ended: {
+    revoked: boolean;
+    fatal: HttpSyncStatus | null;
+    timedOut: boolean;
+    replaced: boolean;
+  } = {
     revoked: false,
     fatal: null,
     timedOut: false,
+    replaced: false,
   };
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let release!: () => void;
@@ -464,6 +470,13 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     bridge.on('state', (s) => {
       if (s !== 'revoked') return;
       ended.revoked = true;
+      stop();
+    });
+    // Another connection took this device's socket: this listener reads nothing more, so it ends, and with it its hold
+    // on the state directory, rather than look alive while deaf.
+    bridge.on('replaced', () => {
+      if (stopping) return;
+      ended.replaced = true;
       stop();
     });
     if (o.mcp) {
@@ -536,6 +549,7 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     o.onReady?.({ bridge, mcp, token });
     await stopped;
     if (ended.revoked) throw new CliError(REVOKED);
+    if (ended.replaced) throw new CliError(socketReplaced('listening'));
     if (ended.fatal)
       throw new CliError(
         `stopped listening: the relay refuses this client (${ended.fatal.reason}); update decisions`,
@@ -546,11 +560,14 @@ export async function daemon(ctx: Ctx, g: GlobalOptions, o: DaemonOptions): Prom
     process.off('SIGTERM', stop);
     stopping = true;
     sink.close();
-    await mcp?.close();
     try {
-      await closeBridge(rt, bridge, sink);
+      await mcp?.close();
     } finally {
-      lock.release();
+      try {
+        await closeBridge(rt, bridge, sink);
+      } finally {
+        lock.release();
+      }
     }
   }
 }

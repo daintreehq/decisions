@@ -15,7 +15,7 @@ import {
   type RegisterResult,
 } from '@daintreehq/decisions-client';
 import { CliError, openRuntime, type Ctx, type GlobalOptions, type Runtime } from '../runtime.js';
-import { ReceiverLock } from '../receiver.js';
+import { ReceiverLock, socketReplaced } from '../receiver.js';
 import { humanFileResolver } from '../resolvers.js';
 import {
   DemoSink,
@@ -250,6 +250,9 @@ async function waitForOutcome(a: WaitArgs): Promise<WaitResult> {
         fail(new CliError('stopped waiting: the relay needs a newer decisions; update decisions'));
     }),
     bridge.on('state', (s) => s === 'revoked' && fail(new CliError(REVOKED))),
+    // Another connection took this device's socket: nothing more arrives here, so the wait ends, and so does its hold on
+    // the state directory, leaving another wait or listener free to receive.
+    bridge.on('replaced', () => fail(new CliError(socketReplaced('waiting')))),
   ];
   halt.onStop = () => wake();
   const timer = setInterval(() => wake(), a.tickMs ?? TICK_MS);

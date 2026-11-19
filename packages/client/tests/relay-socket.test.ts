@@ -292,9 +292,13 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
     await opened();
     b.ws().recv(b.hello);
     await tick(5);
+    const beforeB = b.timers.length;
     b.ws().close(4409, 'replaced');
     expect(b.log).toContain('replaced');
     expect(b.sock.currentState).toBe('stopped');
+    expect(
+      b.timers.slice(beforeB).filter((t) => t.ms < 60_000 && !t.cancelled && t.ms >= 1000),
+    ).toHaveLength(0);
     const n = FakeSocket.instances.length;
     await tick(5);
     expect(FakeSocket.instances.length).toBe(n);
@@ -419,6 +423,39 @@ describe('RelaySocket (hibernatable WebSocket client)', () => {
 });
 
 describe('bridge + socket: persist before ack, contiguous cursor', () => {
+  it('tells the host once when another connection replaced its socket, and never on a stop or a revocation', async () => {
+    FakeSocket.instances = [];
+    const a = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
+    const seen: string[] = [];
+    a.bridge.on('replaced', () => void seen.push(a.bridge.state));
+    await a.bridge.start();
+    await opened();
+    FakeSocket.instances.at(-1)!.close(4409, 'replaced by a newer connection');
+    // The socket stops for good; the bridge goes on running, and the host decides what that means.
+    expect(seen).toEqual(['running']);
+    expect(a.bridge.socket.currentState).toBe('stopped');
+    await a.bridge.stop();
+    expect(seen).toHaveLength(1);
+
+    let others = 0;
+    const b = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
+    b.bridge.on('replaced', () => void others++);
+    await b.bridge.start();
+    await opened(2);
+    // A connection lost on the way is no replacement: the socket backs off to reconnect.
+    FakeSocket.instances.at(-1)!.close(1006, 'lost');
+    expect(b.bridge.socket.currentState).toBe('backoff');
+    await b.bridge.stop();
+    const c = await setupBridge({ webSocket: (u) => new FakeSocket(u) });
+    c.bridge.on('replaced', () => void others++);
+    await c.bridge.start();
+    await opened(3);
+    FakeSocket.instances.at(-1)!.close(4401, 'revoked');
+    expect(c.bridge.state).toBe('revoked');
+    expect(others).toBe(0);
+    await c.bridge.stop();
+  });
+
   it('acks only after the event is stored and only up to the contiguous cursor', async () => {
     FakeSocket.instances = [];
     const order: string[] = [];
