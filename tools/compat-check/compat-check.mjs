@@ -2076,6 +2076,19 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
       show(onRelay),
     );
     await stillCached('after answering and declining');
+    // Every ticket the cached page got from the new relay, reconnects included (one that declares nothing is fine).
+    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
+    check(
+      tickets.every(
+        (t) =>
+          t.features === null ||
+          (Array.isArray(t.features) &&
+            !t.features.includes(ADVISORY) &&
+            !t.features.includes(AGENT_STOPPED)),
+      ),
+      `the ${OLD.label} app's ${tickets.length} socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
+      show(tickets.map((t) => t.features)),
+    );
 
     // The phone updates in place. The browser finds the new worker while the cached page is open, so it waits; a
     // second page of the same phone then loads the new app under the old worker, and the cached page closes.
@@ -2116,19 +2129,6 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     );
     const mixedDoc = mixed.doc;
     await tab.close();
-    // Every ticket the cached page got from the new relay, reconnects included (one that declares nothing is fine).
-    const tickets = net.filter((e) => cachedTickets(e) && e.status === 200);
-    check(
-      tickets.every(
-        (t) =>
-          t.features === null ||
-          (Array.isArray(t.features) &&
-            !t.features.includes(ADVISORY) &&
-            !t.features.includes(AGENT_STOPPED)),
-      ),
-      `the ${OLD.label} app's ${tickets.length} socket tickets on the new relay declare neither ${ADVISORY} nor ${AGENT_STOPPED}`,
-      show(tickets.map((t) => t.features)),
-    );
     // The new app asks the active worker whether it can show an agent-stopped push; the old one never answers, and
     // the app gives up after two seconds (app/src/features/push.ts WORKER_ASK_MS) and closes its end.
     await until(
