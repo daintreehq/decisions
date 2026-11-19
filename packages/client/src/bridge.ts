@@ -196,6 +196,9 @@ const STATUS_WAIT_MS = 5_000;
 /** The deadline of each page request a direct `catchUp` makes (it keeps the client's own retries). */
 const CATCH_UP_TIMEOUT_MS = 30_000;
 
+/** How many stored, unapplied events `ledgerUnsettled` looks through for the question's own. */
+const UNAPPLIED_SCAN = 500;
+
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
@@ -615,7 +618,7 @@ export class DecisionsBridge {
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
       advisoryOutcomes: o.advisoryDeadlines === true,
-      replaying: () => this.ledgerUnsettled(),
+      replaying: (id) => this.ledgerUnsettled(id),
     });
     this.socket = new RelaySocket({
       client,
@@ -626,9 +629,13 @@ export class DecisionsBridge {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => {
-          // A replay is under way until its last segment is caught up; a socket that closes abandons it.
+          // A replay is under way until its last segment is caught up; a socket that closes abandons it, and what an
+          // HTTP read brought meanwhile may settle a notice that waited.
+          const abandoned = this.socketReplay && s !== 'syncing' && s !== 'live';
           this.socketReplay = s === 'syncing' || (s === 'live' && this.socketReplay);
           if (s === 'syncing') this.ledgerRead = false;
+          // What the replay applied was held from delivery while it ran (`onSocketEvent`): deliver it now.
+          if (abandoned && this.running()) void this.deliverNow();
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
@@ -1219,8 +1226,11 @@ export class DecisionsBridge {
   }
 
   async getDecision(questionId: string, pane?: PaneIdentity): Promise<DecisionView> {
+    // Whether an advisory notice would wait for the ledger is read before the row: an event applied in between is
+    // then in the row, and one applied after it was still unsettled here.
+    const unsettled = await this.delivery.ledgerHolds(questionId);
     const row = await this.owned(questionId, pane);
-    return this.view(row);
+    return this.view(row, unsettled);
   }
 
   async listPending(pane?: PaneIdentity): Promise<DecisionView[]> {
@@ -1242,18 +1252,19 @@ export class DecisionsBridge {
   }
 
   /** Opens the answers in memory to build the view; nothing decrypted is written back. */
-  private async view(row: QuestionRow): Promise<DecisionView> {
+  private async view(row: QuestionRow, unsettled?: boolean): Promise<DecisionView> {
     const create = (await this.ctx.store.outboxFor(row.question_id)).find(
       (o) => o.kind === 'create',
     );
     const entries = await openAnswers(this.ctx, row);
     const unpublished = entries.find((e) => e.kind === 'unpublished');
     const timeout = this.advisoryTimeout(row, entries);
-    // A notice waiting for the ledger (a reopen may be on its way) does not let the plan go ahead here either.
+    // A notice nothing was typed for, waiting for the ledger (a reopen may be on its way), does not let the plan go
+    // ahead here either.
     const waiting =
       timeout?.inForce === true &&
-      timeout.view.notice === 'pending' &&
-      (await this.delivery.ledgerHolds());
+      (timeout.view.notice === 'pending' || timeout.view.notice === 'needs-attention') &&
+      (unsettled ?? (await this.delivery.ledgerHolds(row.question_id)));
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
     let current: OpenAnswerEntry | undefined;
@@ -1471,17 +1482,27 @@ export class DecisionsBridge {
   }
 
   /**
-   * The ledger may hold a later event (a reopen, a deletion) for the round an advisory notice closed, so the notice
-   * waits (`DeliveryOptions.replaying`): a read of the relay is under way, a read failed part-way or none reached the
-   * relay's end since this run started, or a stored event is still to be applied.
+   * Whether the ledger may hold a later event (a reopen, a deletion) for the round an advisory notice of `questionId`
+   * closed (`DeliveryOptions.replaying`): `unapplied` when an event of that question is stored and not applied yet (a
+   * gap waits for the events before it), `reading` while a read of the relay is under way, a read failed part-way or
+   * none reached the relay's end since this run started, or an event of another question waits to be applied.
    */
-  private async ledgerUnsettled(): Promise<boolean> {
-    return (
-      this.socketReplay ||
-      this.paging !== null ||
-      !this.ledgerRead ||
-      (await this.ctx.store.unprocessedEvents(1)).length > 0
-    );
+  private async ledgerUnsettled(questionId: string): Promise<'unapplied' | 'reading' | null> {
+    const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
+    // Too many to look through: one of them may be the question's.
+    if (stored.length >= UNAPPLIED_SCAN) return 'unapplied';
+    for (const e of stored) {
+      let id: unknown;
+      try {
+        id = (JSON.parse(e.json) as { question_id?: unknown }).question_id;
+      } catch {
+        id = undefined;
+      }
+      if (id === questionId) return 'unapplied';
+    }
+    return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
+      ? 'reading'
+      : null;
   }
 
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */
@@ -1572,7 +1593,7 @@ export class DecisionsBridge {
     // A frame of a replay is applied but not delivered: a later frame of the same replay (a reopen) may replace
     // what it closed. The pump after the replay's last segment delivers whatever is still in force.
     const drain = await this.inbox.processPending();
-    if (this.socket.currentState !== 'syncing' && (drain || this.delivery.takeReplayHold()))
+    if (this.socket.currentState !== 'syncing' && (drain || this.delivery.replayHeld))
       await this.deliverNow();
     if (await this.inbox.hasGap()) await this.recoverGap();
   }
@@ -1593,7 +1614,7 @@ export class DecisionsBridge {
       this.socketReplay = false;
       this.ledgerRead = true;
       await this.pump();
-      if (this.delivery.takeReplayHold()) await this.deliverNow();
+      if (this.delivery.replayHeld) await this.deliverNow();
     } else await this.inbox.processPending();
   }
 
@@ -1639,7 +1660,7 @@ export class DecisionsBridge {
     await this.reportReceived(cursor, req);
     // An advisory notice held while the ledger was read is delivered now, even when the read brought nothing.
     const drain = await this.inbox.processPending();
-    if (drain || this.delivery.takeReplayHold()) await this.deliverNow();
+    if (drain || this.delivery.replayHeld) await this.deliverNow();
     this.refreshPreference();
     return cursor;
   }
@@ -1663,15 +1684,17 @@ export class DecisionsBridge {
   private async applyStored(): Promise<void> {
     if (!this.running()) return;
     const drain = await this.inbox.processPending();
-    if (drain || this.delivery.takeReplayHold()) void this.deliverer.kick();
+    if (drain || this.delivery.replayHeld) void this.deliverer.kick();
   }
 
   private readPages(req: CallOptions): Promise<number> {
     if (this.paging) return this.paging.pass;
+    // A read that started before the bridge was (re)started says nothing about what this run has read.
+    const run = this.lifecycle;
     const pass = this.pageEvents(req)
       .then(
         (cursor) => {
-          this.ledgerRead = true;
+          if (run === this.lifecycle) this.ledgerRead = true;
           return cursor;
         },
         (e: unknown) => {

@@ -70,12 +70,13 @@ export interface DeliveryOptions {
    */
   advisoryOutcomes?: boolean;
   /**
-   * True while the ledger may hold events this desktop has not read and applied (a read under way, one that ended
-   * part-way or none yet, a stored event not applied): an advisory notice waits, since a later event (a reopen, a
-   * deletion) may replace the round it closed. The host drains again once it is false (`takeReplayHold`); a wait
-   * never lasts past `ADVISORY_LEDGER_WAIT_MS`.
+   * Whether the ledger may hold a later event (a reopen, a deletion) for the round an advisory notice of `questionId`
+   * closed, so the notice waits: `unapplied` when an event of that question is stored and not yet applied (it waits
+   * as long as that lasts), `reading` while a read of the relay is under way, ended part-way or has not reached the
+   * relay's end yet (it waits `ADVISORY_LEDGER_WAIT_MS` at most), null once settled. The host drains again when it
+   * settles (`replayHeld`).
    */
-  replaying?: () => boolean | Promise<boolean>;
+  replaying?: (questionId: string) => Promise<'unapplied' | 'reading' | null>;
 }
 
 /**
@@ -206,40 +207,52 @@ export class DeliveryEngine {
   stopped = false;
   /** Closure notices being written to a terminal, by question (see `closureWrite`). */
   private readonly closureWrites = new Map<string, Promise<void>>();
-  /** An advisory notice waited for the ledger to be read (`DeliveryOptions.replaying`). */
-  private replayHeld = false;
-  /** When advisory notices started waiting for the ledger; null while it is settled. */
-  private ledgerWaitSince: number | null = null;
+  /** An advisory notice waited for the ledger in the latest pass (`DeliveryOptions.replaying`). */
+  private held = new Set<string>();
+  /** When each question's advisory notice started waiting for a read of the relay. */
+  private readonly waitingSince = new Map<string, number>();
 
   constructor(
     private readonly ctx: BridgeContext,
     private readonly o: DeliveryOptions,
   ) {}
 
-  /** True once if an advisory notice waited for the ledger to be read since the last call: drain again then. */
-  takeReplayHold(): boolean {
-    const held = this.replayHeld;
-    this.replayHeld = false;
-    return held;
+  /** True while an advisory notice is waiting for the ledger: the host drains again once the ledger settles. */
+  get replayHeld(): boolean {
+    return this.held.size > 0;
   }
 
-  /** Whether an advisory notice still to be typed would wait for the ledger now (`get_decision` asks; no effects). */
-  async ledgerHolds(): Promise<boolean> {
-    if (!(await this.o.replaying?.())) return false;
-    const since = this.ledgerWaitSince;
-    return since === null || this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
+  /** Whether `questionId`'s advisory notice, still to be typed, would wait for the ledger now (no effects). */
+  async ledgerHolds(questionId: string): Promise<boolean> {
+    const state = await this.o.replaying?.(questionId);
+    if (!state) return false;
+    if (state === 'unapplied') return true;
+    const since = this.waitingSince.get(questionId);
+    return since === undefined || this.ctx.now() - since < ADVISORY_LEDGER_WAIT_MS;
   }
 
-  /** Whether an advisory notice must wait for the ledger; remembered so the host drains again. */
-  private async heldForReplay(): Promise<boolean> {
-    if (!(await this.o.replaying?.())) {
-      this.ledgerWaitSince = null;
+  /**
+   * Whether `questionId`'s advisory notice must wait for the ledger; remembered so the host drains again. A ledger
+   * that cannot be read counts as one to wait for.
+   */
+  private async heldForReplay(questionId: string): Promise<boolean> {
+    let state: 'unapplied' | 'reading' | null | undefined;
+    try {
+      state = await this.o.replaying?.(questionId);
+    } catch {
+      state = 'unapplied';
+    }
+    if (!state) {
+      this.waitingSince.delete(questionId);
       return false;
     }
-    const now = this.ctx.now();
-    if (this.ledgerWaitSince === null || now < this.ledgerWaitSince) this.ledgerWaitSince = now;
-    if (now - this.ledgerWaitSince >= ADVISORY_LEDGER_WAIT_MS) return false;
-    this.replayHeld = true;
+    if (state === 'reading') {
+      const now = this.ctx.now();
+      const since = this.waitingSince.get(questionId);
+      if (since === undefined || now < since) this.waitingSince.set(questionId, now);
+      else if (now - since >= ADVISORY_LEDGER_WAIT_MS) return false;
+    }
+    this.held.add(questionId);
     return true;
   }
 
@@ -260,6 +273,8 @@ export class DeliveryEngine {
           total.deferred = r.deferred;
           total.needsAttention += r.needsAttention;
           total.uncertain += r.uncertain;
+          // A notice that waited for the ledger while it settled during the pass is typed now, not on a later wake.
+          if (!this.again && this.held.size > 0 && (await this.anySettled())) this.again = true;
         } while (this.again && !this.stopped);
       } finally {
         this.running = null;
@@ -267,6 +282,13 @@ export class DeliveryEngine {
       return total;
     })();
     return this.running;
+  }
+
+  /** Whether the ledger settled for some advisory notice that waited for it in the latest pass. */
+  private async anySettled(): Promise<boolean> {
+    for (const id of this.held)
+      if (!(await this.o.replaying?.(id).catch(() => 'unapplied'))) return true;
+    return false;
   }
 
   private pending(q: QuestionRow): AnswerEntry[] {
@@ -278,6 +300,7 @@ export class DeliveryEngine {
   private async pass(): Promise<DrainResult> {
     const { ctx } = this;
     const out = EMPTY();
+    this.held = new Set();
     await this.flushAcks();
     const rows = (await ctx.store.listQuestions()).filter((q) => !q.history_only);
     await this.flushMessageReceipts(rows);
@@ -307,6 +330,11 @@ export class DeliveryEngine {
             : [],
       ),
     );
+    // A wait clock lasts as long as its notice waits to be typed.
+    const advisory = new Set(
+      rows.filter((q) => this.pending(q).some(isAdvisoryNotice)).map((q) => q.question_id),
+    );
+    for (const id of this.waitingSince.keys()) if (!advisory.has(id)) this.waitingSince.delete(id);
     const threads: Thread[] = [];
     for (const q of rows) {
       const t = await this.thread(q, unsettled, unsettledMessages);
@@ -342,7 +370,7 @@ export class DeliveryEngine {
       (q.delivery_status === 'needs-attention' ||
         q.delivery_status === 'delivery-uncertain' ||
         unsettled.has(q.question_id) ||
-        (pending.some(isAdvisoryNotice) && (await this.heldForReplay())) ||
+        (pending.some(isAdvisoryNotice) && (await this.heldForReplay(q.question_id))) ||
         (await this.ctx.store.hasUncertainIntent(q.question_id)));
     const barrier = held ? Math.min(...pending.map(seqOf)) : Infinity;
     const messages: StoredMessage[] = [];
@@ -450,7 +478,9 @@ export class DeliveryEngine {
     // its advisory round, whatever resumes it (its notice, an answer, a follow-up) must bring back that very session,
     // known by its id, or the origin would move to a session that never stated the plan. The row is read afresh: a
     // reopen meanwhile made it a round that waits for a decision.
-    const now = (await this.ctx.store.getQuestion(q.question_id)) ?? q;
+    const now = this.o.advisoryOutcomes
+      ? ((await this.ctx.store.getQuestion(q.question_id)) ?? q)
+      : q;
     if (
       this.o.advisoryOutcomes === true &&
       now.question_revision === ADVISORY_ROUND_REVISION &&
@@ -815,8 +845,18 @@ export class DeliveryEngine {
     const allows = () => this.o.advisoryOutcomes === true && ctx.policy.advisoryQuestions;
     const admitted = await ctx.lock.run(async (): Promise<boolean | 'held'> => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
-      const advisory = chunk.some((i) => i.kind === 'answer' && isAdvisoryNotice(i.entry));
-      if (advisory && (await this.heldForReplay())) return 'held';
+      const advisory = [
+        ...new Set(
+          chunk.flatMap((i) =>
+            i.kind === 'answer' && isAdvisoryNotice(i.entry) ? [i.q.question_id] : [],
+          ),
+        ),
+      ];
+      const mustWait = async () => {
+        for (const id of advisory) if (await this.heldForReplay(id)) return true;
+        return false;
+      };
+      if (await mustWait()) return 'held';
       const rows = new Map<string, QuestionRow>();
       const host = { outcomes: this.o.advisoryOutcomes === true, allowed: allows() };
       let stale = false;
@@ -915,7 +955,7 @@ export class DeliveryEngine {
       // The ledger and the policy can change at any await above (a read stores a reopen outside this lock; the host
       // changes a setting): both are read again after the last one. A notice that must wait, or would now be
       // withheld, is not typed: its intents are closed (nothing was written), and the next pass records it withheld.
-      const wait = advisory && (await this.heldForReplay());
+      const wait = await mustWait();
       if (wait || (advisoryDue && !allows())) {
         for (const i of chunk)
           await ctx.store.updateIntent(i.intentId, { state: 'abandoned', updated_at: ctx.now() });
@@ -925,8 +965,10 @@ export class DeliveryEngine {
       return true;
     });
     if (admitted === 'held') {
-      // The ledger may hold a later event for its round: the host drains again once it has been read.
+      // The ledger may hold a later event for its round: another pass leaves it waiting and types the rest of the
+      // lane, and the host drains again once the ledger settles.
       written();
+      this.again = true;
       res.deferred++;
       return res;
     }

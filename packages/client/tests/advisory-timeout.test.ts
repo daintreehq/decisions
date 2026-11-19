@@ -569,10 +569,24 @@ describe('where the advisory notice goes', () => {
     await e.bridge.notifyPaneIdle();
     await e.bridge.pump();
     expect(e.sink.typed).toHaveLength(0);
-    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.notice).toBe('pending');
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      fallbackDue: false,
+      advisoryTimeout: { notice: 'pending' },
+    });
     await e.bridge.catchUp();
     expect(e.sink.typed).toHaveLength(1);
     expect(e.sink.typed[0]!.text).toContain('disposition: fallback-due');
+  });
+
+  it('get_decision does not let the plan go ahead while a notice needing attention waits for the ledger', async () => {
+    const e = await advised();
+    e.sink.panes.clear();
+    await e.expire();
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.notice).toBe('needs-attention');
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(true);
+    e.relay.down = 1;
+    await expect(e.bridge.catchUp()).rejects.toThrow();
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(false);
   });
 
   it('waits two minutes at most for a read that does not get through', async () => {
@@ -590,6 +604,145 @@ describe('where the advisory notice goes', () => {
     e.setNow(e.now + 1);
     await e.bridge.notifyPaneIdle();
     expect(e.sink.typed).toHaveLength(1);
+  });
+
+  it('an event of its own question stored and not yet applied holds it however long that lasts', async () => {
+    const e = await advised();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    // A reopen read past a hole: it waits for the event before it, and so does the notice.
+    e.relay.skipSeq(1);
+    const reopened = await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    await e.store.insertEvent({
+      seq: reopened.seq,
+      event_id: reopened.event_id,
+      event_type: reopened.event_type,
+      json: JSON.stringify(reopened),
+      received_at: e.now,
+      processed_at: null,
+    });
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    e.setNow(e.now + 3 * ADVISORY_LEDGER_WAIT_MS);
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(0);
+    expect((await e.bridge.getDecision(e.qid)).fallbackDue).toBe(false);
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(0);
+    expect((await e.bridge.getDecision(e.qid)).advisoryTimeout?.notice).toBe('superseded');
+  });
+
+  it('an answer typed in the same chunk is not held back with a notice that waits', async () => {
+    const e = await advised();
+    const other = await e.bridge.registerQuestion({
+      origin: origin(),
+      input: { question: 'Ship it?', expires_in: '1h' },
+    });
+    await e.bridge.pump();
+    e.sink.panes.get('pane-1')!.idle = false;
+    await e.expire();
+    await e.relay.answerEvent({ questionId: other.questionId, phone: e.phone, options: [] });
+    await e.bridge.catchUp();
+    const reopened = await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    const putIntent = e.store.putIntent.bind(e.store);
+    let stored = false;
+    // While the chunk's intents are written, a read stores the advisory question's reopen.
+    e.store.putIntent = async (i) => {
+      if (!stored) {
+        stored = true;
+        await e.store.insertEvent({
+          seq: reopened.seq,
+          event_id: reopened.event_id,
+          event_type: reopened.event_type,
+          json: JSON.stringify(reopened),
+          received_at: e.now,
+          processed_at: null,
+        });
+      }
+      return putIntent(i);
+    };
+    e.sink.panes.get('pane-1')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed).toHaveLength(1);
+    expect(e.sink.typed[0]!.text).toContain(`question_id: ${other.questionId}`);
+    expect(e.sink.typed[0]!.text).not.toContain('advisory-unanswered');
+  });
+
+  it('a socket replay abandoned after an HTTP read reached the end lets it go', async () => {
+    FakeSocket.instances = [];
+    const e = await advised({ webSocket: (u) => new FakeSocket(u) });
+    e.setNow(T0 + 16 * MIN);
+    await e.bridge.start();
+    await e.bridge.pump();
+    const expired = e.relay.expiryEvent({ questionId: e.qid });
+    await tick(10);
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.recv({
+      t: 'hello',
+      protocol_version: PROTOCOL_VERSION,
+      device_id: e.identity.config.deviceId,
+      role: 'owner-desktop',
+      key_epoch: 1,
+      high_water: expired.seq,
+      server_time: new Date().toISOString(),
+    });
+    for (const ev of e.relay.events.filter((x) => x.seq <= expired.seq))
+      ws.recv({ t: 'event', event: ev });
+    await until(async () => (await e.row()).local_status === 'expired');
+    await e.bridge.catchUp();
+    expect(e.sink.typed).toHaveLength(0);
+    // The socket goes away before its replay caught up: the HTTP read already reached the relay's end.
+    ws.close(1006, 'gone');
+    await until(async () => e.sink.typed.length > 0);
+    expect(e.sink.typed).toHaveLength(1);
+  });
+
+  it('is typed in the same drain when the ledger settles while that drain types another pane', async () => {
+    const e = await advised();
+    e.sink.addPane('pane-2', { session: 'sess-2' });
+    const other = await e.bridge.registerQuestion({
+      origin: origin({ pane_id: 'pane-2', agent_session_id: 'sess-2' }),
+      input: { question: 'Ship it?', expires_in: '1h' },
+    });
+    await e.bridge.pump();
+    e.sink.panes.get('pane-1')!.idle = false;
+    e.sink.panes.get('pane-2')!.idle = false;
+    await e.expire();
+    await e.relay.answerEvent({ questionId: other.questionId, phone: e.phone, options: [] });
+    await e.bridge.catchUp();
+    // An event of the advisory question is stored, not yet applied: its notice waits.
+    const message = e.relay.push('decision.snapshot.refresh_requested', e.qid, null, {});
+    await e.store.insertEvent({
+      seq: message.seq + 1000,
+      event_id: 'evt-pending',
+      event_type: message.event_type,
+      json: JSON.stringify({ ...message, seq: message.seq + 1000 }),
+      received_at: e.now,
+      processed_at: null,
+    });
+    // While the same drain types the other pane, the event is applied.
+    const isIdle = e.sink.isIdle.bind(e.sink);
+    e.sink.isIdle = async (t) => {
+      if (t.paneId === 'pane-2') await e.store.markEventProcessed(message.seq + 1000, e.now);
+      return isIdle(t);
+    };
+    e.sink.panes.get('pane-1')!.idle = true;
+    e.sink.panes.get('pane-2')!.idle = true;
+    await e.bridge.notifyPaneIdle();
+    expect(e.sink.typed.map((t) => t.target.paneId).sort()).toEqual(['pane-1', 'pane-2']);
+    expect(e.sink.typed.find((t) => t.target.paneId === 'pane-1')!.text).toContain(
+      'status: advisory-unanswered',
+    );
   });
 
   it('a read over HTTP that ends while a socket replay goes on never releases it', async () => {
