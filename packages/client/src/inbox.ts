@@ -518,14 +518,18 @@ export class Inbox {
     if (this.reconcileDone || row.question_revision === 0 || !ctx.store.processedEventsOfType)
       return row.expires_at;
     if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return row.expires_at;
+    // Every reopen of this question that names the round, in the event or in its data (the inbox applies one by its
+    // data): an extra claim can only make the deadline later, so more of them is the safe side.
     const claims = (await ctx.store.processedEventsOfType('decision.reopened'))
       .map((e) => JSON.parse(e.json) as LedgerEvent)
-      .filter(
-        (ev) =>
-          ev.question_id === row.question_id && ev.question_revision === row.question_revision,
-      )
-      .map((ev) => EventData.action.safeParse(ev.data).data?.record.expires_at)
-      .filter((d): d is string | null => d !== undefined);
+      .filter((ev) => ev.question_id === row.question_id)
+      .flatMap((ev) => {
+        const data = EventData.action.safeParse(ev.data).data;
+        const round =
+          ev.question_revision === row.question_revision ||
+          data?.revision === row.question_revision;
+        return round && data ? [data.record.expires_at] : [];
+      });
     return claims.length === 0 ? row.expires_at : latestDeadline(claims);
   }
 

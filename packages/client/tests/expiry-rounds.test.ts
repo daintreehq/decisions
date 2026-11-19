@@ -960,6 +960,30 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect((await e.row()).expires_at).toBeNull();
   });
 
+  it('a forged earlier claim cannot stand in for a reopen the relay mislabelled', async () => {
+    let later = '';
+    const e = await legacy(
+      (x) => (later = x.later(x.deadline, 2 * DAY)),
+      async (x) => {
+        const reopen = x.relay.events.find((ev) => ev.event_type === 'decision.reopened')!;
+        reopen.question_revision = 99; // its data still says round 1, so the old bridge applied it
+        const data = reopen.data as { record: Record<string, unknown> };
+        x.relay.push('decision.reopened', x.qid, 1, {
+          ...data,
+          record: { ...data.record, expires_at: x.later(x.deadline, DAY) },
+        });
+      },
+    );
+    await e.store.updateQuestion(e.qid, { expires_at: e.deadline });
+    e.relay.devicesFail = true;
+    e.relay.expiryEvent({ questionId: e.qid, revision: 1, at: e.later(e.deadline, DAY + MIN) });
+    e.at(e.deadline, DAY + 2 * MIN);
+    await e.again.catchUp();
+    expect((await e.row()).local_status).toBe('open');
+    expect((await e.rejected()).at(-1)).toBe('expiry-before-deadline');
+    expect(later).not.toBe('');
+  });
+
   it('until a reopened row is repaired, an expiry before its signed later deadline is early', async () => {
     let later = '';
     const e = await legacy(null, async (x) => {
