@@ -77,7 +77,8 @@ async function env(o: { advisory?: boolean } = {}) {
   return { identity, relay, phone, home, clock, proc, created };
 }
 
-const result = (records: { record: string }[]) => records.find((r) => r.record === 'result')!;
+const result = <T extends { record: string }>(records: T[]) =>
+  records.find((r) => r.record === 'result')!;
 
 describe('the outcome a wait reports', () => {
   const base: DecisionView = {
