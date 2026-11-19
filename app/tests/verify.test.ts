@@ -8,7 +8,13 @@ import {
   exportPublicKey,
 } from '@daintreehq/decisions-crypto';
 import { TrustStore } from '../src/domain/trust.js';
-import { NO_EPOCH_KEY, verifyActionEvent, verifyQuestionEvent } from '../src/domain/verify.js';
+import {
+  ADVISORY_UNSUPPORTED,
+  NO_EPOCH_KEY,
+  verifyActionEvent,
+  verifyQuestionEvent,
+} from '../src/domain/verify.js';
+import { ADVISORY_QUESTION_FIXTURE } from '@daintreehq/decisions-protocol/fixtures';
 import {
   actionEvent,
   makeWorld,
@@ -35,6 +41,23 @@ describe('question verification', () => {
       expect(r.value.content.question).toBe('Use the compact sidebar?');
       expect(r.value.content.options).toHaveLength(2);
     }
+  });
+
+  it('refuses a genuine advisory question it cannot show yet, and reads the blocking one beside it', async () => {
+    const w = await makeWorld();
+    const advisory = await questionEvent(w, {
+      replyMode: 'advisory',
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      content: { ...ADVISORY_QUESTION_FIXTURE.content },
+    });
+    expect(await verifyQuestionEvent(advisory.data, NOW, ctx(w), advisory.question_id!)).toEqual({
+      ok: false,
+      reason: ADVISORY_UNSUPPORTED,
+    });
+    const blocking = await questionEvent(w);
+    expect((await verifyQuestionEvent(blocking.data, NOW, ctx(w), blocking.question_id!)).ok).toBe(
+      true,
+    );
   });
 
   it('rejects tampered ciphertext (relay swapped bytes)', async () => {

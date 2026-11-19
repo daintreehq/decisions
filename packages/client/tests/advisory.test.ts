@@ -12,6 +12,7 @@ describe('advisory questions in the desktop library', () => {
     expect(bridgeFeatures({ followUps: true, snapshots: {} })).not.toContain(
       'advisory-deadlines-v1',
     );
+    expect(bridgeFeatures({ advisoryDeadlines: false })).not.toContain('advisory-deadlines-v1');
     expect(bridgeFeatures({ advisoryDeadlines: true })).toContain('advisory-deadlines-v1');
     expect(bridgeFeatures({ advisoryDeadlines: true, followUps: true })).toEqual(
       expect.arrayContaining([...BRIDGE_FEATURES, 'thread-messages-v1', 'advisory-deadlines-v1']),
@@ -25,6 +26,8 @@ describe('advisory questions in the desktop library', () => {
     expect(p.advisoryQuestions).toBe(true);
     p.advisoryQuestions = false;
     expect(p.advisoryQuestions).toBe(false);
+    p.advisoryQuestions = true;
+    expect(p.advisoryQuestions).toBe(true);
   });
 
   it('a gate the registry does not know still keeps a question blocking', () => {
@@ -44,6 +47,9 @@ describe('advisory questions in the desktop library', () => {
     expect(advisoryRefusal(ask)).toBeNull();
     expect(advisoryRefusal({ ...ask, namedGateId: 'no-such-gate' })).toBe('gated');
     expect(advisoryRefusal({ ...ask, originGateId: 'no-such-gate' })).toBe('gated');
+    expect(advisoryRefusal({ ...ask, namedGateId: '', originGateId: 'no-such-gate' })).toBe(
+      'gated',
+    );
     expect(advisoryRefusal({ ...ask, policyAllows: new PolicyRegistry().advisoryQuestions })).toBe(
       'policy-disallowed',
     );

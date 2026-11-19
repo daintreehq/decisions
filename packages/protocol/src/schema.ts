@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CRYPTO_SUITE, CRYPTO_VERSION, PROTOCOL_VERSION } from './version.js';
 import { LIMITS } from './limits.js';
 import { utf8ByteLength } from './encoding.js';
+import { ApiError } from './errors.js';
 
 /* ---------- primitives ---------- */
 
@@ -441,20 +442,37 @@ export const DecisionContentV1 = z.object({
   /**
    * An advisory question's plan (section 21): what the agent intends to do if no answer commits by the deadline,
    * in the agent's words. A plan, never an action taken or an answer. Bound to the question and its first round by
-   * the signed `envelope_digest` and the AAD. A missing, blank or oversize one is dropped rather than failing the
-   * question, so a reader that cannot explain the plan still shows the deadline; the asking host never signs one.
+   * the signed `envelope_digest` and the AAD. A blank or oversize one fails the content, and an advisory question
+   * without one is refused by `advisoryContentIssue`: a reader never shows an advisory question whose plan it
+   * dropped.
    */
-  planned_fallback: PlannedFallback.optional().catch(undefined),
+  planned_fallback: PlannedFallback.optional(),
 });
 export type DecisionContentV1 = z.infer<typeof DecisionContentV1>;
 
-/** What a reader can show of an advisory round: its signed deadline and, when the content holds a valid one, the plan. */
+/**
+ * Why a verified advisory question's decrypted content cannot stand, or null (section 21): an approval is never
+ * advisory, whoever signed it, and an advisory question states its plan. A reader treats either as malformed content
+ * and never offers the question, so it is never shown as optional, nor with a plan it dropped. Null for a blocking
+ * question, which may carry anything in `planned_fallback` without meaning.
+ */
+export function advisoryContentIssue(
+  question: { envelope: Pick<CryptoEnvelope, 'aad'> },
+  content: Pick<DecisionContentV1, 'kind' | 'planned_fallback'>,
+): 'approval' | 'no-plan' | null {
+  if (replyModeOf(question.envelope) !== 'advisory') return null;
+  if (content.kind === 'approval') return 'approval';
+  if (content.planned_fallback === undefined) return 'no-plan';
+  return null;
+}
+
+/** What a reader can show of an advisory round: its signed deadline and, when it could decrypt the content, the plan. */
 export interface AdvisoryPlan {
   /** The signed `expires_at` of the advisory round. */
   deadline: string;
   /**
-   * The agent's plan, or null when this reader cannot explain it (none, or one the content parse dropped). A reader
-   * then shows the deadline and says the agent may proceed after it, without naming what it will do.
+   * The agent's plan, or null when this reader could not decrypt the content (no key for its epoch). It then shows the
+   * deadline and says the agent may proceed after it, without naming what it will do.
    */
   fallback: string | null;
 }
@@ -462,16 +480,20 @@ export interface AdvisoryPlan {
 /**
  * The advisory plan a reader shows for a verified question at `revision`, or null when there is none to show: a
  * blocking question, or a round after the first (a reopen always waits). `content` is the decrypted, parsed content,
- * or null when it could not be read. A plan is never an action taken, and showing it never answers anything.
+ * or null when the reader could not decrypt it. Content that `advisoryContentIssue` refuses throws
+ * `validation_error`: such a question is malformed, never shown. A plan is never an action taken, and showing it
+ * never answers anything.
  */
 export function advisoryPlanOf(
   question: { record: Pick<QuestionRecord, 'expires_at'>; envelope: Pick<CryptoEnvelope, 'aad'> },
   revision: number,
-  content: Pick<DecisionContentV1, 'planned_fallback'> | null,
+  content: Pick<DecisionContentV1, 'kind' | 'planned_fallback'> | null,
 ): AdvisoryPlan | null {
   if (replyModeOf(question.envelope) !== 'advisory' || revision !== ADVISORY_ROUND_REVISION)
     return null;
   if (question.record.expires_at === null) return null;
+  const issue = content && advisoryContentIssue(question, content);
+  if (issue) throw new ApiError('validation_error', `advisory question content refused: ${issue}`);
   return { deadline: question.record.expires_at, fallback: content?.planned_fallback ?? null };
 }
 

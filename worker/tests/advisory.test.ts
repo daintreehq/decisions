@@ -3,6 +3,7 @@ import {
   EventData,
   PROTOCOL_VERSION,
   QuestionDetail,
+  advisoryPlanOf,
   applyRoundEvent,
   replyModeOf,
   type RoundState,
@@ -59,6 +60,15 @@ describe('advisory questions (section 21)', () => {
     expect(replyModeOf(detail.question.envelope)).toBe('advisory');
     expect(detail.question.record.expires_at).toBe(a.question.record.expires_at);
     expect(detail.question.envelope).toEqual(a.question.envelope);
+    // The relay keeps the signed deadline as the one it enforces.
+    expect(detail.expires_at).toBe(a.question.record.expires_at);
+    const row = await inRoom((room) =>
+      room.q1<{ expires_at: number | null }>(
+        `SELECT expires_at FROM questions WHERE question_id = ?`,
+        a.questionId,
+      ),
+    );
+    expect(row?.expires_at).toBe(Date.parse(a.question.record.expires_at!));
 
     const created = (await events(phone)).find((e) => e.event_type === 'decision.created');
     const data = EventData.created.parse(created.data);
@@ -131,7 +141,10 @@ describe('advisory questions (section 21)', () => {
     await makeDue(a.questionId);
     const d = await phone.call('GET', `/api/v1/questions/${a.questionId}`);
     expect(d.json).toMatchObject({ status: 'human-answered', revision: 1 });
-    expect((await events(phone)).map((e) => e.event_type)).not.toContain('decision.expired');
+    const mine = (await events(phone)).filter((e) => e.question_id === a.questionId);
+    const answer = mine.find((e) => e.event_type === 'decision.answer.committed');
+    expect(answer?.data).toMatchObject({ deliverable: true, provenance: 'human', revision: 1 });
+    expect(mine.map((e) => e.event_type)).not.toContain('decision.expired');
   });
 
   it('expires the unanswered advisory round at revision 0 with no answer, and refuses a late answer', async () => {
@@ -147,10 +160,13 @@ describe('advisory questions (section 21)', () => {
     const d = await phone.call('GET', `/api/v1/questions/${a.questionId}`);
     expect(d.json).toMatchObject({ status: 'expired', revision: 0 });
     expect(d.json.actions).toEqual([]);
+    expect(d.json.deliveries).toEqual([]);
     const expired = (await events(phone)).filter((e) => e.event_type === 'decision.expired');
     expect(expired).toHaveLength(1);
     expect(expired[0].question_revision).toBe(0);
-    expect(EventData.expired.parse(expired[0].data)).not.toHaveProperty('provenance');
+    // Exactly the relay's own fields: no answer, choice or provenance.
+    expect(Object.keys(expired[0].data).sort()).toEqual(['expired_at', 'target_host_id']);
+    expect(EventData.expired.safeParse(expired[0].data).success).toBe(true);
 
     // The relay agrees with the round table: a late answer meets the deadline and is refused.
     const start: RoundState = {
@@ -161,21 +177,29 @@ describe('advisory questions (section 21)', () => {
       expiresAt: Date.now() - 1,
       advisory: true,
     };
-    const tr = applyRoundEvent(start, {
+    const r = applyRoundEvent(start, {
       type: 'action',
       action: 'answer',
       role: 'phone',
       expectedRevision: 0,
       at: Date.now(),
     });
-    expect(tr).toMatchObject({ outcome: 'advisory-unanswered', fallbackDue: true });
-    expect(tr.refusal?.code).toBe('expired');
-    expect(tr.state).toMatchObject({ status: d.json.status, revision: d.json.revision });
+    expect(r.expired).toMatchObject({ outcome: 'advisory-unanswered', fallbackDue: true });
+    expect(r.error?.code).toBe(late.res.json.code);
+    expect(r.state).toMatchObject({ status: d.json.status, revision: d.json.revision });
 
-    // A late dismissal finds the round closed.
-    expect((await act(w, phone, 'cancel', a.questionId, 0, { content: null })).res.status).toBe(
-      409,
-    );
+    // A late dismissal finds the round closed, as the table says.
+    const dismiss = await act(w, phone, 'cancel', a.questionId, 0, { content: null });
+    expect(dismiss.res.status).toBe(409);
+    expect(
+      applyRoundEvent(r.state, {
+        type: 'action',
+        action: 'cancel',
+        role: 'phone',
+        expectedRevision: 0,
+        at: Date.now(),
+      }).error?.code,
+    ).toBe(dismiss.res.json.code);
   });
 
   it('a reopen opens a blocking round at revision 1', async () => {
@@ -188,6 +212,13 @@ describe('advisory questions (section 21)', () => {
       expiresAt: soon(60 * 60_000),
     });
     expect(re.res.json).toMatchObject({ revision: 1, status: 'open' });
+    // The new round runs to the reopen's signed deadline, and shows nothing advisory.
+    const reopened = QuestionDetail.parse(
+      (await phone.call('GET', `/api/v1/questions/${a.questionId}`)).json,
+    );
+    expect(reopened.expires_at).toBe(re.signed.record.expires_at);
+    expect(advisoryPlanOf(reopened.question, reopened.revision, null)).toBeNull();
+    expect(advisoryPlanOf(reopened.question, 0, null)).not.toBeNull();
     // An answer signed for the first round conflicts with the new one.
     const stale = await act(w, phone, 'answer', a.questionId, 0, {
       content: { selected_option_ids: ['sqlite'] },
@@ -205,13 +236,14 @@ describe('advisory questions (section 21)', () => {
     const a = await askAdvisory(w);
     const b = await ask(w);
     const page = (after: number) =>
-      phone
-        .call('GET', '/api/v1/events', undefined, `after=${after}&limit=100`)
-        .then((r) => r.json);
+      phone.call('GET', '/api/v1/events', undefined, `after=${after}&limit=1`).then((r) => r.json);
     const desk = await legacyDesktopCatchUp(page);
     const tel = await legacyPhoneCatchUp(page);
     for (const run of [desk, tel]) {
-      expect(run.events.filter((e) => e.event_type === 'decision.created')).toHaveLength(2);
+      const creates = run.events.filter((e) => e.event_type === 'decision.created');
+      expect(creates.map((e) => e.question_id)).toEqual([a.questionId, b.questionId]);
+      expect(run.pages).toBeGreaterThan(1);
+      expect(run.cursor).toBe(Math.max(...run.events.map((e) => e.seq)));
     }
     const byId = new Map(desk.events.map((e) => [e.question_id, e]));
     expect(Legacy080Question.CreatedEventData.safeParse(byId.get(a.questionId)!.data).success).toBe(
@@ -223,6 +255,7 @@ describe('advisory questions (section 21)', () => {
   });
 
   it('advertises the extension', async () => {
-    expect((await raw('GET', '/api/v1/info')).json.features).toContain('advisory-deadlines-v1');
+    const features = (await raw('GET', '/api/v1/info')).json.features as string[];
+    expect(features.filter((f) => f === 'advisory-deadlines-v1')).toHaveLength(1);
   });
 });

@@ -977,14 +977,17 @@ anything, and a step that needs approval is never asked this way.
   (section 6).
 - **No gate.** `workflow_gate_id_hash` is null.
 - **Plan.** `DecisionContentV1.planned_fallback`, the agent's plan in its own words: at most
-  `LIMITS.plannedFallbackChars` (1,000) characters, not blank, inside the encrypted content. It is bound to the question
+  `LIMITS.plannedFallbackChars` (1,000 UTF-16 code units, as JavaScript counts a string), not blank, inside the
+  encrypted content. A plan that breaks either rule fails the content. It is bound to the question
   and its first round because the ciphertext's AAD names the question id, revision 0 and sender, and the envelope digest
   is signed into the record beside the deadline. The relay never sees it, and no hash of it is published, since a
   short plan could be guessed from one.
 
 Every reader of a signed question (`SignedQuestion`, `EventData.created`, `QuestionDetail`) refuses an advisory
 question with a null deadline or a gate hash, and the mode on any other envelope (another record type, revision or
-purpose). The relay answers `400 validation_error`. A client treats such a question as malformed.
+purpose). The relay answers `400 validation_error`. A client treats such a question as malformed. Once it decrypts the
+content, a reader also refuses an advisory question that is an approval or states no plan (`advisoryContentIssue`),
+whoever signed it, and treats it as malformed: it is never shown as optional, nor with a plan it could not read.
 
 **Rounds.** The advisory round is the one the create opens, at revision 0 (`ADVISORY_ROUND_REVISION`,
 `isAdvisoryRound`). A reopen (owner desktop, revision r+1, with its own signed `expires_at`) opens a **blocking**
@@ -994,6 +997,16 @@ round: it carries no plan, and its expiry authorises nothing. A new advisory ask
 Every comparison uses the relay's commit time: `now >= D` is due, so an answer committed at exactly `D` is late. A
 committed answer stays timely however late a desktop receives it, and a reader replaying history never re-judges it
 by its own clock.
+
+The order is the relay's. The route's role check comes first, and a refusal there commits nothing. Then a due deadline
+commits (`RoundResult.expired`), because the relay sweeps due questions before it decides. Then the event applies to
+the round as it now stands (`transition`, or `error`). A relay that finds the deadline passed inside the submission's
+own transaction (it fell between the sweep and the decision) commits the expiry and answers `410 expired` whatever the
+action. The round is expired either way, and the submitter re-reads it. The table covers what the relay decides from
+the round alone. Before any of it, the relay also refuses a `confirm-proxy` that does not name the latest proxy answer
+(`400`), a person's action or message the publishing desktop has not declared it accepts
+(`409 creator-missing-feature`, section 19), phone images that do not bind (section 17), and a reopen past the
+open-question quota (`429`).
 
 | Input                                       | Authority                                                        | From                         | Revision           | Result                                                                                                             |
 | ------------------------------------------- | ---------------------------------------------------------------- | ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
@@ -1005,22 +1018,26 @@ by its own clock.
 | Deletion (`DELETE /questions/{id}`)         | the owner desktop, authenticated and unsigned                    | any                          | none               | gone, with a `decision.deleted` tombstone; every later command is `404 not_found`                                  |
 | Competing proxy answer                      | a desktop's model (`proxy-ok`, `proxy-first`)                    | `open`, committed before `D` | CAS `r` → `r+1`    | `proxy-answered`; the deadline no longer applies, and the person confirms or overrides it as usual, after `D` too  |
 | Proxy abstains                              | a desktop's model                                                | `open`                       | CAS `r`, stays `r` | still `open`; the deadline stays armed                                                                             |
-| Follow-up message, either side (section 16) | the person, or the publishing desktop                            | `open` or answered           | none               | nothing changes: never an answer, and the deadline still applies                                                   |
+| Follow-up message, either side (section 16) | the person, or the publishing desktop                            | `open` or answered           | none               | nothing changes: never an answer, and the round's deadline stands as it was                                        |
 
 Cancellation and expiry keep the revision, so revision equality alone never shows that a round is open.
 
 **A late phone submission** observes, and then re-reads the question (`GET /questions/{id}`) to show how it closed,
-never re-signing the old submission for a newer round:
+never re-signing the old submission for a newer round. A fresh submission, by the question's current state:
 
-- an answer at or after `D` on an unanswered round: `410 expired`. The relay commits the expiry in the same
-  transaction, or already had;
-- an answer after another answer committed: `409 revision_conflict` with the latest revision and status;
-- an answer signed for the advisory round after a reopen: `409 revision_conflict`;
-- an answer after a decline or withdrawal: `409 invalid_state`;
-- anything after deletion: `404 not_found`;
-- a dismissal after `D`: `409 invalid_state`, or `410 expired` when its own transaction expired the round;
-- a message after `D`: `410 expired`;
-- a retry of a command that already committed (the same action id or idempotency key): its original receipt.
+- unanswered and past `D` (the round expires first): an answer `410 expired`, a dismissal `409 invalid_state`, a
+  message `410 expired`. Any of them may instead get `410 expired` from the race above;
+- answered by a person: another answer `409 revision_conflict` with the latest revision and status, at either revision.
+  A message still posts, after `D` too;
+- answered by a proxy: an answer `409 revision_conflict`; the person confirms or overrides instead, after `D` too;
+- declined or withdrawn: an answer `409 invalid_state`; another cancel at the same revision is a `200` no-op;
+- reopened and open: anything signed for the earlier round `409 revision_conflict`. Once that round expires too, an
+  answer is `410 expired`, whatever revision it names;
+- deleted: `404 not_found` (a role the route refuses is `403 forbidden` first).
+
+A retry is not a fresh submission. The same idempotency key with the same body returns the original receipt, even
+after the question changed or was deleted. The same signed action under a new key returns `200` with the question's
+current status and revision and the original event's seq. `applyRoundEvent` describes fresh submissions only.
 
 **Plan, notice and action** are three separate facts:
 
@@ -1073,20 +1090,26 @@ so a reader that cannot explain it refuses the question rather than showing it a
 - **Strict schema readers**: `schemas.json` closes `EnvelopeAad` and `DecisionContentV1`
   (`additionalProperties: false`). A reader that validates against an older bundle refuses an advisory question's
   envelope, and its content too. The current bundle lists `reply_mode` and `planned_fallback`. `QuestionRecord` is
-  unchanged.
+  unchanged. Like `ActionRecord`'s, the rules that span fields (where the mode may appear, the finite deadline, no gate,
+  the plan's non-blank text) are not in the JSON Schemas: a reader enforces them with this package's schemas.
 - **Desktops 0.8.0 or older** never sign an advisory question, and a host acts only on its own questions. An older
-  owner desktop that lists another host's questions fails to read the advisory one.
+  client refuses the advisory question where it validates the `decision.created` event or the question detail. A
+  `GET /questions` summary carries no envelope, so a client verifies the detail before it offers any action.
 - `@daintreehq/decisions-protocol/fixtures` freezes the 0.8.0 question reader (`Legacy080Question`), and
   `worker/tests/advisory.test.ts` runs it, and the 0.3.0 catch-up loops, against the relay.
 
 **When a phone cannot explain the plan** (`advisoryPlanOf`). A phone that declares the feature shows the deadline and
-the plan. When the content holds no usable plan (missing, blank or too long, which the content parse drops rather than
-failing the question), it shows the deadline and says the agent may proceed after it, without naming what it will do.
-In a round after the first it shows nothing advisory. An older phone cannot read the question at all (above), so the
-person answers on a phone that can.
+the plan. When it cannot decrypt the content (it holds no key for the content's epoch), it still reads the signed
+deadline and mode, and shows the deadline and says the agent may proceed after it, without naming what it will do. A
+decrypted plan that is missing or invalid, or an advisory approval, makes the question malformed rather than shown
+without its plan. In a round after the first it shows nothing advisory. A phone that does not declare the feature,
+whether older or merely without the advisory display, never shows the question as one that waits: it shows one it
+cannot read, so the person answers on a phone that can. The phone app in this repository refuses advisory questions
+this way (`ADVISORY_UNSUPPORTED` in `app/src/domain/verify.ts`) until it shows the deadline and plan.
 
 **Fixtures.** `ADVISORY_QUESTION_FIXTURE` (an advisory question), `BLOCKING_APPROVAL_FIXTURE` (a gated approval that
 always waits) and `ROUND_CASES` (the transition table as event sequences, with what every implementation must
 observe), as unsigned templates and plaintext content that each test encrypts and signs with its own keys.
 `packages/protocol/tests/advisory.test.ts` runs every case through `applyRoundEvent`, and
-`worker/tests/advisory.test.ts` holds the relay to the same table.
+`worker/tests/advisory.test.ts` holds the relay to the table's admission, timely answer, expiry, late answer, late
+dismissal and reopen rows.

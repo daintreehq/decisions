@@ -1,11 +1,14 @@
 import type { ErrorCode } from './errors.js';
 import type {
+  ActionKind,
   DecisionContentV1,
+  EventType,
   HumanAnswerContentV1,
   PhoneImageReference,
   Provenance,
   QuestionStatus,
   Requirement,
+  Role,
 } from './schema.js';
 import type { RoundAuthority, RoundEvent, RoundOutcome, RoundState } from './state.js';
 import type { PaneSnapshotContentV1, SnapshotRefresh, SnapshotSharing } from './snapshot.js';
@@ -431,19 +434,27 @@ export const BLOCKING_APPROVAL_FIXTURE = {
 /** One step of a round case, and what every implementation must observe. */
 export interface RoundCaseStep {
   event: RoundEvent;
-  /** What commits, or null when the event is refused and nothing commits. */
-  outcome: RoundOutcome | null;
   /**
-   * The error the submitter observes: a refusal that commits nothing, or the `expired` of a submission that met a due
-   * deadline (the deadline commits). Null when the event commits.
+   * The outcome of the deadline the relay committed before the event, because the event came at or after an open
+   * round's deadline; absent or null when nothing expired first.
    */
+  expired?: RoundOutcome | null;
+  /** The event's own outcome, or null when it was refused and committed nothing of its own. */
+  outcome: RoundOutcome | null;
+  /** The error the submitter observes, or null when the event committed. */
   error: ErrorCode | null;
-  /** The round after the step; null once the question is deleted. */
-  after: Pick<RoundState, 'status' | 'revision'> | null;
+  /** The round after the step (the listed fields only); null once the question is deleted. */
+  after:
+    | (Pick<RoundState, 'status' | 'revision'> &
+        Partial<Pick<RoundState, 'expiresAt' | 'proxyAbstained' | 'hasHumanAnswer'>>)
+    | null;
+  /** The event's own transition, when it committed. */
   authority?: RoundAuthority;
   provenance?: Provenance | null;
+  deliverable?: boolean;
   fallbackDue?: boolean;
   trainable?: boolean;
+  eventType?: EventType | null;
 }
 
 export interface RoundCase {
@@ -465,37 +476,66 @@ const ADVISORY_ROUND: RoundState = {
   advisory: true,
 };
 const open = (revision = 0) => ({ status: 'open' as QuestionStatus, revision });
-const phoneAnswer = (at: number, expectedRevision = 0): RoundEvent => ({
-  type: 'action',
-  action: 'answer',
-  role: 'phone',
-  expectedRevision,
+const expiredAt = (revision = 0) => ({ status: 'expired' as QuestionStatus, revision });
+const act = (
+  action: ActionKind,
+  role: Role,
+  expectedRevision: number,
+  at: number,
+  extra: { decline?: true; expiresAt?: number | null } = {},
+): RoundEvent => ({ type: 'action', action, role, expectedRevision, at, ...extra });
+const phoneAnswer = (at: number, expectedRevision = 0) =>
+  act('answer', 'phone', expectedRevision, at);
+const deadline = (at: number): RoundEvent => ({ type: 'deadline', at });
+const message = (
+  side: 'human' | 'agent',
+  at: number,
+  o: { role?: Role; signerIsPublisher?: boolean } = {},
+): RoundEvent => ({
+  type: 'message',
+  side,
+  role: o.role ?? (side === 'human' ? 'phone' : 'desktop-host'),
+  signerIsPublisher: o.signerIsPublisher ?? side === 'agent',
+  messageCount: 0,
   at,
 });
-const deadline = (at: number): RoundEvent => ({ type: 'deadline', at });
 const unanswered: RoundCaseStep = {
   event: deadline(D),
   outcome: 'advisory-unanswered',
   error: null,
-  after: { status: 'expired', revision: 0 },
+  after: expiredAt(0),
   authority: 'relay',
   provenance: null,
+  deliverable: false,
   fallbackDue: true,
   trainable: false,
+  eventType: 'decision.expired',
 };
-const settled = (at: number, after: Pick<RoundState, 'status' | 'revision'>): RoundCaseStep => ({
+const settled = (at: number, after: RoundCaseStep['after']): RoundCaseStep => ({
   event: deadline(at),
   outcome: 'unchanged',
   error: null,
   after,
   fallbackDue: false,
+  eventType: null,
+});
+const refused = (
+  event: RoundEvent,
+  error: ErrorCode,
+  after: RoundCaseStep['after'],
+): RoundCaseStep => ({
+  event,
+  outcome: null,
+  error,
+  after,
 });
 
 /**
  * The executable transition table of section 21: each case starts from a round and applies its events in order with
  * `applyRoundEvent`, and every implementation (the relay, the publishing desktop, the phone app, Daintree) must
  * observe exactly the same. Times are relay commit times around the advisory deadline `D`, fifteen minutes after
- * `FIXTURE_NOW`.
+ * `FIXTURE_NOW`. The cases assume what the relay checks before a round event (section 21): the publishing desktop
+ * declared every feature they use, the open-question quota has room, and no phone images are involved.
  */
 export const ROUND_CASES: RoundCase[] = [
   {
@@ -507,11 +547,13 @@ export const ROUND_CASES: RoundCase[] = [
         event: phoneAnswer(D - 1),
         outcome: 'answered',
         error: null,
-        after: { status: 'human-answered', revision: 1 },
+        after: { status: 'human-answered', revision: 1, hasHumanAnswer: true, expiresAt: D },
         authority: 'person',
         provenance: 'human',
+        deliverable: true,
         fallbackDue: false,
         trainable: true,
+        eventType: 'decision.answer.committed',
       },
       settled(D, { status: 'human-answered', revision: 1 }),
     ],
@@ -521,30 +563,22 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'answer',
-          role: 'owner-desktop',
-          expectedRevision: 0,
-          at: T0 + MIN,
-        },
+        event: act('answer', 'owner-desktop', 0, T0 + MIN),
         outcome: 'answered',
         error: null,
         after: { status: 'human-answered', revision: 1 },
         authority: 'person',
         provenance: 'human-desktop',
+        deliverable: true,
         trainable: true,
+        eventType: 'decision.answer.committed',
       },
     ],
   },
   {
     name: 'an unanswered advisory deadline makes the plan due, and nothing else',
     start: ADVISORY_ROUND,
-    steps: [
-      settled(D - 1, open()),
-      unanswered,
-      settled(D + MIN, { status: 'expired', revision: 0 }),
-    ],
+    steps: [settled(D - 1, open()), unanswered, settled(D + MIN, expiredAt(0))],
   },
   {
     name: 'a blocking deadline stays unsatisfied',
@@ -554,11 +588,13 @@ export const ROUND_CASES: RoundCase[] = [
         event: deadline(D),
         outcome: 'expired-unsatisfied',
         error: null,
-        after: { status: 'expired', revision: 0 },
+        after: expiredAt(0),
         authority: 'relay',
         provenance: null,
+        deliverable: false,
         fallbackDue: false,
         trainable: false,
+        eventType: 'decision.expired',
       },
     ],
   },
@@ -567,73 +603,58 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'phone',
-          expectedRevision: 0,
-          at: D - MIN,
-        },
+        event: act('cancel', 'phone', 0, D - MIN),
         outcome: 'declined',
         error: null,
         after: { status: 'cancelled', revision: 0 },
         authority: 'person',
         provenance: null,
+        deliverable: false,
         fallbackDue: false,
         trainable: false,
+        eventType: 'decision.cancelled',
       },
       {
-        // A retry from any device is a no-op: a decline is never relabelled a withdrawal.
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'owner-desktop',
-          expectedRevision: 0,
-          at: D - 1,
-        },
+        // A later cancel at the same revision, here the owner desktop's, stores nothing: a decline is never relabelled.
+        event: act('cancel', 'owner-desktop', 0, D - 1),
         outcome: 'unchanged',
         error: null,
         after: { status: 'cancelled', revision: 0 },
+        eventType: null,
       },
       settled(D, { status: 'cancelled', revision: 0 }),
     ],
   },
   {
-    name: "the owner desktop's signed decline is the person's",
+    name: "the owner desktop's signed decline is the person's, and carries no answer",
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'owner-desktop',
-          expectedRevision: 0,
-          decline: true,
-          at: D - MIN,
-        },
+        event: act('cancel', 'owner-desktop', 0, D - MIN, { decline: true }),
         outcome: 'declined',
         error: null,
         after: { status: 'cancelled', revision: 0 },
         authority: 'person',
+        provenance: null,
+        deliverable: false,
+        eventType: 'decision.cancelled',
       },
     ],
   },
   {
-    name: 'a desktop-host never declines for the person',
+    name: 'only the owner desktop signs the decline flag',
     start: ADVISORY_ROUND,
     steps: [
+      refused(act('cancel', 'desktop-host', 0, D - MIN, { decline: true }), 'forbidden', open()),
+      refused(act('cancel', 'phone', 0, D - MIN, { decline: true }), 'forbidden', open()),
+      refused(act('cancel', 'tablet', 0, D - MIN, { decline: true }), 'forbidden', open()),
       {
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'desktop-host',
-          expectedRevision: 0,
-          decline: true,
-          at: D - MIN,
-        },
-        outcome: null,
-        error: 'forbidden',
-        after: open(),
+        // A tablet declines by its role alone.
+        event: act('cancel', 'tablet', 0, D - MIN),
+        outcome: 'declined',
+        error: null,
+        after: { status: 'cancelled', revision: 0 },
+        authority: 'person',
       },
     ],
   },
@@ -642,55 +663,89 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'desktop-host',
-          expectedRevision: 0,
-          at: D - MIN,
-        },
+        event: act('cancel', 'desktop-host', 0, D - MIN),
         outcome: 'withdrawn',
         error: null,
         after: { status: 'cancelled', revision: 0 },
         authority: 'desktop',
         provenance: null,
         fallbackDue: false,
+        eventType: 'decision.cancelled',
       },
       settled(D, { status: 'cancelled', revision: 0 }),
     ],
   },
   {
-    name: 'a reopen after the advisory deadline opens a blocking round',
+    name: 'a desktop withdraws a proxy answer, and the deadline stays spent',
+    start: { ...ADVISORY_ROUND, requirement: 'proxy-ok' },
+    steps: [
+      {
+        event: act('proxy-answer', 'desktop-host', 0, D - MIN),
+        outcome: 'proxy-answered',
+        error: null,
+        after: { status: 'proxy-answered', revision: 1 },
+      },
+      {
+        event: act('cancel', 'owner-desktop', 1, D - 1),
+        outcome: 'withdrawn',
+        error: null,
+        after: { status: 'cancelled', revision: 1 },
+        authority: 'desktop',
+      },
+      settled(D, { status: 'cancelled', revision: 1 }),
+    ],
+  },
+  {
+    name: 'a reopen after the advisory deadline opens blocking rounds',
     start: ADVISORY_ROUND,
     steps: [
       unanswered,
       {
-        event: {
-          type: 'action',
-          action: 'reopen',
-          role: 'owner-desktop',
-          expectedRevision: 0,
-          expiresAt: D + 60 * MIN,
-          at: D + MIN,
-        },
+        event: act('reopen', 'owner-desktop', 0, D + MIN, { expiresAt: D + 60 * MIN }),
         outcome: 'reopened',
         error: null,
-        after: open(1),
+        after: { ...open(1), expiresAt: D + 60 * MIN },
         authority: 'desktop',
+        eventType: 'decision.reopened',
       },
-      {
-        // An answer signed in the first round names its revision and conflicts with the new one.
-        event: phoneAnswer(D + 2 * MIN, 0),
-        outcome: null,
-        error: 'revision_conflict',
-        after: open(1),
-      },
+      // An answer signed in the first round names its revision and conflicts with the new one.
+      refused(phoneAnswer(D + 2 * MIN, 0), 'revision_conflict', open(1)),
+      settled(D + 60 * MIN - 1, open(1)),
       {
         event: deadline(D + 60 * MIN),
         outcome: 'expired-unsatisfied',
         error: null,
-        after: { status: 'expired', revision: 1 },
+        after: expiredAt(1),
         fallbackDue: false,
+        eventType: 'decision.expired',
+      },
+      // Once that round expired too, any late answer is `expired`, whatever revision it names.
+      refused(phoneAnswer(D + 61 * MIN, 0), 'expired', expiredAt(1)),
+      {
+        event: act('reopen', 'owner-desktop', 1, D + 62 * MIN, { expiresAt: D + 70 * MIN }),
+        outcome: 'reopened',
+        error: null,
+        after: open(2),
+      },
+      {
+        event: deadline(D + 70 * MIN),
+        outcome: 'expired-unsatisfied',
+        error: null,
+        after: expiredAt(2),
+        fallbackDue: false,
+      },
+    ],
+  },
+  {
+    name: 'a reopen sent at the deadline of a round still open expires it first, then reopens',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: act('reopen', 'owner-desktop', 0, D, { expiresAt: D + 60 * MIN }),
+        expired: 'advisory-unanswered',
+        outcome: 'reopened',
+        error: null,
+        after: { ...open(1), expiresAt: D + 60 * MIN },
       },
     ],
   },
@@ -699,30 +754,20 @@ export const ROUND_CASES: RoundCase[] = [
     start: { ...ADVISORY_ROUND, status: 'cancelled' },
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'reopen',
-          role: 'owner-desktop',
-          expectedRevision: 0,
-          at: D + MIN,
-        },
+        event: act('reopen', 'owner-desktop', 0, D + MIN),
         outcome: 'reopened',
         error: null,
-        after: open(1),
+        after: { ...open(1), expiresAt: null },
       },
-      settled(D + 365 * 24 * 60 * MIN, open(1)),
+      settled(D + 365 * 24 * 60 * MIN, { ...open(1), expiresAt: null }),
     ],
   },
   {
-    name: 'deleting the question ends every round, and a late answer finds nothing',
+    name: 'only the owner desktop deletes; after that every command finds nothing',
     start: ADVISORY_ROUND,
     steps: [
-      {
-        event: { type: 'delete', role: 'phone' },
-        outcome: null,
-        error: 'forbidden',
-        after: open(),
-      },
+      refused({ type: 'delete', role: 'phone' }, 'forbidden', open()),
+      refused({ type: 'delete', role: 'desktop-host' }, 'forbidden', open()),
       {
         event: { type: 'delete', role: 'owner-desktop' },
         outcome: 'deleted',
@@ -730,53 +775,82 @@ export const ROUND_CASES: RoundCase[] = [
         after: null,
         authority: 'desktop',
         fallbackDue: false,
+        eventType: 'decision.deleted',
       },
-      { event: phoneAnswer(D - 1), outcome: null, error: 'not_found', after: null },
+      refused(phoneAnswer(D - 1), 'not_found', null),
+      refused({ type: 'delete', role: 'owner-desktop' }, 'not_found', null),
+      // The route refuses the role before it looks the question up.
+      refused({ type: 'delete', role: 'phone' }, 'forbidden', null),
+      // The relay's expiry check finds nothing to expire.
+      settled(D, null),
     ],
   },
   {
     name: 'a competing proxy answer wins over the deadline, and is never ground truth',
     start: { ...ADVISORY_ROUND, requirement: 'proxy-ok' },
     steps: [
+      // The route admits only desktops to a proxy answer, before anything else.
+      refused(act('proxy-answer', 'phone', 0, D - 1), 'forbidden', open()),
       {
-        event: {
-          type: 'action',
-          action: 'proxy-answer',
-          role: 'desktop-host',
-          expectedRevision: 0,
-          at: D - 1,
-        },
+        event: act('proxy-answer', 'desktop-host', 0, D - 1),
         outcome: 'proxy-answered',
         error: null,
         after: { status: 'proxy-answered', revision: 1 },
         authority: 'proxy',
         provenance: 'proxy',
+        deliverable: true,
         fallbackDue: false,
         trainable: false,
+        eventType: 'decision.proxy.committed',
       },
       settled(D, { status: 'proxy-answered', revision: 1 }),
+      // The person's answer after it conflicts; they override the proxy instead, even after the deadline.
+      refused(phoneAnswer(D + MIN, 1), 'revision_conflict', {
+        status: 'proxy-answered',
+        revision: 1,
+      }),
       {
-        // The person's answer after it conflicts; they override the proxy instead, even after the deadline.
-        event: phoneAnswer(D + MIN, 1),
-        outcome: null,
-        error: 'revision_conflict',
+        event: act('override', 'phone', 1, D + MIN),
+        outcome: 'overridden',
+        error: null,
+        after: { status: 'human-answered', revision: 2, hasHumanAnswer: true },
+        authority: 'person',
+        provenance: 'human',
+        deliverable: true,
+        trainable: true,
+        eventType: 'decision.answer.overridden',
+      },
+    ],
+  },
+  {
+    name: 'the person confirms a proxy answer: not delivered again, and never ground truth',
+    start: { ...ADVISORY_ROUND, requirement: 'proxy-first' },
+    steps: [
+      {
+        event: act('proxy-answer', 'owner-desktop', 0, T0 + MIN),
+        outcome: 'proxy-answered',
+        error: null,
         after: { status: 'proxy-answered', revision: 1 },
       },
       {
-        event: {
-          type: 'action',
-          action: 'override',
-          role: 'phone',
-          expectedRevision: 1,
-          at: D + MIN,
-        },
-        outcome: 'overridden',
+        event: act('confirm-proxy', 'phone', 1, D + MIN),
+        outcome: 'proxy-confirmed',
         error: null,
         after: { status: 'human-answered', revision: 2 },
         authority: 'person',
         provenance: 'human',
-        trainable: true,
+        deliverable: false,
+        trainable: false,
+        eventType: 'decision.proxy.confirmed',
       },
+    ],
+  },
+  {
+    name: 'a proxy never answers a human-required round',
+    start: ADVISORY_ROUND,
+    steps: [
+      refused(act('proxy-answer', 'desktop-host', 0, D - 1), 'forbidden', open()),
+      unanswered,
     ],
   },
   {
@@ -784,18 +858,13 @@ export const ROUND_CASES: RoundCase[] = [
     start: { ...ADVISORY_ROUND, requirement: 'proxy-first' },
     steps: [
       {
-        event: {
-          type: 'action',
-          action: 'proxy-abstain',
-          role: 'desktop-host',
-          expectedRevision: 0,
-          at: T0 + MIN,
-        },
+        event: act('proxy-abstain', 'desktop-host', 0, T0 + MIN),
         outcome: 'proxy-abstained',
         error: null,
-        after: open(),
+        after: { ...open(), proxyAbstained: true },
         authority: 'proxy',
         provenance: null,
+        eventType: 'decision.proxy.abstained',
       },
       unanswered,
     ],
@@ -805,30 +874,20 @@ export const ROUND_CASES: RoundCase[] = [
     start: ADVISORY_ROUND,
     steps: [
       {
-        event: {
-          type: 'message',
-          side: 'human',
-          role: 'phone',
-          signerIsPublisher: false,
-          messageCount: 0,
-          at: D - 2 * MIN,
-        },
+        event: message('human', D - 2 * MIN),
         outcome: 'message',
         error: null,
         after: open(),
         authority: 'person',
         provenance: null,
+        deliverable: false,
         trainable: false,
+        eventType: 'decision.message.posted',
       },
+      // Only the desktop that published the question speaks for its agent.
+      refused(message('agent', D - MIN, { signerIsPublisher: false }), 'forbidden', open()),
       {
-        event: {
-          type: 'message',
-          side: 'agent',
-          role: 'desktop-host',
-          signerIsPublisher: true,
-          messageCount: 1,
-          at: D - MIN,
-        },
+        event: message('agent', D - MIN),
         outcome: 'message',
         error: null,
         after: open(),
@@ -838,56 +897,82 @@ export const ROUND_CASES: RoundCase[] = [
     ],
   },
   {
-    name: 'a late phone answer meets the deadline: the round expires and the answer is refused',
+    name: 'a follow-up after the deadline still posts on an answered round',
     start: ADVISORY_ROUND,
     steps: [
       {
-        // At D exactly the round is due: the relay commits the expiry and refuses the answer in one transaction.
-        event: phoneAnswer(D),
-        outcome: 'advisory-unanswered',
-        error: 'expired',
-        after: { status: 'expired', revision: 0 },
-        authority: 'relay',
-        provenance: null,
-        fallbackDue: true,
-        trainable: false,
+        event: phoneAnswer(D - 1),
+        outcome: 'answered',
+        error: null,
+        after: { status: 'human-answered', revision: 1 },
       },
       {
-        event: phoneAnswer(D + MIN),
-        outcome: null,
-        error: 'expired',
-        after: { status: 'expired', revision: 0 },
-      },
-      {
-        // A dismissal sent once the round expired finds it closed.
-        event: {
-          type: 'action',
-          action: 'cancel',
-          role: 'phone',
-          expectedRevision: 0,
-          at: D + MIN,
-        },
-        outcome: null,
-        error: 'invalid_state',
-        after: { status: 'expired', revision: 0 },
-      },
-      {
-        event: {
-          type: 'message',
-          side: 'human',
-          role: 'phone',
-          signerIsPublisher: false,
-          messageCount: 0,
-          at: D + MIN,
-        },
-        outcome: null,
-        error: 'expired',
-        after: { status: 'expired', revision: 0 },
+        event: message('human', D + MIN),
+        outcome: 'message',
+        error: null,
+        after: { status: 'human-answered', revision: 1 },
       },
     ],
   },
   {
-    name: 'a second answer conflicts with the first',
+    name: 'a late phone answer meets the deadline: the round expires and the answer is refused',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        // At D exactly the round is due: the relay commits the expiry, then refuses the answer.
+        event: phoneAnswer(D),
+        expired: 'advisory-unanswered',
+        outcome: null,
+        error: 'expired',
+        after: expiredAt(0),
+      },
+      refused(phoneAnswer(D + MIN), 'expired', expiredAt(0)),
+      // A dismissal sent once the round expired finds it closed.
+      refused(act('cancel', 'phone', 0, D + MIN), 'invalid_state', expiredAt(0)),
+      refused(message('human', D + MIN), 'expired', expiredAt(0)),
+    ],
+  },
+  {
+    name: 'a dismissal at the deadline finds the round expired',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: act('cancel', 'phone', 0, D),
+        expired: 'advisory-unanswered',
+        outcome: null,
+        error: 'invalid_state',
+        after: expiredAt(0),
+      },
+    ],
+  },
+  {
+    name: 'a follow-up at the deadline finds the round expired',
+    start: ADVISORY_ROUND,
+    steps: [
+      {
+        event: message('human', D),
+        expired: 'advisory-unanswered',
+        outcome: null,
+        error: 'expired',
+        after: expiredAt(0),
+      },
+    ],
+  },
+  {
+    name: 'a proxy answer at the deadline is too late',
+    start: { ...ADVISORY_ROUND, requirement: 'proxy-ok' },
+    steps: [
+      {
+        event: act('proxy-answer', 'desktop-host', 0, D),
+        expired: 'advisory-unanswered',
+        outcome: null,
+        error: 'revision_conflict',
+        after: expiredAt(0),
+      },
+    ],
+  },
+  {
+    name: 'a second answer conflicts with the first, at either revision',
     start: ADVISORY_ROUND,
     steps: [
       {
@@ -896,18 +981,14 @@ export const ROUND_CASES: RoundCase[] = [
         error: null,
         after: { status: 'human-answered', revision: 1 },
       },
-      {
-        event: {
-          type: 'action',
-          action: 'answer',
-          role: 'tablet',
-          expectedRevision: 0,
-          at: D - MIN,
-        },
-        outcome: null,
-        error: 'revision_conflict',
-        after: { status: 'human-answered', revision: 1 },
-      },
+      refused(act('answer', 'tablet', 0, D - MIN), 'revision_conflict', {
+        status: 'human-answered',
+        revision: 1,
+      }),
+      refused(act('answer', 'tablet', 1, D - MIN), 'revision_conflict', {
+        status: 'human-answered',
+        revision: 1,
+      }),
     ],
   },
 ];

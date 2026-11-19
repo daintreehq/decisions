@@ -90,7 +90,10 @@ export const LIMITS = {
   preparationSummaryChars: 2_000,
 
   /* ---- advisory questions (section 21) ---- */
-  /** An advisory question's plan (`DecisionContentV1.planned_fallback`), in characters. */
+  /**
+   * An advisory question's plan (`DecisionContentV1.planned_fallback`), in UTF-16 code units as JavaScript counts a
+   * string's length. A JSON Schema validator counts code points, so check a plan with this package before signing it.
+   */
   plannedFallbackChars: 1_000,
 
   /* ---- presence (section 11) ---- */

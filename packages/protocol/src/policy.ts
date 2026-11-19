@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PlannedFallback, type QuestionKind, type Requirement } from './schema.js';
+import { IsoTime, PlannedFallback, type QuestionKind, type Requirement } from './schema.js';
 
 const STRICTNESS: Record<Requirement, number> = {
   'human-required': 3,
@@ -50,7 +50,7 @@ export function proxyMayAnswer(level: Requirement): boolean {
  * - `gated`: the question names a workflow gate, from its origin or from the agent, registered or not: a gated
  *   question always waits for a decision;
  * - `approval`: an approval always waits for a decision;
- * - `no-deadline`: the deadline is not finite;
+ * - `no-deadline`: the deadline is not a finite, well-formed signed time;
  * - `invalid-plan`: the plan is missing, blank or longer than `LIMITS.plannedFallbackChars`.
  */
 export const AdvisoryRefusal = z.enum([
@@ -93,11 +93,15 @@ export function advisoryRefusal(i: {
   if (i.hostSupport !== true) return 'host-unsupported';
   if (i.policyAllows !== true) return 'policy-disallowed';
   if (i.readerSupport !== true) return 'no-capable-reader';
-  // Any id at all, even one no gate is registered under: the resolver reads an unknown id as no policy, and an
-  // advisory question must never be how a gate's question stops waiting.
-  if ((i.originGateId ?? '') !== '' || (i.namedGateId ?? '') !== '') return 'gated';
+  // Any id at all, even an empty one or one no gate is registered under: the resolver reads an unknown id as no
+  // policy, and an advisory question must never be how a gate's question stops waiting.
+  if (
+    (i.originGateId !== null && i.originGateId !== undefined) ||
+    (i.namedGateId !== null && i.namedGateId !== undefined)
+  )
+    return 'gated';
   if (i.kind === 'approval') return 'approval';
-  if (i.expiresAt === null) return 'no-deadline';
+  if (!IsoTime.safeParse(i.expiresAt).success) return 'no-deadline';
   if (!PlannedFallback.safeParse(i.plannedFallback).success) return 'invalid-plan';
   return null;
 }

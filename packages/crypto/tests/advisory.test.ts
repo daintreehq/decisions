@@ -62,6 +62,18 @@ describe('the advisory question signature (protocol section 21)', () => {
     expect(await verifyRecordAndEnvelope(q.record, q.envelope, pub)).toBe(true);
     const content = DecisionContentV1.parse(await decryptEnvelope(q.envelope, keys));
     expect(content.planned_fallback).toBe(ADVISORY_QUESTION_FIXTURE.content.planned_fallback);
+    // What travels in the clear holds neither the plan nor its field name.
+    const wire = JSON.stringify(q);
+    expect(wire).not.toContain(ADVISORY_QUESTION_FIXTURE.content.planned_fallback);
+    expect(wire).not.toContain('planned_fallback');
+  });
+
+  it('marks nothing unless asked: a question without a reply mode is blocking', async () => {
+    const { q, pub, keys } = await sign(BLOCKING_APPROVAL_FIXTURE);
+    expect('reply_mode' in q.envelope.aad).toBe(false);
+    expect(replyModeOf(q.envelope)).toBe('blocking');
+    expect(await verifyRecordAndEnvelope(q.record, q.envelope, pub)).toBe(true);
+    expect(DecisionContentV1.parse(await decryptEnvelope(q.envelope, keys)).kind).toBe('approval');
   });
 
   it('a relay can neither drop the mode, move it to another round, nor change the deadline', async () => {
@@ -72,6 +84,7 @@ describe('the advisory question signature (protocol section 21)', () => {
     await expect(decryptEnvelope(stripped, keys)).rejects.toThrow(/decryption failed/);
     const moved: CryptoEnvelope = { ...q.envelope, aad: { ...q.envelope.aad, revision: 1 } };
     expect(await verifyRecordAndEnvelope(q.record, moved, pub)).toBe(false);
+    await expect(decryptEnvelope(moved, keys)).rejects.toThrow(/decryption failed/);
     const later = {
       ...q.record,
       expires_at: new Date(Date.parse(q.record.expires_at!) + 60_000).toISOString(),
@@ -81,7 +94,7 @@ describe('the advisory question signature (protocol section 21)', () => {
 
   it('a relay cannot make a blocking question advisory', async () => {
     const { q, pub, keys } = await sign(BLOCKING_APPROVAL_FIXTURE);
-    expect('reply_mode' in q.envelope.aad).toBe(false);
+    expect(await verifyRecordAndEnvelope(q.record, q.envelope, pub)).toBe(true);
     const marked: CryptoEnvelope = {
       ...q.envelope,
       aad: { ...q.envelope.aad, reply_mode: 'advisory' },

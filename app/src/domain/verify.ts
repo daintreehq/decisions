@@ -12,6 +12,7 @@ import {
   imagesMatchRecord,
   messageEnvelopeIssues,
   provenanceForSigner,
+  replyModeOf,
   roleMaySign,
   type ActionRecord,
   type MessageRecord,
@@ -33,6 +34,13 @@ export type Verified<T> = { ok: true; value: T } | { ok: false; reason: string }
  * tampering, so the app tells it apart from every other failure.
  */
 export const NO_EPOCH_KEY = 'this phone holds no epoch key for this question';
+
+/**
+ * A genuine advisory question (docs/protocol.md section 21), which this app cannot show yet: it would read as one
+ * that waits for a decision, while its agent may go ahead at the deadline. It does not declare
+ * `advisory-deadlines-v1`, so a host asks one only when another of the person's devices can show it.
+ */
+export const ADVISORY_UNSUPPORTED = 'this app cannot show an advisory question yet';
 
 export interface VerifyCtx {
   installationId: string;
@@ -83,6 +91,9 @@ export async function verifyQuestionEvent(
     envelope.purpose !== 'question-content'
   )
     return fail('envelope binding mismatch');
+  // An advisory question (docs/protocol.md section 21) may go ahead without the person at its deadline. This app does
+  // not show the deadline and plan yet, so it must not show the question as one that waits: it stays unreadable here.
+  if (replyModeOf(envelope) === 'advisory') return fail(ADVISORY_UNSUPPORTED);
   if (!ctx.epochKeys.has(envelope.key_epoch)) return fail(NO_EPOCH_KEY);
   let plain: unknown;
   try {
