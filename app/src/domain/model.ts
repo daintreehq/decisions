@@ -533,6 +533,10 @@ export class QuestionStore {
           v.integrityIssues.push('expiry reported for a question with no deadline (ignored)');
         else if (Date.parse(ev.occurred_at) < due || Date.parse(p.data.expired_at) < due)
           v.integrityIssues.push('expiry reported before the signed deadline (ignored)');
+        // A question this device can't read keeps only its signed deadline: once an action it couldn't apply (an
+        // answer, a dismissal, a reopen) is recorded, the round may already have ended, so no expiry is its outcome.
+        else if (!v.verification.ok && v.actions.some((a) => a.action !== 'proxy-abstain'))
+          v.integrityIssues.push('expiry reported for a round this device cannot follow (ignored)');
         else {
           // Kept per round, so a reopened question still shows how its earlier round ended.
           v.expiries.push({

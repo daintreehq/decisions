@@ -224,6 +224,20 @@ describe('the deadline fixtures as this phone reads them', () => {
     });
     expect(effectiveStatus(v, adv.asked)).toBe('unverified');
     expect(deadlinePhase(v, adv.asked)).toBe('before');
+    // An answer it can't apply may have ended the round: a later expiry is no outcome here.
+    const other = await deadlineScenario(w, 'advisory');
+    await s.ingestAll([
+      ...other.events,
+      await actionEvent(w, { questionId: other.questionId, action: 'answer' }),
+      expiredEvent(other.questionId, other.deadline!),
+    ]);
+    expect(s.get(other.questionId)).toMatchObject({ status: 'open', expiries: [] });
+    expect(s.get(other.questionId)!.integrityIssues.at(-1)).toBe(
+      'expiry reported for a round this device cannot follow (ignored)',
+    );
+    // With only an abstention recorded, the relay's expiry of the advisory round stands.
+    await s.ingest(expiredEvent(adv.questionId, adv.deadline!));
+    expect(s.get(adv.questionId)!.expiries).toMatchObject([{ advisory: true }]);
     keys = true;
     await s.rebuild(events);
     const r = s.get(adv.questionId)!;
