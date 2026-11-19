@@ -82,10 +82,14 @@ describe('expires_in: a relative reply window', () => {
     expect(parseExpiresIn('2h')).toBe(2 * 3_600_000);
     expect(parseExpiresIn('7d')).toBe(7 * DAY);
     expect(parseExpiresIn('365d')).toBe(365 * DAY);
+    expect(parseExpiresIn('8760h')).toBe(365 * DAY);
+    expect(parseExpiresIn('31536000s')).toBe(365 * DAY);
     for (const bad of [
       '60s',
       '1m',
       '366d',
+      '8761h',
+      '31536001s',
       '0m',
       '015m',
       '1.5h',
@@ -125,6 +129,10 @@ describe('expires_in: a relative reply window', () => {
     const e = await env({ policy });
     const fromOrigin = await e.ask({ expires_in: '15m' }, { workflow_gate_id: 'review' });
     expect(fromOrigin.expiresAt).toBe(at(5 * MIN));
+    await e.bridge.pump();
+    expect(e.relay.questions.get(fromOrigin.questionId)!.signed.record.expires_at).toBe(
+      at(5 * MIN),
+    );
     expect(fromOrigin.adjustments).toEqual([
       {
         field: 'expires_at',
@@ -196,6 +204,7 @@ describe('expires_in: a relative reply window', () => {
     await expect(e.ask({ expires_at: at(MIN) })).rejects.toMatchObject({
       message: 'expires_at must be at least one minute in the future',
     });
+    expect(await e.ask({})).toMatchObject({ expiresAt: at(7 * DAY), requestedExpiresAt: null });
   });
 });
 
@@ -247,6 +256,7 @@ describe('planned_fallback: asking for advice', () => {
       e.identity.epochs,
     );
     expect('planned_fallback' in content).toBe(false);
+    expect(signed.record.expires_at).toBe(at(15 * MIN));
     expect((await e.bridge.getDecision(r.questionId)).replyMode).toBe('blocking');
   });
 
@@ -290,7 +300,7 @@ describe('planned_fallback: asking for advice', () => {
     expect(e.relay.questions.size).toBe(0);
   });
 
-  it('refuses advice on a host that did not opt in, or whose policy does not allow it, without reading the relay', async () => {
+  it('refuses advice on a host that did not opt in, or whose policy does not allow it, without reading the device directory', async () => {
     for (const [o, code, reason] of [
       [
         { policy: new PolicyRegistry({ advisoryQuestions: true }) },
@@ -390,15 +400,107 @@ describe('planned_fallback: asking for advice', () => {
     e.relay.features = ['thread-messages-v1', ADVISORY];
     e.relay.deviceFeatures.set(e.phone.deviceId, [ADVISORY]);
     let release!: () => void;
-    e.relay.holdDevices = new Promise<void>((r) => (release = r));
+    // Held before anything is learned, so only the discarded read could teach the bridge that advice is supported.
+    e.relay.holdInfo = new Promise<void>((r) => (release = r));
     const pumping = e.bridge.pump();
     await new Promise((r) => setTimeout(r, 10));
     await e.bridge.stop();
     release();
     await pumping;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(e.relay.calls.some((c) => c.path === '/api/v1/devices')).toBe(false);
     await expect(e.ask({ expires_in: '15m', planned_fallback: PLAN })).rejects.toMatchObject({
       message: expect.stringMatching(/^support-unknown: /),
     });
+  });
+
+  it('a slow read never holds back a question asked meanwhile', async () => {
+    const e = await env({ advisory: true });
+    e.relay.features = ['thread-messages-v1', ADVISORY];
+    e.relay.deviceFeatures.set(e.phone.deviceId, [ADVISORY]);
+    let release!: () => void;
+    e.relay.holdDevices = new Promise<void>((r) => (release = r));
+    const pumping = e.bridge.pump();
+    await new Promise((r) => setTimeout(r, 10));
+    const r = await e.ask({ expires_in: '15m' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(e.relay.questions.has(r.questionId)).toBe(true);
+    release();
+    await pumping;
+  });
+
+  it('a failed read is retried after 15 seconds, not on every ask', async () => {
+    const e = await env({ advisory: true });
+    e.relay.features = ['thread-messages-v1', ADVISORY];
+    e.relay.deviceFeatures.set(e.phone.deviceId, [ADVISORY]);
+    e.relay.failInfo = 1;
+    const infos = () => e.relay.calls.filter((c) => c.path === '/api/v1/info').length;
+    await e.bridge.pump();
+    const after = infos();
+    e.setNow(T0 + 5_000);
+    await expect(e.ask({ expires_in: '15m', planned_fallback: PLAN })).rejects.toMatchObject({
+      message: expect.stringMatching(/^support-unknown: /),
+    });
+    await e.bridge.pump();
+    expect(infos()).toBe(after);
+    e.setNow(T0 + 16_000);
+    await e.bridge.pump();
+    expect(infos()).toBe(after + 1);
+    expect((await e.ask({ expires_in: '15m', planned_fallback: PLAN })).replyMode).toBe('advisory');
+  });
+
+  it('a device list whose features are not a list declares nothing', async () => {
+    const e = await env({ advisory: true });
+    e.relay.features = ['thread-messages-v1', ADVISORY];
+    e.relay.deviceFeatures.set(e.phone.deviceId, `no-${ADVISORY}` as unknown as string[]);
+    await e.bridge.pump();
+    await expect(e.ask({ expires_in: '15m', planned_fallback: PLAN })).rejects.toMatchObject({
+      message: expect.stringMatching(/^no-capable-reader: /),
+    });
+  });
+
+  it('a change of policy while the images are read is caught before anything is signed', async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const spooled = new Set<string>();
+    const policy = new PolicyRegistry({ advisoryQuestions: true });
+    const e = await setupBridge({
+      policy,
+      now: () => T0,
+      advisoryDeadlines: true,
+      resolver: {
+        resolve: async () => {
+          await held;
+          return { bytes: png };
+        },
+      },
+      spool: {
+        put: async (id) => void spooled.add(id),
+        get: async () => null,
+        delete: async (id) => void spooled.delete(id),
+      },
+    });
+    e.relay.features = ['thread-messages-v1', ADVISORY];
+    e.relay.deviceFeatures.set(e.phone.deviceId, [ADVISORY]);
+    await e.bridge.pump();
+    const asking = e.bridge.registerQuestion({
+      origin: origin(),
+      input: {
+        question: 'Which layout?',
+        expires_in: '15m',
+        planned_fallback: PLAN,
+        attachments: [{ local_resource_id: 'a.png' }, { local_resource_id: 'b.png' }],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    policy.advisoryQuestions = false;
+    release();
+    await expect(asking).rejects.toMatchObject({
+      message: expect.stringMatching(/^policy-disallowed: /),
+    });
+    expect(spooled.size).toBe(0);
+    expect(await e.store.listQuestions()).toHaveLength(0);
   });
 });
 
@@ -457,6 +559,10 @@ describe('correlation_id: retries and collisions', () => {
     // Withdrawn as they go, so the pane stays under its open-question limit; a closed question still counts.
     await e.bridge.cancelQuestion(first.questionId);
     for (const change of changes) {
+      // Back to the base request first, so each change differs from the question it is compared with in one field.
+      const b = await e.askQueued(base);
+      if (b.questionId !== first.questionId) await e.bridge.cancelQuestion(b.questionId);
+      seen.add(b.questionId);
       const r = await e.askQueued({ ...base, ...change });
       expect(r.duplicate, JSON.stringify(change)).toBe(false);
       expect(seen.has(r.questionId), JSON.stringify(change)).toBe(false);
@@ -465,7 +571,7 @@ describe('correlation_id: retries and collisions', () => {
       expect((await e.askQueued({ ...base, ...change })).questionId).toBe(r.questionId);
       await e.bridge.cancelQuestion(r.questionId);
     }
-    // And the original request, asked again, is a new question too: the id moved on from it.
+    // And the base request, asked again, is a new question too: the id moved on from it.
     const back = await e.askQueued(base);
     expect(seen.has(back.questionId)).toBe(false);
   });
@@ -557,24 +663,37 @@ describe('correlation_id: retries and collisions', () => {
     await s2.close();
   });
 
-  it('a process that stopped between the commit and moving the id finds the committed question', async () => {
+  it('a commit that fails leaves the id on the question before it', async () => {
     const e = await env();
-    const first = await e.ask({ question: 'A', correlation_id: 'c1' });
-    const key = [...(e.store as unknown as { meta: Map<string, string> }).meta.keys()].find((k) =>
-      k.startsWith('corr:'),
-    )!;
-    const second = await e.ask({ question: 'B', correlation_id: 'c1' });
-    // As if the process had stopped right after committing B: the id still names A, with B staged.
-    await e.store.setMeta(key, JSON.stringify({ q: first.questionId, p: second.questionId }));
-    expect(await e.ask({ question: 'B', correlation_id: 'c1' })).toMatchObject({
+    const first = await e.askQueued({ question: 'A', correlation_id: 'c1' });
+    const commit = e.store.commitNewQuestion.bind(e.store);
+    e.store.commitNewQuestion = async () => {
+      throw new Error('disk full');
+    };
+    await expect(e.askQueued({ question: 'B', correlation_id: 'c1' })).rejects.toThrow('disk full');
+    e.store.commitNewQuestion = commit;
+    expect(await e.askQueued({ question: 'A', correlation_id: 'c1' })).toMatchObject({
+      questionId: first.questionId,
+      duplicate: true,
+    });
+  });
+
+  it('a process that stops after the commit, before the id moves, finds the committed question', async () => {
+    const e = await env();
+    await e.askQueued({ question: 'A', correlation_id: 'c1' });
+    const setMeta = e.store.setMeta.bind(e.store);
+    // The last write, which moves the id on, never lands.
+    e.store.setMeta = async (key, value) => {
+      if (key.startsWith('corr:') && !value.includes('"p"')) throw new Error('process stopped');
+      return setMeta(key, value);
+    };
+    const second = await e.askQueued({ question: 'B', correlation_id: 'c1' });
+    e.store.setMeta = setMeta;
+    expect(await e.askQueued({ question: 'B', correlation_id: 'c1' })).toMatchObject({
       questionId: second.questionId,
       duplicate: true,
     });
-    // Staged but never committed: the id still names the committed question.
-    await e.store.setMeta(key, JSON.stringify({ q: second.questionId, p: 'never-committed' }));
-    expect((await e.ask({ question: 'B', correlation_id: 'c1' })).questionId).toBe(
-      second.questionId,
-    );
+    expect(await e.store.listQuestions()).toHaveLength(2);
   });
 
   it('a question asked before this change, without a registration, is asked afresh once', async () => {
@@ -592,14 +711,54 @@ describe('correlation_id: retries and collisions', () => {
     );
   });
 
-  it('an advisory retry that now names a gate is not the advisory question', async () => {
+  it('an advisory retry under a gate, named or bound since, registered or not, is not the advisory question', async () => {
     const e = await advisoryEnv();
     const input = { expires_in: '15m', planned_fallback: PLAN, correlation_id: 'c1' };
     const first = await e.ask(input);
     await expect(e.ask({ ...input, workflow_gate_id: 'unknown' })).rejects.toMatchObject({
       message: expect.stringMatching(/^gated: /),
     });
+    // The host binding a gate the policy does not know leaves the pane's scope and the governing gate as they were.
+    await expect(e.ask(input, { workflow_gate_id: 'unregistered' })).rejects.toMatchObject({
+      message: expect.stringMatching(/^gated: /),
+    });
     expect((await e.ask(input)).questionId).toBe(first.questionId);
+  });
+
+  it('names the gate that changed the level or the kind, not merely one that was there', async () => {
+    const policy = new PolicyRegistry({ proxyAllowlisted: true });
+    policy.register(
+      gate('lenient', {
+        minRequirement: 'proxy-ok',
+        choices: [
+          { id: 'a', label: 'A' },
+          { id: 'b', label: 'B' },
+        ],
+        allowText: true,
+      }),
+    );
+    policy.register(gate('strict', { allowText: false }));
+    const e = await env({ policy });
+    const r = await e.ask(
+      { requested_requirement: 'proxy-ok', kind: 'mixed', workflow_gate_id: 'strict' },
+      { workflow_gate_id: 'lenient' },
+    );
+    expect(r.requirement).toBe('human-required');
+    expect(r.adjustments.filter((a) => a.field !== 'expires_at')).toEqual([
+      {
+        field: 'requirement',
+        requested: 'proxy-ok',
+        effective: 'human-required',
+        source: 'gate',
+        gateId: 'strict',
+      },
+      { field: 'kind', requested: 'mixed', effective: 'choice', source: 'gate', gateId: 'strict' },
+    ]);
+    // A text question under the lenient gate's choices is given them, and may still be answered in words.
+    const text = await e.ask({ kind: 'text' }, { workflow_gate_id: 'lenient' });
+    expect(text.adjustments.filter((a) => a.field === 'kind')).toEqual([
+      { field: 'kind', requested: 'text', effective: 'mixed', source: 'gate', gateId: 'lenient' },
+    ]);
   });
 });
 
@@ -699,8 +858,21 @@ describe('over MCP', () => {
       planned_fallback: PLAN,
       correlation_id: 'fixture-choice',
     });
-    expect(again.structuredContent).toMatchObject({ question_id: id, duplicate: true });
+    expect(again.structuredContent).toMatchObject({
+      question_id: id,
+      duplicate: true,
+      expires_at: at(15 * MIN),
+      reply_mode: 'advisory',
+    });
     expect(again.content[0].text).toMatch(/^Already asked as q-1: /);
+    expect(again.content[0].text).toContain(
+      `It was asked for advice, with a deadline of ${at(15 * MIN)} (UTC) and the plan in planned_fallback.`,
+    );
+    expect(again.content[0].text).toContain(
+      `call get_decision with question_id ${id} to see where it stands`,
+    );
+    // Nothing forward-looking: what happened since is get_decision's to say.
+    expect(again.content[0].text).not.toContain('a notice arrives');
   });
 
   it('a capped approval: the receipt says blocking, names the gate and what it changed', async () => {
@@ -762,6 +934,73 @@ describe('over MCP', () => {
     const both = await call('ask_human', { question: 'q', expires_in: '15m', expires_at: at(DAY) });
     expect(both.content[0].text).toBe(
       'validation_error: expires_in: supply only one of expires_at and expires_in',
+    );
+  });
+
+  it('a host forwarding an older receipt still gets a result, with no deadline invented', async () => {
+    const e = await env();
+    const auth = new TokenMapAuthenticator();
+    auth.register(TOKEN, origin());
+    running = await startDecisionsMcpServer({
+      authenticator: auth,
+      bridge: {
+        registerQuestion: async (a) => {
+          const r = await e.bridge.registerQuestion(a);
+          return {
+            questionId: r.questionId,
+            alias: r.alias,
+            requirement: r.requirement,
+            status: r.status,
+            duplicate: r.duplicate,
+          } as unknown as Awaited<ReturnType<typeof e.bridge.registerQuestion>>;
+        },
+        getDecision: (...a) => e.bridge.getDecision(...a),
+        cancelQuestion: (...a) => e.bridge.cancelQuestion(...a),
+        postMessage: (...a) => e.bridge.postMessage(...a),
+        getInvolvement: () => e.bridge.getInvolvement(),
+      },
+    });
+    const mcp = running;
+    const res = await new Promise<{
+      content: { text: string }[];
+      structuredContent: Record<string, unknown>;
+      isError?: boolean;
+    }>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: mcp.port,
+          path: '/mcp',
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        },
+        (r) => {
+          let b = '';
+          r.on('data', (c) => (b += c));
+          r.on('end', () => resolve(JSON.parse(b).result));
+        },
+      );
+      req.on('error', reject);
+      req.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'ask_human', arguments: { question: 'q' } },
+        }),
+      );
+    });
+    expect(res.isError).toBeUndefined();
+    const id = res.structuredContent.question_id as string;
+    expect(res.structuredContent).toEqual({
+      question_id: id,
+      status: 'queued',
+      duplicate: false,
+      enforced_requirement: 'human-required',
+      instruction: res.content[0].text,
+    });
+    expect(res.content[0].text).toBe(
+      `${askedInstruction(1)} To check on it later, or if you lose track of it, call get_decision with question_id ${id}.`,
     );
   });
 
@@ -880,6 +1119,21 @@ describe('over MCP', () => {
       error_code: null,
     });
     expect(a.content[0].text).toContain('nothing was decided or approved');
+    // Reopened, it is a new round that waits for a decision: the plan no longer applies.
+    await e.relay.plainActionEvent({
+      questionId: advised,
+      signer: desktop,
+      action: 'reopen',
+      expiresAt: at(60 * MIN),
+    });
+    await e.bridge.catchUp();
+    expect((await get(advised)).structuredContent).toMatchObject({
+      status: 'open',
+      revision: 1,
+      expires_at: at(60 * MIN),
+      reply_mode: 'blocking',
+      planned_fallback: null,
+    });
     expect(a.content[0].text).toContain(
       'the plan you stated (planned_fallback) is yours to carry out',
     );

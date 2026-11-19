@@ -10,7 +10,15 @@ const ADVISORY_FEATURE: ProtocolFeature = 'advisory-deadlines-v1';
 export const ADVISORY_SUPPORT_TTL_MS = 5 * 60_000;
 /** How old a read may get before the pump reads again. */
 const REFRESH_AFTER_MS = 60_000;
+/** How soon a read is tried again after one that started (and may have failed). */
+const RETRY_AFTER_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** When something was read: by the host's clock, and by a monotonic one a wall-clock step cannot move back. */
+interface ReadAt {
+  at: number;
+  mono: number;
+}
 
 /** What is known about the remote half of `advisoryRefusal`; null means not known (never read, or too old). */
 export interface AdvisorySupportSnapshot {
@@ -27,10 +35,12 @@ export interface AdvisorySupportSnapshot {
  * so other hosts make no extra requests. A read that fails leaves the facts to age out; nothing is assumed.
  */
 export class AdvisorySupport {
-  private relay: { value: boolean; at: number } | null = null;
+  private relay: ({ value: boolean } & ReadAt) | null = null;
   /** The active phones and tablets that declared the feature, by device id. */
-  private readers: { ids: string[]; at: number } | null = null;
+  private readers: ({ ids: string[] } & ReadAt) | null = null;
   private reading: Promise<void> | null = null;
+  /** When the last read started, so a relay that keeps failing is not read on every ask. */
+  private attempted: number | null = null;
   /** Bumped by `stop`, so a read that started before it never restores what it cleared. */
   private generation = 0;
   /** False once the bridge stopped or was revoked, until it starts again: nothing is read meanwhile. */
@@ -60,19 +70,31 @@ export class AdvisorySupport {
     return { relay, reader: false };
   }
 
-  private fresh<T extends { at: number }>(f: T | null): T | null {
+  /** Within the TTL by both clocks, so neither a clock set back nor one that stood still keeps a read alive. */
+  private fresh<T extends ReadAt>(f: T | null): T | null {
     if (!f) return null;
     const age = this.ctx.now() - f.at;
-    return age >= 0 && age < ADVISORY_SUPPORT_TTL_MS ? f : null;
+    const mono = performance.now() - f.mono;
+    return age >= 0 && age < ADVISORY_SUPPORT_TTL_MS && mono < ADVISORY_SUPPORT_TTL_MS ? f : null;
   }
 
-  /** Read again when wanted and the last read is a minute old or missing. Never throws. */
+  private stamp(): ReadAt {
+    return { at: this.ctx.now(), mono: performance.now() };
+  }
+
+  /**
+   * Read again when wanted and the last read is a minute old or missing, but not within 15 seconds of the last
+   * attempt, so failures are not retried on every ask. Never throws.
+   */
   refreshIfDue(): Promise<void> {
     if (!this.wanted()) return Promise.resolve();
     if (this.reading) return this.reading;
     const now = this.ctx.now();
     const due = (f: { at: number } | null) => !f || now - f.at >= REFRESH_AFTER_MS || now < f.at;
     if (!due(this.relay) && !(this.relay?.value && due(this.readers))) return Promise.resolve();
+    if (this.attempted !== null && now >= this.attempted && now - this.attempted < RETRY_AFTER_MS)
+      return Promise.resolve();
+    this.attempted = now;
     const run = this.generation;
     this.reading = this.read(run)
       .catch(() => undefined)
@@ -93,6 +115,7 @@ export class AdvisorySupport {
     this.relay = null;
     this.readers = null;
     this.reading = null;
+    this.attempted = null;
   }
 
   private async read(run: number): Promise<void> {
@@ -107,7 +130,7 @@ export class AdvisorySupport {
       relay = false;
     }
     if (run !== this.generation) return;
-    this.relay = { value: relay, at: ctx.now() };
+    this.relay = { value: relay, ...this.stamp() };
     if (!relay) {
       this.readers = null;
       return;
@@ -121,10 +144,12 @@ export class AdvisorySupport {
         (d) =>
           (d.cert.role === 'phone' || d.cert.role === 'tablet') &&
           d.revoked_at === null &&
-          (d.features ?? []).includes(ADVISORY_FEATURE),
+          // The directory is not schema-checked here: only a real list naming the feature counts.
+          Array.isArray(d.features) &&
+          d.features.includes(ADVISORY_FEATURE),
       )
       .map((d) => d.device_id);
     if (run !== this.generation) return;
-    this.readers = { ids, at: ctx.now() };
+    this.readers = { ids, ...this.stamp() };
   }
 }

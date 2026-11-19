@@ -200,6 +200,8 @@ type DeadlineRequest =
 interface RegistrationRecord {
   v: 1;
   deadline: DeadlineRequest;
+  /** The origin's gate id as the host bound it, registered or not. */
+  originGateId: string | null;
   namedGateId: string | null;
   requestedRequirement: Requirement | null;
   requestedExpiresAt: string | null;
@@ -469,15 +471,14 @@ export class Publisher {
         'expires_at is too far ahead: the relay accepts at most 366 days, less two minutes for clock skew',
       );
     }
-    if (replyMode === 'advisory') {
-      await this.admitAdvisory({
-        originGateId: origin.workflow_gate_id,
-        namedGateId: input.workflow_gate_id,
-        kind: shape.kind,
-        expiresAt,
-        plannedFallback: input.planned_fallback,
-      });
-    }
+    const advisoryAsk = {
+      originGateId: origin.workflow_gate_id,
+      namedGateId: input.workflow_gate_id,
+      kind: shape.kind,
+      expiresAt,
+      plannedFallback: input.planned_fallback,
+    };
+    if (replyMode === 'advisory') await this.admitAdvisory(advisoryAsk);
     const adjustments = policyAdjustments({
       input,
       requestedExpiresAt,
@@ -542,6 +543,17 @@ export class Publisher {
         ciphertext_bytes: enc.ciphertext.length,
         sha256_ciphertext: enc.sha256Ciphertext,
       });
+    }
+
+    // Reading the images waited on disk: what allowed advice may have changed meanwhile (the policy, a revoked reader,
+    // a stopped bridge), so it is decided again where nothing waits before the signature.
+    if (replyMode === 'advisory' && descriptors.length > 0) {
+      try {
+        await this.admitAdvisory(advisoryAsk);
+      } catch (e) {
+        for (const d of descriptors) await ctx.spool.delete(d.attachment_id).catch(() => undefined);
+        throw e;
+      }
     }
 
     const content: DecisionContentV1 = {
@@ -624,6 +636,7 @@ export class Publisher {
       const reg: RegistrationRecord = {
         v: 1,
         deadline,
+        originGateId: origin.workflow_gate_id ?? null,
         namedGateId: input.workflow_gate_id ?? null,
         requestedRequirement: input.requested_requirement ?? null,
         requestedExpiresAt,
@@ -640,7 +653,9 @@ export class Publisher {
       );
     }
     await ctx.store.commitNewQuestion(row, item);
-    if (corrKey) await ctx.store.setMeta(corrKey, JSON.stringify({ q: questionId }));
+    // The staged id already names this question now that it is committed, so this only tidies the pointer.
+    if (corrKey)
+      await ctx.store.setMeta(corrKey, JSON.stringify({ q: questionId })).catch(() => undefined);
     await ctx.audit.log({
       event: 'question.queued',
       question_id: questionId,
@@ -724,6 +739,8 @@ export class Publisher {
     if (row.origin.workflow_gate_id !== asked.governingId || row.requirement !== asked.requirement)
       return false;
     if (
+      // Raw ids, registered or not: a gate bound since, even one the policy does not know, makes it another question.
+      reg.originGateId !== (origin.workflow_gate_id ?? null) ||
       reg.namedGateId !== (input.workflow_gate_id ?? null) ||
       reg.requestedRequirement !== (input.requested_requirement ?? null) ||
       reg.replyMode !== asked.replyMode ||
@@ -2171,19 +2188,24 @@ function policyAdjustments(a: {
   if (asked && asked !== a.requirement) {
     const [origin, originId] = a.gates[0]!;
     const [, namedId] = a.gates[1]!;
+    // The origin's gate (or the host, with none) raised it if the level was already stricter before the named gate.
     out.push({
       field: 'requirement',
       requested: asked,
       effective: a.requirement,
-      ...(origin ? gate(originId) : a.baseRequirement !== asked ? host : gate(namedId)),
+      ...(a.baseRequirement !== asked ? (origin ? gate(originId) : host) : gate(namedId)),
     });
   }
   const kind = a.input.kind;
   if (kind && kind !== a.shape.kind) {
+    // The rule that set the kind: images bound to the answer make it an approval, a gate that takes no text makes it
+    // a choice, and a gate's choices turn a text question into one with options.
     const by =
-      a.gates.find(([g]) => g?.bindArtifacts) ??
-      a.gates.find(([g]) => g?.choices) ??
-      a.gates.find(([g]) => g && (g.allowText ?? !g.choices) === false);
+      a.shape.kind === 'approval'
+        ? a.gates.find(([g]) => g?.bindArtifacts)
+        : a.shape.kind === 'choice'
+          ? a.gates.find(([g]) => g && (g.allowText ?? !g.choices) === false)
+          : a.gates.find(([g]) => g?.choices);
     out.push({
       field: 'kind',
       requested: kind,

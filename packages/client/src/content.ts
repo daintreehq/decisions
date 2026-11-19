@@ -8,12 +8,7 @@ import {
   utf8ByteLength,
   type DecisionContentV1,
 } from '@daintreehq/decisions-protocol';
-import {
-  QUESTION_EXPIRY_LIMIT_MS,
-  gateAllowsText,
-  questionExpiryPolicy,
-  type WorkflowGate,
-} from './policy.js';
+import { gateAllowsText, questionExpiryPolicy, type WorkflowGate } from './policy.js';
 
 /** Milliseconds in one unit of an `expires_in` duration. */
 const DURATION_UNITS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
@@ -21,17 +16,18 @@ const DURATION = /^([1-9][0-9]{0,8})([smhd])$/;
 
 /** The shortest `expires_in`: more than one minute, as for `expires_at`. */
 export const MIN_EXPIRES_IN_MS = 61_000;
+/** The longest `expires_in`: 365 days, inside the relay's limit (`QUESTION_EXPIRY_LIMIT_MS`). */
+export const MAX_EXPIRES_IN_MS = 365 * DURATION_UNITS.d;
 
 /**
  * An `expires_in` duration in milliseconds: a whole number and one unit, `s`, `m`, `h` or `d` (a day is 24 hours),
- * such as `90s`, `15m`, `2h` or `7d`. Null for anything else, or for a duration outside 61 seconds to
- * `QUESTION_EXPIRY_LIMIT_MS` (366 days, less two minutes).
+ * such as `90s`, `15m`, `2h` or `7d`. Null for anything else, or for a duration outside 61 seconds to 365 days.
  */
 export function parseExpiresIn(v: string): number | null {
   const m = DURATION.exec(v);
   if (!m) return null;
   const ms = Number(m[1]) * DURATION_UNITS[m[2] as keyof typeof DURATION_UNITS];
-  return ms >= MIN_EXPIRES_IN_MS && ms <= QUESTION_EXPIRY_LIMIT_MS ? ms : null;
+  return ms >= MIN_EXPIRES_IN_MS && ms <= MAX_EXPIRES_IN_MS ? ms : null;
 }
 
 /** The `ask_human` input contract (spec 6.2), validated identically for MCP and direct callers. */

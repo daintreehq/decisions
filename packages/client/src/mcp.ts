@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { LIMITS, isAdvisoryRound } from '@daintreehq/decisions-protocol';
+import { LIMITS } from '@daintreehq/decisions-protocol';
 import { BridgeError } from './content.js';
 import { paneIdentityOf, type DecisionView, type DecisionsBridge } from './bridge.js';
 import type { InvolvementView } from './involvement.js';
@@ -193,44 +193,70 @@ function adjustmentText(a: PolicyAdjustment): string {
 }
 
 /**
- * The `ask_human` result text: where the answer arrives, the deadline and mode that apply, what policy changed, and
- * how to find the question again.
+ * What `registerQuestion` returned. A host that forwards it from an older library version may return only the first
+ * fields; the result then says nothing about the deadline rather than guess one.
  */
-export function askedText(r: RegisterResult): string {
+export type AskedReceipt = Pick<
+  RegisterResult,
+  'questionId' | 'alias' | 'requirement' | 'status' | 'duplicate'
+> &
+  Partial<RegisterResult>;
+
+/** The deadline and mode as they apply from now on. */
+function planText(r: RegisterResult): string {
+  if (r.replyMode === 'advisory')
+    return `Asked for advice, due ${r.expiresAt} (UTC). An answer committed before then is typed here as usual. If none is, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`;
+  return r.expiresAt
+    ? `It waits for a decision until ${r.expiresAt} (UTC); unanswered by then, it expires, and expiry authorises nothing.`
+    : 'It has no deadline: it waits for a decision until it is answered, declined or cancelled.';
+}
+
+/** How a repeated question was asked; what happened since is for `get_decision` to say. */
+function askedAsText(r: RegisterResult): string {
+  const deadline = r.expiresAt ? `a deadline of ${r.expiresAt} (UTC)` : 'no deadline';
+  return r.replyMode === 'advisory'
+    ? `It was asked for advice, with ${deadline} and the plan in planned_fallback.`
+    : `It was asked for a decision, with ${deadline}.`;
+}
+
+/**
+ * The `ask_human` result text: where the answer arrives, the deadline and mode that apply, what policy changed, and
+ * how to find the question again. A repeated question is described as it was asked, and pointed at `get_decision`.
+ */
+export function askedText(r: AskedReceipt): string {
   const q = `q-${r.alias}`;
-  const lead = r.duplicate
-    ? `Already asked as ${q}: this correlation_id and request match it, so this is that question with its original deadline. It may have been answered or closed since; check with get_decision.`
-    : askedInstruction(r.alias);
-  const plan =
-    r.replyMode === 'advisory'
-      ? `Asked for advice, due ${r.expiresAt} (UTC). An answer that arrives by then is typed here as usual. If none does, a notice arrives here that the deadline passed unanswered; the plan you gave in planned_fallback is then yours to carry out, at your discretion. The deadline decides and approves nothing.`
-      : r.expiresAt
-        ? `It waits for a decision until ${r.expiresAt} (UTC); unanswered by then, it expires, and expiry authorises nothing.`
-        : 'It has no deadline: it waits for a decision until it is answered, declined or cancelled.';
-  const policy = r.adjustments.length
-    ? ` Policy: ${r.adjustments.map(adjustmentText).join('; ')}.`
+  const recover = `call get_decision with question_id ${r.questionId}`;
+  const full = r.expiresAt !== undefined ? (r as RegisterResult) : null;
+  const policy = full?.adjustments.length
+    ? ` Policy: ${full.adjustments.map(adjustmentText).join('; ')}.`
     : '';
-  return `${lead} ${plan}${policy} To check on it later, or if you lose track of it, call get_decision with question_id ${r.questionId}.`;
+  if (r.duplicate)
+    return `Already asked as ${q}: this correlation_id and request match it, so this is that question, not a new one.${full ? ` ${askedAsText(full)}` : ''}${policy} It may have been answered, closed or reopened since: ${recover} to see where it stands before you act on it.`;
+  return `${askedInstruction(r.alias)}${full ? ` ${planText(full)}` : ''}${policy} To check on it later, or if you lose track of it, ${recover}.`;
 }
 
 /** The `ask_human` structured result: the question and the plan that applies to it, in the MCP surface's snake_case. */
-function askedResult(r: RegisterResult, instruction: string) {
+function askedResult(r: AskedReceipt, instruction: string) {
   return {
     question_id: r.questionId,
     status: r.status,
     duplicate: r.duplicate,
     enforced_requirement: r.requirement,
-    reply_mode: r.replyMode,
-    expires_at: r.expiresAt,
-    requested_expires_at: r.requestedExpiresAt,
-    planned_fallback: r.plannedFallback,
-    policy_adjustments: r.adjustments.map((a) => ({
-      field: a.field,
-      requested: a.requested,
-      effective: a.effective,
-      source: a.source,
-      gate_id: a.gateId,
-    })),
+    ...(r.expiresAt !== undefined
+      ? {
+          reply_mode: r.replyMode ?? 'blocking',
+          expires_at: r.expiresAt,
+          requested_expires_at: r.requestedExpiresAt ?? null,
+          planned_fallback: r.plannedFallback ?? null,
+          policy_adjustments: (r.adjustments ?? []).map((a) => ({
+            field: a.field,
+            requested: a.requested,
+            effective: a.effective,
+            source: a.source,
+            gate_id: a.gateId,
+          })),
+        }
+      : {}),
     instruction,
   };
 }
@@ -447,7 +473,7 @@ export const TOOLS = [
           type: 'string',
           enum: ['blocking', 'advisory'],
           description:
-            'advisory: you asked for advice; if no answer arrived by the first deadline (revision 0, status expired), the plan you stated is yours to carry out. blocking: expiry authorises nothing.',
+            "The current round's mode. advisory: you asked for advice in this round; expired unanswered, the plan you stated (planned_fallback) is yours to carry out. blocking: it waits for a decision, a reopened question included; expiry authorises nothing.",
         },
         planned_fallback: { type: ['string', 'null'] },
         error_code: {
@@ -759,11 +785,11 @@ export function createDecisionsMcpHandler(
         const summary = v.provenance
           ? `q-${v.alias} is ${v.status}. Answer (${v.answeredOn === 'computer' ? 'human, made on their computer' : v.provenance}): ${v.choice ?? '(no choice)'}${v.text ? ` — ${v.text.slice(0, 500)}` : ''}. reviewed_digests_match: ${v.reviewedDigestsMatch}.`
           : v.status === 'expired'
-            ? isAdvisoryRound({ advisory: v.replyMode === 'advisory', revision: v.revision })
+            ? v.replyMode === 'advisory'
               ? `q-${v.alias}'s deadline passed without an answer: nothing was decided or approved. You asked for advice, so the plan you stated (planned_fallback) is yours to carry out, at your discretion.`
               : `q-${v.alias} expired without an answer; you are not authorised to continue the gated step.`
             : v.status === 'publish-failed'
-              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: the person never saw it, so nothing was decided. Ask again if you still need it.`
+              ? `q-${v.alias} could not be published${v.errorCode ? ` (${v.errorCode})` : ''}: the relay refused it, and nothing was decided. Ask again if you still need it.`
               : v.closedReason === 'declined'
                 ? `q-${v.alias} was declined: the person chose not to answer. Nothing was approved; stop waiting for it and do not continue the gated step.`
                 : `q-${v.alias} is ${v.status}; no answer in force.`;

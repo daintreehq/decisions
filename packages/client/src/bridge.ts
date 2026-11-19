@@ -1,5 +1,6 @@
 import {
   LIMITS,
+  isAdvisoryRound,
   type DecisionContentV1,
   type LedgerEvent,
   type ProtocolFeature,
@@ -282,11 +283,15 @@ export interface DecisionView {
   revision: number;
   expiresAt: string | null;
   /**
-   * `advisory` when the agent asked for advice (protocol section 21): if no answer commits by the first round's
-   * deadline, the plan it stated is its own to carry out. A reopened question (`revision` above 0) always waits.
+   * The current round's mode (protocol section 21): `advisory` while the question is in the round its agent asked for
+   * advice in, so if no answer commits by that round's deadline the plan it stated is its own to carry out. `blocking`
+   * otherwise, a reopened question (`revision` above 0) included: it waits for a decision.
    */
   replyMode: ReplyMode;
-  /** The plan the agent stated when it asked for advice; null for a blocking question, or content this desktop cannot open. */
+  /**
+   * The plan the agent stated, while `replyMode` is `advisory`; null otherwise, or for content this desktop cannot
+   * open.
+   */
   plannedFallback: string | null;
   /** Why the relay refused the question, when it is `publish-failed`; null otherwise. */
   errorCode: string | null;
@@ -1178,7 +1183,12 @@ export class DecisionsBridge {
     const declined = entries.some(
       (e) => e.kind === 'declined' && e.revision === row.question_revision,
     );
-    const replyMode = replyModeOfRow(row);
+    const replyMode: ReplyMode = isAdvisoryRound({
+      advisory: replyModeOfRow(row) === 'advisory',
+      revision: row.question_revision,
+    })
+      ? 'advisory'
+      : 'blocking';
     let plannedFallback: string | null = null;
     if (replyMode === 'advisory') {
       // Opened with the keys already held: reading a decision never asks the relay for one.
@@ -1329,8 +1339,11 @@ export class DecisionsBridge {
     // The relay is refusing this device's signature: every signed request now counts against its limit on failed
     // authentications from this address, so the background work waits for the sync's slow retry to get through.
     if (this.pollMode && this.authRefused) return Promise.resolve();
-    if (this.pumping) return this.pumping;
-    this.pumping = (async () => {
+    // Beside the pump, never inside it: a slow relay must not keep a question asked meanwhile from the next flush. It
+    // reads only on a host that could ask for advice, and never throws.
+    const advisory = this.advisory.refreshIfDue();
+    if (this.pumping) return Promise.all([this.pumping, advisory]).then(() => undefined);
+    const core = (async () => {
       try {
         // A flush that waits behind another, or is still sending when the bridge stops, sends nothing more.
         const flushed = await this.publisher.flush({ proceed: this.running });
@@ -1343,13 +1356,12 @@ export class DecisionsBridge {
         // A polling bridge reads the preference after each successful sync instead, so a relay refusing this device
         // hears from it on the sync's slow schedule, not every pump.
         if (!this.pollMode) this.involvement.retryIfDue();
-        // Last, so a slow relay holds up nothing else; it reads only on a host that could ask for advice.
-        await this.advisory.refreshIfDue();
       } finally {
         this.pumping = null;
       }
     })();
-    return this.pumping;
+    this.pumping = core;
+    return Promise.all([core, advisory]).then(() => undefined);
   }
 
   private async deliverNow(): Promise<void> {
