@@ -1866,9 +1866,15 @@ async function cachedPhone({ OLD, NEW, oldRelay, newRelay, port }) {
     );
 
     // Push: the subscription the old relay stored is kept, declares nothing, and is sent no agent-stopped push.
+    // The released Notifications section reads the relay's rows each time it mounts, so leave it first.
+    const NOTIFICATIONS_LEAD = 'Applies to this device straight away';
     const readSubscriptions = async (when) => {
-      const at = Date.now();
       await goInApp(tab, '/');
+      await tab
+        .getByText(NOTIFICATIONS_LEAD)
+        .first()
+        .waitFor({ state: 'detached', timeout: 20_000 });
+      const at = Date.now();
       await goInApp(tab, '/settings/notifications');
       const r = await seen(
         (e) =>
