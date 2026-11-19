@@ -211,6 +211,10 @@ export class FakeRelay {
   onInvolvementPut: (() => void | Promise<void>) | null = null;
   /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
   holdDevices: Promise<void> | null = null;
+  /** While true, `GET /devices` fails as an unreachable relay would. */
+  devicesFail = false;
+  /** Called once the relay has committed a new question, before its receipt is sent (a slow reply). */
+  onCreated: ((questionId: string) => void | Promise<void>) | null = null;
   /**
    * Whether `PUT /presence` exists; false makes it unknown (404), like a relay from before `presence-v1`. Advertising
    * the feature is `features`' job, so a test can make the two disagree.
@@ -461,6 +465,7 @@ export class FakeRelay {
         event_seq: ev.seq,
       };
       this.receipts.set(b.idempotency_key, receipt);
+      await this.onCreated?.(q.record.question_id);
       if (this.dropCreateReply > 0) {
         this.dropCreateReply--;
         throw new TypeError('connection reset after the relay committed the question');
@@ -583,6 +588,7 @@ export class FakeRelay {
     }
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;
+      if (this.devicesFail) throw new TypeError('fetch failed');
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,
@@ -1049,6 +1055,29 @@ export class FakeRelay {
     });
   }
 
+  /**
+   * The relay expiring a question's round as `expireQuestionNow` does: at `at` (by default the deadline the question
+   * was published with), naming the question's signed host, at the round's revision (by default 0).
+   */
+  expiryEvent(opts: {
+    questionId: string;
+    revision?: number | null;
+    at?: string;
+    occurredAt?: string;
+    targetHostId?: string;
+  }): LedgerEvent {
+    const q = this.questions.get(opts.questionId)!;
+    const at = opts.at ?? q.signed.record.expires_at ?? new Date().toISOString();
+    const ev = this.push(
+      'decision.expired',
+      opts.questionId,
+      opts.revision === undefined ? 0 : opts.revision,
+      { expired_at: at, target_host_id: opts.targetHostId ?? q.signed.record.target_host_id },
+    );
+    ev.occurred_at = opts.occurredAt ?? at;
+    return ev;
+  }
+
   /** A signed envelope-less action (cancel / reopen / proxy-abstain) as the relay would emit it. */
   async plainActionEvent(opts: {
     questionId: string;
@@ -1061,6 +1090,8 @@ export class FakeRelay {
     provenance?: 'human' | 'proxy' | null;
     /** Sign `decline: true` into the record: the owner desktop declining for the person (section 6.1). */
     decline?: true;
+    /** A reopen's signed new deadline (null: never expires). */
+    expiresAt?: string | null;
   }): Promise<LedgerEvent> {
     const o = this.owner;
     const rev = opts.expectedRevision ?? 0;
@@ -1072,6 +1103,7 @@ export class FakeRelay {
       signingKey: opts.signer.keys.signing.privateKey,
       expectedRevision: rev,
       ...(opts.decline ? { decline: true as const } : {}),
+      ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
     });
     const q = this.questions.get(opts.questionId)!;
     const type =

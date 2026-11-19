@@ -155,6 +155,17 @@ const Q_COLS = [
   'attachment_digests',
 ] as const;
 
+function inboundEvent(r: Row): InboundEvent {
+  return {
+    seq: Number(r.seq),
+    event_id: r.event_id as string,
+    event_type: r.event_type as string,
+    json: r.json as string,
+    received_at: Number(r.received_at),
+    processed_at: r.processed_at == null ? null : Number(r.processed_at),
+  };
+}
+
 function toRow(q: QuestionRow): Row {
   return {
     question_id: q.question_id,
@@ -426,14 +437,13 @@ export class SqliteLocalStore implements LocalStore {
     const rows = this.st(
       'SELECT * FROM inbound_events WHERE processed_at IS NULL ORDER BY seq ASC LIMIT ?',
     ).all(limit) as Row[];
-    return rows.map((r): InboundEvent => ({
-      seq: Number(r.seq),
-      event_id: r.event_id as string,
-      event_type: r.event_type as string,
-      json: r.json as string,
-      received_at: Number(r.received_at),
-      processed_at: r.processed_at == null ? null : Number(r.processed_at),
-    }));
+    return rows.map(inboundEvent);
+  }
+  async processedEventsOfType(eventType: string) {
+    const rows = this.st(
+      'SELECT * FROM inbound_events WHERE event_type = ? AND processed_at IS NOT NULL ORDER BY seq ASC',
+    ).all(eventType) as Row[];
+    return rows.map(inboundEvent);
   }
   async getCursor() {
     return Number((await this.getMeta('cursor')) ?? '0');
@@ -506,6 +516,12 @@ export class SqliteLocalStore implements LocalStore {
     return rows.map((r) => this.intentFrom(r));
   }
 
+  async uncertainIntents(questionId: string) {
+    const rows = this.st(
+      `SELECT * FROM injection_intents WHERE question_id = ? AND message_id IS NULL AND state = 'uncertain'`,
+    ).all(questionId) as Row[];
+    return rows.map((r) => this.intentFrom(r));
+  }
   async hasUncertainIntent(questionId: string) {
     const r = this.st(
       `SELECT 1 AS x FROM injection_intents WHERE question_id = ? AND message_id IS NULL AND state = 'uncertain' LIMIT 1`,

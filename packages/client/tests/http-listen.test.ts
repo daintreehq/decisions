@@ -96,12 +96,15 @@ async function ask(env: Env): Promise<string> {
 }
 
 const bridges: DecisionsBridge[] = [];
+/** How far ahead of the wall clock the bridges' own clock runs (an expiry needs its deadline passed there). */
+const clock = { late: 0 };
 afterEach(async () => {
   for (const b of bridges.splice(0)) await b.stop();
+  clock.late = 0;
 });
 
 async function listening(over: { poll?: HttpPollOptions; now?: () => number } = {}) {
-  const env = await setupBridge(over.now ? { now: over.now } : {});
+  const env = await setupBridge({ now: over.now ?? (() => Date.now() + clock.late) });
   const ctl = control(env);
   const seen = syncs(env.bridge);
   bridges.push(env.bridge);
@@ -127,11 +130,12 @@ describe('a socketless bridge that polls over HTTP', () => {
     ],
     [
       'an expiry',
-      async (env, qid) =>
-        env.relay.push('decision.expired', qid, 0, {
-          expired_at: new Date().toISOString(),
-          target_host_id: 'x'.repeat(12),
-        }),
+      async (env, qid) => {
+        // The relay expires a question at its signed deadline, and the bridge believes it only once that has passed.
+        const deadline = (await env.store.getQuestion(qid))!.expires_at!;
+        clock.late = Date.parse(deadline) - Date.now() + 1_000;
+        return env.relay.expiryEvent({ questionId: qid });
+      },
       ['status: expired', 'NOT authorised to continue'],
     ],
   ];

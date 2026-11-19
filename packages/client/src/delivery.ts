@@ -6,7 +6,10 @@ import {
 } from './notice.js';
 import {
   answeredOn,
+  closureInForce,
+  isClosure,
   parseAnswers,
+  supersededClosure,
   serializeAnswers,
   type AnswerContent,
   type AnswerEntry,
@@ -179,6 +182,8 @@ export class DeliveryEngine {
   private running: Promise<DrainResult> | null = null;
   private again = false;
   stopped = false;
+  /** Closure notices being written to a terminal, by question (see `closureWrite`). */
+  private readonly closureWrites = new Map<string, Promise<void>>();
 
   constructor(
     private readonly ctx: BridgeContext,
@@ -213,7 +218,7 @@ export class DeliveryEngine {
 
   private pending(q: QuestionRow): AnswerEntry[] {
     return parseAnswers(q.answers_json)
-      .filter((e) => e.deliver && !e.delivered)
+      .filter((e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, q)))
       .sort((a, b) => a.revision - b.revision);
   }
 
@@ -384,6 +389,9 @@ export class DeliveryEngine {
   ): Promise<{ target: TerminalTarget } | { attention: string }> {
     // Resume restores the agent in its ORIGINAL worktree; anything else would cross a destination boundary.
     if (target.worktreeId !== q.origin.worktree_id) return { attention: 'resume_wrong_worktree' };
+    // And on its original host: the relay keeps naming the host the question was published for, and the inbox
+    // checks the relay's host-bound claims (an expiry, a snapshot refresh) against this origin.
+    if (target.hostId !== q.origin.host_id) return { attention: 'resume_wrong_host' };
     const origin: QuestionOrigin = {
       ...q.origin,
       host_id: target.hostId,
@@ -722,8 +730,13 @@ export class DeliveryEngine {
     }
     // 0b. Every answer and message must still be one to type: fetching images takes time, and a cancellation,
     //     deletion or another delivery may have settled one meanwhile. The check and the intents share the lock
-    //     the inbox applies cancellations and deletions under, so none lands between them.
+    //     the inbox applies cancellations and deletions under, so none lands between them. A closure notice
+    //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink.
+    let written!: () => void;
+    const writing = new Promise<void>((r) => (written = r));
+    const closing = new Set<string>();
     const admitted = await ctx.lock.run(async () => {
+      if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
       const rows = new Map<string, QuestionRow>();
       for (const q of questions) {
         const row = await ctx.store.getQuestion(q.question_id);
@@ -789,17 +802,50 @@ export class DeliveryEngine {
             last_injection_id: i.intentId,
             last_attempt_at: new Date(now).toISOString(),
           });
+          if (isClosure(i.entry)) closing.add(i.q.question_id);
         }
       }
+      for (const id of closing) this.closureWrites.set(id, writing);
       return true;
     });
     if (!admitted) {
+      written();
       // Stale: another pass rebuilds the lane from the store, without what was settled, so the pane's other
       // answers are not left waiting for an unrelated wake-up.
       this.again = true;
       res.deferred++;
       return res;
     }
+    const release = () => {
+      for (const id of closing)
+        if (this.closureWrites.get(id) === writing) this.closureWrites.delete(id);
+      written();
+    };
+    try {
+      return await this.typeChunk(target, chunk, questions, text, res, release);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The terminal write of a closure notice for this question that is under way, if any: it settles once the sink
+   * has answered and the outcome is recorded.
+   */
+  closureWrite(questionId: string): Promise<void> | null {
+    return this.closureWrites.get(questionId) ?? null;
+  }
+
+  /** Steps 2 and 3 of `injectChunk`: type the admitted chunk and record what the sink said. */
+  private async typeChunk(
+    target: TerminalTarget,
+    chunk: Item[],
+    questions: QuestionRow[],
+    text: string,
+    res: DrainResult,
+    recorded: () => void,
+  ): Promise<DrainResult> {
+    const { ctx, o } = this;
     // 2. Type, and take the sink's word only in the shapes the contract allows.
     let result: InjectResult & { code?: string };
     let thrown: unknown = undefined;
@@ -813,21 +859,25 @@ export class DeliveryEngine {
       // Settle first (below), log afterwards: nothing fallible may run between a possible write and the
       // durable record that it may have happened.
       const message = thrown instanceof Error ? thrown.message : String(thrown);
-      const settled = await this.settleChunk(chunk, questions, result, res);
+      const settled = await this.settleChunk(chunk, questions, result, res, recorded);
       await ctx.audit
         .log({ event: 'inject.threw', result: message.slice(0, 80) })
         .catch(() => undefined);
       return settled;
     }
-    return this.settleChunk(chunk, questions, result, res);
+    return this.settleChunk(chunk, questions, result, res, recorded);
   }
 
-  /** Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. */
+  /**
+   * Record what the sink reported. Runs straight after inject(); see `InjectResult` for the meanings. `recorded` is
+   * called once the outcome is stored locally, before anything is reported to the relay.
+   */
   private async settleChunk(
     chunk: Item[],
     questions: QuestionRow[],
     result: InjectResult & { code?: string },
     res: DrainResult,
+    recorded: () => void = () => {},
   ): Promise<DrainResult> {
     const { ctx } = this;
     switch (result.outcome) {
@@ -850,8 +900,9 @@ export class DeliveryEngine {
               result.proof,
             );
           }
-          await this.ack(i.intentId);
         }
+        recorded();
+        for (const i of chunk) await this.ack(i.intentId);
         res.delivered += chunk.length;
         return res;
       case 'ambiguous': {
@@ -929,7 +980,9 @@ export class DeliveryEngine {
       const entries = parseAnswers(row.answers_json).map((e) =>
         e.entry_id === entryId ? { ...e, delivered: true, injection_id: injectionId } : e,
       );
-      const stillPending = entries.some((e) => e.deliver && !e.delivered);
+      const stillPending = entries.some(
+        (e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, row)),
+      );
       await this.ctx.store.settleIntent(injectionId, typed, questionId, {
         answers_json: serializeAnswers(entries),
         delivered_revision: Math.max(row.delivered_revision, revision),
@@ -1282,6 +1335,18 @@ export class DeliveryEngine {
         });
         await this.ack(intent.injection_id);
         reconciled++;
+      } else if (supersededClosure(q, intent.answer_revision)) {
+        // A closure notice of a round a reopen has since replaced: content-free, and no longer to be typed, so
+        // whether it reached the screen holds nothing back. The new round's answers must not wait on it.
+        await ctx.store.updateIntent(intent.injection_id, {
+          state: 'abandoned',
+          updated_at: ctx.now(),
+        });
+        await ctx.audit.log({
+          event: 'delivery.superseded',
+          question_id: q.question_id,
+          result: 'crash_unreconciled',
+        });
       } else {
         await this.attention(q, 'crash_unreconciled', 'delivery-uncertain', intent.injection_id);
         uncertain++;

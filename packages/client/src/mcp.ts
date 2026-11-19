@@ -355,7 +355,16 @@ export const TOOLS = [
         choice: { type: ['string', 'null'] },
         text: { type: 'string' },
         reviewed_digests_match: { type: 'boolean' },
-        expires_at: { type: ['string', 'null'] },
+        revision: {
+          type: 'integer',
+          description:
+            'The revision the question is at. A reopen starts a new round at a higher revision, with its own deadline.',
+        },
+        expires_at: {
+          type: ['string', 'null'],
+          description:
+            "The current round's deadline: the one the question was published with, or the one signed when it was last reopened. Null: no deadline.",
+        },
         thread: {
           type: 'array',
           description:

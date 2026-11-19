@@ -1,4 +1,5 @@
 import type { PhoneImageReference, Role } from '@daintreehq/decisions-protocol';
+import type { QuestionRow } from './types.js';
 
 /**
  * One locally stored answer for a question: delivery bookkeeping in clear, content sealed.
@@ -121,6 +122,34 @@ export function parseAnswers(json: string): AnswerEntry[] {
   }
 }
 export const serializeAnswers = (a: AnswerEntry[]): string => JSON.stringify(a);
+
+/** A content-free notice that closed a round without an answer: an expiry, or the person's decline. */
+export const isClosure = (e: Pick<AnswerEntry, 'kind'>): boolean =>
+  e.kind === 'expired' || e.kind === 'declined';
+
+/**
+ * True while a closure notice still describes its question: it closed the current round, and the question is
+ * still closed that way. A reopen moves the round on, so an earlier round's notice is never typed after it.
+ */
+export function closureInForce(
+  e: Pick<AnswerEntry, 'kind' | 'revision'>,
+  q: Pick<QuestionRow, 'local_status' | 'question_revision'>,
+): boolean {
+  if (e.revision !== q.question_revision) return false;
+  return e.kind === 'expired' ? q.local_status === 'expired' : q.local_status === 'cancelled';
+}
+
+/**
+ * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced: every
+ * entry at that revision, typed or not, is such a notice. An answer at the same revision keeps the intent its own.
+ */
+export function supersededClosure(
+  q: Pick<QuestionRow, 'answers_json' | 'local_status' | 'question_revision'>,
+  revision: number,
+): boolean {
+  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision);
+  return at.length > 0 && at.every((e) => isClosure(e) && !closureInForce(e, q));
+}
 
 /**
  * Where the person gave a human answer: `computer` when the owner desktop signed it (the person's own answer, made

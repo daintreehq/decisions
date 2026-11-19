@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULTS } from '@daintreehq/decisions-protocol';
 import {
   PolicyRegistry,
   fakeResumeAdapter,
@@ -155,6 +156,37 @@ describe('verified answers reach the exact pane', () => {
     });
   });
 
+  it('never resumes onto another host: the relay keeps naming the host the question was asked on', async () => {
+    const target: TerminalTarget = {
+      hostId: 'host-other',
+      paneId: 'pane-9',
+      terminalGeneration: 5,
+      ownershipPrincipal: 'principal-9',
+      agentIncarnation: 'inc-9',
+      worktreeId: 'wt-1',
+      agentSessionId: 'sess-1',
+    };
+    const { bridge, relay, phone, sink, qid, store } = await asked({
+      adapters: [fakeResumeAdapter('claude', target)],
+    });
+    sink.panes.delete('pane-1');
+    sink.addPane('pane-9', {
+      generation: 5,
+      session: 'sess-1',
+      principal: 'principal-9',
+      incarnation: 'inc-9',
+    });
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(0);
+    const row = (await store.getQuestion(qid))!;
+    expect(row).toMatchObject({
+      delivery_status: 'needs-attention',
+      error_code: 'resume_wrong_host',
+    });
+    expect(row.origin.host_id).toBe('host-local');
+  });
+
   it('default resume stubs report unsupported rather than inventing flags', async () => {
     const { claudeResumeAdapter } = await import('../src/index.js');
     expect((await claudeResumeAdapter.probe('h')).supported).toBe(false);
@@ -282,11 +314,10 @@ describe('ordering, expiry, proxy labelling', () => {
   });
 
   it('expiry notice is explicit that the workflow is not authorised, and unsigned events never approve', async () => {
-    const { bridge, relay, sink, qid, store } = await asked();
-    relay.push('decision.expired', qid, 0, {
-      expired_at: new Date().toISOString(),
-      target_host_id: 'x'.repeat(12),
-    });
+    let late = 0;
+    const { bridge, relay, sink, qid, store } = await asked({ now: () => Date.now() + late });
+    late = DEFAULTS.questionExpiryMs;
+    relay.expiryEvent({ questionId: qid });
     await bridge.catchUp();
     expect(sink.typed).toHaveLength(1);
     expect(sink.typed[0]!.text).toContain('NOT authorised to continue');

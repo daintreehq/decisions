@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULTS,
   LIMITS,
   PaneSnapshotBody,
   PaneSnapshotContentV1,
@@ -633,7 +634,8 @@ describe('lifecycle', () => {
 
   it('stops publishing once the question expires', async () => {
     const s = await snapshotBridge();
-    s.relay.push('decision.expired', s.qid, 0, { reason: 'expired' });
+    s.advance(DEFAULTS.questionExpiryMs);
+    s.relay.expiryEvent({ questionId: s.qid });
     await s.bridge.catchUp();
     expect(await s.bridge.publishSnapshot(s.qid, input())).toBe('closed');
     await s.quiet(0);

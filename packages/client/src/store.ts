@@ -42,6 +42,11 @@ export interface LocalStore {
   insertEvent(ev: InboundEvent): Promise<boolean>;
   markEventProcessed(seq: number, at: number): Promise<void>;
   unprocessedEvents(limit: number): Promise<InboundEvent[]>;
+  /**
+   * Every stored event of one type that was already processed, in ledger order: the history the bridge reconciles
+   * rows written by an earlier version from. Optional: without it, nothing is reconciled.
+   */
+  processedEventsOfType?(eventType: string): Promise<InboundEvent[]>;
   /** Highest seq such that every event from 1..seq has been stored, starting from the persisted cursor. */
   advanceCursor(): Promise<number>;
   getCursor(): Promise<number>;
@@ -57,6 +62,11 @@ export interface LocalStore {
    * stay blocked. A follow-up message's uncertain intent blocks only that message, never the answers.
    */
   hasUncertainIntent(questionId: string): Promise<boolean>;
+  /**
+   * The question's answer intents (`message_id` null) left uncertain, which `hasUncertainIntent` counts. Optional:
+   * without it, a reopen releases none of them.
+   */
+  uncertainIntents?(questionId: string): Promise<InjectionIntent[]>;
   /** Update an intent and its question in ONE atomic write (no crash window between them). */
   settleIntent(
     intentId: string,

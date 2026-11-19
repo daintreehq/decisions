@@ -441,6 +441,45 @@ describe('HTTP MCP: ask_human / get_decision / cancel_question', () => {
     expect(r.content[0].text).toContain('the person chose not to answer');
     expect(r.content[0].text).toContain('Nothing was approved');
   });
+  it('get_decision reports the revision and deadline each signed reopen set, down to none at all', async () => {
+    const { mcp, bridge, relay, identity } = await boot();
+    const tools = JSON.parse((await raw(mcp, { body: rpc('tools/list') })).body).result.tools as {
+      name: string;
+      outputSchema: { properties: Record<string, { type: unknown }> };
+    }[];
+    const schema = tools.find((t) => t.name === 'get_decision')!.outputSchema.properties;
+    expect(schema.revision!.type).toBe('integer');
+    expect(schema.expires_at!.type).toEqual(['string', 'null']);
+    const owner = { deviceId: identity.config.deviceId, keys: identity.keys };
+    const ask = await call(mcp, 'ask_human', { question: 'Ship it?' });
+    const id = ask.structuredContent.question_id as string;
+    await bridge.pump();
+    const first = (await call(mcp, 'get_decision', { question_id: id })).structuredContent;
+    expect(first).toMatchObject({ status: 'open', revision: 0 });
+    const later = new Date(Date.parse(first.expires_at as string) + 86_400_000).toISOString();
+    for (const [round, expiresAt] of [
+      [1, later],
+      [2, null],
+    ] as const) {
+      await relay.plainActionEvent({
+        questionId: id,
+        signer: owner,
+        action: 'cancel',
+        expectedRevision: round - 1,
+      });
+      await relay.plainActionEvent({
+        questionId: id,
+        signer: owner,
+        action: 'reopen',
+        expectedRevision: round - 1,
+        expiresAt,
+      });
+      await bridge.catchUp();
+      expect(
+        (await call(mcp, 'get_decision', { question_id: id })).structuredContent,
+      ).toMatchObject({ status: 'open', revision: round, expires_at: expiresAt });
+    }
+  });
   it("get_decision reports the owner desktop's answer as the person's, made on their computer", async () => {
     const { mcp, bridge, relay, phone, identity } = await boot();
     const owner = { deviceId: identity.config.deviceId, keys: identity.keys };

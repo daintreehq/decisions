@@ -240,7 +240,13 @@ Every committed transition appends an immutable `LedgerEvent` with a monotonical
 the Durable Object. Delivery is **at-least-once**; consumers dedupe by `event_id`. Event types added after 0.3.0 are
 sent only to clients that declared the feature they belong to (section 19). Event types and `data` shapes are
 in `api.ts` (`EventData`). Notable: `decision.created` and `decision.*.committed` carry the signed record plus
-ciphertext; `decision.expired` is relay-asserted and unsigned (it never authorises anything).
+ciphertext; `decision.expired` is relay-asserted and unsigned (it never authorises anything). A client believes it only
+for the round in force (`question_revision`), the host the question was signed for (`target_host_id`) and the deadline
+signed for that round (the question's, or its latest reopen's), and only when both `occurred_at` and `expired_at` are
+at or past that deadline; a round reopened with `expires_at: null` never expires. The desktop bridge also refuses one
+older than the question's last applied event, and judges by its own clock when it first stored the claim: more than
+two minutes before the deadline it is refused, closer than that it waits, in ledger order, until the deadline has
+passed locally. The notice it types records the signed deadline as the time the question expired.
 
 `GET /events?after=<seq>&limit=<n>` returns `EventsPage` (`has_more`, `next_after`, `high_water_seq`). A client MUST
 NOT advance its cursor past a partial page and MUST persist events before acknowledging them.

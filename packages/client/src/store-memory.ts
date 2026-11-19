@@ -100,6 +100,12 @@ export class MemoryLocalStore implements LocalStore {
       .slice(0, limit)
       .map(clone);
   }
+  async processedEventsOfType(eventType: string) {
+    return [...this.events.values()]
+      .filter((e) => e.processed_at !== null && e.event_type === eventType)
+      .sort((a, b) => a.seq - b.seq)
+      .map(clone);
+  }
   async getCursor() {
     return Number(this.meta.get('cursor') ?? '0');
   }
@@ -128,6 +134,13 @@ export class MemoryLocalStore implements LocalStore {
   async openIntents() {
     return [...this.intents.values()]
       .filter((i) => i.state === 'intent' || i.state === 'typed')
+      .map(clone);
+  }
+  async uncertainIntents(questionId: string) {
+    return [...this.intents.values()]
+      .filter(
+        (i) => i.question_id === questionId && i.message_id == null && i.state === 'uncertain',
+      )
       .map(clone);
   }
   async hasUncertainIntent(questionId: string) {

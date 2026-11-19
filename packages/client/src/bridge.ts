@@ -500,6 +500,7 @@ export class DecisionsBridge {
         onSnapshotRefresh: (row, refresh) => this.snapshots.refreshRequested(row, refresh),
         onQuestionClosed: (id) => this.snapshots.closedQuestion(id),
         onInvolvementHint: () => this.involvement.hint(),
+        closureWrite: (id) => this.delivery.closureWrite(id),
       },
       { messages: !!o.followUps },
     );
@@ -1337,7 +1338,10 @@ export class DecisionsBridge {
     } catch {
       /* socket closed; the next sync re-sends from the stored cursor */
     }
-    if (await this.inbox.processPending()) await this.deliverNow();
+    // A frame of a replay is applied but not delivered: a later frame of the same replay (a reopen) may replace
+    // what it closed. The pump after the replay's last segment delivers whatever is still in force.
+    const drain = await this.inbox.processPending();
+    if (drain && this.socket.currentState !== 'syncing') await this.deliverNow();
     if (await this.inbox.hasGap()) await this.recoverGap();
   }
 
@@ -1352,7 +1356,7 @@ export class DecisionsBridge {
       /* closed */
     }
     if (!hasMore) await this.pump();
-    else if (await this.inbox.processPending()) await this.deliverNow();
+    else await this.inbox.processPending();
   }
 
   private lastGap = { cursor: -1, at: 0 };
