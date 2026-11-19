@@ -8,6 +8,7 @@ import {
   FileSpool,
   PolicyRegistry,
   RelayClient,
+  RelayError,
   currentEpochKey,
   openQuestionContent,
 } from '../src/index.js';
@@ -186,7 +187,7 @@ describe('a question whose deadline passes before it reaches the relay', () => {
 
     // Back online: the relay expired it, and that is the outcome.
     env.relay.down = 0;
-    env.relay.push('decision.expired', r.questionId, 0, { expired_at: iso(deadline) });
+    env.relay.expiryEvent({ questionId: r.questionId, at: iso(deadline) });
     for (const o of await env.store.dueOutbox(Number.MAX_SAFE_INTEGER, 10))
       await env.store.putOutbox({ ...o, next_attempt_at: 0 });
     await env.bridge.pump();
@@ -258,6 +259,107 @@ describe('a question whose deadline passes before it reaches the relay', () => {
     expect(env.sink.typed).toHaveLength(1);
     expect(env.sink.typed[0]!.text).toContain('choice: a');
     expect(env.sink.typed[0]!.text).not.toContain('expired');
+  });
+});
+
+describe('several senders and the person on one queued create', () => {
+  it('closes the person\'s answer from this computer on a question that never reached the relay, with no network', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    env.relay.down = 1_000; // offline through the deadline: even `/info` cannot be read
+    const deadline = now + 120_000;
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      options: [{ id: 'a', label: 'A' }],
+      expires_at: iso(deadline),
+    });
+    const { answerId } = await env.bridge.publisher.enqueueOwnerAnswer({
+      questionId: r.questionId,
+      expectedRevision: 0,
+      selectedOptionIds: ['a'],
+      reviewedAttachmentDigests: [],
+    });
+    now = deadline;
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      closedReason: 'never-published',
+    });
+    await env.bridge.pump(); // the person's answer takes its turn once the create has gone
+    expect(await env.bridge.publisher.ownerAnswerResult(answerId)).toMatchObject({
+      status: 'closed',
+      reason: 'not-found',
+    });
+    expect(await env.store.outboxFor(r.questionId)).toHaveLength(0);
+  });
+
+  it('never settles a create another sender claimed after this flush read it', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    env.relay.createNow = () => now;
+    const deadline = now + 120_000;
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      options: [{ id: 'a', label: 'A' }],
+      expires_at: iso(deadline),
+    });
+    // Another process (a CLI `ask` beside `listen`) sends it just before the deadline, and its reply is lost.
+    const [item] = await env.store.outboxFor(r.questionId);
+    await env.relay.fetch('https://relay.test/api/v1/questions', {
+      method: 'POST',
+      body: JSON.stringify({ idempotency_key: item!.id, question: (item!.payload as { signed: unknown }).signed }),
+    });
+    now = deadline + 1_000;
+    // This flush read the item unclaimed; the other sender's claim lands before it decides.
+    const due = env.store.dueOutbox.bind(env.store);
+    env.store.dueOutbox = async (...args) => {
+      const items = await due(...args);
+      const live = (await env.store.outboxFor(r.questionId))[0]!;
+      await env.store.putOutbox({
+        ...live,
+        payload: { ...(live.payload as object), maybePublished: true, claim: 'other-sender' },
+      });
+      env.store.dueOutbox = due;
+      return items;
+    };
+    await env.bridge.pump();
+
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'open',
+      publication: 'accepted',
+      closedReason: null,
+    });
+    expect(env.sink.typed).toHaveLength(0);
+  });
+
+  it('keeps another sender\'s claim when this send provably never left the computer', async () => {
+    let now = Date.parse('2026-11-19T10:00:00Z');
+    const env = await setupBridge({ now: () => now });
+    const deadline = now + 120_000;
+    const r = await env.bridge.publisher.register(origin(), {
+      question: 'q?',
+      options: [{ id: 'a', label: 'A' }],
+      expires_at: iso(deadline),
+    });
+    env.client.createQuestion = async () => {
+      // Another process claims and sends it meanwhile; this one could not even connect.
+      const live = (await env.store.outboxFor(r.questionId))[0]!;
+      await env.store.putOutbox({
+        ...live,
+        payload: { ...(live.payload as object), maybePublished: true, claim: 'other-sender' },
+      });
+      throw new RelayError('network_error', 'connect ECONNREFUSED', 0, { notSent: true });
+    };
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      publication: 'possibly-committed',
+    });
+    now = deadline;
+    await env.bridge.pump();
+    expect(await env.bridge.getDecision(r.questionId)).toMatchObject({
+      status: 'queued',
+      publication: 'possibly-committed',
+      closedReason: null,
+    });
   });
 });
 
@@ -370,8 +472,8 @@ describe('a restart during an attachment upload', () => {
     // A crash between spooling an image and committing its question, and one mid-write, leave strays.
     writeFileSync(join(t.spoolDir, 'stray01'), new Uint8Array([1, 2, 3]));
     writeFileSync(join(t.spoolDir, 'stray02.tmp'), new Uint8Array([4]));
-    const hourAgo = new Date(Date.now() - 60 * 60_000);
-    for (const f of readdirSync(t.spoolDir)) utimesSync(join(t.spoolDir, f), hourAgo, hourAgo);
+    const longAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000);
+    for (const f of readdirSync(t.spoolDir)) utimesSync(join(t.spoolDir, f), longAgo, longAgo);
     // Another process has just spooled an image for a question it has not committed yet.
     writeFileSync(join(t.spoolDir, 'fresh03'), new Uint8Array([5]));
     await a.store.close();
