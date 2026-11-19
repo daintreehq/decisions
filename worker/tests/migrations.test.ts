@@ -294,9 +294,7 @@ describe('schema migrations', () => {
       return { before, after, again: rows() };
     });
     expect(result.before).toHaveLength(2);
-    expect(result.after.map(({ agent_stopped_capable, ...rest }) => rest)).toEqual(
-      result.before,
-    );
+    expect(result.after.map(({ agent_stopped_capable, ...rest }) => rest)).toEqual(result.before);
     expect(result.after.map((r) => r.agent_stopped_capable)).toEqual([0, 0]);
     expect(result.again).toEqual(result.after);
 
