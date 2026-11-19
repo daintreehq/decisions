@@ -35,6 +35,8 @@ export interface AnswerEntry {
   /**
    * `unpublished` only: the question was advisory (protocol section 21) and the host's policy allowed its stated plan
    * to go ahead at the deadline, so the agent is told it may carry the plan out. Nothing was decided or approved.
+   * Delivery drops it before the notice is typed once the host no longer allows advice (`unpublishedPlanDue`), never
+   * the other way.
    */
   fallback_due?: boolean;
   /**
@@ -88,6 +90,36 @@ export function currentDisposition(
 ): AdvisoryDisposition | undefined {
   if (d === undefined) return undefined;
   return d === 'fallback-due' && !(host.outcomes && host.allowed) ? 'fallback-withheld' : d;
+}
+
+/**
+ * Whether a never-published advisory question's stated plan may still go ahead (`AnswerEntry.fallback_due`), as the
+ * host stands now. Its notice, not yet typed, follows the host as a published advisory expiry does
+ * (`currentDisposition`): only a host that still delivers advisory outcomes and whose policy still allows advice lets
+ * it go ahead. A notice typed, or that may have been (`maybeTyped`), keeps what it said. Never upgraded.
+ */
+export function unpublishedPlanDue(
+  e: Pick<AnswerEntry, 'fallback_due' | 'delivered'>,
+  maybeTyped: boolean,
+  host: { outcomes: boolean; allowed: boolean },
+): boolean {
+  if (e.fallback_due !== true) return false;
+  return e.delivered || maybeTyped || (host.outcomes && host.allowed);
+}
+
+/** An entry whose stated plan is due: an advisory expiry's `fallback-due`, or a never-published `fallback_due`. */
+export const planDue = (e: Pick<AnswerEntry, 'advisory_disposition' | 'fallback_due'>): boolean =>
+  e.advisory_disposition === 'fallback-due' || e.fallback_due === true;
+
+/**
+ * The entry with its stated plan withheld, as delivery records it before typing once the host no longer allows it:
+ * an advisory expiry becomes `fallback-withheld`, a never-published notice loses `fallback_due`.
+ */
+export function withholdPlan(e: AnswerEntry): AnswerEntry {
+  if (e.advisory_disposition === 'fallback-due')
+    return { ...e, advisory_disposition: 'fallback-withheld' };
+  const { fallback_due: _due, ...rest } = e;
+  return rest;
 }
 
 /** The content of an answer. Held in memory only; at rest it is sealed into `AnswerEntry.sealed`. */

@@ -7,13 +7,13 @@ import {
 import {
   answeredOn,
   closureInForce,
-  currentDisposition,
-  type AdvisoryDisposition,
   isAdvisoryNotice,
   isClosure,
   parseAnswers,
+  planDue,
   supersededClosure,
   serializeAnswers,
+  withholdPlan,
   type AnswerContent,
   type AnswerEntry,
 } from './answers.js';
@@ -858,13 +858,11 @@ export class DeliveryEngine {
     //     admitted here is registered as being written, under the same lock, so a reopen waits for the sink. An
     //     advisory notice waits while the ledger may hold a later event for its round, and must still say what the
     //     host allows now: one its policy no longer allows is withheld, recorded here, and the chunk is built again
-    //     from the store.
+    //     from the store. So is a never-published advisory notice's plan (`fallback_due`).
     let written!: () => void;
     const writing = new Promise<void>((r) => (written = r));
     const closing = new Set<string>();
-    const advisoryDue = chunk.some(
-      (i) => i.kind === 'answer' && i.entry.advisory_disposition === 'fallback-due',
-    );
+    const advisoryDue = chunk.some((i) => i.kind === 'answer' && planDue(i.entry));
     const allows = () => this.o.advisoryOutcomes === true && ctx.policy.advisoryQuestions;
     const admitted = await ctx.lock.run(async (): Promise<boolean | 'held'> => {
       if (this.stopped) return false; // stopped while the pane was checked: nothing more is typed
@@ -896,7 +894,7 @@ export class DeliveryEngine {
                 .map((m) => m.message_id)
             : ([] as string[]),
         );
-        const withheld = new Map<string, AdvisoryDisposition>();
+        const withheld = new Set<string>();
         for (const i of chunk) {
           if (i.q.question_id !== q.question_id) continue;
           if (i.kind === 'message') {
@@ -904,17 +902,20 @@ export class DeliveryEngine {
             continue;
           }
           const e = answers.get(i.entry.entry_id);
-          if (!e || e.advisory_disposition !== i.entry.advisory_disposition) return false;
-          const now = currentDisposition(e.advisory_disposition, host);
-          if (now && now !== e.advisory_disposition) withheld.set(e.entry_id, now);
+          if (
+            !e ||
+            e.advisory_disposition !== i.entry.advisory_disposition ||
+            e.fallback_due !== i.entry.fallback_due
+          )
+            return false;
+          // An advisory expiry's plan and a never-published one's alike (`currentDisposition`, `unpublishedPlanDue`).
+          if (planDue(e) && !(host.outcomes && host.allowed)) withheld.add(e.entry_id);
         }
         if (row && withheld.size > 0) {
           await ctx.store.updateQuestion(row.question_id, {
             answers_json: serializeAnswers(
               parseAnswers(row.answers_json).map((e) =>
-                withheld.has(e.entry_id)
-                  ? { ...e, advisory_disposition: withheld.get(e.entry_id)! }
-                  : e,
+                withheld.has(e.entry_id) ? withholdPlan(e) : e,
               ),
             ),
           });
