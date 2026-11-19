@@ -506,7 +506,6 @@ export class DecisionsBridge {
     );
     this.delivery = new DeliveryEngine(this.ctx, {
       sink: o.sink,
-      holdClosures: () => this.replaying,
       ...(o.adapters ? { adapters: o.adapters } : {}),
       ...(o.batch !== undefined ? { batch: o.batch } : {}),
       ...(o.phoneImages ? { phoneImages: o.phoneImages } : {}),
@@ -520,7 +519,6 @@ export class DecisionsBridge {
         onEvent: (ev) => this.onSocketEvent(ev),
         onCaughtUp: (hw, more) => this.onCaughtUp(hw, more),
         onState: (s, d) => {
-          this.replaying = s === 'syncing';
           this.involvement.socketState(s);
           this.listeners.socket.forEach((l) => l(s, d));
         },
@@ -1340,14 +1338,15 @@ export class DecisionsBridge {
     } catch {
       /* socket closed; the next sync re-sends from the stored cursor */
     }
-    if (await this.inbox.processPending()) await this.deliverNow();
+    // A frame of a replay is applied but not delivered: a later frame of the same replay (a reopen) may replace
+    // what it closed. The pump after the replay's last segment delivers whatever is still in force.
+    const drain = await this.inbox.processPending();
+    if (drain && this.socket.currentState !== 'syncing') await this.deliverNow();
     if (await this.inbox.hasGap()) await this.recoverGap();
   }
 
   /** A replay segment finished: everything the relay holds up to `highWater` is now stored. */
   private async onCaughtUp(highWater: number, hasMore: boolean): Promise<void> {
-    // The last segment is in: the closure notices it left in force may now be typed.
-    if (!hasMore) this.replaying = false;
     // Holes left by tombstoned (deleted) questions are legitimate; the relay's replay is authoritative.
     await this.ctx.store.forceCursor(highWater);
     const cursor = await this.ctx.store.getCursor();
@@ -1357,11 +1356,8 @@ export class DecisionsBridge {
       /* closed */
     }
     if (!hasMore) await this.pump();
-    else if (await this.inbox.processPending()) await this.deliverNow();
+    else await this.inbox.processPending();
   }
-
-  /** The socket is replaying missed events: closure notices wait for its last segment (see `holdClosures`). */
-  private replaying = false;
 
   private lastGap = { cursor: -1, at: 0 };
 

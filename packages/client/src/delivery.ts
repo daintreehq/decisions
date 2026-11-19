@@ -60,11 +60,6 @@ export interface DeliveryOptions {
   maxBatchBytes?: number;
   /** Where verified phone images go on the host's disk. Without it, each is listed as unavailable. */
   phoneImages?: PhoneImageStore;
-  /**
-   * True while closure notices must wait: during a replay of missed events, a later one (a reopen) may have
-   * replaced the question's closure already.
-   */
-  holdClosures?: () => boolean;
 }
 
 export interface DrainResult {
@@ -223,12 +218,7 @@ export class DeliveryEngine {
 
   private pending(q: QuestionRow): AnswerEntry[] {
     return parseAnswers(q.answers_json)
-      .filter(
-        (e) =>
-          e.deliver &&
-          !e.delivered &&
-          (!isClosure(e) || (closureInForce(e, q) && !this.o.holdClosures?.())),
-      )
+      .filter((e) => e.deliver && !e.delivered && (!isClosure(e) || closureInForce(e, q)))
       .sort((a, b) => a.revision - b.revision);
   }
 

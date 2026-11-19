@@ -141,13 +141,13 @@ export function closureInForce(
 
 /**
  * True when an answer intent at `revision` can only have been for a closure notice of a round since replaced: every
- * entry at that revision not yet typed is such a notice. An answer at the same revision keeps the intent its own.
+ * entry at that revision, typed or not, is such a notice. An answer at the same revision keeps the intent its own.
  */
 export function supersededClosure(
   q: Pick<QuestionRow, 'answers_json' | 'local_status' | 'question_revision'>,
   revision: number,
 ): boolean {
-  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision && !e.delivered);
+  const at = parseAnswers(q.answers_json).filter((e) => e.revision === revision);
   return at.length > 0 && at.every((e) => isClosure(e) && !closureInForce(e, q));
 }
 

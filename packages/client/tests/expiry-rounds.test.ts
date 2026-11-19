@@ -602,6 +602,28 @@ describe('a superseded closure notice holds nothing back', () => {
     ]);
   });
 
+  it('a reopen still applies when the writes it would release cannot be read', async () => {
+    const e = await asked();
+    e.store.uncertainIntents = async () => {
+      throw new Error('disk unavailable');
+    };
+    e.relay.expiryEvent({ questionId: e.qid });
+    e.at(e.deadline, MIN);
+    await e.bridge.catchUp();
+    await e.relay.plainActionEvent({
+      questionId: e.qid,
+      signer: e.desktop,
+      action: 'reopen',
+      expiresAt: null,
+    });
+    await e.bridge.catchUp();
+    expect(await e.bridge.getDecision(e.qid)).toMatchObject({
+      status: 'open',
+      revision: 1,
+      expiresAt: null,
+    });
+  });
+
   it('an intent at a revision that also holds an answer is never taken for a superseded notice', () => {
     const entry = (kind: 'answer' | 'expired', revision: number) => ({
       entry_id: `${kind}-${revision}`,
@@ -622,6 +644,11 @@ describe('a superseded closure notice holds nothing back', () => {
     const notice = JSON.stringify([entry('expired', 1)]);
     expect(
       supersededClosure({ answers_json: notice, local_status: 'open', question_revision: 2 }, 1),
+    ).toBe(true);
+    // Typed before the reopen, it still names that round's notice and nothing else.
+    const typed = JSON.stringify([{ ...entry('expired', 1), delivered: true }]);
+    expect(
+      supersededClosure({ answers_json: typed, local_status: 'open', question_revision: 2 }, 1),
     ).toBe(true);
     expect(
       supersededClosure({ answers_json: notice, local_status: 'expired', question_revision: 1 }, 1),
@@ -864,14 +891,24 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     expect((await e.row()).expires_at).toBeNull();
   });
 
-  it('while the directory cannot be read, no event is applied against the deadline it would replace', async () => {
-    const e = await legacy(null);
+  it("while the directory cannot be read, only that question's expiry waits for its round to be settled", async () => {
+    let other = '';
+    const e = await legacy(null, async (x) => {
+      other = (
+        await x.bridge.registerQuestion({ origin: origin(), input: { question: 'And this?' } })
+      ).questionId;
+      await x.bridge.pump();
+    });
+    // Another question's expiry, ahead in the ledger, needs nothing from the directory.
+    e.relay.expiryEvent({ questionId: other });
     e.relay.expiryEvent({ questionId: e.qid, revision: 1, at: e.later(e.deadline, MIN) });
     e.at(e.deadline, 2 * MIN);
     e.relay.devicesFail = true;
     await e.again.catchUp();
+    expect((await e.again.getDecision(other)).status).toBe('expired');
     expect((await e.row()).local_status).toBe('open');
     expect((await e.store.listAudit(100)).map((a) => a.event)).toContain('rounds.unreconciled');
+    expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
     e.relay.devicesFail = false;
     await e.again.catchUp();
     expect(await e.again.getDecision(e.qid)).toMatchObject({ status: 'open', expiresAt: null });
@@ -899,10 +936,12 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     const e = await asked();
     await e.reopen(1, null);
     await e.bridge.catchUp();
+    (e.store as unknown as { meta: Map<string, string> }).meta.delete('rounds-reconciled');
     const again = await restart(e);
     const reads = directoryReads(e);
     await again.catchUp();
     expect(directoryReads(e)).toBe(reads);
     expect(await events(e)).not.toContain('round.reconciled');
+    expect(await e.store.getMeta('rounds-reconciled')).not.toBeNull();
   });
 });
