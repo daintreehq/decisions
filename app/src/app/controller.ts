@@ -459,7 +459,7 @@ export class AppController {
     });
     this.involvement.subscribe(() => this.emitInvolvement());
 
-    this.outbox = new Outbox(db, cacheKey, () => this.relay!, this.outboxHooks());
+    this.outbox = new Outbox(db, cacheKey, () => this.relay!, this.outboxHooks(config.deviceId));
     // Whatever the thread reads (a socket event, a catch-up, a backfill) may be what a committed entry waited for.
     this.store.subscribe(() => this.outbox?.reconcile());
     this.drafts = new Drafts(db, cacheKey);
@@ -471,6 +471,8 @@ export class AppController {
     );
     for (const e of this.outbox.list())
       if (e.kind === 'decline' && deleted.has(e.questionId)) await this.outbox.discard(e.id);
+    // A dismissal whose settlement was read before the app closed, but not yet written, settles from the thread now.
+    this.outbox.reconcile();
 
     const sync = (this.sync = new SyncEngine({
       relay: this.relay,
@@ -517,7 +519,7 @@ export class AppController {
   }
 
   /** What the outbox asks of the app: reading a commit back, photo rebuilds, and when an entry has settled. */
-  private outboxHooks(): OutboxHooks {
+  private outboxHooks(deviceId?: string): OutboxHooks {
     return {
       onChange: () => this.patch({}),
       // What the relay just committed is read back before its local copy goes, so an answer or follow-up never blinks
@@ -541,8 +543,9 @@ export class AppController {
       // A decline is settled only by the very cancel this device signed, verified in the thread (a relay answers a
       // cancel another cancel beat with a receipt like a committed one), or by what settled its round instead.
       declineSettlement: (e) => {
-        const deviceId = this.snap.config?.deviceId;
-        return deviceId ? declineSettlement(e, this.store?.get(e.questionId), deviceId) : null;
+        // Known from boot, before the snapshot carries the config.
+        const self = deviceId ?? this.snap.config?.deviceId;
+        return self ? declineSettlement(e, this.store?.get(e.questionId), self) : null;
       },
       onRefused: (e) => {
         if (e.kind !== 'decline') return;

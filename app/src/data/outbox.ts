@@ -590,7 +590,8 @@ export class Outbox {
     for (const e of this.list()) {
       // Let go since this pass began (a decline the thread already holds): never sent, never written back.
       if (this.entries.get(e.id) !== e) continue;
-      if (e.state === 'committed') {
+      // Committed, or a decline refused and not yet settled from the thread: read back (again).
+      if (e.state === 'committed' || (e.kind === 'decline' && !e.outcome && e.state !== 'queued')) {
         await this.settled(e);
         continue;
       }
@@ -681,10 +682,15 @@ export class Outbox {
         // Network trouble or relay hiccup: keep it queued and stop, order matters. Photos part-way up say so, and
         // try again on their own while the device thinks it is online.
         e.state = 'queued';
-        // The thread already holds the decline this send was for (it arrived while the answer was lost): settled.
-        if (e.kind === 'decline' && this.hooks.declineSettlement?.(e) === 'accepted') {
-          await this.discard(e.id);
-          continue;
+        if (e.kind === 'decline') {
+          // The thread already holds the decline this send was for (it arrived while the answer was lost): settled.
+          if (this.hooks.declineSettlement?.(e) === 'accepted') {
+            await this.discard(e.id);
+            continue;
+          }
+          // The relay may have taken it all the same (an answer that came too late, or never came): read the thread,
+          // which settles it if so, off the send path.
+          void Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
         }
         const online = typeof navigator === 'undefined' || navigator.onLine !== false;
         // Offline is simply waiting; a photo that stopped part-way while online is trouble worth saying.
@@ -706,8 +712,16 @@ export class Outbox {
 
   /** Read a committed entry back; let its local copy go only once the thread holds what it committed. */
   private async settled(e: OutboxEntry): Promise<void> {
+    if (e.kind === 'decline' && this.hooks.declineSettlement) {
+      // Read back off the send path: a slow read never holds the queue behind a dismissal, and the thread settles it
+      // whenever what it needs arrives (`reconcile`).
+      void Promise.resolve(this.hooks.settle?.(e))
+        .catch(() => undefined)
+        .then(() => this.settleDecline(e))
+        .catch(() => undefined);
+      return;
+    }
     await Promise.resolve(this.hooks.settle?.(e)).catch(() => undefined);
-    if (e.kind === 'decline' && this.hooks.declineSettlement) return this.settleDecline(e);
     if (!this.hooks.inThread || this.hooks.inThread(e)) await this.discard(e.id);
   }
 
@@ -716,8 +730,15 @@ export class Outbox {
    * first (or the relay refused it), that outcome is kept with it until the person lets it go. Nothing yet: it waits.
    */
   private async settleDecline(e: OutboxEntry): Promise<void> {
+    if (this.entries.get(e.id) !== e) return;
     const s = this.hooks.declineSettlement?.(e);
-    if (!s || this.entries.get(e.id) !== e) return;
+    if (!s) {
+      // The relay has answered but the thread can't say yet (a read that failed, or came back short): read it again
+      // later, on its own, rather than leave the question held until something else happens.
+      const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+      if (e.state !== 'queued' && e.state !== 'sending' && online) this.scheduleRetry();
+      return;
+    }
     if (s === 'accepted') return this.discard(e.id);
     if (e.outcome) return;
     e.outcome = s;

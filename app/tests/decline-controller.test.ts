@@ -289,9 +289,8 @@ describe('a dismissal queued on this device until it settles', () => {
     };
     await p.c.declineQuestion(p.view, 0);
     await p.idle();
-    expect(p.standing()).toEqual({ kind: 'unconfirmed' });
-    // The thread reads the committed cancel (a socket event) before the outbox tries again: it settles from that.
-    await p.catchUp();
+    // The lost answer sends the phone to read the thread, which holds the committed cancel: settled, never resent.
+    expect(p.catchUp).toHaveBeenCalled();
     await vi.waitFor(() => expect(p.outbox.list()).toEqual([]));
     expect(taken).not.toBeNull();
     expect(p.posts).toHaveLength(1);
@@ -302,17 +301,22 @@ describe('a dismissal queued on this device until it settles', () => {
     const p = await phone();
     let first = true;
     let receipt: unknown = null;
+    // What the relay committed, held back from this phone's reads until the retry (its event feed is behind).
+    let committed: LedgerEvent[] = [];
     p.relay.answer = async (body) => {
       if (first) {
         first = false;
         receipt = p.commit(body);
+        committed = p.unread.splice(0);
         throw new RelayError('network_error', 0, 'connection reset');
       }
+      p.unread.push(...committed);
       // The relay's receipt for the same device and idempotency key: the original answer, nothing new stored.
       return receipt;
     };
     await p.c.declineQuestion(p.view, 0);
     await p.idle();
+    // Read back and found nothing yet: saved here, not confirmed.
     expect(p.standing()).toEqual({ kind: 'unconfirmed' });
     // Back online: the same request again.
     await p.outbox.flush();
@@ -633,5 +637,30 @@ describe('a dismissal queued on this device until it settles', () => {
     const [dismissal] = await Promise.all([p.c.declineQuestion(p.view, 0), p.c.retry(refused.id)]);
     expect(p.outbox.list().find((e) => e.id === refused.id)!.state).toBe('rejected');
     expect(p.outbox.declineInFlight(p.view.id)!.id).toBe(dismissal.id);
+  });
+
+  it('keeps reading the thread on its own until a refusal can be named', async () => {
+    const p = await phone({ retryDelays: [5] });
+    p.relay.answer = async () => {
+      throw new RelayError('revision_conflict', 409, 'changed', {
+        latest_revision: 1,
+        status: 'human-answered',
+      });
+    };
+    await p.c.declineQuestion(p.view, 0);
+    await p.idle();
+    // The relay is ahead of what this phone has read: it waits to say why, holding the question meanwhile.
+    expect(p.standing()).toEqual({ kind: 'confirming' });
+    expect(p.outbox.declineInFlight(p.view.id)).toBeDefined();
+    // The answer reaches this phone's reads only later, with no socket event or reconnect to prompt it.
+    p.unread.push(
+      await actionEvent(p.w, { questionId: p.view.id, action: 'answer', signer: p.w.owner }),
+    );
+    await vi.waitFor(() =>
+      expect(p.standing()).toEqual({ kind: 'settled', outcome: { status: 'answered' } }),
+    );
+    // Never sent again.
+    expect(p.posts).toHaveLength(1);
+    p.outbox.stop();
   });
 });
