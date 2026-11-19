@@ -194,7 +194,7 @@ describe('declaring the agent-stopped push when notifications are turned on', ()
     expect(declares(posted(calls)[0])).toBe(false);
   });
 
-  it.each([
+  it.each<[string, () => void, typeof served]>([
     ['there is no active worker', () => (reg.active = null), served],
     [
       'the answer is malformed',
@@ -232,7 +232,7 @@ describe('declaring the agent-stopped push when notifications are turned on', ()
         })),
       served,
     ],
-  ] as const)('declares nothing when %s', async (_, arrange, gate) => {
+  ])('declares nothing when %s', async (_, arrange, gate) => {
     arrange();
     const { relay, calls } = relayListing([row(ROW, true, null)]);
     await enablePush(relay, gate);
@@ -339,19 +339,37 @@ describe('declaring the agent-stopped push for an app updated in place', () => {
     expect(posted(calls)).toEqual([expect.objectContaining({ features: DECLARED })]);
   });
 
-  it.each([
-    [
-      'without permission',
-      () => vi.stubGlobal('Notification', { permission: 'denied', requestPermission }),
-      [row(ROW, true, null)],
-      false,
-    ],
-    ['without a browser subscription', () => (current = null), [row(ROW, true, null)], false],
-    ['for a pairing already ended', () => undefined, [row(ROW, true, null)], false, false],
-    ['with no relay row', () => undefined, [], true],
-  ] as const)('sends nothing %s', async (_, arrange, rows, lists, paired = true) => {
+  it.each<{
+    name: string;
+    arrange: () => void;
+    rows: unknown[];
+    /** Whether it reads the relay's rows before stopping. */
+    lists: boolean;
+    paired?: boolean;
+  }>([
+    {
+      name: 'without permission',
+      arrange: () => vi.stubGlobal('Notification', { permission: 'denied', requestPermission }),
+      rows: [row(ROW, true, null)],
+      lists: false,
+    },
+    {
+      name: 'without a browser subscription',
+      arrange: () => (current = null),
+      rows: [row(ROW, true, null)],
+      lists: false,
+    },
+    {
+      name: 'for a pairing already ended',
+      arrange: () => undefined,
+      rows: [row(ROW, true, null)],
+      lists: false,
+      paired: false,
+    },
+    { name: 'with no relay row', arrange: () => undefined, rows: [], lists: true },
+  ])('sends nothing $name', async ({ arrange, rows, lists, paired = true }) => {
     arrange();
-    const { relay, calls } = relayListing([...rows]);
+    const { relay, calls } = relayListing(rows);
     const gate = { ...served, current: () => paired };
     expect(await declareAgentStoppedPush(relay, asReg(), gate)).toBe(false);
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(
