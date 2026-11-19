@@ -33,6 +33,7 @@ import {
   verifyRecordAndEnvelope,
 } from '@daintreehq/decisions-crypto';
 import type { BridgeContext } from './context.js';
+import { isDeviceRevoked } from './errors.js';
 import { KeyUnavailableError, TransientError } from './mutex.js';
 
 interface DirEntry {
@@ -122,6 +123,8 @@ export class EventVerifier {
     try {
       list = await ctx.client.devices();
     } catch (e) {
+      // The relay saying this device is revoked is no outage: the inbox stops the bridge on it.
+      if (isDeviceRevoked(e)) throw e;
       throw new TransientError(`device directory unavailable: ${(e as Error).message}`);
     }
     // A reply that is not a list of certified entries is no directory at all: it says nothing about the event, so it

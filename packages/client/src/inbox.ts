@@ -22,6 +22,7 @@ import {
 import { advisoryContentHolds, replyModeOfRow } from './advisory.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
 import { hostRef, type BridgeContext } from './context.js';
+import { isDeviceRevoked } from './errors.js';
 import {
   EVENT_ACTION,
   revokedKey,
@@ -189,6 +190,7 @@ export class Inbox {
         if (batch.length === 0) return drain;
         for (const stored of batch) {
           const ev = JSON.parse(stored.json) as LedgerEvent;
+          let revoked = false;
           try {
             if (await this.apply(ev, stored.received_at)) drain = true;
           } catch (e) {
@@ -208,9 +210,16 @@ export class Inbox {
               event: 'event.error',
               result: (e as Error).message.slice(0, 80),
             });
+            revoked = isDeviceRevoked(e);
           }
           this.keyAttempts.delete(ev.seq);
           await this.ctx.store.markEventProcessed(stored.seq, this.ctx.now());
+          if (revoked) {
+            // A read for this event found the relay no longer accepts this device: stop, as a sync or the socket
+            // finding it would, rather than wait for the revocation to come up in the ledger.
+            this.cb.onRevokedSelf();
+            return drain;
+          }
         }
       }
     });

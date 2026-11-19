@@ -216,8 +216,8 @@ export class FakeRelay {
   holdDevices: Promise<void> | null = null;
   /** While true, `GET /devices` fails as an unreachable relay would. */
   devicesFail = false;
-  /** While set, `GET /devices` answers 200 with this body in place of the directory (a broken reply). */
-  devicesBody: Record<string, unknown> | null = null;
+  /** While set, `GET /devices` gets this status and body in place of the directory (a refusal or a broken reply). */
+  devicesReply: { status: number; body: Record<string, unknown> } | null = null;
   /** Called once the relay has committed a new question, before its receipt is sent (a slow reply). */
   onCreated: ((questionId: string) => void | Promise<void>) | null = null;
   /**
@@ -602,7 +602,7 @@ export class FakeRelay {
     if (method === 'GET' && p === '/api/v1/devices') {
       if (this.holdDevices) await this.holdDevices;
       if (this.devicesFail) throw new TypeError('fetch failed');
-      if (this.devicesBody) return json(200, this.devicesBody);
+      if (this.devicesReply) return json(this.devicesReply.status, this.devicesReply.body);
       const certs = [this.ownerCert(), ...this.devices];
       return json(200, {
         key_epoch: this.epoch,

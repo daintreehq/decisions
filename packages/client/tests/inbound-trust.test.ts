@@ -460,7 +460,7 @@ describe('A: transient failures retry in order; permanent ones do not', () => {
     const ev = await relay.answerEvent({ questionId: qid, phone: tablet, options: ['approve'] });
     // No list, a list that is not one, and entries without a certificate.
     for (const body of [{}, { devices: {} }, { devices: [{}] }, { devices: [null] }]) {
-      relay.devicesBody = body;
+      relay.devicesReply = { status: 200, body };
       clock += 30_000;
       await bridge.catchUp();
       expect(sink.typed).toHaveLength(0);
@@ -468,10 +468,25 @@ describe('A: transient failures retry in order; permanent ones do not', () => {
     }
     expect(await reasons(store)).toEqual([]);
     expect((await store.listAudit(100)).some((a) => a.event === 'event.error')).toBe(false);
-    relay.devicesBody = null;
+    relay.devicesReply = null;
     clock += 30_000;
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
+  });
+  it('a directory read refused because this device is revoked stops the bridge instead of waiting', async () => {
+    const { bridge, relay, sink, qid, identity } = await asked();
+    await bridge.catchUp();
+    const tablet = await makePhone(identity, 'tablet');
+    relay.devices.push(tablet.cert);
+    relay.push('device.approved', null, null, { cert: tablet.cert });
+    await relay.answerEvent({ questionId: qid, phone: tablet, options: ['approve'] });
+    relay.devicesReply = {
+      status: 401,
+      body: { code: 'not_authenticated', message: 'unknown or revoked device' },
+    };
+    await bridge.catchUp();
+    expect(bridge.state).toBe('revoked');
+    expect(sink.typed).toHaveLength(0);
   });
   it('a permanent rejection is consumed (not retried forever)', async () => {
     const { bridge, relay, qid, phone, store } = await asked();

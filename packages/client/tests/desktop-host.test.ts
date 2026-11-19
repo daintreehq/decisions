@@ -341,6 +341,7 @@ describe('a desktop-host bridge after a key rotation', () => {
     for (const reply of [
       { status: 200, body: {} },
       { status: 426, body: { code: 'upgrade_required', message: 'upgrade' } },
+      { status: 403, body: { code: 'forbidden', message: 'forbidden' } },
       { status: 401, body: { code: 'not_authenticated', message: 'bad signature' } },
     ]) {
       relay.grantsReply = reply;
@@ -371,8 +372,36 @@ describe('a desktop-host bridge after a key rotation', () => {
       body: { code: 'not_authenticated', message: 'unknown or revoked device' },
     };
     await bridge.catchUp();
-    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect(bridge.state).toBe('revoked');
     expect((await store.listAudit(500)).some((a) => a.event === 'event.error')).toBe(true);
+  });
+
+  it('a Host key store that cannot be read holds the rotation and the answer until it can', async () => {
+    let clock = Date.now();
+    const { relay, owner, phone, host, bridge, sink, store } = await hostWorld({
+      now: () => clock,
+    });
+    const qid = await ask(bridge);
+    const r = await rotate(owner, relay, host);
+    keyRotated(relay, r.epoch);
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'], epoch: r.key });
+    const load = host.keyStore.load.bind(host.keyStore);
+    let locked = true;
+    host.keyStore.load = async () => {
+      if (locked) throw new Error('keychain locked');
+      return load();
+    };
+    await bridge.catchUp();
+    for (let i = 0; i < 6; i++) {
+      clock += 5 * 60_000;
+      await bridge.pump();
+    }
+    expect((await store.unprocessedEvents(10)).length).toBe(2);
+    expect(sink.typed).toHaveLength(0);
+    locked = false;
+    await bridge.pump();
+    expect(await store.unprocessedEvents(10)).toEqual([]);
+    expect(sink.typed).toHaveLength(1);
   });
 
   it('rejects an answer under an epoch from before it was enrolled, and the events behind it go on', async () => {

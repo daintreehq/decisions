@@ -101,7 +101,8 @@ describe('the owner bridge after a key rotation made by another process', () => 
     );
     const qid = await ask(bridge, 'Ship it?');
     // The relay committed epoch 2 and the phone answers under it, but this store does not hold the key yet (another
-    // process is still saving its rotation, say): the answer waits through many retries.
+    // process is still saving its rotation, say): the answer waits, through many quick retries and through a few slow
+    // ones (a laptop asleep) that take longer than the window but are too few to end the wait.
     const raw = generateEpochKeyBytes();
     relay.epoch = 2;
     const ev = await relay.answerEvent({
@@ -111,10 +112,10 @@ describe('the owner bridge after a key rotation made by another process', () => 
       epoch: await importEpochKey(raw, 2, true),
     });
     await bridge.catchUp();
-    for (let i = 0; i < 16; i++) {
-      clock += 30_000;
-      await bridge.pump();
-    }
+    await bridge.pump();
+    await bridge.pump();
+    clock += 15 * 60_000;
+    await bridge.pump();
     expect(sink.typed).toHaveLength(0);
     expect((await store.unprocessedEvents(10)).map((e) => e.seq)).toContain(ev.seq);
     // The key reaches the store: the next pump reloads it and delivers the answer.
