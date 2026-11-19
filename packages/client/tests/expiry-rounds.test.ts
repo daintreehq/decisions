@@ -841,7 +841,8 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
       }),
       policy: new PolicyRegistry(),
       pumpIntervalMs: 0,
-      now: () => e.now,
+      // The bridge's own clock: a copy of `e` holds the time it was made at, not the one the test moves.
+      now: e.bridge.ctx.now,
     });
   }
   /** Reopened to `expiresAt`, stored the way an earlier bridge left it: the first round's deadline kept. */
@@ -1088,6 +1089,10 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     b.on('error', (err) => errors.push(err));
     return errors;
   };
+  const unreconciled = async (e: Env) =>
+    (await e.store.listAudit(100))
+      .filter((a) => a.event === 'rounds.unreconciled')
+      .map((a) => a.result);
 
   it('a store that cannot read its history says the repair could not run, and repairs once it can', async () => {
     let finite = '';
@@ -1097,16 +1102,18 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     const restore = withoutHistory(e);
     const errors = errorsOf(e.again);
     await e.again.catchUp();
-    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ name: 'BridgeError', code: 'not_supported' });
     expect(errors[0]!.message).toContain('processedEventsOfType');
-    expect(await events(e)).toContain('rounds.unreconciled');
+    expect(await unreconciled(e)).toEqual(['store-without-history']);
     expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
     expect((await e.row()).expires_at).toBeNull();
     // Said once a run, however many passes follow.
-    e.at(new Date(e.now).toISOString(), 2 * MIN);
+    e.at(e.deadline, -DAY);
     await e.again.catchUp();
     await tick(20);
     expect(errors).toHaveLength(1);
+    expect(await unreconciled(e)).toEqual(['store-without-history']);
     // Once the store can read it, the next start repairs the row, and the relay's expiry closes the question.
     restore();
     const third = await restart({ ...e, bridge: e.again });
@@ -1119,6 +1126,74 @@ describe('rows reopened before reopens kept their deadline are reconciled from v
     await third.catchUp();
     expect((await e.row()).local_status).toBe('expired');
     expect(later).toEqual([]);
+  });
+
+  it('a host that starts the bridge has been told by the time start returns, on every call', async () => {
+    const e = await legacy((x) => x.later(x.deadline, DAY));
+    await e.store.updateQuestion(e.qid, { expires_at: null });
+    withoutHistory(e);
+    const errors = errorsOf(e.again);
+    onTestFinished(() => e.again.stop());
+    const [first, second] = [e.again.start({ socket: false }), e.again.start({ socket: false })];
+    await second;
+    expect(errors.map((x) => (x as { code?: string }).code)).toEqual(['not_supported']);
+    await first;
+    expect(errors).toHaveLength(1);
+  });
+
+  it('a store that cannot read its history and holds no reopened question is marked, and nothing is said', async () => {
+    const e = await asked();
+    withoutHistory(e);
+    (e.store as unknown as { meta: Map<string, string> }).meta.delete('rounds-reconciled');
+    const again = await restart(e);
+    const errors = errorsOf(again);
+    await again.catchUp();
+    expect(await e.store.getMeta('rounds-reconciled')).not.toBeNull();
+    expect(errors).toEqual([]);
+    expect(await unreconciled(e)).toEqual([]);
+    // Reopened after that, by a bridge that keeps the deadline: a later start has nothing to say either.
+    await e.reopen(1, e.later(e.deadline, DAY));
+    await again.catchUp();
+    const third = await restart({ ...e, bridge: again });
+    const later = errorsOf(third);
+    await third.catchUp();
+    expect(later).toEqual([]);
+  });
+
+  it('a store that cannot read its history, with only closed reopened questions, is audited, not reported or marked', async () => {
+    const e = await legacy(null, async (x) => {
+      await x.relay.answerEvent({
+        questionId: x.qid,
+        phone: x.phone,
+        options: ['approve'],
+        expectedRevision: 1,
+      });
+    });
+    withoutHistory(e);
+    const errors = errorsOf(e.again);
+    await e.again.catchUp();
+    expect((await e.row()).local_status).toBe('human-answered');
+    expect(errors).toEqual([]);
+    expect(await unreconciled(e)).toEqual(['store-without-history']);
+    expect(await e.store.getMeta('rounds-reconciled')).toBeNull();
+  });
+
+  it('a store that cannot read its history, already marked, or holding only imported history, says nothing', async () => {
+    const marked = await legacy(null);
+    withoutHistory(marked);
+    await marked.store.setMeta('rounds-reconciled', '1');
+    const errors = errorsOf(marked.again);
+    await marked.again.catchUp();
+    expect(errors).toEqual([]);
+    expect(await unreconciled(marked)).toEqual([]);
+
+    const imported = await legacy(null);
+    withoutHistory(imported);
+    await imported.store.updateQuestion(imported.qid, { history_only: true });
+    const told = errorsOf(imported.again);
+    await imported.again.catchUp();
+    expect(told).toEqual([]);
+    expect(await imported.store.getMeta('rounds-reconciled')).not.toBeNull();
   });
 
   it('a row whose deadline already matches costs no verification', async () => {

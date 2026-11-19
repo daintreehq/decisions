@@ -24,6 +24,16 @@ import { SqliteLocalStore } from '@daintreehq/decisions-client/sqlite';
 const store = new SqliteLocalStore('/path/to/decisions.db');
 ```
 
+A custom store that a 0.8.0 bridge wrote to needs `processedEventsOfType(eventType)`, optional in the interface:
+every processed inbound event of that type, applied or rejected, in `seq` order with its original `json`. A 0.8.0
+bridge kept the earlier round's deadline when a question was reopened, and 0.9.0 repairs those rows from the stored
+reopens it can verify. Without the method nothing is repaired, and such a question can miss its expiry (asked with no
+deadline and reopened with one, it never expires) or be closed at the earlier round's deadline. While any reopened
+question is open, the bridge then reports a `not_supported` error on `bridge.on("error")` before `start()` returns, so
+register the listener first. Implement the method and start the bridge again: the repair runs then, as long as the
+stored events are kept. An expiry the bridge refused in the meantime is not applied again. Both bundled stores
+implement it.
+
 `bridge.start()` keeps a live socket to the relay. A host that cannot keep one starts with `{ socket: false, poll: true }`
 (or `poll: { intervalMs, retryBaseMs, retryCapMs, requestTimeoutMs }`) and the bridge syncs over HTTP until `stop()`:
 every 15 s, with equal-jitter backoff up to a minute while the relay is unreachable, one sync at a time, resuming from

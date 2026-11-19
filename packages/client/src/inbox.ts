@@ -21,6 +21,7 @@ import {
 } from './answers.js';
 import { advisoryContentHolds, replyModeOfRow } from './advisory.js';
 import { openQuestionContent, sealAnswerContent } from './at-rest.js';
+import { BridgeError } from './content.js';
 import { hostRef, type BridgeContext } from './context.js';
 import { isDeviceRevoked } from './errors.js';
 import {
@@ -50,6 +51,8 @@ export interface InboxCallbacks {
    * opens again or never. Must return without waiting.
    */
   closureWrite?(questionId: string): Promise<void> | null;
+  /** Something the host must act on that stops nothing now, such as a store missing a method. Must not throw. */
+  onWarning?(e: Error): void;
 }
 
 export interface InboxOptions {
@@ -96,6 +99,8 @@ function latestDeadline(deadlines: (string | null)[]): string | null {
 
 /** Meta key: the stored history was searched for reopens whose deadline an earlier bridge did not keep. */
 const ROUNDS_RECONCILED = 'rounds-reconciled';
+/** Audit result: the store has reopened questions but no `processedEventsOfType` to search for their deadlines. */
+const STORE_WITHOUT_HISTORY = 'store-without-history';
 
 /** How far this desktop's clock may lag the relay's before an expiry it holds is taken as early. */
 export const EXPIRY_CLOCK_SKEW_MS = 2 * 60_000;
@@ -179,11 +184,7 @@ export class Inbox {
   processPending(): Promise<boolean> {
     return this.serial.run(async () => {
       let drain = false;
-      if (!this.reconcileDone && !this.reconciling && this.ctx.now() >= this.reconcileAfter) {
-        this.reconciling = this.reconcileRounds().finally(() => {
-          this.reconciling = null;
-        });
-      }
+      await this.beginReconcile();
       for (;;) {
         const cursor = await this.ctx.store.getCursor();
         const batch = (await this.ctx.store.unprocessedEvents(50)).filter((e) => e.seq <= cursor);
@@ -237,6 +238,76 @@ export class Inbox {
     const a = { n: (prev?.n ?? 0) + 1, since: prev?.since ?? this.ctx.now() };
     this.keyAttempts.set(seq, a);
     return a.n < MAX_KEY_ATTEMPTS || this.ctx.now() - a.since < MIN_KEY_WINDOW_MS;
+  }
+
+  /**
+   * Looks at a store that cannot read its processed history before the bridge reads anything, so the host hears of a
+   * repair that cannot run as it starts. A store that can is repaired from the first `processPending`, as before.
+   */
+  async checkHistory(): Promise<void> {
+    if (this.ctx.store.processedEventsOfType) return;
+    await this.serial.run(() => this.beginReconcile());
+  }
+
+  /** Under `serial`: start the background repair, or check a store that cannot read its history, once it is due. */
+  private async beginReconcile(): Promise<void> {
+    if (this.reconcileDone || this.reconciling || this.ctx.now() < this.reconcileAfter) return;
+    // Local reads only, so it runs in place: done before this pass applies any event.
+    if (!this.ctx.store.processedEventsOfType) return this.withoutHistory();
+    this.reconciling = this.reconcileRounds().finally(() => {
+      this.reconciling = null;
+    });
+  }
+
+  /**
+   * A store without `processedEventsOfType` cannot be searched for reopens an earlier bridge stored without their
+   * deadline, so none is repaired. With no reopened question there is nothing to repair, and the store is marked as
+   * a searched one is. Otherwise it stays unmarked, so the repair runs at the first start whose store can read its
+   * history, and the host is told when an open question may be affected: a row asked with no deadline and reopened
+   * with one refuses the relay's expiry, and one reopened later or to never can be closed at its earlier deadline.
+   */
+  private async withoutHistory(): Promise<void> {
+    const { ctx } = this;
+    let open = 0;
+    try {
+      if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) === null) {
+        const rows = (await ctx.store.listQuestions()).filter(
+          (q) => !q.history_only && q.question_revision > 0,
+        );
+        if (rows.length === 0) await ctx.store.setMeta(ROUNDS_RECONCILED, String(ctx.now()));
+        else {
+          open = rows.filter(
+            (q) => q.local_status === 'open' || q.local_status === 'queued',
+          ).length;
+          await ctx.audit.log({ event: 'rounds.unreconciled', result: STORE_WITHOUT_HISTORY });
+        }
+      }
+    } catch (e) {
+      // The store could not be read: looked at again a minute on.
+      this.reconcileAfter = ctx.now() + 60_000;
+      await ctx.audit
+        .log({
+          event: 'rounds.unreconciled',
+          result: String((e as Error)?.message ?? e).slice(0, 80),
+        })
+        .catch(() => undefined);
+      return;
+    }
+    this.reconcileDone = true;
+    this.reopened.clear();
+    if (open === 0) return;
+    try {
+      this.cb.onWarning?.(
+        new BridgeError(
+          'not_supported',
+          `LocalStore.processedEventsOfType is missing, so ${open} open reopened question(s) cannot be checked for a ` +
+            'deadline an earlier version did not store, and may never expire or expire early. Implement it and ' +
+            'start the bridge again to repair them.',
+        ),
+      );
+    } catch {
+      /* the host's listener: told once, whatever it does */
+    }
   }
 
   /**
@@ -451,7 +522,7 @@ export class Inbox {
     const { ctx } = this;
     let settled = false;
     try {
-      if (!ctx.store.processedEventsOfType) return void (settled = true);
+      if (!ctx.store.processedEventsOfType) return void (settled = true); // `withoutHistory` instead
       if ((await ctx.store.getMeta(ROUNDS_RECONCILED)) !== null) return void (settled = true);
       const rows = (await ctx.store.listQuestions()).filter(
         (q) => !q.history_only && q.question_revision > 0,
