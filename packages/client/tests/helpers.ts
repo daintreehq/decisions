@@ -281,6 +281,8 @@ export class FakeRelay {
   dropDeclineReply = 0;
   /** Number of upcoming `GET /questions/{id}` reads that fail with a network error. */
   failDetail = 0;
+  /** The status and code every upcoming `GET /questions/{id}` is refused with, until cleared. */
+  rejectDetail: { status: number; code: string } | null = null;
   /** The signature each committed answer or decline carried, by action id. */
   committedSignatures = new Map<string, string>();
   /** Each question's committed cancels, as `GET /questions/{id}` lists them in its action log. */
@@ -569,6 +571,11 @@ export class FakeRelay {
         this.failDetail--;
         throw new TypeError('fetch failed');
       }
+      if (this.rejectDetail)
+        return json(this.rejectDetail.status, {
+          code: this.rejectDetail.code,
+          message: 'refused',
+        });
       const q = this.questions.get(m[1]!);
       if (!q) return json(404, { code: 'not_found', message: 'no such question' });
       const state = this.answerState.get(m[1]!) ?? { status: 'open' as const, revision: 0 };
