@@ -12,11 +12,19 @@ export interface RunningRelay {
   stop(): Promise<void>;
 }
 
+/**
+ * The relay with a clock the suite can move (`TestClock` in clock.ts): the production Worker behind a shifted clock and
+ * one extra route, run in place of the config's `main`.
+ */
+export const CLOCKED_WORKER = 'worker/tests/e2e-clock-worker.ts';
+
 /** Starts the real Worker (workerd via `wrangler dev`) with a fresh, empty storage directory. */
 export async function startRelay(
   port: number,
   // E2E_INSPECTOR_PORT keeps a run inside a fixed port range (several design runs share this machine).
   inspectorPort = Number(process.env.E2E_INSPECTOR_PORT) || port + 1000,
+  /** `script` runs another entry (relative to the repository root) with the root config's bindings and assets. */
+  options: { script?: string } = {},
 ): Promise<RunningRelay> {
   if (!existsSync(join(ROOT, 'app/dist/index.html'))) {
     throw new Error('app/dist is missing: run `pnpm build` before the end-to-end tests');
@@ -28,6 +36,7 @@ export async function startRelay(
       'exec',
       'wrangler',
       'dev',
+      ...(options.script ? [options.script] : []),
       '--port',
       String(port),
       '--ip',
@@ -117,12 +126,14 @@ export async function until<T>(
   fn: () => Promise<T | null | undefined | false>,
   ms = 30_000,
   what = 'condition',
+  /** Between attempts; slower for a check that spends a rate-limited request (MCP allows 60 a minute per pane). */
+  everyMs = 150,
 ): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
     if (v) return v;
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-    await tick(150);
+    await tick(everyMs);
   }
 }

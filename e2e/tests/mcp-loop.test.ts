@@ -3,94 +3,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright-core';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   DecisionsBridge,
   FileKeyStore,
   MemoryLocalStore,
   RelayClient,
   TokenMapAuthenticator,
-  approveCandidate,
   claimRelay,
-  createPairingInvite,
-  localShortCode,
   startDecisionsMcpServer,
-  type LocateResult,
-  type QuestionOrigin,
   type RunningMcp,
-  type TerminalSink,
-  type TerminalTarget,
 } from '@daintreehq/decisions-client';
 import { CLAIM_SECRET, findChromium, startRelay, until, type RunningRelay } from './harness.js';
+import { PaneSink, callTool, connect, openFromInbox, pairPhone, paneOrigin } from './mcp-agent.js';
 
 const PORT = 8797;
 const MOUNT = '/mcp/decisions';
 const TOKEN_A = 'pane-a-bearer-0123456789abcdefABCDEF';
 const TOKEN_B = 'pane-b-bearer-0123456789abcdefABCDEF';
-
-const origin = (pane: string): QuestionOrigin =>
-  ({
-    host_id: 'host_mcp0001',
-    pane_id: pane,
-    terminal_generation: 1,
-    ownership_principal: `principal-${pane}`,
-    agent_incarnation: `inc-${pane}`,
-    agent_kind: 'claude-code',
-    agent_session_id: `sess-${pane}`,
-    project_id: 'proj',
-    worktree_id: 'wt',
-    worktree_root: '/tmp/mcp-e2e',
-    workflow_gate_id: null,
-  }) as QuestionOrigin;
-
-/** One terminal per pane, recording what Daintree would type into each. */
-class PaneSink implements TerminalSink {
-  typed: { pane: string; text: string }[] = [];
-  async locate(o: QuestionOrigin): Promise<LocateResult> {
-    return {
-      state: 'alive',
-      target: {
-        hostId: o.host_id,
-        paneId: o.pane_id,
-        terminalGeneration: o.terminal_generation,
-        ownershipPrincipal: o.ownership_principal,
-        agentIncarnation: o.agent_incarnation,
-        agentSessionId: o.agent_session_id,
-        worktreeId: o.worktree_id,
-      },
-    };
-  }
-  async isIdle() {
-    return true;
-  }
-  async inject(t: TerminalTarget, text: string) {
-    this.typed.push({ pane: t.paneId, text });
-    return { outcome: 'delivered' as const, proof: 'e2e' };
-  }
-  async hasMarker(t: TerminalTarget, id: string) {
-    return this.typed.some((x) => x.pane === t.paneId && x.text.includes(`injection_id: ${id}`));
-  }
-  async resume() {
-    return null;
-  }
-}
-
-type ToolResult = {
-  content: { type: string; text?: string }[];
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
-
-async function connect(url: string, token: string): Promise<Client> {
-  const client = new Client({ name: 'decisions-e2e-agent', version: '1.0.0' });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(url), {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
-    }),
-  );
-  return client;
-}
 
 const chromiumPath = findChromium();
 
@@ -140,28 +70,13 @@ describe.skipIf(!chromiumPath)(
 
       // Mounted the way Daintree mounts it: its own route, panes resolved from the bearer alone.
       const auth = new TokenMapAuthenticator();
-      auth.register(TOKEN_A, origin('pane-a'));
-      auth.register(TOKEN_B, origin('pane-b'));
+      auth.register(TOKEN_A, paneOrigin('pane-a'));
+      auth.register(TOKEN_B, paneOrigin('pane-b'));
       mcp = await startDecisionsMcpServer({ bridge, authenticator: auth, path: MOUNT });
       paneA = await connect(mcp.url, TOKEN_A);
       paneB = await connect(mcp.url, TOKEN_B);
 
-      const invite = await createPairingInvite(relayClient, 'phone');
-      await page.goto(invite.url);
-      await page.getByRole('button', { name: 'Pair this device' }).click();
-      await page.getByText('Check that this matches your computer').waitFor({ timeout: 20_000 });
-      const shown = (await page.locator('.pair-digits').innerText()).replace(/\s/g, '');
-      const cand = await until(
-        async () =>
-          (await relayClient.pendingPairings()).pending.find(
-            (p) => p.pairing_id === invite.pairingId,
-          ),
-        20_000,
-        'pending pairing',
-      );
-      expect((await localShortCode(cand)).replace(/\s/g, '')).toBe(shown);
-      await approveCandidate(relayClient, cand);
-      await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
+      await pairPhone(page, relayClient);
     }, 120_000);
 
     afterAll(async () => {
@@ -181,27 +96,7 @@ describe.skipIf(!chromiumPath)(
       if (keyDir) rmSync(keyDir, { recursive: true, force: true });
     });
 
-    const call = async (c: Client, name: string, args: Record<string, unknown>) =>
-      (await c.callTool({ name, arguments: args })) as ToolResult;
-
-    /**
-     * Opens a question from the inbox, as a person would the first time. Home can render from its cache before the
-     * question syncs, and then holds it behind "N new questions" (rows never reshuffle): take it the way a person would.
-     */
-    const openFromInbox = async (text: string) => {
-      await page.goto(`${relay.origin}/`);
-      const row = page.locator('main').getByText(text).first();
-      await until(
-        async () => {
-          const pill = page.locator('main .nav-new');
-          if (await pill.isVisible().catch(() => false)) await pill.click();
-          return row.isVisible().catch(() => false);
-        },
-        30_000,
-        `"${text}" listed on Home`,
-      );
-      await row.click();
-    };
+    const call = callTool;
 
     it('negotiates with the SDK client and lists the five tools with their annotations', async () => {
       expect(paneA.getServerVersion()?.name).toBe('daintree-decisions');
@@ -256,7 +151,7 @@ describe.skipIf(!chromiumPath)(
       const before = await call(paneA, 'get_decision', { question_id: qid });
       expect(before.structuredContent).toMatchObject({ status: 'open', provenance: null });
 
-      await openFromInbox('Use optimistic updates for the todo list?');
+      await openFromInbox(page, relay.origin, 'Use optimistic updates for the todo list?');
       await page
         .getByRole('radio', { name: /Yes, optimistic/ })
         .first()
@@ -372,7 +267,7 @@ describe.skipIf(!chromiumPath)(
       });
       const id = String(asked.structuredContent!.question_id);
       await bridge.pump();
-      await openFromInbox('Bump the lint rules to the strict preset?');
+      await openFromInbox(page, relay.origin, 'Bump the lint rules to the strict preset?');
       // This bridge declares person-declines-v1, so the phone offers Dismiss.
       await page.locator('.ws-head').getByRole('button', { name: 'More' }).click();
       await page.getByRole('menuitem', { name: 'Dismiss question…' }).click();
@@ -419,7 +314,7 @@ describe.skipIf(!chromiumPath)(
       expect(id).not.toBe(qid);
       await bridge.pump();
 
-      await openFromInbox('Show completed todos by default?');
+      await openFromInbox(page, relay.origin, 'Show completed todos by default?');
       await page
         .getByRole('radio', { name: /Hide them/ })
         .first()
@@ -488,7 +383,7 @@ describe.skipIf(!chromiumPath)(
       });
       expect(asked.structuredContent).toMatchObject({ enforced_requirement: 'human-required' });
       await bridge.pump();
-      await openFromInbox('Ship the smaller migration first?');
+      await openFromInbox(page, relay.origin, 'Ship the smaller migration first?');
       await page.getByText('The agent’s account').first().waitFor({ timeout: 20_000 });
       await page.getByText('All three prefer the smaller migration.').first().waitFor();
     });
