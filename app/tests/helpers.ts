@@ -212,6 +212,8 @@ export async function actionEvent(
     seq?: number;
     /** A `cancel` signed with `decline: true` (the owner desktop's decline for the person). */
     decline?: true;
+    /** A `reopen`'s signed new deadline (null: never). */
+    expiresAt?: string | null;
   },
 ): Promise<LedgerEvent> {
   const human = o.action === 'answer' || o.action === 'override' || o.action === 'confirm-proxy';
@@ -260,6 +262,7 @@ export async function actionEvent(
     actionId,
     confirmsActionId: o.confirms ?? null,
     ...(o.decline ? { decline: o.decline } : {}),
+    ...(o.expiresAt !== undefined ? { expiresAt: o.expiresAt } : {}),
   });
   const provenance =
     o.provenance !== undefined

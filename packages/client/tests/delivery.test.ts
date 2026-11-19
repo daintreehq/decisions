@@ -156,6 +156,34 @@ describe('verified answers reach the exact pane', () => {
     });
   });
 
+  it('never resumes onto another host: the relay keeps naming the host the question was asked on', async () => {
+    const target: TerminalTarget = {
+      hostId: 'host-other',
+      paneId: 'pane-9',
+      terminalGeneration: 5,
+      ownershipPrincipal: 'principal-9',
+      agentIncarnation: 'inc-9',
+      worktreeId: 'wt-1',
+      agentSessionId: 'sess-1',
+    };
+    const { bridge, relay, phone, sink, qid, store } = await asked({
+      adapters: [fakeResumeAdapter('claude', target)],
+    });
+    sink.panes.delete('pane-1');
+    sink.addPane('pane-9', {
+      generation: 5,
+      session: 'sess-1',
+      principal: 'principal-9',
+      incarnation: 'inc-9',
+    });
+    await relay.answerEvent({ questionId: qid, phone, options: ['approve'] });
+    await bridge.catchUp();
+    expect(sink.typed).toHaveLength(0);
+    const row = (await store.getQuestion(qid))!;
+    expect(row).toMatchObject({ delivery_status: 'needs-attention', error_code: 'resume_wrong_host' });
+    expect(row.origin.host_id).toBe('host-local');
+  });
+
   it('default resume stubs report unsupported rather than inventing flags', async () => {
     const { claudeResumeAdapter } = await import('../src/index.js');
     expect((await claudeResumeAdapter.probe('h')).supported).toBe(false);

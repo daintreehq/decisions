@@ -211,6 +211,8 @@ export class FakeRelay {
   onInvolvementPut: (() => void | Promise<void>) | null = null;
   /** While set, `GET /devices` waits for it before answering (a directory that does not answer). */
   holdDevices: Promise<void> | null = null;
+  /** Called once the relay has committed a new question, before its receipt is sent (a slow reply). */
+  onCreated: ((questionId: string) => void | Promise<void>) | null = null;
   /**
    * Whether `PUT /presence` exists; false makes it unknown (404), like a relay from before `presence-v1`. Advertising
    * the feature is `features`' job, so a test can make the two disagree.
@@ -461,6 +463,7 @@ export class FakeRelay {
         event_seq: ev.seq,
       };
       this.receipts.set(b.idempotency_key, receipt);
+      await this.onCreated?.(q.record.question_id);
       if (this.dropCreateReply > 0) {
         this.dropCreateReply--;
         throw new TypeError('connection reset after the relay committed the question');
