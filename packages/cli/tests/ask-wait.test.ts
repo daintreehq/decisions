@@ -219,6 +219,8 @@ describe('the outcome a wait reports', () => {
     });
     expect(outcomeOf(refused)).toBe('advisory-expired');
     expect(deliveryOf(refused, 'advisory-expired')).toBe('needs-attention');
+    // Still held where it reads (an event of its question waits to be applied): no outcome yet.
+    expect(outcomeOf({ ...refused, fallbackDue: false })).toBeNull();
     // A policy that withholds it now: a plain expiry, from any process.
     expect(
       outcomeOf(

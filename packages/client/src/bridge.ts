@@ -206,6 +206,15 @@ const CATCH_UP_TIMEOUT_MS = 30_000;
 /** How many stored, unapplied events `ledgerUnsettled` looks through for the question's own. */
 const UNAPPLIED_SCAN = 500;
 
+/** The question a stored ledger event is about, when it names one. */
+function eventQuestionId(e: { json: string }): unknown {
+  try {
+    return (JSON.parse(e.json) as { question_id?: unknown }).question_id;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The protocol extensions the bridge declares to the relay (section 19), on its socket ticket and its event
  * pages. `phone-images-v1` is declared with or without a `phoneImages` store: a relay hides an image-bearing
@@ -1376,9 +1385,8 @@ export class DecisionsBridge {
     const unsettled = await this.delivery
       .ledgerHolds(questionId, { start: false })
       .catch(() => true);
-    const unapplied = await this.unappliedEvent(questionId);
     const row = await this.owned(questionId, pane);
-    return this.view(row, unsettled, unapplied);
+    return this.view(row, unsettled);
   }
 
   async listPending(pane?: PaneIdentity): Promise<DecisionView[]> {
@@ -1400,11 +1408,7 @@ export class DecisionsBridge {
   }
 
   /** Opens the answers in memory to build the view; nothing decrypted is written back. */
-  private async view(
-    row: QuestionRow,
-    unsettled?: boolean,
-    unapplied?: boolean,
-  ): Promise<DecisionView> {
+  private async view(row: QuestionRow, unsettled?: boolean): Promise<DecisionView> {
     const create = (await this.ctx.store.outboxFor(row.question_id)).find(
       (o) => o.kind === 'create',
     );
@@ -1426,12 +1430,10 @@ export class DecisionsBridge {
     const held = noticeWaits
       ? await this.delivery.ledgerHolds(row.question_id).catch(() => true)
       : false;
-    // One whose admitted write its sink refused was settled as a typed one is, so only an event of its question stored
-    // since and not yet applied (a reopen read past a gap) holds it: the store shows that to every process alike.
+    // One whose admitted write its sink refused was settled as a typed one is, so only what the store shows every
+    // process alike holds it (`refusalHeld`).
     const refusedWaits =
-      timeout?.inForce === true && timeout.view.writeRefused
-        ? (unapplied ?? (await this.unappliedEvent(row.question_id)))
-        : false;
+      timeout?.inForce === true && timeout.view.writeRefused ? await this.refusalHeld(row) : false;
     const waiting = (noticeWaits && (unsettled === true || held)) || refusedWaits;
     const answered = row.local_status === 'human-answered' || row.local_status === 'proxy-answered';
     // The answer in force is the last one that carried content; a later confirm-proxy makes it the human's.
@@ -1667,25 +1669,37 @@ export class DecisionsBridge {
    */
   private async ledgerUnsettled(questionId: string): Promise<'unapplied' | 'reading' | null> {
     const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
-    for (const e of stored) {
-      let id: unknown;
-      try {
-        id = (JSON.parse(e.json) as { question_id?: unknown }).question_id;
-      } catch {
-        id = undefined;
-      }
-      if (id === questionId) return 'unapplied';
-    }
+    if (stored.some((e) => eventQuestionId(e) === questionId)) return 'unapplied';
     // More than were looked through: one of them may be the question's, so the wait is bounded like a read's.
     return this.socketReplay || this.paging !== null || !this.ledgerRead || stored.length > 0
       ? 'reading'
       : null;
   }
 
-  /** Whether an event of `questionId` is stored and not yet applied (`ledgerUnsettled`); one that cannot be read is. */
-  private async unappliedEvent(questionId: string): Promise<boolean> {
-    const state = await this.ledgerUnsettled(questionId).catch(() => 'unapplied' as const);
-    return state === 'unapplied';
+  /**
+   * Whether an advisory notice of `row` whose write its sink refused still waits (`view`), from the store alone: an event
+   * of its question is stored and not yet applied (a reopen read past a gap), more are stored than one look reads, the
+   * store cannot be read, or the row has moved on since it was read. Looked at after the row was read, so an event
+   * stored before the refusal is either still waiting here or applied, which the row read again shows.
+   */
+  private async refusalHeld(row: QuestionRow): Promise<boolean> {
+    try {
+      const stored = await this.ctx.store.unprocessedEvents(UNAPPLIED_SCAN);
+      if (
+        stored.length >= UNAPPLIED_SCAN ||
+        stored.some((e) => eventQuestionId(e) === row.question_id)
+      )
+        return true;
+      const now = await this.ctx.store.getQuestion(row.question_id);
+      return (
+        !now ||
+        now.local_status !== row.local_status ||
+        now.question_revision !== row.question_revision ||
+        now.answers_json !== row.answers_json
+      );
+    } catch {
+      return true;
+    }
   }
 
   /** The pane became idle (Daintree's wake gate): try pending deliveries now. */

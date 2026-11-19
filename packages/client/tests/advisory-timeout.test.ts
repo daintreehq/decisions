@@ -697,6 +697,24 @@ describe('where the advisory notice goes', () => {
     });
   });
 
+  it('a refused notice waits while more events wait to be applied than one look reads', async () => {
+    const e = await advised();
+    e.sink.injectBehaviour = { unavailable: 'rejected' };
+    await e.expire();
+    expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(true);
+    // Other questions' events fill the look: one of those after it may be this question's reopen.
+    for (let i = 0; i < 500; i++)
+      await e.store.insertEvent({
+        seq: 10_000 + i,
+        event_id: `other-${i}`,
+        event_type: 'question.created',
+        json: JSON.stringify({ question_id: 'another-question' }),
+        received_at: e.now,
+        processed_at: null,
+      });
+    expect((await e.restart().getDecision(e.qid)).fallbackDue).toBe(false);
+  });
+
   it('a retry takes the refusal back, and a reopen supersedes a refused notice', async () => {
     const e = await advised();
     e.sink.injectBehaviour = { unavailable: 'rejected' };
