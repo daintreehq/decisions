@@ -443,7 +443,10 @@ describe('A: transient failures retry in order; permanent ones do not', () => {
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
     const row = (await store.getQuestion(qid))!;
-    expect([row.local_status, row.question_revision]).toEqual(['human-answered', ev.question_revision]);
+    expect([row.local_status, row.question_revision]).toEqual([
+      'human-answered',
+      ev.question_revision,
+    ]);
     expect((await store.listAudit(1000)).some((a) => a.event === 'event.error')).toBe(false);
     await bridge.pump();
     expect(sink.typed).toHaveLength(1);
