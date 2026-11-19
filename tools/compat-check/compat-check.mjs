@@ -492,7 +492,7 @@ function checkBridgeHealth(state, who, refusable = []) {
 /* ---------------------------------------------------------------- scenarios */
 
 /** 1. The old desktop (CLI and library) against the new relay. */
-async function oldDesktopNewRelay({ OLD, NEW, oldRelay: _oldRelay, newRelay, port }) {
+async function oldDesktopNewRelay({ OLD, NEW, newRelay, port }) {
   const relay = await startRelay(newRelay, port, scratch('persist-1'), '1-new');
   const old = startActor(OLD, '1-old');
   const neu = startActor(NEW, '1-new');
