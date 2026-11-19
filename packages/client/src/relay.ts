@@ -67,8 +67,9 @@ export interface RequestOptions {
   maxBytes?: number;
   retry?: boolean;
   /**
-   * Send at most once: no retry, and no resend after a clock-skew refusal either. The skew such a refusal shows is
-   * still learned, so the next request is signed right. For a request whose repeat would do harm.
+   * Send at most once: no retry, no resend after a clock-skew refusal, and no redirect followed (a redirect is a
+   * network error). The skew such a refusal shows is still learned, so the next request is signed right. For a
+   * request whose repeat would do harm.
    */
   once?: boolean;
   /** Abort an attempt that has not answered within this long (a network error). */
@@ -217,6 +218,8 @@ export class RelayClient {
           },
           body: (opts.rawBody as unknown as BodyInit | undefined) ?? bodyText,
           ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
+          // A 307 or 308 would have fetch send the body again, elsewhere.
+          ...(opts.once ? { redirect: 'error' as const } : {}),
         });
       } catch (e) {
         const err = new RelayError('network_error', (e as Error).message || 'network error', 0);

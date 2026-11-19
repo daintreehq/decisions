@@ -242,6 +242,8 @@ describe('never retried', () => {
     await expect(client.postAgentStoppedPush()).rejects.toMatchObject({ code: 'network_error' });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(sleep).not.toHaveBeenCalled();
+    // Nor does fetch send it again on a redirect.
+    for (const [, init] of fetch.mock.calls) expect(init?.redirect).toBe('error');
   });
 });
 
