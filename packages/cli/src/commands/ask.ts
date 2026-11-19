@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { knownFeatures } from '@daintreehq/decisions-protocol';
+import { knownFeatures, type ProtocolFeature } from '@daintreehq/decisions-protocol';
 import {
   BridgeError,
   RelayError,
@@ -644,16 +644,29 @@ async function publish(
  * missing one is declared, as an HTTP sync does, through a ticket it never uses. It only adds: what the relay already
  * lists for this device stays declared (a host of the same device may declare more), and when that covers them nothing
  * is sent, so a run of plain asks spends none of the device's few tickets a minute, which a receiver starting meanwhile
- * needs. Done within `ms` altogether. Never throws; a failure is a warning.
+ * needs. When the list cannot be read, the ticket declares what a receiver would. Done within `ms` altogether. Never
+ * throws; a failure is a warning.
  */
 async function declareFeatures(ctx: Ctx, w: Waiter, ms: number): Promise<void> {
   try {
     // One deadline for all of it, however often a request is signed and sent again (after a clock-skew refusal).
     const signal = AbortSignal.timeout(Math.max(1, Math.floor(ms)));
-    const list = await w.rt.client.devices({ retry: false, signal });
-    const me = w.rt.identity.config.deviceId;
-    const self = (Array.isArray(list?.devices) ? list.devices : []).find((d) => d.device_id === me);
-    const listed = knownFeatures(self?.features);
+    let listed = new Set<ProtocolFeature>();
+    try {
+      const list = (await w.rt.client.devices({ retry: false, signal })) as {
+        devices?: unknown;
+      } | null;
+      const me = w.rt.identity.config.deviceId;
+      const rows = list?.devices;
+      const self: unknown = Array.isArray(rows)
+        ? rows.find((d) => (d as { device_id?: unknown } | null)?.device_id === me)
+        : undefined;
+      const features = (self as { features?: unknown } | undefined)?.features;
+      if (Array.isArray(features))
+        listed = knownFeatures(features.filter((f): f is string => typeof f === 'string'));
+    } catch {
+      // Unread: the ticket below says why, if it fails too.
+    }
     if (w.bridge.features.every((f) => listed.has(f))) return;
     await w.rt.client.socketTicket([...listed, ...w.bridge.features], { retry: false, signal });
   } catch (e) {

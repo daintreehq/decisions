@@ -11,7 +11,7 @@ import {
   issueDeviceCert,
   newId,
 } from '@daintreehq/decisions-crypto';
-import { PROTOCOL_VERSION, type DeviceCert } from '@daintreehq/decisions-protocol';
+import { PROTOCOL_VERSION, ProtocolFeature, type DeviceCert } from '@daintreehq/decisions-protocol';
 import { buildProgram, describeError, isEntryPoint } from '../src/bin.js';
 import { CliError, keyStoreFor, type Ctx } from '../src/runtime.js';
 import { DemoSink, cliOrigin, daemon, mcpAddLines, parseSink } from '../src/commands/daemon.js';
@@ -402,7 +402,12 @@ describe('ask / status / devices', () => {
         'GET /api/v1/devices': () => ({
           key_epoch: 1,
           owner_device_id: me.id,
-          devices: [{ device_id: me.id, features: me.features }],
+          // A phone, listed first, declares what a phone does; only this device's own row counts.
+          devices: [
+            { device_id: 'dev_phone0001', features: ProtocolFeature.options },
+            null,
+            { device_id: me.id, features: [...me.features, 7] },
+          ],
         }),
       },
     });
@@ -419,6 +424,23 @@ describe('ask / status / devices', () => {
     calls.length = 0;
     expect(await ask(ctx, {}, { question: 'Two?' })).toBe(0);
     expect(tickets).toHaveLength(1);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toContain('POST /api/v1/questions');
+  });
+  it('a plain ask that cannot read the device list still declares what a receiver would', async () => {
+    const tickets: { features?: string[] }[] = [];
+    const { ctx, calls } = await ready({
+      routes: {
+        'POST /api/v1/socket-ticket': ticketed(tickets),
+        'GET /api/v1/devices': () =>
+          new Response(JSON.stringify({ code: 'internal_error', message: 'down' }), {
+            status: 500,
+          }),
+      },
+    });
+    tickets.length = 0;
+    expect(await ask(ctx, {}, { question: 'Ship it?' })).toBe(0);
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]!.features).toEqual(expect.arrayContaining(['person-declines-v1']));
     expect(calls.map((c) => `${c.method} ${c.path}`)).toContain('POST /api/v1/questions');
   });
   it('ask rejects malformed --option values', async () => {
